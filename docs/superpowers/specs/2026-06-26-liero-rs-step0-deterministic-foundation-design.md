@@ -1,139 +1,139 @@
-# Steg 0 — Deterministisk grund (`sim-core`)
+# Step 0 — Deterministic foundation (`sim-core`)
 
-Status: **utkast för granskning** · 2026-06-26
-Del av: `2026-06-26-liero-rs-roadmap.md`
+Status: **draft for review** · 2026-06-26
+Part of: `2026-06-26-liero-rs-roadmap.md`
 
-## Syfte
+## Purpose
 
-Bevisa den enda riktigt riskabla hypotesen i hela projektet **innan** vi bygger
-något ovanpå den: *kan Rust reproducera C++-motorns fixpunktsmatematik och RNG
-bit-exakt?* Om ja → vi har orakel-mönstret som alla senare steg lutar sig mot. Om
-nej → vi vet det på en dag, inte efter månader.
+Prove the one truly risky hypothesis in the whole project **before** we build
+anything on top of it: *can Rust reproduce the C++ engine's fixed-point math and RNG
+bit-exact?* If yes → we have the oracle pattern that all later steps lean on. If
+no → we know it in a day, not after months.
 
-Steg 0 levererar `sim-core`-craten (fixpunkt + RNG + tabeller) plus en
-**differentialtest** som kör samma operationer genom C++ och Rust och kräver
-identisk output.
+Step 0 delivers the `sim-core` crate (fixed-point + RNG + tables) plus a
+**differential test** that runs the same operations through C++ and Rust and requires
+identical output.
 
-## Varför det går att lyckas (förundersökning klar)
+## Why success is achievable (preliminary investigation done)
 
-Källan är redan granskad och är **ren heltalsaritmetik** — inga flyttal, ingen
-libm, inga plattformsberoenden:
+The source has already been reviewed and is **pure integer arithmetic** — no floats, no
+libm, no platform dependencies:
 
-- **`math.hpp` / `math.cpp`** — `fixed = int32` i 16.16-format. `Itof = v<<16`,
-  `Ftoi = v>>16` (aritmetiskt skift). `cossin_table[128]` byggs med en egen
-  **heltals-Taylorserie** (int64), inte `sin/cos`. `VectorLength` använder en
-  **heltals-kvadratrot** (`Sqr`). Allt reproducerbart.
-- **`rand.hpp`** — `std::mt19937` (standard MT19937, 32-bit) seedad med `0x1337`.
-  Bounded form använder **Lemire**: `(u64(x) * max) >> 32`. MT19937 är en helt
-  specificerad standardalgoritm → identisk i Rust.
+- **`math.hpp` / `math.cpp`** — `fixed = int32` in 16.16 format. `Itof = v<<16`,
+  `Ftoi = v>>16` (arithmetic shift). `cossin_table[128]` is built with a dedicated
+  **integer Taylor series** (int64), not `sin/cos`. `VectorLength` uses an
+  **integer square root** (`Sqr`). All reproducible.
+- **`rand.hpp`** — `std::mt19937` (standard MT19937, 32-bit) seeded with `0x1337`.
+  The bounded form uses **Lemire**: `(u64(x) * max) >> 32`. MT19937 is a fully
+  specified standard algorithm → identical in Rust.
 
 ## Scope
 
-**Ingår:**
-1. Cargo-workspace under `rust/` med craten `sim-core` (ingen Bevy-dep) och
+**Included:**
+1. Cargo workspace under `rust/` with the crates `sim-core` (no Bevy dep) and
    `oracle-tests`.
-2. Port av fixpunkt: `Fixed` (i32, 16.16), `IVec2/fixedvec` med exakt samma
-   operator-semantik som C++ (trunkering!).
-3. Port av `VectorLength` / heltals-`Sqr`.
-4. Port av `cossin_table`-genereringen (Taylor-serien) — och/eller verifiering mot
+2. Port of fixed-point: `Fixed` (i32, 16.16), `IVec2/fixedvec` with exactly the same
+   operator semantics as C++ (truncation!).
+3. Port of `VectorLength` / integer `Sqr`.
+4. Port of the `cossin_table` generation (the Taylor series) — and/or verification against
    golden.
-5. Port av `Rand`: MT19937 + `next()`, `bound(max)` (Lemire), `bound(min,max)`,
+5. Port of `Rand`: MT19937 + `next()`, `bound(max)` (Lemire), `bound(min,max)`,
    `seed()`.
-6. C++ **golden-generator** (litet verktyg/test) som dumpar deterministiska
-   vektorer till en committad fil.
-7. Rust-test som läser golden-filen och kräver bit-identisk output.
+6. C++ **golden generator** (small tool/test) that dumps deterministic
+   vectors to a committed file.
+7. Rust test that reads the golden file and requires bit-identical output.
 
-**Ingår INTE** (senare steg): Bevy, ECS, rendering, asset-laddning, någon
-spel-logik, RNG-state-serialisering i C++:s textformat (vi jämför *output*, inte
-state-format).
+**NOT included** (later steps): Bevy, ECS, rendering, asset loading, any
+game logic, RNG state serialization in C++'s text format (we compare *output*, not
+state format).
 
-## Arkitektur
+## Architecture
 
 ```
 rust/
 ├── Cargo.toml                # [workspace] members = ["sim-core", "oracle-tests"]
 ├── sim-core/
-│   ├── Cargo.toml            # inga beroenden (ev. bara för MT19937 om vi ej skriver egen)
+│   ├── Cargo.toml            # no dependencies (possibly just for MT19937 if we don't write our own)
 │   └── src/
 │       ├── lib.rs
-│       ├── fixed.rs          # Fixed(i32, 16.16): itof, ftoi, mul/div-semantik
-│       ├── vec.rs            # IVec2/fixedvec + operatorer
+│       ├── fixed.rs          # Fixed(i32, 16.16): itof, ftoi, mul/div semantics
+│       ├── vec.rs            # IVec2/fixedvec + operators
 │       ├── tables.rs         # cossin_table[128], precompute (Taylor)
-│       └── rng.rs            # Rand: MT19937 + Lemire-bound
+│       └── rng.rs            # Rand: MT19937 + Lemire bound
 └── oracle-tests/
     ├── Cargo.toml
     ├── tests/
     │   ├── fixed_golden.rs
     │   ├── tables_golden.rs
     │   └── rng_golden.rs
-    └── golden/               # committade vektorer genererade av C++
+    └── golden/               # committed vectors generated by C++
         ├── fixed.txt
         ├── cossin.txt
         └── rng.txt
 
-src/tools/oracle_dump/        # NYTT C++-verktyg som genererar golden/*.txt
+src/tools/oracle_dump/        # NEW C++ tool that generates golden/*.txt
 ```
 
-`sim-core` har medvetet **inget Bevy-beroende** — determinismen isoleras från
-engine-churn och kan testas helt fristående.
+`sim-core` deliberately has **no Bevy dependency** — determinism is isolated from
+engine churn and can be tested entirely standalone.
 
-## Semantik som MÅSTE bevaras (bit-exakthetens detaljer)
+## Semantics that MUST be preserved (the details of bit-exactness)
 
-| C++ | Rust | Fälla |
+| C++ | Rust | Trap |
 |---|---|---|
-| `fixed = int` (32-bit) | `i32` | Anta 32-bit `int`; använd `i32`, inte `i64` |
-| `Itof(v) = v << 16` | `v << 16` | Overflow vid stora `v` ska matcha (wrap) |
-| `Ftoi(v) = v >> 16` | `v >> 16` | Aritmetiskt skift på negativa (rundar mot −∞) — Rust `>>` på `i32` gör samma |
-| `a * b / 100` (IVec2) | `a * b / 100` | Heltalsdivision trunkerar mot 0 i båda — men skift och division rundar OLIKA för negativa; bevara exakt operator |
-| `Sqr` heltals-sqrt | port rakt av | u32-aritmetik, exakt loop |
-| cossin Taylor (int64) | i64 | `Reduce`/`Reducedfrac`-skiften måste matcha exakt |
-| MT19937 seed `0x1337` | samma init | C++:s single-seed init = referens-`init_genrand`; en trogen MT matchar |
-| `bound = (u64(x)*max)>>32` | samma | Enkelt; inga distributionsskillnader |
+| `fixed = int` (32-bit) | `i32` | Assume 32-bit `int`; use `i32`, not `i64` |
+| `Itof(v) = v << 16` | `v << 16` | Overflow on large `v` must match (wrap) |
+| `Ftoi(v) = v >> 16` | `v >> 16` | Arithmetic shift on negatives (rounds toward −∞) — Rust `>>` on `i32` does the same |
+| `a * b / 100` (IVec2) | `a * b / 100` | Integer division truncates toward 0 in both — but shift and division round DIFFERENTLY for negatives; preserve the exact operator |
+| `Sqr` integer sqrt | port verbatim | u32 arithmetic, exact loop |
+| cossin Taylor (int64) | i64 | `Reduce`/`Reducedfrac` shifts must match exactly |
+| MT19937 seed `0x1337` | same init | C++'s single-seed init = reference `init_genrand`; a faithful MT matches |
+| `bound = (u64(x)*max)>>32` | same | Simple; no distribution differences |
 
-Overflow: C++ signed overflow är formellt UB men i praktiken wrap på mål-plattform.
-Rust `i32` overflow panikar i debug. → använd **`wrapping_*`** där C++ förlitar sig
-på wrap, eller bekräfta via golden att inga overflows sker i testdatan. Beslut tas
-när golden genereras (se öppna frågor).
+Overflow: C++ signed overflow is formally UB but in practice wraps on the target platform.
+Rust `i32` overflow panics in debug. → use **`wrapping_*`** where C++ relies
+on wrap, or confirm via golden that no overflows occur in the test data. The decision is made
+when golden is generated (see open questions).
 
-## Differentialtest-harness
+## Differential test harness
 
-Enklast och mest CI-vänligt: **generera golden från C++ en gång, committa, testa
-Rust mot dem.** Slipper länka C++ från Rust.
+Simplest and most CI-friendly: **generate golden from C++ once, commit it, test
+Rust against it.** Avoids linking C++ from Rust.
 
-**C++ golden-generator** (`src/tools/oracle_dump/`) — en liten `main()` som:
-- `fixed.txt`: för ett bestämt rutnät av `v` (inkl. negativa, gränsvärden) skriver
-  `Itof/Ftoi`-rundturer; för par `(a,b)` skriver `IVec2`-add/sub/mul/div-resultat.
-- `cossin.txt`: alla 128 `cossin_table`-poster `(x, y)` efter `PrecomputeTables()`.
-- `rng.txt`: seed `0x1337` → första N råa `engine()`-värden; bounded `bound(max)`
-  för flera `max`; en reseed-sekvens.
+**C++ golden generator** (`src/tools/oracle_dump/`) — a small `main()` that:
+- `fixed.txt`: for a fixed grid of `v` (incl. negatives, boundary values) writes
+  `Itof/Ftoi` round-trips; for pairs `(a,b)` writes `IVec2` add/sub/mul/div results.
+- `cossin.txt`: all 128 `cossin_table` entries `(x, y)` after `PrecomputeTables()`.
+- `rng.txt`: seed `0x1337` → first N raw `engine()` values; bounded `bound(max)`
+  for several `max`; a reseed sequence.
 
-**Rust-tester** läser respektive golden-fil och `assert_eq!` rad för rad. En enda
-divergens = rött, med exakt index.
+**Rust tests** read the respective golden file and `assert_eq!` line by line. A single
+divergence = red, with the exact index.
 
-Detta gör steg 0 till en perfekt **agent-uppgift**: målet är binärt och objektivt.
+This makes step 0 a perfect **agent task**: the goal is binary and objective.
 
 ## Definition of done
 
-- [ ] `cargo test` i `rust/` är grönt: alla tre golden-sviter matchar.
-- [ ] `cossin.txt` (128 poster) matchar bit-för-bit — bevisar Taylor-porten.
-- [ ] RNG: ≥ 10 000 råa MT-värden + bounded-värden matchar.
-- [ ] Fixpunkt: rundtur + aritmetik inkl. negativa/gränsfall matchar.
-- [ ] Golden-generatorn är committad och reproducerbar (`make`/CMake-target).
-- [ ] Kort README i `rust/` som förklarar orakel-flödet.
+- [ ] `cargo test` in `rust/` is green: all three golden suites match.
+- [ ] `cossin.txt` (128 entries) matches bit-for-bit — proves the Taylor port.
+- [ ] RNG: ≥ 10,000 raw MT values + bounded values match.
+- [ ] Fixed-point: round-trip + arithmetic incl. negatives/boundary cases match.
+- [ ] The golden generator is committed and reproducible (`make`/CMake target).
+- [ ] Short README in `rust/` explaining the oracle flow.
 
-## Öppna frågor (att besluta innan/under bygget)
+## Open questions (to decide before/during the build)
 
-1. **MT19937 i Rust:** skriva egen (~40 rader, full kontroll, ingen dep) eller
-   använda en crate (`rand_mt`/`mt19937`)? Måste matcha C++:s single-seed init.
-   *Förslag:* skriv egen — liten, ingen dep, exakt kontroll.
-2. **Overflow-policy:** `wrapping_*` överallt, eller bevisa via golden att testdatan
-   aldrig svämmar? *Förslag:* `wrapping_*` i `Fixed`/`IVec2` för att matcha C++ på
-   alla indata.
-3. **Golden-format:** ren text (en post per rad) räcker och är diff-vänligt.
-4. **CMake-integration nu eller senare?** Golden-generatorn kan vara ett enkelt
-   CMake-target bakom en option; full cargo-i-CMake skjuts till steg 1+.
+1. **MT19937 in Rust:** write our own (~40 lines, full control, no dep) or
+   use a crate (`rand_mt`/`mt19937`)? Must match C++'s single-seed init.
+   *Suggestion:* write our own — small, no dep, exact control.
+2. **Overflow policy:** `wrapping_*` everywhere, or prove via golden that the test data
+   never overflows? *Suggestion:* `wrapping_*` in `Fixed`/`IVec2` to match C++ on
+   all inputs.
+3. **Golden format:** plain text (one entry per line) is enough and diff-friendly.
+4. **CMake integration now or later?** The golden generator can be a simple
+   CMake target behind an option; full cargo-in-CMake is deferred to step 1+.
 
-## Nästa steg efter detta spec
+## Next step after this spec
 
-Granska specet → `writing-plans`-skill gör en konkret, stegvis implementationsplan
-för steg 0 → bygg (gärna agent-drivet, en uppgift per golden-svit).
+Review the spec → the `writing-plans` skill produces a concrete, step-by-step implementation plan
+for step 0 → build it (preferably agent-driven, one task per golden suite).

@@ -1,26 +1,26 @@
-# Steg 0 — Deterministisk grund: Implementationsplan
+# Step 0 — Deterministic foundation: Implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Skapa Rust-craten `sim-core` (fixpunkt, vektor, heltals-sqrt, cossin-tabell, MT19937-RNG) och bevisa bit-exakt likhet med C++-motorn via golden-vektorer genererade ur C++.
+**Goal:** Create the Rust crate `sim-core` (fixed-point, vector, integer sqrt, cossin table, MT19937 RNG) and prove bit-exact equality with the C++ engine via golden vectors generated from C++.
 
-**Architecture:** Ren Rust-crate utan Bevy-beroende. En liten C++-dumpare (`oracle_dump`) kör de *befintliga* C++-funktionerna och skriver deterministiska resultat till textfiler. Rust-tester läser samma filer och kräver identisk output rad för rad.
+**Architecture:** Pure Rust crate with no Bevy dependency. A small C++ dumper (`oracle_dump`) runs the *existing* C++ functions and writes deterministic results to text files. Rust tests read the same files and require identical output line by line.
 
-**Tech Stack:** Rust (stable, edition 2021), cargo workspace; C++20 (clang++) för dumparen.
+**Tech Stack:** Rust (stable, edition 2021), cargo workspace; C++20 (clang++) for the dumper.
 
 ## Global Constraints
 
-- `sim-core` har **inga** beroenden (ingen `rand`-crate; MT19937 skrivs för hand).
-- All aritmetik som kan svämma över använder `wrapping_*` för att matcha C++ 2-komplement-wrap.
-- Heltalsskift (`<<`, `>>`) och heltalsdivision (`/`) ska användas **exakt** som i C++ — `>>` på `i32` är aritmetiskt (matchar C++ signed shift); `/` trunkerar mot 0 (matchar C++).
-- `fixed` = `i32`, 16.16-format (`FRAC_BITS = 16`).
-- Rust-koden bor i `rust/` i repo-roten; C++-dumparen i `src/tools/oracle_dump/`.
-- Golden-filer committas i `rust/oracle-tests/golden/`.
-- Källreferens (oraklet, ändras ej): `src/game/math.hpp`, `src/game/math.cpp`, `src/game/math/rect.hpp`, `src/game/rand.hpp`.
+- `sim-core` has **no** dependencies (no `rand` crate; MT19937 is written by hand).
+- All arithmetic that may overflow uses `wrapping_*` to match C++ two's-complement wrap.
+- Integer shifts (`<<`, `>>`) and integer division (`/`) must be used **exactly** as in C++ — `>>` on `i32` is arithmetic (matches C++ signed shift); `/` truncates toward 0 (matches C++).
+- `fixed` = `i32`, 16.16 format (`FRAC_BITS = 16`).
+- The Rust code lives in `rust/` at the repo root; the C++ dumper in `src/tools/oracle_dump/`.
+- Golden files are committed in `rust/oracle-tests/golden/`.
+- Source reference (the oracle, not modified): `src/game/math.hpp`, `src/game/math.cpp`, `src/game/math/rect.hpp`, `src/game/rand.hpp`.
 
 ---
 
-### Task 1: Cargo-workspace och tomma crates
+### Task 1: Cargo workspace and empty crates
 
 **Files:**
 - Create: `rust/Cargo.toml`
@@ -31,10 +31,10 @@
 - Create: `rust/.gitignore`
 
 **Interfaces:**
-- Consumes: inget.
-- Produces: workspace där `sim_core` är en lib-crate och `oracle-tests` en crate med `dev-dependency` på `sim_core`.
+- Consumes: nothing.
+- Produces: a workspace where `sim_core` is a lib crate and `oracle-tests` is a crate with a `dev-dependency` on `sim_core`.
 
-- [ ] **Step 1: Skapa workspace-manifestet**
+- [ ] **Step 1: Create the workspace manifest**
 
 `rust/Cargo.toml`:
 ```toml
@@ -43,7 +43,7 @@ resolver = "2"
 members = ["sim-core", "oracle-tests"]
 ```
 
-- [ ] **Step 2: Skapa sim-core-manifest och lib**
+- [ ] **Step 2: Create the sim-core manifest and lib**
 
 `rust/sim-core/Cargo.toml`:
 ```toml
@@ -57,11 +57,11 @@ edition = "2021"
 
 `rust/sim-core/src/lib.rs`:
 ```rust
-//! Deterministisk simuleringskärna för Liero-rs. Ingen Bevy-, std-rng- eller
-//! flyttalsberoende — allt är heltalsaritmetik som matchar C++-motorn bit-exakt.
+//! Deterministic simulation core for Liero-rs. No Bevy, std-rng, or
+//! floating-point dependencies — everything is integer arithmetic that matches the C++ engine bit-exact.
 ```
 
-- [ ] **Step 3: Skapa oracle-tests-crate**
+- [ ] **Step 3: Create the oracle-tests crate**
 
 `rust/oracle-tests/Cargo.toml`:
 ```toml
@@ -76,7 +76,7 @@ sim-core = { path = "../sim-core" }
 
 `rust/oracle-tests/src/lib.rs`:
 ```rust
-//! Golden-vektor-tester mot C++-oraklet. Se tests/.
+//! Golden-vector tests against the C++ oracle. See tests/.
 ```
 
 `rust/.gitignore`:
@@ -84,7 +84,7 @@ sim-core = { path = "../sim-core" }
 /target
 ```
 
-- [ ] **Step 4: Verifiera att workspace bygger**
+- [ ] **Step 4: Verify that the workspace builds**
 
 Run: `cd rust && cargo build`
 Expected: PASS (`Compiling sim-core`, `Compiling oracle-tests`, `Finished`).
@@ -98,23 +98,23 @@ git commit -m "feat(rust): scaffold sim-core + oracle-tests cargo workspace"
 
 ---
 
-### Task 2: C++ golden-generator
+### Task 2: C++ golden generator
 
 **Files:**
 - Create: `src/tools/oracle_dump/main.cpp`
 - Create: `rust/oracle-tests/gen_golden.sh`
-- Create (genererade, committas): `rust/oracle-tests/golden/fixed.txt`, `vec.txt`, `sqrt.txt`, `cossin.txt`, `rng.txt`
+- Create (generated, committed): `rust/oracle-tests/golden/fixed.txt`, `vec.txt`, `sqrt.txt`, `cossin.txt`, `rng.txt`
 
 **Interfaces:**
 - Consumes: `src/game/math.cpp`, `src/game/math.hpp`, `src/game/math/rect.hpp`, `src/game/rand.hpp`.
-- Produces: fem golden-textfiler. **Format:** ett heltal per rad (decimal, i32/u32), utom `cossin.txt` som har `x y` per rad. Talsekvenserna definieras av de exakta indatalistorna nedan — Rust-testerna i Task 3–7 använder *identiska* listor.
+- Produces: five golden text files. **Format:** one integer per line (decimal, i32/u32), except `cossin.txt` which has `x y` per line. The number sequences are defined by the exact input lists below — the Rust tests in Task 3–7 use *identical* lists.
 
-- [ ] **Step 1: Skriv dumparen**
+- [ ] **Step 1: Write the dumper**
 
 `src/tools/oracle_dump/main.cpp`:
 ```cpp
-// Genererar golden-vektorer ur C++-oraklet för Rust-differentialtester.
-// Kompileras fristående (se rust/oracle-tests/gen_golden.sh) — ingår ej i CMake.
+// Generates golden vectors from the C++ oracle for the Rust differential tests.
+// Compiled standalone (see rust/oracle-tests/gen_golden.sh) — not part of CMake.
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -124,7 +124,7 @@ git commit -m "feat(rust): scaffold sim-core + oracle-tests cargo workspace"
 
 namespace {
 
-// MÅSTE vara identiska med Rust-testernas listor.
+// MUST be identical to the Rust tests' lists.
 int const kFixedInputs[] = {-2000000, -65537, -65536, -100, -1, 0,
                             1,        100,     65535,  65536, 65537, 2000000};
 
@@ -173,7 +173,7 @@ void DumpCossin(std::FILE* f) {
 }
 
 void DumpRng(std::FILE* f) {
-  Rand r;  // seed 0x1337 enligt rand.hpp
+  Rand r;  // seed 0x1337 per rand.hpp
   for (int i = 0; i < 10000; ++i) {
     std::fprintf(f, "%u\n", r());
   }
@@ -218,12 +218,12 @@ int main(int argc, char** argv) {
 }
 ```
 
-- [ ] **Step 2: Skriv generator-skriptet**
+- [ ] **Step 2: Write the generator script**
 
 `rust/oracle-tests/gen_golden.sh`:
 ```bash
 #!/usr/bin/env bash
-# Bygger C++-dumparen och genererar golden-vektorer. Kör från repo-roten.
+# Builds the C++ dumper and generates golden vectors. Run from the repo root.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/rust/oracle-tests/golden"
@@ -237,15 +237,15 @@ clang++ -std=c++20 -O2 -I "$ROOT/src/game" \
 echo "golden written to $OUT"
 ```
 
-- [ ] **Step 3: Generera golden-filerna**
+- [ ] **Step 3: Generate the golden files**
 
 Run: `chmod +x rust/oracle-tests/gen_golden.sh && ./rust/oracle-tests/gen_golden.sh`
 Expected: `golden written to .../rust/oracle-tests/golden`
 
-- [ ] **Step 4: Verifiera filinnehållet**
+- [ ] **Step 4: Verify the file contents**
 
 Run: `wc -l rust/oracle-tests/golden/*.txt`
-Expected: `cossin.txt` = 128 rader; `fixed.txt` = 36 rader (12 inputs × 3); `rng.txt` = 10700 rader (10000 + 6×100 + 100); `vec.txt` = 40 rader (5 fall × 8); `sqrt.txt` = 7 rader.
+Expected: `cossin.txt` = 128 lines; `fixed.txt` = 36 lines (12 inputs × 3); `rng.txt` = 10700 lines (10000 + 6×100 + 100); `vec.txt` = 40 lines (5 cases × 8); `sqrt.txt` = 7 lines.
 
 - [ ] **Step 5: Commit**
 
@@ -256,7 +256,7 @@ git commit -m "feat(oracle): C++ golden-vector dumper + generated vectors"
 
 ---
 
-### Task 3: Fixpunkt (`fixed.rs`)
+### Task 3: Fixed-point (`fixed.rs`)
 
 **Files:**
 - Create: `rust/sim-core/src/fixed.rs`
@@ -265,9 +265,9 @@ git commit -m "feat(oracle): C++ golden-vector dumper + generated vectors"
 
 **Interfaces:**
 - Consumes: `golden/fixed.txt`.
-- Produces: `sim_core::fixed::{Fixed, FRAC_BITS, itof, ftoi}` där `Fixed = i32`, `itof(i32) -> Fixed`, `ftoi(Fixed) -> i32`.
+- Produces: `sim_core::fixed::{Fixed, FRAC_BITS, itof, ftoi}` where `Fixed = i32`, `itof(i32) -> Fixed`, `ftoi(Fixed) -> i32`.
 
-- [ ] **Step 1: Skriv golden-testet (failing)**
+- [ ] **Step 1: Write the golden test (failing)**
 
 `rust/oracle-tests/tests/fixed_golden.rs`:
 ```rust
@@ -295,40 +295,40 @@ fn fixed_matches_cpp_oracle() {
 }
 ```
 
-- [ ] **Step 2: Kör testet, verifiera kompileringsfel/fail**
+- [ ] **Step 2: Run the test, verify compile error/fail**
 
 Run: `cd rust && cargo test -p oracle-tests --test fixed_golden`
 Expected: FAIL (`unresolved import sim_core::fixed`).
 
-- [ ] **Step 3: Implementera fixed.rs**
+- [ ] **Step 3: Implement fixed.rs**
 
 `rust/sim-core/src/fixed.rs`:
 ```rust
-//! 16.16 fixpunkt. Port av src/game/math.hpp (Itof/Ftoi).
+//! 16.16 fixed-point. Port of src/game/math.hpp (Itof/Ftoi).
 pub type Fixed = i32;
 pub const FRAC_BITS: u32 = 16;
 
-/// Heltal → fixpunkt: v << 16. Wrap matchar C++ 2-komplement.
+/// Integer → fixed-point: v << 16. Wrap matches C++ two's complement.
 #[inline]
 pub fn itof(v: i32) -> Fixed {
     v.wrapping_shl(FRAC_BITS)
 }
 
-/// Fixpunkt → heltal: v >> 16 (aritmetiskt skift, som C++ signed >>).
+/// Fixed-point → integer: v >> 16 (arithmetic shift, like C++ signed >>).
 #[inline]
 pub fn ftoi(v: Fixed) -> i32 {
     v >> FRAC_BITS
 }
 ```
 
-- [ ] **Step 4: Exponera modulen**
+- [ ] **Step 4: Expose the module**
 
-Lägg till i `rust/sim-core/src/lib.rs`:
+Add to `rust/sim-core/src/lib.rs`:
 ```rust
 pub mod fixed;
 ```
 
-- [ ] **Step 5: Kör testet, verifiera pass**
+- [ ] **Step 5: Run the test, verify pass**
 
 Run: `cd rust && cargo test -p oracle-tests --test fixed_golden`
 Expected: PASS (`test fixed_matches_cpp_oracle ... ok`).
@@ -342,7 +342,7 @@ git commit -m "feat(sim-core): fixed-point itof/ftoi matching C++ oracle"
 
 ---
 
-### Task 4: Vektor (`vec.rs`)
+### Task 4: Vector (`vec.rs`)
 
 **Files:**
 - Create: `rust/sim-core/src/vec.rs`
@@ -351,15 +351,15 @@ git commit -m "feat(sim-core): fixed-point itof/ftoi matching C++ oracle"
 
 **Interfaces:**
 - Consumes: `golden/vec.txt`.
-- Produces: `sim_core::vec::Vec2 { x: i32, y: i32 }` med `add`, `sub`, `mul(i32)`, `div(i32)`, `neg`, `zero()`. Semantik exakt som `IVec2` i `rect.hpp` (komponentvis; `mul`/`div` mot skalär; wrap på +,-,*).
+- Produces: `sim_core::vec::Vec2 { x: i32, y: i32 }` with `add`, `sub`, `mul(i32)`, `div(i32)`, `neg`, `zero()`. Semantics exactly like `IVec2` in `rect.hpp` (component-wise; `mul`/`div` against a scalar; wrap on +,-,*).
 
-- [ ] **Step 1: Skriv golden-testet (failing)**
+- [ ] **Step 1: Write the golden test (failing)**
 
 `rust/oracle-tests/tests/vec_golden.rs`:
 ```rust
 use sim_core::vec::Vec2;
 
-// (ax, ay, bx, by, s) — identiskt med kVecCases i dumparen.
+// (ax, ay, bx, by, s) — identical to kVecCases in the dumper.
 const CASES: [(i32, i32, i32, i32, i32); 5] = [
     (0, 0, 0, 0, 1),
     (100, -50, 7, 9, 3),
@@ -388,16 +388,16 @@ fn vec_matches_cpp_oracle() {
 }
 ```
 
-- [ ] **Step 2: Kör testet, verifiera fail**
+- [ ] **Step 2: Run the test, verify fail**
 
 Run: `cd rust && cargo test -p oracle-tests --test vec_golden`
 Expected: FAIL (`unresolved import sim_core::vec`).
 
-- [ ] **Step 3: Implementera vec.rs**
+- [ ] **Step 3: Implement vec.rs**
 
 `rust/sim-core/src/vec.rs`:
 ```rust
-//! Heltalsvektor. Port av IVec2 i src/game/math/rect.hpp.
+//! Integer vector. Port of IVec2 in src/game/math/rect.hpp.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Vec2 {
     pub x: i32,
@@ -436,14 +436,14 @@ impl Vec2 {
 }
 ```
 
-- [ ] **Step 4: Exponera modulen**
+- [ ] **Step 4: Expose the module**
 
-Lägg till i `rust/sim-core/src/lib.rs`:
+Add to `rust/sim-core/src/lib.rs`:
 ```rust
 pub mod vec;
 ```
 
-- [ ] **Step 5: Kör testet, verifiera pass**
+- [ ] **Step 5: Run the test, verify pass**
 
 Run: `cd rust && cargo test -p oracle-tests --test vec_golden`
 Expected: PASS.
@@ -457,7 +457,7 @@ git commit -m "feat(sim-core): Vec2 matching C++ IVec2 oracle"
 
 ---
 
-### Task 5: Heltals-sqrt och vektorlängd (`math.rs`)
+### Task 5: Integer sqrt and vector length (`math.rs`)
 
 **Files:**
 - Create: `rust/sim-core/src/math.rs`
@@ -466,9 +466,9 @@ git commit -m "feat(sim-core): Vec2 matching C++ IVec2 oracle"
 
 **Interfaces:**
 - Consumes: `golden/sqrt.txt`.
-- Produces: `sim_core::math::{isqrt, vector_length}` där `isqrt(u32) -> u32` (port av `Sqr`), `vector_length(i32, i32) -> i32` (port av `VectorLength`).
+- Produces: `sim_core::math::{isqrt, vector_length}` where `isqrt(u32) -> u32` (port of `Sqr`), `vector_length(i32, i32) -> i32` (port of `VectorLength`).
 
-- [ ] **Step 1: Skriv golden-testet (failing)**
+- [ ] **Step 1: Write the golden test (failing)**
 
 `rust/oracle-tests/tests/sqrt_golden.rs`:
 ```rust
@@ -493,21 +493,21 @@ fn vector_length_matches_cpp_oracle() {
 }
 ```
 
-- [ ] **Step 2: Kör testet, verifiera fail**
+- [ ] **Step 2: Run the test, verify fail**
 
 Run: `cd rust && cargo test -p oracle-tests --test sqrt_golden`
 Expected: FAIL (`unresolved import sim_core::math`).
 
-- [ ] **Step 3: Implementera math.rs**
+- [ ] **Step 3: Implement math.rs**
 
 `rust/sim-core/src/math.rs`:
 ```rust
-//! Heltals-kvadratrot och vektorlängd. Port av Sqr/VectorLength i src/game/math.cpp.
+//! Integer square root and vector length. Port of Sqr/VectorLength in src/game/math.cpp.
 
-/// Heltals-sqrt (avrundat nedåt). Bit-för-bit-port av Sqr().
+/// Integer sqrt (rounded down). Bit-for-bit port of Sqr().
 pub fn isqrt(mut op: u32) -> u32 {
     let mut res: u32 = 0;
-    let mut one: u32 = 1 << 30; // högsta fyrpotens
+    let mut one: u32 = 1 << 30; // highest power of four
     while one > op {
         one >>= 2;
     }
@@ -522,21 +522,21 @@ pub fn isqrt(mut op: u32) -> u32 {
     res
 }
 
-/// Port av VectorLength: isqrt(x*x + y*y), i32-aritmetik som castas till u32.
+/// Port of VectorLength: isqrt(x*x + y*y), i32 arithmetic cast to u32.
 pub fn vector_length(x: i32, y: i32) -> i32 {
     let sum = x.wrapping_mul(x).wrapping_add(y.wrapping_mul(y));
     isqrt(sum as u32) as i32
 }
 ```
 
-- [ ] **Step 4: Exponera modulen**
+- [ ] **Step 4: Expose the module**
 
-Lägg till i `rust/sim-core/src/lib.rs`:
+Add to `rust/sim-core/src/lib.rs`:
 ```rust
 pub mod math;
 ```
 
-- [ ] **Step 5: Kör testet, verifiera pass**
+- [ ] **Step 5: Run the test, verify pass**
 
 Run: `cd rust && cargo test -p oracle-tests --test sqrt_golden`
 Expected: PASS.
@@ -550,7 +550,7 @@ git commit -m "feat(sim-core): integer isqrt + vector_length matching C++ oracle
 
 ---
 
-### Task 6: Cossin-tabell (`tables.rs`)
+### Task 6: Cossin table (`tables.rs`)
 
 **Files:**
 - Create: `rust/sim-core/src/tables.rs`
@@ -559,9 +559,9 @@ git commit -m "feat(sim-core): integer isqrt + vector_length matching C++ oracle
 
 **Interfaces:**
 - Consumes: `golden/cossin.txt`, `sim_core::vec::Vec2`.
-- Produces: `sim_core::tables::precompute_cossin() -> [Vec2; 128]` (port av `PrecomputeTables`).
+- Produces: `sim_core::tables::precompute_cossin() -> [Vec2; 128]` (port of `PrecomputeTables`).
 
-- [ ] **Step 1: Skriv golden-testet (failing)**
+- [ ] **Step 1: Write the golden test (failing)**
 
 `rust/oracle-tests/tests/cossin_golden.rs`:
 ```rust
@@ -588,17 +588,17 @@ fn cossin_table_matches_cpp_oracle() {
 }
 ```
 
-- [ ] **Step 2: Kör testet, verifiera fail**
+- [ ] **Step 2: Run the test, verify fail**
 
 Run: `cd rust && cargo test -p oracle-tests --test cossin_golden`
 Expected: FAIL (`unresolved import sim_core::tables`).
 
-- [ ] **Step 3: Implementera tables.rs**
+- [ ] **Step 3: Implement tables.rs**
 
 `rust/sim-core/src/tables.rs`:
 ```rust
-//! cossin_table[128], port av PrecomputeTables i src/game/math.cpp.
-//! Egen heltals-Taylorserie (i64) — ingen libm, fullt reproducerbar.
+//! cossin_table[128], port of PrecomputeTables in src/game/math.cpp.
+//! Dedicated integer Taylor series (i64) — no libm, fully reproducible.
 use crate::vec::Vec2;
 
 struct Fp {
@@ -656,7 +656,7 @@ pub fn precompute_cossin() -> [Vec2; 128] {
             c = -c;
         }
         const SHIFT: i32 = 60 - 16;
-        rf += 1i64 << (SHIFT - 1); // korrekt avrundning
+        rf += 1i64 << (SHIFT - 1); // correct rounding
         let r = (rf >> SHIFT) as i32;
         table[i as usize].x = r;
         table[((i + 32) & 0x7f) as usize].y = r;
@@ -665,17 +665,17 @@ pub fn precompute_cossin() -> [Vec2; 128] {
 }
 ```
 
-- [ ] **Step 4: Exponera modulen**
+- [ ] **Step 4: Expose the module**
 
-Lägg till i `rust/sim-core/src/lib.rs`:
+Add to `rust/sim-core/src/lib.rs`:
 ```rust
 pub mod tables;
 ```
 
-- [ ] **Step 5: Kör testet, verifiera pass**
+- [ ] **Step 5: Run the test, verify pass**
 
 Run: `cd rust && cargo test -p oracle-tests --test cossin_golden`
-Expected: PASS (alla 128 poster matchar — bevisar Taylor-porten).
+Expected: PASS (all 128 entries match — proves the Taylor port).
 
 - [ ] **Step 6: Commit**
 
@@ -695,9 +695,9 @@ git commit -m "feat(sim-core): cossin table via integer Taylor series matching C
 
 **Interfaces:**
 - Consumes: `golden/rng.txt`.
-- Produces: `sim_core::rng::Rand` med `new()` (seed `0x1337`), `seed(u32)`, `next_u32() -> u32`, `bound(u32) -> u32` (Lemire), `bound_range(u32, u32) -> u32`.
+- Produces: `sim_core::rng::Rand` with `new()` (seed `0x1337`), `seed(u32)`, `next_u32() -> u32`, `bound(u32) -> u32` (Lemire), `bound_range(u32, u32) -> u32`.
 
-- [ ] **Step 1: Skriv golden-testet (failing)**
+- [ ] **Step 1: Write the golden test (failing)**
 
 `rust/oracle-tests/tests/rng_golden.rs`:
 ```rust
@@ -730,17 +730,17 @@ fn rng_matches_cpp_oracle() {
 }
 ```
 
-- [ ] **Step 2: Kör testet, verifiera fail**
+- [ ] **Step 2: Run the test, verify fail**
 
 Run: `cd rust && cargo test -p oracle-tests --test rng_golden`
 Expected: FAIL (`unresolved import sim_core::rng`).
 
-- [ ] **Step 3: Implementera rng.rs**
+- [ ] **Step 3: Implement rng.rs**
 
 `rust/sim-core/src/rng.rs`:
 ```rust
-//! Deterministisk MT19937, port av std::mt19937-användningen i src/game/rand.hpp.
-//! Standard-parametrar; single-seed-init matchar C++:s std::mt19937(seed).
+//! Deterministic MT19937, port of the std::mt19937 usage in src/game/rand.hpp.
+//! Standard parameters; single-seed init matches C++'s std::mt19937(seed).
 
 const N: usize = 624;
 const M: usize = 397;
@@ -804,7 +804,7 @@ impl Rand {
         y
     }
 
-    /// [0, max) via Lemire multiply-shift (matchar rand.hpp).
+    /// [0, max) via Lemire multiply-shift (matches rand.hpp).
     pub fn bound(&mut self, max: u32) -> u32 {
         ((self.next_u32() as u64 * max as u64) >> 32) as u32
     }
@@ -822,17 +822,17 @@ impl Default for Rand {
 }
 ```
 
-- [ ] **Step 4: Exponera modulen**
+- [ ] **Step 4: Expose the module**
 
-Lägg till i `rust/sim-core/src/lib.rs`:
+Add to `rust/sim-core/src/lib.rs`:
 ```rust
 pub mod rng;
 ```
 
-- [ ] **Step 5: Kör testet, verifiera pass**
+- [ ] **Step 5: Run the test, verify pass**
 
 Run: `cd rust && cargo test -p oracle-tests --test rng_golden`
-Expected: PASS (10 000 råa + bounded + reseed matchar — bevisar MT19937-porten).
+Expected: PASS (10,000 raw + bounded + reseed match — proves the MT19937 port).
 
 - [ ] **Step 6: Commit**
 
@@ -843,58 +843,58 @@ git commit -m "feat(sim-core): MT19937 RNG matching C++ std::mt19937 oracle"
 
 ---
 
-### Task 8: README och full verifiering
+### Task 8: README and full verification
 
 **Files:**
 - Create: `rust/README.md`
 
 **Interfaces:**
-- Consumes: alla tidigare tasks.
-- Produces: dokumentation av orakel-flödet + grön helhet.
+- Consumes: all previous tasks.
+- Produces: documentation of the oracle flow + a green whole.
 
-- [ ] **Step 1: Skriv rust/README.md**
+- [ ] **Step 1: Write rust/README.md**
 
 `rust/README.md`:
 ```markdown
-# Liero-rs (Rust-omskrivning)
+# Liero-rs (Rust rewrite)
 
-Cargo-workspace för den agent-drivna Rust/Bevy-omskrivningen av OpenLiero.
-Se `../docs/superpowers/specs/2026-06-26-liero-rs-roadmap.md`.
+Cargo workspace for the agent-driven Rust/Bevy rewrite of OpenLiero.
+See `../docs/superpowers/specs/2026-06-26-liero-rs-roadmap.md`.
 
 ## Crates
 
-- `sim-core` — deterministisk kärna (fixpunkt, vektor, sqrt, cossin, RNG). Inga
-  beroenden, ingen Bevy. Allt är heltalsaritmetik som matchar C++-motorn bit-exakt.
-- `oracle-tests` — differentialtester mot C++-oraklet via golden-vektorer.
+- `sim-core` — deterministic core (fixed-point, vector, sqrt, cossin, RNG). No
+  dependencies, no Bevy. Everything is integer arithmetic that matches the C++ engine bit-exact.
+- `oracle-tests` — differential tests against the C++ oracle via golden vectors.
 
-## Orakel-flödet
+## The oracle flow
 
-1. C++-dumparen (`src/tools/oracle_dump`) kör de *befintliga* C++-funktionerna och
-   skriver deterministiska resultat till `oracle-tests/golden/*.txt`.
-2. Rust-testerna läser samma filer och kräver identisk output rad för rad.
+1. The C++ dumper (`src/tools/oracle_dump`) runs the *existing* C++ functions and
+   writes deterministic results to `oracle-tests/golden/*.txt`.
+2. The Rust tests read the same files and require identical output line by line.
 
-Regenerera golden efter ändring i C++-`math`/`rand`:
+Regenerate golden after a change in the C++ `math`/`rand`:
 
 \`\`\`bash
 ./oracle-tests/gen_golden.sh
 \`\`\`
 
-## Köra testerna
+## Running the tests
 
 \`\`\`bash
 cd rust && cargo test
 \`\`\`
 ```
 
-- [ ] **Step 2: Kör hela sviten**
+- [ ] **Step 2: Run the full suite**
 
 Run: `cd rust && cargo test`
-Expected: PASS — fem golden-tester gröna (fixed, vec, sqrt, cossin, rng).
+Expected: PASS — five golden tests green (fixed, vec, sqrt, cossin, rng).
 
-- [ ] **Step 3: Verifiera determinism vid regenerering (idempotens)**
+- [ ] **Step 3: Verify determinism on regeneration (idempotence)**
 
 Run: `./rust/oracle-tests/gen_golden.sh && cd rust && git diff --stat -- oracle-tests/golden && cargo test`
-Expected: `git diff` tomt (golden oförändrade), `cargo test` PASS.
+Expected: `git diff` empty (golden unchanged), `cargo test` PASS.
 
 - [ ] **Step 4: Commit**
 
@@ -907,9 +907,9 @@ git commit -m "docs(rust): document oracle differential-testing workflow"
 
 ## Self-Review
 
-**Spec coverage:** Varje punkt i steg 0-specens "Scope (Ingår)" har en task: workspace (T1), fixpunkt (T3), vektor (T4), VectorLength/Sqr (T5), cossin (T6), Rand inkl. Lemire (T7), C++ golden-generator (T2), Rust golden-tester (T3–T7). "Definition of done" täcks: cossin 128 (T6), RNG ≥10000 (T7), fixpunkt inkl. negativa/gränsfall (T3), generator reproducerbar (T2/T8 idempotenskoll), README (T8).
+**Spec coverage:** Every item in step 0 spec's "Scope (Included)" has a task: workspace (T1), fixed-point (T3), vector (T4), VectorLength/Sqr (T5), cossin (T6), Rand incl. Lemire (T7), C++ golden generator (T2), Rust golden tests (T3–T7). "Definition of done" is covered: cossin 128 (T6), RNG ≥10000 (T7), fixed-point incl. negatives/boundary cases (T3), generator reproducible (T2/T8 idempotence check), README (T8).
 
-**Placeholder scan:** Inga TBD/TODO; all kod är fullständig och konkret.
+**Placeholder scan:** No TBD/TODO; all code is complete and concrete.
 
-**Type consistency:** `Fixed=i32`/`itof`/`ftoi` (T3), `Vec2{x,y}` med `new/zero/add/sub/mul/div/neg` (T4, använd i T6), `isqrt`/`vector_length` (T5), `precompute_cossin()->[Vec2;128]` (T6), `Rand::{new,seed,next_u32,bound,bound_range}` (T7) — namn och signaturer konsekventa mellan dumpare, tester och moduler. Golden-radantal i T2 stämmer med testernas läsordning i T3–T7.
+**Type consistency:** `Fixed=i32`/`itof`/`ftoi` (T3), `Vec2{x,y}` with `new/zero/add/sub/mul/div/neg` (T4, used in T6), `isqrt`/`vector_length` (T5), `precompute_cossin()->[Vec2;128]` (T6), `Rand::{new,seed,next_u32,bound,bound_range}` (T7) — names and signatures consistent across dumper, tests, and modules. The golden line counts in T2 match the tests' read order in T3–T7.
 ```

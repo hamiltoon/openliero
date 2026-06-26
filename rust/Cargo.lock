@@ -3,9 +3,14 @@
 version = 4
 
 [[package]]
+name = "assets"
+version = "0.1.0"
+
+[[package]]
 name = "oracle-tests"
 version = "0.1.0"
 dependencies = [
+ "assets",
  "sim-core",
 ]
 

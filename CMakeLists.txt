@@ -373,6 +373,8 @@ option(OPENLIERO_BUILD_ORACLE_DUMP "Build the Rust differential-test oracle dump
 if(OPENLIERO_BUILD_ORACLE_DUMP)
   add_executable(oracle_dump_level src/tools/oracle_dump/level_dump.cpp)
   target_link_libraries(oracle_dump_level PRIVATE game)
+  add_executable(oracle_dump_palette src/tools/oracle_dump/palette_dump.cpp)
+  target_link_libraries(oracle_dump_palette PRIVATE game)
 endif()
 
 # binaries

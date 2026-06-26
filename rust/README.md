@@ -14,7 +14,7 @@ See `../docs/superpowers/specs/2026-06-26-liero-rs-roadmap.md`.
 
 `assets` loads OpenLiero's on-disk formats (no Bevy). Behaviour that feeds the
 simulation is differential-tested against the C++ engine; the implementation is
-idiomatic Rust (`std::io`/`from_le_bytes`, `Result`), not a port of the C++ `io`
+idiomatic Rust (`from_le_bytes` + slicing, `Result`), not a port of the C++ `io`
 layer.
 
 - `level` — `.lev` material-map loader (legacy 504×350 + OLLEVEL2 sized).

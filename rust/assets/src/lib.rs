@@ -4,3 +4,4 @@
 pub mod level;
 pub mod palette;
 pub mod sprite;
+pub mod tc;

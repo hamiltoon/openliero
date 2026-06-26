@@ -25,6 +25,25 @@ Therefore: **no big-bang rewrite.** Strangler pattern — build the new engine
 piece by piece, prove each piece correct against the old one, keep the old one until the
 new one is done.
 
+## Modernization charter
+
+This is a **modernization, not a literal port.** The line:
+
+- **Locked, bit-exact (what we keep):** the deterministic simulation — all of
+  `processFrame`'s math, fixed-point, RNG, lookup tables, and ordering — plus the
+  parsed data that drives it (the material map, weapon/object parameters), and the
+  ability to read existing `data/` assets. Replay, rollback, and the game's feel
+  depend on tick #1000 being identical. These keep the differential-testing oracle.
+- **Free to modernize (we do NOT mirror C++):** code architecture, module/crate
+  boundaries, APIs, error handling, and idioms — idiomatic Rust (`Result`,
+  `std::io`, iterators, `serde` where apt) rather than a transliteration of C++
+  structures (e.g. use `std::io`/`from_le_bytes`, not a port of `io::Reader`).
+  Internal data representations, naming, build, and test layout are ours to choose.
+
+In short: the *behaviour* that affects the simulation is sacred and bit-exact;
+*how the code is structured* we rebuild cleanly. The oracle proves we preserved
+the behaviour while modernizing the implementation.
+
 ## The oracle strategy: differential testing against C++
 
 The existing C++ engine is kept as the **oracle of truth**. For each subsystem in

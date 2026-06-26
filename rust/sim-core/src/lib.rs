@@ -3,4 +3,5 @@
 
 pub mod fixed;
 pub mod math;
+pub mod tables;
 pub mod vec;

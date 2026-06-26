@@ -2,3 +2,4 @@
 //! simulation is differential-tested against the C++ engine; the implementation
 //! is idiomatic Rust, not a port of the C++ `io` layer.
 pub mod level;
+pub mod palette;

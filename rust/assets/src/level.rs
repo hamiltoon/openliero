@@ -56,6 +56,12 @@ const SIZED_HEADER_LEN: usize = 13; // magic(8) + version(1) + w(2) + h(2)
 /// the sized format; otherwise the bytes are a legacy 504×350 material map.
 /// An optional trailing POWERLEVEL block carries a custom palette (C++ always
 /// parses it). MODERNLV/display blocks are handled in a later slice.
+///
+/// Trailing-block truncation is handled more leniently than C++: where C++'s
+/// `Reader::Get` throws and rejects the whole level, we degrade gracefully (a
+/// truncated POWERLEVEL palette yields `palette: None`; a truncated MODERNLV
+/// body yields `display: None`), keeping what parsed. These blocks are
+/// non-simulation rendering data, so dropping them is charter-permitted.
 pub fn load(bytes: &[u8]) -> Result<LevelData, LevelError> {
     let (width, height, mat_start) = if bytes.len() >= 8 && &bytes[0..8] == SIZED_MAGIC {
         let (w, h) = parse_sized_header(bytes)?;

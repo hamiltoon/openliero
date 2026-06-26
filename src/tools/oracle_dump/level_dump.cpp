@@ -1,5 +1,5 @@
 // Generates the golden digests for the Rust level differential test. Runs the
-// REAL C++ Level::load on six inputs and writes one line each:
+// REAL C++ Level::load on seven inputs and writes one line each:
 // `w h mat_hash pal_hash dd_hash dv_hash ramp_hash anim_hash` (FNV-1a hashes of
 // the material map, POWERLEVEL palette, and MODERNLV display/ramp/anim fields,
 // `-` for absent optional fields). Links the `game` library; built via the
@@ -212,6 +212,12 @@ int main(int argc, char** argv) {
   DumpOne(out, common, settings, MakeSizedWith(4, 4, Powerlevel()));
   DumpOne(out, common, settings, MakeSizedWith(2, 2, Modernlv(4, 0)));
   DumpOne(out, common, settings, MakeSizedWith(2, 2, Modernlv(4, 2)));
+  {
+    std::vector<uint8_t> tail = Powerlevel();
+    auto m = Modernlv(4, 0);
+    tail.insert(tail.end(), m.begin(), m.end());
+    DumpOne(out, common, settings, MakeSizedWith(2, 2, tail));
+  }
   std::fclose(out);
   return 0;
 }

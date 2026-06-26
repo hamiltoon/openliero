@@ -118,13 +118,18 @@ fn level_matches_cpp_oracle() {
     ))
     .unwrap();
 
-    let inputs: [Vec<u8>; 6] = [
+    let inputs: [Vec<u8>; 7] = [
         modern,
         make_legacy(),
         make_ollevel2_base(13, 11),
         with_tail(make_ollevel2_base(4, 4), powerlevel()),
         with_tail(make_ollevel2_base(2, 2), modernlv(4, 0)),
         with_tail(make_ollevel2_base(2, 2), modernlv(4, 2)),
+        with_tail(make_ollevel2_base(2, 2), {
+            let mut t = powerlevel();
+            t.extend_from_slice(&modernlv(4, 0));
+            t
+        }),
     ];
     let mut lines = golden.lines();
 

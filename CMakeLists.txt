@@ -375,6 +375,8 @@ if(OPENLIERO_BUILD_ORACLE_DUMP)
   target_link_libraries(oracle_dump_level PRIVATE game)
   add_executable(oracle_dump_palette src/tools/oracle_dump/palette_dump.cpp)
   target_link_libraries(oracle_dump_palette PRIVATE game)
+  add_executable(oracle_dump_sprite src/tools/oracle_dump/sprite_dump.cpp)
+  target_link_libraries(oracle_dump_sprite PRIVATE game)
 endif()
 
 # binaries

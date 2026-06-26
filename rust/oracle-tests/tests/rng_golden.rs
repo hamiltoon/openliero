@@ -1,3 +1,9 @@
+//! Differential test for the MT19937 RNG against the C++ oracle. See
+//! `fixed_golden.rs` for the golden pattern. The sequence — 10000 raw values,
+//! then bounded values for several maxes, then a reseed — must match
+//! `golden/rng.txt` exactly, and in the same order, since each draw advances the
+//! shared generator state.
+
 use sim_core::rng::Rand;
 
 #[test]

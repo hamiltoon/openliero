@@ -1,3 +1,16 @@
+//! Differential test for the fixed-point module against the C++ oracle.
+//!
+//! The pattern (the same in every `*_golden.rs`): the C++ dumper has already run
+//! the matching C++ functions and written the results to `golden/fixed.txt`.
+//! Here we run the ported Rust code on the *exact same* inputs and compare line
+//! by line. If every value matches, the port is proven bit-identical to the
+//! original.
+//!
+//! `FIXED_INPUTS` must be identical to the dumper's `kFixedInputs` — otherwise
+//! we would be comparing apples and oranges. The list deliberately includes edge
+//! cases: negative numbers, exactly ±1.0 (±65536), and values that make `itof`
+//! overflow.
+
 use sim_core::fixed::{ftoi, itof};
 
 const FIXED_INPUTS: [i32; 12] = [

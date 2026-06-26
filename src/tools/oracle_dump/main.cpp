@@ -1,5 +1,12 @@
-// Genererar golden-vektorer ur C++-oraklet för Rust-differentialtester.
-// Kompileras fristående (se rust/oracle-tests/gen_golden.sh) — ingår ej i CMake.
+// Generates golden vectors from the C++ oracle for the Rust differential tests.
+//
+// This runs the *existing* C++ engine functions (Itof/Ftoi, IVec2, VectorLength,
+// the cossin table, Rand) and writes their results to text files. The Rust port
+// in rust/sim-core is then tested against these files: if Rust reproduces every
+// value bit-for-bit, the port is proven correct. The input lists below MUST stay
+// identical to the Rust tests' lists.
+//
+// Built standalone (see rust/oracle-tests/gen_golden.sh) — not part of CMake.
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -9,7 +16,7 @@
 
 namespace {
 
-// MÅSTE vara identiska med Rust-testernas listor.
+// MUST stay identical to the Rust tests' lists.
 int const kFixedInputs[] = {-2000000, -65537, -65536, -100, -1, 0,
                             1,        100,     65535,  65536, 65537, 2000000};
 
@@ -58,7 +65,7 @@ void DumpCossin(std::FILE* f) {
 }
 
 void DumpRng(std::FILE* f) {
-  Rand r;  // seed 0x1337 enligt rand.hpp
+  Rand r;  // seed 0x1337 per rand.hpp
   for (int i = 0; i < 10000; ++i) {
     std::fprintf(f, "%u\n", r());
   }

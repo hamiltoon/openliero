@@ -1,6 +1,12 @@
+//! Differential test for `Vec2` against the C++ oracle (`IVec2`). See
+//! `fixed_golden.rs` for an explanation of the golden pattern. Here we run
+//! add/sub/mul/div on the same cases as the dumper and compare both components
+//! against `golden/vec.txt`.
+
 use sim_core::vec::Vec2;
 
-// (ax, ay, bx, by, s) — identiskt med kVecCases i dumparen.
+// (ax, ay, bx, by, s) — must be identical to kVecCases in the dumper, otherwise
+// the lines in the golden file would not line up.
 const CASES: [(i32, i32, i32, i32, i32); 5] = [
     (0, 0, 0, 0, 1),
     (100, -50, 7, 9, 3),

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bygger C++-dumparen och genererar golden-vektorer. Kör från repo-roten.
+# Builds the C++ dumper and generates the golden vectors. Run from anywhere.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/rust/oracle-tests/golden"

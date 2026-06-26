@@ -1,3 +1,8 @@
+//! Differential test for the sin/cos table against the C++ oracle. See
+//! `fixed_golden.rs` for the golden pattern. This is the strictest test: all 128
+//! entries (both x and y) must match `golden/cossin.txt` bit-for-bit, which
+//! proves the integer Taylor-series port is exact.
+
 use sim_core::tables::precompute_cossin;
 
 #[test]

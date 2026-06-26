@@ -1,1 +1,1 @@
-//! Golden-vektor-tester mot C++-oraklet. Se tests/.
+//! Golden-vector tests against the C++ oracle. See tests/.

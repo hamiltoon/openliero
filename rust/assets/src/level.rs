@@ -108,4 +108,29 @@ mod tests {
         assert_eq!(lvl.material_id[7], 7);
         assert_eq!(lvl.material_id[176399], ((176399 % 251) as u8));
     }
+
+    #[test]
+    fn rejects_truncated_sized_header() {
+        let buf = b"OLLEVEL2\x00\x0d".to_vec(); // magic + version + 1 byte (header incomplete)
+        assert_eq!(load(&buf), Err(LevelError::Truncated));
+    }
+
+    #[test]
+    fn rejects_truncated_sized_body() {
+        let mut buf = make_ollevel2(4, 4, |_| 0);
+        buf.truncate(SIZED_HEADER_LEN + 5); // fewer than 16 material bytes
+        assert_eq!(load(&buf), Err(LevelError::Truncated));
+    }
+
+    #[test]
+    fn rejects_zero_dimensions() {
+        let buf = make_ollevel2(0, 10, |_| 0); // width 0 is invalid
+        assert_eq!(load(&buf), Err(LevelError::BadDimensions(0, 10)));
+    }
+
+    #[test]
+    fn rejects_truncated_legacy() {
+        let buf = vec![1u8; 1000]; // far fewer than 176400, no magic
+        assert_eq!(load(&buf), Err(LevelError::Truncated));
+    }
 }

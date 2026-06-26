@@ -3,5 +3,6 @@
 
 pub mod fixed;
 pub mod math;
+pub mod rng;
 pub mod tables;
 pub mod vec;

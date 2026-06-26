@@ -11,14 +11,30 @@ pub struct LevelData {
     pub material_id: Vec<u8>,
     /// Custom palette from a trailing POWERLEVEL block, if present.
     pub palette: Option<Palette>,
-    /// Display layers (sprite/graphics data) — filled in Task 4 (slice 1d).
+    /// True-color display layers from a trailing MODERNLV block, if present.
     pub display: Option<DisplayLayers>,
 }
 
-/// Placeholder for the display-layer data parsed from MODERNLV blocks.
-/// Implemented in Task 4 (slice 1d); `load` currently always sets `display` to `None`.
+/// True-color display layers from a `.lev` MODERNLV block. Read byte-exact;
+/// the per-tick colour resolve is rendering (step 3), out of scope here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DisplayLayers {}
+pub struct DisplayLayers {
+    /// `cells` ARGB values (per-pixel phase offset when animated).
+    pub data: Vec<u32>,
+    /// `cells` flags: 1 = authored colour, 0 = fall back to palette.
+    pub valid: Vec<u8>,
+    /// Animation ramps; empty unless a valid animation block followed.
+    pub ramps: Vec<ArgbRamp>,
+    /// `cells` ramp indices (0 = static, N = ramp N-1); empty unless `ramps`.
+    pub anim: Vec<u8>,
+}
+
+/// One animation ramp: a colour cycle advanced by `shift`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArgbRamp {
+    pub shift: u8,
+    pub colors: Vec<u32>,
+}
 
 /// Why a `.lev` failed to load. C++ returns `bool`; we use a typed error.
 #[derive(Debug, PartialEq, Eq)]
@@ -57,13 +73,14 @@ pub fn load(bytes: &[u8]) -> Result<LevelData, LevelError> {
     // Cursor now points just past the material map; optional blocks follow.
     let mut cursor = mat_end;
     let palette = parse_powerlevel(bytes, &mut cursor);
+    let display = parse_modernlv(bytes, &mut cursor, cells);
 
     Ok(LevelData {
         width,
         height,
         material_id,
         palette,
-        display: None, // filled in Task 4
+        display,
     })
 }
 
@@ -99,6 +116,100 @@ fn parse_powerlevel(bytes: &[u8], cursor: &mut usize) -> Option<Palette> {
     }
 }
 
+const MAX_RAMP_COLORS: usize = 4096;
+
+// If `bytes[cursor..]` starts with "MODERNLV", parse display layers + optional
+// animation, advancing `cursor`. Animation degrades gracefully: any malformed
+// or short part drops ramps+anim while keeping display data (matches C++).
+fn parse_modernlv(bytes: &[u8], cursor: &mut usize, cells: usize) -> Option<DisplayLayers> {
+    const MAGIC: &[u8; 8] = b"MODERNLV";
+    let start = *cursor;
+    if bytes.len() < start + MAGIC.len() || &bytes[start..start + MAGIC.len()] != MAGIC {
+        return None;
+    }
+    let mut pos = start + MAGIC.len();
+
+    // display_data: cells * u32 LE
+    let dd_end = pos + cells * 4;
+    if bytes.len() < dd_end {
+        return None; // C++ Get() would fail; treat as no MODERNLV block
+    }
+    let data: Vec<u32> = bytes[pos..dd_end]
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    pos = dd_end;
+
+    // display_valid: cells * u8
+    let dv_end = pos + cells;
+    if bytes.len() < dv_end {
+        return None;
+    }
+    let valid = bytes[pos..dv_end].to_vec();
+    pos = dv_end;
+    *cursor = pos; // display layers committed; cursor past them
+
+    // Optional animation extension (graceful degrade on any shortfall).
+    let (ramps, anim) = parse_animation(bytes, &mut pos, cells).unwrap_or_default();
+    if !ramps.is_empty() {
+        *cursor = pos; // animation consumed too
+    }
+
+    Some(DisplayLayers { data, valid, ramps, anim })
+}
+
+// Returns Some((ramps, anim)) only when the full, valid animation parses;
+// None on any shortfall/violation (caller keeps display, drops animation).
+fn parse_animation(
+    bytes: &[u8],
+    pos: &mut usize,
+    cells: usize,
+) -> Option<(Vec<ArgbRamp>, Vec<u8>)> {
+    let mut p = *pos;
+    let ramp_count = *bytes.get(p)?; // EOF here -> no animation
+    p += 1;
+    if ramp_count == 0 {
+        return None;
+    }
+
+    let mut ramps = Vec::with_capacity(ramp_count as usize);
+    for _ in 0..ramp_count {
+        let shift = *bytes.get(p)?;
+        p += 1;
+        let cc_lo = *bytes.get(p)?;
+        let cc_hi = *bytes.get(p + 1)?;
+        p += 2;
+        let color_count = u16::from_le_bytes([cc_lo, cc_hi]) as usize;
+        if color_count == 0 || color_count > MAX_RAMP_COLORS {
+            return None;
+        }
+        let end = p + color_count * 4;
+        if bytes.len() < end {
+            return None;
+        }
+        let colors: Vec<u32> = bytes[p..end]
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        p = end;
+        ramps.push(ArgbRamp { shift, colors });
+    }
+
+    let anim_end = p + cells;
+    if bytes.len() < anim_end {
+        return None;
+    }
+    let anim = bytes[p..anim_end].to_vec();
+    // Every index must be <= ramp_count (C++ rejects `> ramp_count`).
+    if anim.iter().any(|&idx| idx > ramp_count) {
+        return None;
+    }
+    p = anim_end;
+
+    *pos = p;
+    Some((ramps, anim))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +238,118 @@ mod tests {
     fn no_palette_when_no_powerlevel() {
         let buf = make_ollevel2(4, 4, |_| 1);
         assert!(load(&buf).unwrap().palette.is_none());
+    }
+
+    #[test]
+    fn no_palette_when_trailing_block_not_powerlevel() {
+        // A trailing block whose first bytes are not "POWERLEVEL" -> palette None.
+        let mut buf = make_ollevel2(2, 2, |_| 1);
+        buf.extend_from_slice(b"NOTAPOWER_anything");
+        assert!(load(&buf).unwrap().palette.is_none());
+    }
+
+    #[test]
+    fn no_palette_when_powerlevel_palette_truncated() {
+        // "POWERLEVEL" magic but fewer than 768 palette bytes -> palette None.
+        let mut buf = make_ollevel2(2, 2, |_| 1);
+        buf.extend_from_slice(b"POWERLEVEL");
+        buf.extend_from_slice(&[7u8; 100]); // < 768 palette bytes
+        assert!(load(&buf).unwrap().palette.is_none());
+    }
+
+    // Build a MODERNLV block for `cells` pixels. `anim` = None -> no animation;
+    // Some((ramps, anim_indices)) appends the animation extension.
+    fn modernlv_block(
+        cells: usize,
+        anim: Option<(Vec<(u8, Vec<u32>)>, Vec<u8>)>,
+    ) -> Vec<u8> {
+        let mut b = b"MODERNLV".to_vec();
+        for i in 0..cells {
+            b.extend_from_slice(&((0x11223300u32).wrapping_add(i as u32)).to_le_bytes());
+        }
+        for i in 0..cells {
+            b.push((i % 2) as u8); // display_valid
+        }
+        if let Some((ramps, anim_idx)) = anim {
+            b.push(ramps.len() as u8);
+            for (shift, colors) in &ramps {
+                b.push(*shift);
+                b.extend_from_slice(&(colors.len() as u16).to_le_bytes());
+                for c in colors {
+                    b.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+            for idx in &anim_idx {
+                b.push(*idx);
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn parses_modernlv_without_animation() {
+        let mut buf = make_ollevel2(2, 2, |_| 7);
+        buf.extend_from_slice(&modernlv_block(4, None));
+        let d = load(&buf).unwrap().display.expect("display");
+        assert_eq!(d.data.len(), 4);
+        assert_eq!(d.valid, vec![0, 1, 0, 1]);
+        assert_eq!(d.data[0], 0x11223300);
+        assert!(d.ramps.is_empty());
+        assert!(d.anim.is_empty());
+    }
+
+    #[test]
+    fn parses_modernlv_with_good_animation() {
+        let ramps = vec![(3u8, vec![0xAABBCCDDu32, 0x01020304])];
+        let anim = vec![0u8, 1, 1, 0]; // all <= ramp_count (1)
+        let mut buf = make_ollevel2(2, 2, |_| 7);
+        buf.extend_from_slice(&modernlv_block(4, Some((ramps, anim.clone()))));
+        let d = load(&buf).unwrap().display.unwrap();
+        assert_eq!(d.ramps.len(), 1);
+        assert_eq!(d.ramps[0].shift, 3);
+        assert_eq!(d.ramps[0].colors, vec![0xAABBCCDD, 0x01020304]);
+        assert_eq!(d.anim, anim);
+    }
+
+    #[test]
+    fn modernlv_bad_ramp_index_degrades_gracefully() {
+        // anim index 2 > ramp_count 1 -> C++ drops ramps+anim, keeps display.
+        let ramps = vec![(3u8, vec![0xAABBCCDDu32])];
+        let anim = vec![0u8, 2, 0, 0];
+        let mut buf = make_ollevel2(2, 2, |_| 7);
+        buf.extend_from_slice(&modernlv_block(4, Some((ramps, anim))));
+        let d = load(&buf).unwrap().display.unwrap();
+        assert_eq!(d.data.len(), 4); // display kept
+        assert!(d.ramps.is_empty()); // animation dropped
+        assert!(d.anim.is_empty());
+    }
+
+    #[test]
+    fn modernlv_truncated_animation_degrades_gracefully() {
+        // ramp_count=1 but stream ends before the ramp body -> drop animation.
+        let mut buf = make_ollevel2(2, 2, |_| 7);
+        let mut block = modernlv_block(4, None);
+        block.push(1); // ramp_count = 1, then EOF
+        buf.extend_from_slice(&block);
+        let d = load(&buf).unwrap().display.unwrap();
+        assert!(d.ramps.is_empty());
+        assert!(d.anim.is_empty());
+    }
+
+    #[test]
+    fn no_display_when_no_modernlv() {
+        let buf = make_ollevel2(2, 2, |_| 7);
+        assert!(load(&buf).unwrap().display.is_none());
+    }
+
+    #[test]
+    fn powerlevel_then_modernlv_both_parsed() {
+        let mut buf = make_ollevel2(2, 2, |_| 1);
+        buf.extend_from_slice(&powerlevel_block());
+        buf.extend_from_slice(&modernlv_block(4, None));
+        let lvl = load(&buf).unwrap();
+        assert!(lvl.palette.is_some());
+        assert!(lvl.display.is_some());
     }
 
     // OLLEVEL2: magic(8) + version(1) + w(2 LE) + h(2 LE) + w*h material bytes.

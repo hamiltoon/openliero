@@ -95,4 +95,17 @@ mod tests {
         assert_eq!(lvl.material_id[0], 2);
         assert_eq!(lvl.material_id[3], ((3 * 5 + 2) % 256) as u8);
     }
+
+    #[test]
+    fn loads_legacy_504x350_when_no_magic() {
+        // 176400 bytes, first 8 != "OLLEVEL2" so it is legacy.
+        let buf: Vec<u8> = (0..504 * 350).map(|i| (i % 251) as u8).collect();
+        let lvl = load(&buf).unwrap();
+        assert_eq!(lvl.width, 504);
+        assert_eq!(lvl.height, 350);
+        assert_eq!(lvl.material_id.len(), 504 * 350);
+        assert_eq!(lvl.material_id[0], 0);
+        assert_eq!(lvl.material_id[7], 7);
+        assert_eq!(lvl.material_id[176399], ((176399 % 251) as u8));
+    }
 }

@@ -1,0 +1,57 @@
+---
+
+name: Rust (sim-core)
+
+on:  # yamllint disable-line rule:truthy
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'rust/**'
+      - 'src/game/math.cpp'
+      - 'src/game/math.hpp'
+      - 'src/game/math/rect.hpp'
+      - 'src/game/rand.hpp'
+      - 'src/tools/oracle_dump/**'
+      - '.github/workflows/rust.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - 'rust/**'
+      - 'src/game/math.cpp'
+      - 'src/game/math.hpp'
+      - 'src/game/math/rect.hpp'
+      - 'src/game/rand.hpp'
+      - 'src/tools/oracle_dump/**'
+      - '.github/workflows/rust.yml'
+
+jobs:
+  sim-core:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang
+
+      # Differential-test the oracle itself: regenerate the golden vectors from
+      # the CURRENT C++ source and fail if they differ from what is committed.
+      # This catches C++ math changes that were not reflected in golden, and
+      # proves the integer-only oracle is compiler/platform independent.
+      - name: Regenerate golden vectors from C++ oracle
+        run: bash rust/oracle-tests/gen_golden.sh
+
+      - name: Verify committed golden matches the C++ oracle
+        run: git diff --exit-code -- rust/oracle-tests/golden
+
+      # Prove the Rust port reproduces the golden vectors bit-for-bit.
+      - name: Run differential tests
+        run: cargo test --manifest-path rust/Cargo.toml --workspace

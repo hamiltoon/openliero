@@ -160,6 +160,69 @@ impl NObjectType {
     }
 }
 
+// ===== SObjectType =====
+
+/// Parsed `sobjects/<id_str>.cfg`. Mirrors `SObjectType`
+/// (`src/game/sobject.hpp:18`) + `LoadSObjectConfig`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SObjectType {
+    pub shadow: bool,
+    pub start_sound: i32, // SoundRefFromStr
+    pub num_sounds: i32,
+    pub anim_delay: i32,
+    pub start_frame: i32,
+    pub num_frames: i32,
+    pub detect_range: i32,
+    pub damage: i32,
+    pub blow_away: i32,
+    pub shake: i32,
+    pub flash: i32,
+    pub dirt_effect: i32,
+    pub id: i32,
+    pub id_str: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawSObject {
+    shadow: bool,
+    startSound: String,
+    numSounds: i32,
+    animDelay: i32,
+    startFrame: i32,
+    numFrames: i32,
+    detectRange: i32,
+    damage: i32,
+    blowAway: i32,
+    shake: i32,
+    flash: i32,
+    dirtEffect: i32,
+}
+
+impl SObjectType {
+    /// Mirrors `LoadSObjectConfig` (`common_model.hpp:160`). `id`/`id_str` set by
+    /// the caller.
+    pub fn load(bytes: &[u8], sounds: &[String]) -> Result<SObjectType, ObjectError> {
+        let r: RawSObject = parse_cfg(bytes)?;
+        Ok(SObjectType {
+            shadow: r.shadow,
+            start_sound: sound_ref_from_str(&r.startSound, sounds),
+            num_sounds: r.numSounds,
+            anim_delay: r.animDelay,
+            start_frame: r.startFrame,
+            num_frames: r.numFrames,
+            detect_range: r.detectRange,
+            damage: r.damage,
+            blow_away: r.blowAway,
+            shake: r.shake,
+            flash: r.flash,
+            dirt_effect: r.dirtEffect,
+            id: 0,
+            id_str: String::new(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +300,58 @@ timeToExplo = 0
             NObjectType::load(b"this is = = not toml", &n, &s),
             Err(ObjectError::Parse(_))
         ));
+    }
+
+    const SOBJ_SAMPLE: &str = r#"
+shadow = true
+startSound = "exp2"
+numSounds = 4
+animDelay = 2
+startFrame = 40
+numFrames = 15
+detectRange = 20
+damage = 15
+blowAway = 3000
+shake = 4
+flash = 8
+dirtEffect = 0
+"#;
+
+    #[test]
+    fn sobject_fields_and_sound_ref() {
+        let (_n, _s, snd) = lists();
+        let o = SObjectType::load(SOBJ_SAMPLE.as_bytes(), &snd).unwrap();
+        assert!(o.shadow);
+        assert_eq!(o.num_sounds, 4);
+        assert_eq!(o.detect_range, 20);
+        assert_eq!(o.blow_away, 3000);
+        assert_eq!(o.dirt_effect, 0);
+        // startSound "exp2" -> sounds index 2.
+        assert_eq!(o.start_sound, 2);
+    }
+
+    #[test]
+    fn sobject_missing_sound_is_minus_one() {
+        let (_n, _s, snd) = lists();
+        // No startSound key -> "" -> -1.
+        let o = SObjectType::load(b"shadow = false\ndamage = 3\n", &snd).unwrap();
+        assert_eq!(o.start_sound, -1);
+        assert_eq!(o.damage, 3);
+        assert_eq!(o.num_sounds, 0);
+    }
+
+    #[test]
+    fn real_large_explosion_cfg_loads() {
+        let (_n, _s, snd) = lists();
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/TC/openliero/sobjects/large_explosion.cfg"
+        ));
+        let o = SObjectType::load(bytes, &snd).unwrap();
+        assert_eq!(o.num_frames, 15);
+        assert_eq!(o.damage, 15);
+        // "exp2" is in our synthetic list at index 2.
+        assert_eq!(o.start_sound, 2);
     }
 
     #[test]

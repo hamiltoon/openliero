@@ -1,0 +1,13 @@
+types_sounds 97a5ae16659d47bb
+types_weapons 29133fbc40f4f93a
+types_nobjects 58931fa331abfa79
+types_sobjects 6b9ccd5dce8f5341
+constants b9586324060e489b
+materials 4098645fedef641a
+textures 5190135ec31f8645
+bonuses a9f105509de8c2fc
+coloranim 45b361d0de7c943e
+aiparams 1af9adb891607650
+texts a5f2c7071d2bddce
+hacks c885ccdc03990c97
+soundhooks 4f865541698adc1d

@@ -629,4 +629,25 @@ Begin = ""
             Err(TcError::Parse(_))
         ));
     }
+
+    // Real-file coverage independent of the oracle golden: the shipped TC must
+    // parse and yield the engine's fixed counts. (Restores the original Task 0
+    // smoke test that was lost when this module was rewritten in Task 1.)
+    #[test]
+    fn real_shipped_tc_cfg_loads() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/TC/openliero/tc.cfg"
+        ));
+        let c = TcConfig::load(bytes).expect("shipped tc.cfg parses");
+        assert_eq!(c.materials.len(), MAX_MATERIALS);
+        assert_eq!(c.textures.len(), NUM_TEXTURES);
+        assert_eq!(c.bonuses.len(), NUM_BONUS_SOBJECTS);
+        assert_eq!(c.color_anim.len(), NUM_COLOR_ANIM);
+        assert!(!c.types.sounds.is_empty());
+        assert!(!c.types.weapons.is_empty());
+        // Sound hooks resolve to real indices for the shipped TC.
+        assert!(c.sound_hooks.Bump >= 0);
+        assert!(c.sound_hooks.Begin >= 0);
+    }
 }

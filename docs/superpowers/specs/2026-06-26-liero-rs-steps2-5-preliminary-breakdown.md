@@ -164,6 +164,10 @@ bit-exact-gated — it reads sim state, it does not produce it.
    renders. May surface asset-loading and threading constraints.
 
 ### Oracle / verification strategy
+- **See `2026-06-26-liero-rs-interactive-iteration-exploration.md`** for the full
+  run/observe/iterate + regression design (native window vs headless screenshot vs
+  web/wasm; deterministic replay + state-checksum as the authoritative regression
+  gate; the headless-screenshot mode + fixed-seed demo launch to add here at step 3).
 - **No tick-by-tick checksum here** — rendering is derived, not authoritative.
   Verification is mostly visual / screenshot comparison against the C++ renderer
   for a fixed sim state, plus "does it run in the browser."
@@ -222,6 +226,9 @@ start, sound triggers).
   precondition for rollback.**
 - Reuse the step-2 time-series checksum harness, now fed by recorded real input
   rather than scripted vectors.
+- **See `2026-06-26-liero-rs-interactive-iteration-exploration.md`** — the replay
+  player + state-checksum regression harness (and the in-repo `run`/`verify` launch
+  skill + stable CLI) to add at this step belong to that design.
 
 ### Key risks & the hard 10%
 - **Input sampling timing.** Exactly one input snapshot per sim tick, sampled

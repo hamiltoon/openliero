@@ -120,6 +120,16 @@ Mobile packaging, new game modes, larger levels, mod tools, 3D. All of this beco
 possible *after* a deterministic core exists — but none of it may
 complicate steps 0–2.
 
+Two forward-looking directions have been explored (deferred, not on the critical
+path) — see the exploration docs so they aren't forgotten:
+- **Interactive run/observe/iterate + regression** (how to start the app, watch it,
+  and test/iterate; deterministic replay + state-checksum regression) —
+  `2026-06-26-liero-rs-interactive-iteration-exploration.md` (lands at steps 3–4).
+- **RL / self-play AI** that learns to play over many iterations (the deterministic
+  headless sim is an ideal RL substrate) —
+  `2026-06-27-liero-rs-rl-self-play-exploration.md` (feasible after step 2 + the
+  step-4 control model; independent of rendering/netcode).
+
 ## Next concrete artifact
 
 Detailed spec for **step 0**:

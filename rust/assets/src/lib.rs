@@ -6,3 +6,4 @@ pub mod palette;
 pub mod sprite;
 pub mod tc;
 pub mod object;
+pub mod wav;

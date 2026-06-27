@@ -311,6 +311,15 @@ Small networks suffice — this is not ImageNet.
 - **Vectorized parallel envs:** run N headless sims (processes or threads) and batch
   their observations through the policy. Throughput is the lever; Rust + no rendering
   makes each env cheap, so N can be large on one machine.
+- **Local-first (stated goal):** the intent is to train **locally on the author's
+  Apple M2 Max** (12 CPU cores / 30 GPU cores / 32 GB unified memory), not a cloud
+  GPU. This is realistic *here* precisely because throughput is CPU-bound (the Rust
+  headless sim) and the policy net is small (state-based, not pixels): the 12 CPU
+  cores drive many parallel envs while the small net trains on CPU or via PyTorch's
+  **MPS/Metal** backend on the 30 GPU cores — no CUDA / big-GPU dependency. Expect
+  the first milestone to be hours-to-a-day of local training. A cloud/large GPU is
+  only warranted if scaling to pixel observations, a large self-play league, many
+  concurrent experiments, or superhuman levels.
 - **Rollout → update:** collect fixed-length rollouts across the vector, compute GAE
   advantages, run PPO epochs, repeat for many iterations (millions of env steps).
 - **Checkpoints:** snapshot the policy periodically (for the opponent pool and for

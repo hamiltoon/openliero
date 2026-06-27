@@ -25,6 +25,25 @@ Therefore: **no big-bang rewrite.** Strangler pattern — build the new engine
 piece by piece, prove each piece correct against the old one, keep the old one until the
 new one is done.
 
+## Modernization charter
+
+This is a **modernization, not a literal port.** The line:
+
+- **Locked, bit-exact (what we keep):** the deterministic simulation — all of
+  `processFrame`'s math, fixed-point, RNG, lookup tables, and ordering — plus the
+  parsed data that drives it (the material map, weapon/object parameters), and the
+  ability to read existing `data/` assets. Replay, rollback, and the game's feel
+  depend on tick #1000 being identical. These keep the differential-testing oracle.
+- **Free to modernize (we do NOT mirror C++):** code architecture, module/crate
+  boundaries, APIs, error handling, and idioms — idiomatic Rust (`Result`,
+  `std::io`, iterators, `serde` where apt) rather than a transliteration of C++
+  structures (e.g. use `std::io`/`from_le_bytes`, not a port of `io::Reader`).
+  Internal data representations, naming, build, and test layout are ours to choose.
+
+In short: the *behaviour* that affects the simulation is sacred and bit-exact;
+*how the code is structured* we rebuild cleanly. The oracle proves we preserved
+the behaviour while modernizing the implementation.
+
 ## The oracle strategy: differential testing against C++
 
 The existing C++ engine is kept as the **oracle of truth**. For each subsystem in
@@ -100,6 +119,16 @@ Steps 2–5 are detailed-specced just-in-time; we understand them better after s
 Mobile packaging, new game modes, larger levels, mod tools, 3D. All of this becomes
 possible *after* a deterministic core exists — but none of it may
 complicate steps 0–2.
+
+Two forward-looking directions have been explored (deferred, not on the critical
+path) — see the exploration docs so they aren't forgotten:
+- **Interactive run/observe/iterate + regression** (how to start the app, watch it,
+  and test/iterate; deterministic replay + state-checksum regression) —
+  `2026-06-26-liero-rs-interactive-iteration-exploration.md` (lands at steps 3–4).
+- **RL / self-play AI** that learns to play over many iterations (the deterministic
+  headless sim is an ideal RL substrate) —
+  `2026-06-27-liero-rs-rl-self-play-exploration.md` (feasible after step 2 + the
+  step-4 control model; independent of rendering/netcode).
 
 ## Next concrete artifact
 

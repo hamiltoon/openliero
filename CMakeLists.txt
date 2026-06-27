@@ -369,6 +369,22 @@ if(OPENLIERO_BUILD_VIDEOTOOL)
   target_link_libraries(videotool PRIVATE vt)
 endif()
 
+option(OPENLIERO_BUILD_ORACLE_DUMP "Build the Rust differential-test oracle dumpers" OFF)
+if(OPENLIERO_BUILD_ORACLE_DUMP)
+  add_executable(oracle_dump_level src/tools/oracle_dump/level_dump.cpp)
+  target_link_libraries(oracle_dump_level PRIVATE game)
+  add_executable(oracle_dump_palette src/tools/oracle_dump/palette_dump.cpp)
+  target_link_libraries(oracle_dump_palette PRIVATE game)
+  add_executable(oracle_dump_sprite src/tools/oracle_dump/sprite_dump.cpp)
+  target_link_libraries(oracle_dump_sprite PRIVATE game)
+  add_executable(oracle_dump_tc src/tools/oracle_dump/tc_config_dump.cpp)
+  target_link_libraries(oracle_dump_tc PRIVATE game)
+  add_executable(oracle_dump_object src/tools/oracle_dump/object_dump.cpp)
+  target_link_libraries(oracle_dump_object PRIVATE game)
+  add_executable(oracle_dump_wav src/tools/oracle_dump/wav_dump.cpp)
+  target_link_libraries(oracle_dump_wav PRIVATE game)
+endif()
+
 # binaries
 # Windows (zip + MSIX) and Emscripten expect a flat install; on Linux/macOS
 # we follow the FHS: binaries in bin/, stock data in share/openliero/.

@@ -5,3 +5,4 @@ edition = "2021"
 
 [dev-dependencies]
 sim-core = { path = "../sim-core" }
+assets = { path = "../assets" }

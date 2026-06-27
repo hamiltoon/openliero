@@ -30,8 +30,7 @@ fn obj_ref_from_str(s: &str, list: &[String]) -> i32 {
 // SoundRefFromStr (common_model.hpp:47): empty -> -1, else SoundIndex
 // (common.cpp:574, -1 if absent). Distinct from obj_ref_from_str: an unknown
 // non-empty sound resolves to -1, not 0.
-// Shared helper used by sobject/weapon loaders (added in later sub-slice tasks).
-#[allow(dead_code)]
+// Shared helper used by the sobject and weapon loaders.
 fn sound_ref_from_str(s: &str, sounds: &[String]) -> i32 {
     if s.is_empty() {
         return -1;

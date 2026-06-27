@@ -223,6 +223,250 @@ impl SObjectType {
     }
 }
 
+// ===== Weapon =====
+
+/// Parsed `weapons/<id_str>.cfg`. Mirrors `Weapon` (`src/game/weapon.hpp:12`) +
+/// `LoadWeaponConfig`. Note `loop_sound` is a `bool` reproducing C++'s int->bool
+/// quirk (`common_model.hpp:277`, `weapon.hpp:67`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Weapon {
+    pub name: String,
+    pub affect_by_worm: bool,
+    pub shadow: bool,
+    pub laser_sight: bool,
+    pub play_reload_sound: bool,
+    pub worm_explode: bool,
+    pub expl_ground: bool,
+    pub worm_collide: bool,
+    pub collide_with_objects: bool,
+    pub affect_by_explosions: bool,
+    pub loop_anim: bool,
+    pub detect_distance: i32,
+    pub blow_away: i32,
+    pub gravity: i32,
+    pub launch_sound: i32, // SoundRefFromStr
+    pub loop_sound: bool,  // SoundRefFromStr(...) != 0  (int->bool quirk)
+    pub explo_sound: i32,  // SoundRefFromStr
+    pub speed: i32,
+    pub add_speed: i32,
+    pub distribution: i32,
+    pub parts: i32,
+    pub recoil: i32,
+    pub mult_speed: i32,
+    pub delay: i32,
+    pub loading_time: i32,
+    pub ammo: i32,
+    pub dirt_effect: i32,
+    pub leave_shells: i32,
+    pub leave_shell_delay: i32,
+    pub fire_cone: i32,
+    pub bounce: i32,
+    pub time_to_explo: i32,
+    pub time_to_explo_v: i32,
+    pub hit_damage: i32,
+    pub blood_on_hit: i32,
+    pub start_frame: i32,
+    pub num_frames: i32,
+    pub shot_type: i32,
+    pub color_bullets: i32,
+    pub splinter_amount: i32,
+    pub splinter_colour: i32,
+    pub splinter_type: i32, // ObjRefFromStr against nobjects
+    pub splinter_scatter: i32,
+    pub obj_trail_type: i32, // ObjRefFromStr against sobjects
+    pub obj_trail_delay: i32,
+    pub part_trail_type: i32,
+    pub part_trail_obj: i32, // ObjRefFromStr against nobjects
+    pub part_trail_delay: i32,
+    pub create_on_exp: i32, // ObjRefFromStr against sobjects
+    pub chain_explosion: bool,
+    pub id: i32,
+    pub id_str: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawWeapon {
+    name: String,
+    affectByWorm: bool,
+    shadow: bool,
+    laserSight: bool,
+    playReloadSound: bool,
+    wormExplode: bool,
+    explGround: bool,
+    wormCollide: bool,
+    collideWithObjects: bool,
+    affectByExplosions: bool,
+    loopAnim: bool,
+    detectDistance: i32,
+    blowAway: i32,
+    gravity: i32,
+    launchSound: String,
+    loopSound: String,
+    exploSound: String,
+    speed: i32,
+    addSpeed: i32,
+    distribution: i32,
+    parts: i32,
+    recoil: i32,
+    multSpeed: i32,
+    delay: i32,
+    loadingTime: i32,
+    ammo: i32,
+    dirtEffect: i32,
+    leaveShells: i32,
+    leaveShellDelay: i32,
+    fireCone: i32,
+    bounce: i32,
+    timeToExplo: i32,
+    timeToExploV: i32,
+    hitDamage: i32,
+    bloodOnHit: i32,
+    startFrame: i32,
+    numFrames: i32,
+    shotType: i32,
+    colorBullets: i32,
+    splinterAmount: i32,
+    splinterColour: i32,
+    splinterType: String,
+    splinterScatter: i32,
+    objTrailType: String,
+    objTrailDelay: i32,
+    partTrailType: i32,
+    partTrailObj: String,
+    partTrailDelay: i32,
+    createOnExp: String,
+    chainExplosion: bool,
+}
+
+impl Weapon {
+    /// Mirrors `LoadWeaponConfig` (`common_model.hpp:256`). `id`/`id_str` set by
+    /// the caller.
+    pub fn load(
+        bytes: &[u8],
+        nobjects: &[String],
+        sobjects: &[String],
+        sounds: &[String],
+    ) -> Result<Weapon, ObjectError> {
+        let r: RawWeapon = parse_cfg(bytes)?;
+        Ok(Weapon {
+            name: r.name,
+            affect_by_worm: r.affectByWorm,
+            shadow: r.shadow,
+            laser_sight: r.laserSight,
+            play_reload_sound: r.playReloadSound,
+            worm_explode: r.wormExplode,
+            expl_ground: r.explGround,
+            worm_collide: r.wormCollide,
+            collide_with_objects: r.collideWithObjects,
+            affect_by_explosions: r.affectByExplosions,
+            loop_anim: r.loopAnim,
+            detect_distance: r.detectDistance,
+            blow_away: r.blowAway,
+            gravity: r.gravity,
+            launch_sound: sound_ref_from_str(&r.launchSound, sounds),
+            // C++ stores SoundRefFromStr's int into a bool: value != 0.
+            loop_sound: sound_ref_from_str(&r.loopSound, sounds) != 0,
+            explo_sound: sound_ref_from_str(&r.exploSound, sounds),
+            speed: r.speed,
+            add_speed: r.addSpeed,
+            distribution: r.distribution,
+            parts: r.parts,
+            recoil: r.recoil,
+            mult_speed: r.multSpeed,
+            delay: r.delay,
+            loading_time: r.loadingTime,
+            ammo: r.ammo,
+            dirt_effect: r.dirtEffect,
+            leave_shells: r.leaveShells,
+            leave_shell_delay: r.leaveShellDelay,
+            fire_cone: r.fireCone,
+            bounce: r.bounce,
+            time_to_explo: r.timeToExplo,
+            time_to_explo_v: r.timeToExploV,
+            hit_damage: r.hitDamage,
+            blood_on_hit: r.bloodOnHit,
+            start_frame: r.startFrame,
+            num_frames: r.numFrames,
+            shot_type: r.shotType,
+            color_bullets: r.colorBullets,
+            splinter_amount: r.splinterAmount,
+            splinter_colour: r.splinterColour,
+            splinter_type: obj_ref_from_str(&r.splinterType, nobjects),
+            splinter_scatter: r.splinterScatter,
+            obj_trail_type: obj_ref_from_str(&r.objTrailType, sobjects),
+            obj_trail_delay: r.objTrailDelay,
+            part_trail_type: r.partTrailType,
+            part_trail_obj: obj_ref_from_str(&r.partTrailObj, nobjects),
+            part_trail_delay: r.partTrailDelay,
+            create_on_exp: obj_ref_from_str(&r.createOnExp, sobjects),
+            chain_explosion: r.chainExplosion,
+            id: 0,
+            id_str: String::new(),
+        })
+    }
+}
+
+// ===== Aggregate (mirrors Common::load loop + id=index, common.cpp:437-507) =====
+
+/// All three object-parameter tables, indexed exactly as the engine's
+/// `weapons[]` / `nobject_types[]` / `sobject_types[]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Objects {
+    pub weapons: Vec<Weapon>,
+    pub nobject_types: Vec<NObjectType>,
+    pub sobject_types: Vec<SObjectType>,
+}
+
+impl Objects {
+    /// Read every object `.cfg` named in `types`, resolve cross-refs, and assign
+    /// `id = array index` (the part of `Precompute` this slice reproduces).
+    /// `read(subdir, id_str)` returns the bytes of `<subdir>/<id_str>.cfg`
+    /// (subdir in {"weapons","nobjects","sobjects"}) — no coupling to an IO
+    /// backend. An IO failure is surfaced as `ObjectError::Parse`.
+    pub fn load(
+        types: &crate::tc::TcTypes,
+        read: impl Fn(&str, &str) -> std::io::Result<Vec<u8>>,
+    ) -> Result<Objects, ObjectError> {
+        let fetch = |sub: &str, id: &str| -> Result<Vec<u8>, ObjectError> {
+            read(sub, id).map_err(|e| ObjectError::Parse(format!("{sub}/{id}.cfg: {e}")))
+        };
+
+        let mut weapons = Vec::with_capacity(types.weapons.len());
+        for (i, id_str) in types.weapons.iter().enumerate() {
+            let bytes = fetch("weapons", id_str)?;
+            let mut w = Weapon::load(&bytes, &types.nobjects, &types.sobjects, &types.sounds)?;
+            w.id = i as i32;
+            w.id_str = id_str.clone();
+            weapons.push(w);
+        }
+
+        let mut nobject_types = Vec::with_capacity(types.nobjects.len());
+        for (i, id_str) in types.nobjects.iter().enumerate() {
+            let bytes = fetch("nobjects", id_str)?;
+            let mut n = NObjectType::load(&bytes, &types.nobjects, &types.sobjects)?;
+            n.id = i as i32;
+            n.id_str = id_str.clone();
+            nobject_types.push(n);
+        }
+
+        let mut sobject_types = Vec::with_capacity(types.sobjects.len());
+        for (i, id_str) in types.sobjects.iter().enumerate() {
+            let bytes = fetch("sobjects", id_str)?;
+            let mut s = SObjectType::load(&bytes, &types.sounds)?;
+            s.id = i as i32;
+            s.id_str = id_str.clone();
+            sobject_types.push(s);
+        }
+
+        Ok(Objects {
+            weapons,
+            nobject_types,
+            sobject_types,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,5 +612,100 @@ dirtEffect = 0
         assert_eq!(o.create_on_exp, -1);
         assert_eq!(o.splinter_type, -1);
         assert_eq!(o.leave_obj, -1);
+    }
+
+    const WEAP_SAMPLE: &str = r#"
+name = "TESTGUN"
+affectByWorm = true
+wormExplode = true
+detectDistance = 1
+gravity = 0
+launchSound = "exp2"
+loopSound = "bump"
+exploSound = ""
+speed = 200
+addSpeed = 3
+splinterType = "blood"
+objTrailType = "large_explosion"
+partTrailObj = "missing_nobj"
+createOnExp = "small_explosion"
+chainExplosion = false
+"#;
+
+    #[test]
+    fn weapon_scalars_and_object_refs() {
+        let (n, s, snd) = lists();
+        let w = Weapon::load(WEAP_SAMPLE.as_bytes(), &n, &s, &snd).unwrap();
+        assert_eq!(w.name, "TESTGUN");
+        assert!(w.affect_by_worm);
+        assert_eq!(w.speed, 200);
+        assert_eq!(w.add_speed, 3);
+        assert_eq!(w.detect_distance, 1);
+        // splinterType "blood" -> nobjects 0; objTrailType "large_explosion" -> sobjects 1.
+        assert_eq!(w.splinter_type, 0);
+        assert_eq!(w.obj_trail_type, 1);
+        // partTrailObj unknown -> ObjRefFromStr 0; createOnExp "small_explosion" -> 0.
+        assert_eq!(w.part_trail_obj, 0);
+        assert_eq!(w.create_on_exp, 0);
+        // Missing keys -> defaults.
+        assert_eq!(w.ammo, 0);
+        assert!(!w.shadow);
+    }
+
+    #[test]
+    fn weapon_sound_refs_and_loop_sound_quirk() {
+        let (n, s, snd) = lists(); // sounds = [bump(0), begin(1), exp2(2)]
+        let w = Weapon::load(WEAP_SAMPLE.as_bytes(), &n, &s, &snd).unwrap();
+        // launchSound "exp2" -> 2; exploSound "" -> -1.
+        assert_eq!(w.launch_sound, 2);
+        assert_eq!(w.explo_sound, -1);
+        // loopSound "bump" -> index 0 -> bool false (int->bool quirk).
+        assert!(!w.loop_sound);
+    }
+
+    #[test]
+    fn weapon_loop_sound_empty_is_true() {
+        let (n, s, snd) = lists();
+        // loopSound "" -> SoundRefFromStr -1 -> -1 != 0 -> true.
+        let w = Weapon::load(b"name = \"X\"\n", &n, &s, &snd).unwrap();
+        assert!(w.loop_sound);
+        // A sound at index >= 1 -> true.
+        let w2 = Weapon::load(b"loopSound = \"begin\"\n", &n, &s, &snd).unwrap();
+        assert!(w2.loop_sound);
+    }
+
+    #[test]
+    fn real_bazooka_cfg_loads() {
+        let (n, s, snd) = lists();
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/TC/openliero/weapons/bazooka.cfg"
+        ));
+        let w = Weapon::load(bytes, &n, &s, &snd).unwrap();
+        assert_eq!(w.name, "BAZOOKA");
+        assert_eq!(w.loading_time, 410);
+        // bazooka.cfg omits partTrailObj -> "" -> -1.
+        assert_eq!(w.part_trail_obj, -1);
+    }
+
+    #[test]
+    fn objects_aggregate_assigns_index() {
+        use crate::tc::TcTypes;
+        let types = TcTypes {
+            sounds: vec!["bump".into(), "exp2".into()],
+            weapons: vec!["bazooka".into()],
+            nobjects: vec!["blood".into()],
+            sobjects: vec!["small_explosion".into(), "large_explosion".into()],
+        };
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
+        let objs = Objects::load(&types, |sub, id| {
+            std::fs::read(format!("{root}/{sub}/{id}.cfg"))
+        })
+        .unwrap();
+        assert_eq!(objs.weapons.len(), 1);
+        assert_eq!(objs.weapons[0].id, 0);
+        assert_eq!(objs.weapons[0].id_str, "bazooka");
+        assert_eq!(objs.sobject_types[1].id, 1);
+        assert_eq!(objs.sobject_types[1].id_str, "large_explosion");
     }
 }

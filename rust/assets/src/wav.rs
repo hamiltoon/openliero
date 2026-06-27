@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(WavSound::load(&bad_riff), Err(WavError::BadHeader));
 
         let mut bad_rate = wav(&[1, 2, 3]);
-        bad_rate[24] = 0x44; // sample rate 0x4422 != 22050
+        bad_rate[24] = 0x44; // sample rate low byte 0x22->0x44 (0x5644 != 22050)
         assert_eq!(WavSound::load(&bad_rate), Err(WavError::BadHeader));
 
         let mut bad_bits = wav(&[1, 2, 3]);

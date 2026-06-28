@@ -53,5 +53,109 @@ jobs:
         run: git diff --exit-code -- rust/oracle-tests/golden
 
       # Prove the Rust port reproduces the golden vectors bit-for-bit.
+      # Capture the output so a later step can summarize it, but keep the gate:
+      # `set -o pipefail` makes the step inherit cargo's exit code, so a single
+      # failing test still fails the job. The summary below is purely additive.
       - name: Run differential tests
-        run: cargo test --manifest-path rust/Cargo.toml --workspace
+        run: |
+          set -o pipefail
+          cargo test --manifest-path rust/Cargo.toml --workspace 2>&1 | tee test-output.txt
+
+      # Render a human-readable summary on the run's Summary page. Runs even on
+      # failure (`if: always()`) so a red run still explains what broke. Pure
+      # text parse of cargo's output — no extra tooling, doctests still counted.
+      - name: Summarize test results
+        if: always()
+        run: |
+          if [ ! -f test-output.txt ]; then
+            echo "No test output was captured (tests may not have run)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          awk '
+            # Initialise counters: an uninitialised subscript stringifies to ""
+            # (not 0) in some awks, which would misplace the first entry.
+            BEGIN { n = 0; total_pass = 0; total_fail = 0; overall_fail = 0 }
+            # Track the current test binary / crate. The "Running" line names the
+            # compiled artifact; derive a friendly label from its basename minus
+            # the trailing -<hash>. POSIX-only awk (Ubuntu ships mawk).
+            /^[[:space:]]*Running / {
+              line = $0
+              kind = (line ~ /Running tests\//) ? "integration" : "unit"
+              idx = index(line, "(")
+              path = ""
+              if (idx > 0) {
+                path = substr(line, idx + 1)
+                gsub(/\).*/, "", path)
+                sub(/.*\//, "", path)
+                sub(/-[0-9a-f]+$/, "", path)
+              }
+              current = path
+              next
+            }
+            /^[[:space:]]*Doc-tests / {
+              current = "doctest: " $2
+              kind = "doc"
+              next
+            }
+            /^test result:/ {
+              status = "ok"
+              if ($3 != "ok.") status = "FAILED"
+              p = 0; f = 0
+              for (i = 1; i <= NF; i++) {
+                if ($i == "passed;") p = $(i - 1) + 0
+                if ($i == "failed;") f = $(i - 1) + 0
+              }
+              total_pass += p
+              total_fail += f
+              if (status == "FAILED" || f > 0) overall_fail = 1
+              label[n]  = current
+              kind_a[n] = kind
+              pass_a[n] = p
+              fail_a[n] = f
+              stat_a[n] = status
+              gold_a[n] = (current ~ /golden/ || current ~ /slice/) ? 1 : 0
+              n++
+              next
+            }
+            END {
+              print "## Rust conversion test results"
+              print ""
+              if (n == 0) {
+                print "No test results were parsed — tests likely failed to compile. See the job log."
+                exit
+              }
+              overall = (overall_fail == 0 && total_fail == 0) ? "PASS" : "FAIL"
+              badge   = (overall == "PASS") ? ":white_check_mark:" : ":x:"
+              printf "**%s %s** — %d passed, %d failed across %d test binaries.\n", \
+                     badge, overall, total_pass, total_fail, n
+              print ""
+              print "### Differential golden tests (bit-for-bit C++ oracle proofs)"
+              print ""
+              print "The headline correctness guarantee of this conversion: these assert the"
+              print "Rust port reproduces the C++ engine output exactly."
+              print ""
+              print "| Test binary | Result | Passed | Failed |"
+              print "| --- | --- | --- | --- |"
+              gold = 0
+              for (i = 0; i < n; i++) {
+                if (gold_a[i]) {
+                  gold++
+                  r = (stat_a[i] == "ok") ? ":white_check_mark: ok" : ":x: FAILED"
+                  printf "| `%s` | %s | %d | %d |\n", label[i], r, pass_a[i], fail_a[i]
+                }
+              }
+              if (gold == 0) print "| _(none present in this run)_ |  |  |  |"
+              print ""
+              print "### All test binaries"
+              print ""
+              print "| Test binary | Kind | Result | Passed | Failed |"
+              print "| --- | --- | --- | --- | --- |"
+              for (i = 0; i < n; i++) {
+                r = (stat_a[i] == "ok") ? ":white_check_mark: ok" : ":x: FAILED"
+                name = "`" label[i] "`"
+                if (gold_a[i]) name = name " :microscope:"
+                printf "| %s | %s | %s | %d | %d |\n", \
+                       name, kind_a[i], r, pass_a[i], fail_a[i]
+              }
+            }
+          ' test-output.txt >> "$GITHUB_STEP_SUMMARY"

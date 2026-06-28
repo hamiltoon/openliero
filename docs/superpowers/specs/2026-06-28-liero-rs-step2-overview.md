@@ -200,7 +200,9 @@ Refines the breakdown's six-step ordering:
 1. **Level → sim-state + state-hash harness (frame 0, no dynamics).** Build
    `SimState` from `assets::LevelData`; stand up `hash_game_state`/`hash_components`;
    match C++ at tick 0 before any motion. Proves the harness + the level + initial
-   worm + empty-pool halves of the checksum. **← the first slice; specced now.**
+   worm + empty-pool halves of the checksum. **← DONE & bit-exact** (new `sim` crate,
+   `oracle_dump_sim` dumper, golden `sim_slice1.txt`; the Rust tick-0 `HashGameState`
+   reproduces C++ `ae317bb5` and every component hash bit-for-bit on real TC data).
 2. **One worm, physics only.** Port `Worm::ProcessPhysics` (gravity, terrain
    collision via material flags, fixed-point pos/vel); match the worm component hash
    under scripted input.

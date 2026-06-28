@@ -9,8 +9,10 @@
 //! No dynamics live here: no physics, no RNG consumption, no spawned objects.
 
 use assets::level::LevelData;
+use assets::object::Weapon;
 use sim_core::fixed::Fixed;
 use sim_core::rng::Rand;
+use sim_core::tables::precompute_cossin;
 use sim_core::vec::Vec2;
 
 use crate::control::{
@@ -143,6 +145,17 @@ pub struct WormWeapon {
     pub ammo: i32,
     pub delay_left: i32,
     pub loading_left: i32,
+}
+
+impl WormWeapon {
+    /// Port of `WormWeapon::Available()` (`worm.hpp:35`): `loading_left == 0`.
+    /// This is the Fire gate's reload predicate **only** — it deliberately
+    /// ignores `ammo` and `delay_left`. The C++ Fire gate
+    /// (`worm.cpp`, design doc *Fire gate*) tests `delay_left <= 0` (and ammo)
+    /// **separately**; folding them in here would change the gate semantics.
+    pub fn available(&self) -> bool {
+        self.loading_left == 0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +342,11 @@ pub struct Bonus {
 }
 
 /// A weapon projectile. Hash reads `pos, vel, cur_frame, time_left, ty.id`.
+///
+/// `owner_idx` mirrors C++ `WObject::owner_idx` (`weapon.hpp:341`): the firing
+/// worm's index, used for self-exclusion in the collide loop. It is **not**
+/// hashed (the C++ `stateHash`/Rust `hash.rs` wobject fold omits it), so adding
+/// it leaves the wobject hash and slices 1-3 goldens unchanged.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct WObject {
     pub pos: Vec2,
@@ -336,6 +354,8 @@ pub struct WObject {
     pub cur_frame: i32,
     pub time_left: i32,
     pub ty: Option<WeaponId>,
+    /// Firing worm's index (C++ `owner_idx`). Default 0. Not hashed.
+    pub owner_idx: i32,
 }
 
 /// A "sound/explosion" object. Hash reads `id, cur_frame`.
@@ -382,9 +402,19 @@ pub struct LevelSim {
     pub material_flags: [u8; 256],
 }
 
-/// `Material::kBackground` (`material.hpp:11`): the flag bit a "background"
+/// `Material::kDirt` (`material.hpp:7`): destructible dirt.
+pub const MAT_DIRT: u8 = 1 << 0;
+/// `Material::kDirt2` (`material.hpp:8`): second dirt variant.
+pub const MAT_DIRT2: u8 = 1 << 1;
+/// `Material::kRock` (`material.hpp:9`): solid rock.
+pub const MAT_ROCK: u8 = 1 << 2;
+/// `Material::kBackground` (`material.hpp:10`): the flag bit a "background"
 /// (empty/walkable) material carries.
 pub const MAT_BACKGROUND: u8 = 1 << 3;
+/// `Material::DirtRock()` (`material.hpp:22`): `flags & (kDirt|kDirt2|kRock)`,
+/// i.e. bits 0|1|2 — the "solid to projectiles" combination. `kBackground`
+/// (bit 3) is deliberately excluded.
+pub const MAT_DIRT_ROCK: u8 = MAT_DIRT | MAT_DIRT2 | MAT_ROCK;
 
 impl LevelSim {
     /// Port of `Level::CheckedMatWrap(x, y).Background()` (`level.hpp:124-130` +
@@ -413,6 +443,38 @@ impl LevelSim {
         };
         (flags & MAT_BACKGROUND) != 0
     }
+
+    /// Port of `Level::Inside(x, y)` (`level.hpp:132-135`): a **true** range
+    /// check `0 <= x < width && 0 <= y < height`.
+    ///
+    /// The C++ writes it as `(unsigned)x < (unsigned)width && (unsigned)y <
+    /// (unsigned)height`; for non-negative `width`/`height` that unsigned trick
+    /// is exactly the signed range check (a negative coordinate reinterprets to a
+    /// huge unsigned and fails). This is **distinct** from
+    /// [`checked_mat_background`](Self::checked_mat_background), which flattens
+    /// `x + y*width` with **no separate x-bounds check** and can wrap a negative
+    /// `x` into a wrong-row in-range pixel. `WObject::Process` tests `Inside`
+    /// *separately* before the material probe (`weapon.cpp:249`).
+    pub fn inside(&self, x: i32, y: i32) -> bool {
+        x >= 0 && x < self.width && y >= 0 && y < self.height
+    }
+
+    /// Port of `Level::PixelMat(x, y).DirtRock()` gated by `Inside`. Returns
+    /// `false` when `!inside` (the C++ collision tests `!Inside(...)` first, so a
+    /// projectile leaving the level never reads a wrapped pixel). When inside,
+    /// looks up `material_flags[material_id[idx]]` (the same flattened index as
+    /// [`checked_mat_background`](Self::checked_mat_background)) and tests the
+    /// `DirtRock` bit set (`material.hpp:22`, bits 0|1|2).
+    pub fn dirt_rock(&self, x: i32, y: i32) -> bool {
+        if !self.inside(x, y) {
+            return false;
+        }
+        // inside() guarantees 0 <= x < width and 0 <= y < height, so the
+        // flattened index is in range; no wrap concern here.
+        let idx = (x + y * self.width) as usize;
+        let flags = self.material_flags[self.material_id[idx] as usize];
+        (flags & MAT_DIRT_ROCK) != 0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +498,14 @@ pub struct SimState {
     /// The TC constants/hacks (aim/move/jump/ninjarope) the worm control +
     /// aiming paths read. Built once from the same TC; not hashed.
     pub control: ControlConsts,
+    /// The resolved weapon parameter table (C++ `common.weapons`). `Fire` /
+    /// `WObject::Process` read the firing weapon's params from here. Empty in
+    /// slices 1-3 (no firing); not hashed.
+    pub weapons: Vec<Weapon>,
+    /// The precomputed 128-step cos/sin direction table (C++ `cossin_table`),
+    /// from [`sim_core::tables::precompute_cossin`]. `Fire` reads it for the
+    /// muzzle velocity / firing position and recoil. Not hashed.
+    pub cossin: [Vec2; 128],
 }
 
 impl SimState {
@@ -456,6 +526,7 @@ impl SimState {
         worms_init: &[WormInit],
         seed: u32,
         material_flags: &[u8; 256],
+        weapons: Vec<Weapon>,
         physics: PhysicsConsts,
         control: ControlConsts,
     ) -> SimState {
@@ -479,6 +550,10 @@ impl SimState {
             bobjects: BloodPool::new(BLOOD_CAPACITY),
             physics,
             control,
+            weapons,
+            // Built deterministically from the integer Taylor-series table; the
+            // caller never supplies it (it is TC-independent).
+            cossin: precompute_cossin(),
         }
     }
 
@@ -666,6 +741,7 @@ mod tests {
             &two_worms(),
             0x1234,
             &[0u8; 256],
+            Vec::new(),
             PhysicsConsts::default(),
             ControlConsts::default(),
         );
@@ -687,6 +763,7 @@ mod tests {
             &two_worms(),
             1,
             &[0u8; 256],
+            Vec::new(),
             PhysicsConsts::default(),
             ControlConsts::default(),
         );
@@ -712,6 +789,7 @@ mod tests {
             &two_worms(),
             7,
             &[0u8; 256],
+            Vec::new(),
             PhysicsConsts::default(),
             ControlConsts::default(),
         );
@@ -743,6 +821,7 @@ mod tests {
             &two_worms(),
             7,
             &[0u8; 256],
+            Vec::new(),
             PhysicsConsts::default(),
             ControlConsts::default(),
         );
@@ -1000,6 +1079,7 @@ mod tests {
             &two_worms(),
             0,
             &flags,
+            Vec::new(),
             PhysicsConsts::default(),
             ControlConsts::default(),
         );
@@ -1011,5 +1091,168 @@ mod tests {
         assert!(state.level.checked_mat_background(2, 0));
         // idx 0 = material 1 -> no flag set -> false.
         assert!(!state.level.checked_mat_background(0, 0));
+    }
+
+    // ---- Slice 4a datamodel scaffolding --------------------------------------
+
+    #[test]
+    fn wobject_owner_idx_defaults_zero() {
+        // The new field defaults to 0 (C++ owner_idx for the unused/default case).
+        assert_eq!(WObject::default().owner_idx, 0);
+    }
+
+    #[test]
+    fn wobject_owner_idx_is_not_hashed() {
+        // owner_idx must NOT fold into the master hash (it is omitted from the
+        // wobject fold in hash.rs / C++ stateHash), so two states differing only
+        // in owner_idx hash identically. This keeps slices 1-3 goldens green.
+        use crate::hash::hash_game_state;
+        let level = synthetic_level();
+        let mk = |owner: i32| {
+            let mut s = SimState::new(
+                &level,
+                &two_worms(),
+                0,
+                &[0u8; 256],
+                Vec::new(),
+                PhysicsConsts::default(),
+                ControlConsts::default(),
+            );
+            s.wobjects.spawn(WObject {
+                pos: Vec2::new(1, 2),
+                vel: Vec2::new(3, 4),
+                cur_frame: 5,
+                time_left: 6,
+                ty: Some(1),
+                owner_idx: owner,
+            });
+            hash_game_state(&s)
+        };
+        assert_eq!(
+            mk(0),
+            mk(9),
+            "owner_idx must not affect the master hash"
+        );
+    }
+
+    #[test]
+    fn worm_weapon_available_is_loading_left_zero() {
+        // Available() == (loading_left == 0), independent of ammo/delay_left.
+        let mut ww = WormWeapon::default();
+        assert!(ww.available(), "loading_left 0 -> available");
+        ww.loading_left = 1;
+        assert!(!ww.available(), "loading_left > 0 -> not available");
+        ww.loading_left = -3; // any non-zero value is "still loading"
+        assert!(!ww.available(), "loading_left != 0 -> not available");
+        // available() ignores ammo and delay_left (the gate tests those itself).
+        ww.loading_left = 0;
+        ww.ammo = 0;
+        ww.delay_left = 99;
+        assert!(
+            ww.available(),
+            "available() ignores ammo and delay_left"
+        );
+    }
+
+    #[test]
+    fn inside_is_a_true_range_check_distinct_from_the_wrap() {
+        let lvl = probe_level(); // 4x4
+        assert!(lvl.inside(0, 0));
+        assert!(lvl.inside(3, 3));
+        assert!(!lvl.inside(4, 0), "x == width is outside");
+        assert!(!lvl.inside(0, 4), "y == height is outside");
+        assert!(!lvl.inside(-1, 0), "negative x is outside");
+        assert!(!lvl.inside(0, -1), "negative y is outside");
+        // The trap: (-1,1) flattens to in-range idx 3 for the WRAPPING probe, but
+        // inside() rejects it on the real range check — proving they differ.
+        assert!(
+            lvl.checked_mat_background(-1, 1),
+            "wrapping probe reads idx 3 (in range)"
+        );
+        assert!(
+            !lvl.inside(-1, 1),
+            "inside() is a real range check, NOT the wrap"
+        );
+    }
+
+    // A 4x4 level pinning every DirtRock branch: a dirt cell, a dirt2 cell, a
+    // rock cell, a background-only cell, a no-flag cell. material_id[3] is dirt so
+    // a *wrapping* dirt_rock(-1,1) would read it (idx 3) and wrongly report true —
+    // the inside() gate must reject it instead.
+    fn dirt_rock_level() -> LevelSim {
+        let mut material_flags = [0u8; 256];
+        material_flags[1] = MAT_DIRT; // dirt -> DirtRock
+        material_flags[2] = MAT_ROCK; // rock -> DirtRock
+        material_flags[3] = MAT_DIRT2; // dirt2 -> DirtRock
+        material_flags[4] = MAT_BACKGROUND; // background only -> NOT DirtRock
+
+        let mut material_id = vec![0u8; 16]; // material 0: no flags
+        material_id[0] = 1; // (0,0) dirt
+        material_id[3] = 1; // (3,0) dirt -> the wrapped cell for (-1,1)
+        material_id[5] = 2; // (1,1) rock
+        material_id[6] = 3; // (2,1) dirt2
+        material_id[10] = 4; // (2,2) background only
+
+        LevelSim {
+            width: 4,
+            height: 4,
+            material_id,
+            material_flags,
+        }
+    }
+
+    #[test]
+    fn dirt_rock_tests_the_dirt_dirt2_rock_bits() {
+        let lvl = dirt_rock_level();
+        assert!(lvl.dirt_rock(0, 0), "dirt cell -> DirtRock");
+        assert!(lvl.dirt_rock(1, 1), "rock cell -> DirtRock");
+        assert!(lvl.dirt_rock(2, 1), "dirt2 cell -> DirtRock");
+        assert!(
+            !lvl.dirt_rock(2, 2),
+            "background-only cell -> NOT DirtRock (bit 3 excluded)"
+        );
+        assert!(!lvl.dirt_rock(3, 3), "no-flag material -> NOT DirtRock");
+        // OOB -> false (NOT the wrapping fallback): inside() gates first.
+        assert!(!lvl.dirt_rock(100, 100), "far OOB -> false");
+        assert!(
+            !lvl.dirt_rock(-1, 1),
+            "negative x is OOB for dirt_rock: inside() gate beats the wrap (idx 3 is dirt)"
+        );
+    }
+
+    #[test]
+    fn sim_state_carries_cossin_and_weapons() {
+        // cossin matches the sim-core table verbatim; weapons are carried as given.
+        let weapons = vec![
+            Weapon {
+                id: 0,
+                name: "A".into(),
+                ammo: 5,
+                ..Default::default()
+            },
+            Weapon {
+                id: 1,
+                name: "B".into(),
+                ammo: 9,
+                ..Default::default()
+            },
+        ];
+        let state = SimState::new(
+            &synthetic_level(),
+            &two_worms(),
+            0,
+            &[0u8; 256],
+            weapons.clone(),
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+        );
+        assert_eq!(
+            state.cossin,
+            sim_core::tables::precompute_cossin(),
+            "cossin matches the sim-core table"
+        );
+        assert_eq!(state.weapons, weapons, "weapons carried verbatim");
+        // Spot-check a known identity: index 0 holds sin(0) = 0 in x.
+        assert_eq!(state.cossin[0].x, 0);
     }
 }

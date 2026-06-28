@@ -129,6 +129,7 @@ fn sim_slice1_tick0_hash_matches_cpp_oracle() {
         &worms_init,
         seed,
         &tc.materials,
+        Vec::new(),
         PhysicsConsts::from_tc(&tc),
         ControlConsts::from_tc(&tc),
     );

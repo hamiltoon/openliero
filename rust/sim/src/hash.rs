@@ -229,6 +229,8 @@ mod tests {
             bobjects: BloodPool::new(4),
             physics: crate::physics::PhysicsConsts::default(),
             control: crate::control::ControlConsts::default(),
+            weapons: Vec::new(),
+            cossin: sim_core::tables::precompute_cossin(),
         }
     }
 
@@ -474,6 +476,7 @@ mod tests {
             cur_frame: 11,
             time_left: 12,
             ty: None,
+            owner_idx: 0,
         });
 
         // Master hash by hand (no worms).

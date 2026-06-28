@@ -60,6 +60,7 @@ fn build(level: &LevelData, flags: &[u8; 256], pos: Vec2) -> SimState {
         &[worm_init(pos)],
         42,
         flags,
+        Vec::new(),
         PhysicsConsts::default(),
         ControlConsts::default(),
     )

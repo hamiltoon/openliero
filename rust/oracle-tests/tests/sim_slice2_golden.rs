@@ -134,6 +134,7 @@ fn sim_slice2_physics_matches_cpp_oracle() {
         &worms_init,
         scenario.seed,
         &tc.materials,
+        Vec::new(),
         PhysicsConsts::from_tc(&tc),
         ControlConsts::from_tc(&tc),
     );

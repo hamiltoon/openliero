@@ -304,12 +304,14 @@ materials) — **pixel-exact** is the 4b challenge.
   or an accidental `++cycles` (which gates trail/anim `% delay`) desyncs.
 - **Pool free/spawn during iteration** + the **`NewObjectReuse` full semantics**
   (O3).
-- **`CorrectShadow`** (`gfx/blit.cpp`, gated by `settings->shadow`) runs after
-  `DrawDirtEffect` for shadow-casting weapons. **Audit whether it writes
-  `material_id` (hashed) or only the display buffer (not hashed).** If it touches
-  `material_id`, 4b must port it; if display-only, it is safely omitted. fan
-  (`shadow=false`) sidesteps this in 4a; greenball (`shadow=true`) forces the
-  question in 4b. **O4.**
+- **`CorrectShadow`** (`gfx/blit.cpp:624-639`) runs after `DrawDirtEffect` inside the
+  same code path. **RESOLVED (pre-4b audit): it DOES write `material_id` (hashed)** —
+  `SetPixel` at `blit.cpp:632/635` → `level.hpp:74`, reading `SeeShadow`/`DirtRock`. It
+  is gated on the **GLOBAL `settings->shadow`** (default `true`, `settings.hpp:74`),
+  **NOT a per-weapon shadow flag** (the earlier premise here was wrong). 4a is
+  **unaffected**: fan has `dirt_effect=-1` ⇒ no `DrawDirtEffect` ⇒ no `CorrectShadow`.
+  **4b decision** (level-hash goes live): either set `settings->shadow=false` in the
+  dumper (1 line, harmless to slices 1-3) and omit it, **or** port it bit-for-bit. **O4.**
 - **Object↔object / object↔worm collision** geometry (4c).
 
 ## Open questions for the controller
@@ -321,8 +323,11 @@ materials) — **pixel-exact** is the 4b challenge.
   new `oracle_dump_sim_frame`? *(Recommended: extend + re-diff.)*
 - **O3** — When to make `Pool` match `NewObjectReuse`'s full-pool overwrite?
   *(Recommended: Slice 6, when fuzzing can fill pools; document in 4a.)*
-- **O4** — Does `CorrectShadow` write `material_id`? Resolve before 4b; pick fan
-  (`shadow=false`) for 4a to defer it.
+- **O4** — RESOLVED (pre-4b audit): `CorrectShadow` **writes `material_id`** (hashed,
+  `SetPixel` `blit.cpp:632/635`), gated on the GLOBAL `settings->shadow` (default
+  `true`), not a per-weapon flag. 4a defers it naturally (fan `dirt_effect=-1` ⇒ no
+  `DrawDirtEffect`/`CorrectShadow`). 4b: set `settings->shadow=false` in the dumper +
+  omit, or port bit-for-bit.
 - **O5** — 4c weapon: `dart→small_explosion` (clean Fire, isolates explosion RNG)
   vs `bazooka` (full splinter path in one slice)? *(Recommended: dart first.)*
 - **O6** — Scenario weapon-override grammar: `weapon <slot> <name>` per-worm vs a

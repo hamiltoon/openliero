@@ -1,9 +1,8 @@
 [package]
-name = "oracle-tests"
+name = "sim"
 version = "0.1.0"
 edition = "2021"
 
-[dev-dependencies]
+[dependencies]
 sim-core = { path = "../sim-core" }
 assets = { path = "../assets" }
-sim = { path = "../sim" }

@@ -49,7 +49,7 @@ sub-slice adds **one** new pool / one new RNG cluster against its component hash
 | **4a** *(✓ DONE — bit-exact, master+components 93 ticks, on PR #3)* | `Worm::Fire` + `WObject::Process`/`BlowUpObject` for a projectile that **explodes into nothing** (free only) | **fan** | `wobjects` | **yes** (Fire spread/colour/time-var) | still **pristine** |
 | **4b** *(planned — design+plan written)* | `BlowUpObject`'s own `dirt_effect` → **`DrawDirtEffect`** (the level-hash goes live); greenball's texture-6 is *additive* (`n_draw_back=false` ⇒ creates dirt in Background, not carving — `blit.hpp:40`) | **greenball** | — | + 1 `rand(tex.r_frame)=rand(2)` per explode | **goes live** |
 | **4c** *(planned — design+plan written)* | `create_on_exp` **`SObject::Create`** (sound, screen_flash, dirt-throw → **`NObject`** dirt-debris, crater) + `SObject::Process` + `NObject::Process`/`Create*`. **Deferred:** worm `DoDamage`+blow-away+blood (O10, worms kept out of range; the `cycles=0` blood-trail trap) and the splinter path (O9, dart spawns none). **`small_explosion`'s `dirtEffect=2` is a *carving* texture (`n_draw_back=true`)** ⇒ 4c reuses 4b's `draw_dirt_effect` and is its first *live* carve | **dart→small_explosion** (O5 confirmed; `bazooka→large_explosion` adds the splinter path — O9) | `sobjects`, `nobjects` | + sound `rand(2)` / dirt-throw `rand(8)`+`rand(128)`+`Create2` / crater `rand(2)` cluster (dart Fire = **0** rand) | live (carving) |
-| **4d** | the **Slice-3 deferrals** that belong here: dig-body `DrawDirtEffect`, reload branch (`ammo<=0 → loading_left`/`ComputedLoadingTime`), `leave_shell_timer` shell-drop, `ProcessSight` (laser), weapon-change `load_change` gate | (reuses above) | — | + shell-drop / dig | live |
+| **4d** *(planned — design+plan written; **executes LAST**, after 4b+4c land)* | the **Slice-3 deferrals** that belong here: dig-body `DrawDirtEffect` (texture 7 carving — first **live** `n_draw_back=true`), reload branch (`ammo<=0 → loading_left`/`ComputedLoadingTime`), `leave_shell_timer` shell-drop (`nobject_types[7]`), `ProcessSight` (laser — **audited inert, stays omitted**), weapon-change `load_change` gate | **handgun** (+ dig, no weapon) | — (reuses `wobjects`/`nobjects`) | + leave-shell `rand(leave_shells)` (4a-guarded→live) + 5-draw shell-expiry burst + 2× dig `rand(2)` | live (dig carve + reload `loading_left`) |
 
 **Ordering rationale (sim-first, simplest weapon first):**
 
@@ -76,6 +76,21 @@ sub-slice adds **one** new pool / one new RNG cluster against its component hash
   `DrawDirtEffect` (4b) under a control gate (already ported, guarded by a
   `debug_assert!`); the shell-drop spawns an NObject (4c); the reload branch is pure
   scalar state. Doing them last means they cost almost nothing new.
+  **4d decomposition (planned — see the 4d design+plan):** five deferrals close
+  here — (1) **dig** (`worm.cpp:889-948`) = 2× `draw_dirt_effect` texture-7 carving,
+  the **first live** `n_draw_back=true` path (4b only unit-tested it); (2) **reload**
+  (`worm.cpp:823-827`, `ComputedLoadingTime` `weapon.cpp:8-14`) — pure scalar, no dep;
+  (3) **shell-drop** (`worm.cpp:841-847` → `nobject_types[7]`/`NObject::Create1`) —
+  **depends on 4c**; (4) **`ProcessSight`** (`worm.cpp:1190-1212`) — **audited inert**
+  (writes only non-hashed `hotspot_*`/`make_sight_green`, no RNG, no terrain write) ⇒
+  **stays omitted**, proven by running a `laser_sight=true` weapon live in the dumper;
+  (5) **`load_change` gate** (`worm.cpp:1079`) — the `|| settings->load_change` term
+  Slice-3 dropped (default `true`; only load-bearing once reload makes `Available()`
+  false). **4d is LAST in Slice 4** (it references 4b's `draw_dirt_effect` carving
+  half and 4c's `NObject::Create1`/`Process` + `nobject_types`). Chosen weapon:
+  **handgun** (shotType 0 ⇒ 4a flight; `createOnExp=small_explosion` ⇒ 4c sobject;
+  `leaveShells=1`/`leaveShellDelay=1` ⇒ clean shell; `laserSight=true` ⇒ sight
+  coverage), with a low-ammo override to reach reload fast.
 
 > This deliberately **deviates from the planning brief's "4a = one sobject, level-
 > hash matched"** suggestion. The brief's example bundles `DrawDirtEffect` **and**
@@ -373,6 +388,17 @@ materials) — **pixel-exact** is the 4b challenge.
   desyncs are invisible to the `nobjects` column and localise via the master only.
   *(Recommended: accept — it is the C++ contract; document, don't change
   `stateHash.hpp`.)*
+- **O12** (new, 4d) — Prove the `load_change=false` *blocking* path via a new
+  `load_change <0|1>` scenario directive, or accept the default-true (always-cycles)
+  proof for 4d? *(Recommended: accept default-true; add the directive only when a TC
+  ships `load_change=false`.)*
+- **O13** (new, 4d) — One **combined** 4d scenario (handgun:
+  fire→shell→reload→change + a dig window), or one scenario per deferral?
+  *(Recommended: combined — last/cheap, fewer files, same rigor.)*
+- **O14** (new, 4d) — Extend the `weapon` directive to `weapon <slot> <name> [ammo]`
+  (optional low-ammo override, one dumper line) so reload is reached in a couple
+  shots, or drive reload by firing handgun's full `ammo=15` (~300 ticks)?
+  *(Recommended: add the optional `[ammo]` token.)*
 
 ## Next artifacts
 
@@ -382,5 +408,9 @@ materials) — **pixel-exact** is the 4b challenge.
 - **4b plan: `plans/2026-06-28-liero-rs-step2-slice4b-plan.md`** (planned)
 - **4c design: `specs/2026-06-28-liero-rs-step2-slice4c-explosion-objects-design.md`** (planned)
 - **4c plan: `plans/2026-06-28-liero-rs-step2-slice4c-plan.md`** (planned)
+- **4d design: `specs/2026-06-28-liero-rs-step2-slice4d-deferrals-design.md`** (planned)
+- **4d plan: `plans/2026-06-28-liero-rs-step2-slice4d-plan.md`** (planned — executes LAST, after 4b+4c)
 
-4d is sketched above and specced just-in-time when reached.
+All four sub-slices are now specced. 4a is shipped; 4b is implemented (this PR); 4c
+and 4d execute next, in order (4d last, since it reuses 4b's `draw_dirt_effect` and
+4c's `NObject::Create`).

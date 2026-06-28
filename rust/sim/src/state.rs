@@ -145,6 +145,12 @@ pub struct WormInit {
     pub stats_x: i32,
     /// The five selectable weapons, pre-resolved to id + ammo.
     pub weapons: [WeaponInit; NUM_WEAPONS],
+    /// Starting position (16.16 fixed-point), copied into [`WormState::pos`].
+    /// Slice 1 hard-coded `(0,0)`; the Slice-2 scenario places a worm mid-air.
+    pub start_pos: Vec2,
+    /// Whether the worm is visible at tick 0 (`Worm::visible`). Slice 1 was
+    /// always `false`; the Slice-2 scenario spawns a visible, falling worm.
+    pub visible: bool,
 }
 
 impl WormInit {
@@ -205,9 +211,10 @@ pub const KILLED_TIMER_INITIAL: i32 = 150;
 
 impl WormState {
     /// Builds the tick-0 worm from its scenario init, reproducing the post-`AddWorm`
-    /// / `ResetWorms` / `InitWeapons` state: zero position/velocity/aim, `kills`
-    /// and `timer` zero, `visible = false`, `killed_timer = 150`, no input, the
-    /// rope stowed, and each weapon slot loaded with `delay_left = loading_left = 0`.
+    /// / `ResetWorms` / `InitWeapons` state: `pos = init.start_pos`, zero
+    /// velocity/aim, `kills` and `timer` zero, `visible = init.visible`,
+    /// `killed_timer = 150`, no input, the rope stowed, and each weapon slot
+    /// loaded with `delay_left = loading_left = 0`.
     pub fn from_init(init: &WormInit) -> WormState {
         let weapons = init.weapons.map(|w| WormWeapon {
             ty: w.ty,
@@ -216,14 +223,14 @@ impl WormState {
             loading_left: 0,
         });
         WormState {
-            pos: Vec2::zero(),
+            pos: init.start_pos,
             vel: Vec2::zero(),
             aiming_angle: 0,
             health: init.health,
             lives: init.lives,
             kills: 0,
             timer: 0,
-            visible: false,
+            visible: init.visible,
             killed_timer: KILLED_TIMER_INITIAL,
             control_states: ControlState::new(),
             weapons,
@@ -375,8 +382,24 @@ mod tests {
             WeaponInit { ty: Some(9), ammo: 1 },
         ];
         vec![
-            WormInit { index: 0, health: 100, lives: 5, stats_x: 0, weapons: weapons0 },
-            WormInit { index: 1, health: 100, lives: 5, stats_x: 218, weapons: weapons1 },
+            WormInit {
+                index: 0,
+                health: 100,
+                lives: 5,
+                stats_x: 0,
+                weapons: weapons0,
+                start_pos: Vec2::zero(),
+                visible: false,
+            },
+            WormInit {
+                index: 1,
+                health: 100,
+                lives: 5,
+                stats_x: 218,
+                weapons: weapons1,
+                start_pos: Vec2::zero(),
+                visible: false,
+            },
         ]
     }
 
@@ -448,6 +471,42 @@ mod tests {
         assert_eq!(w0.weapons[2].ammo, 50);
         assert_eq!(state.worms[1].weapons[2].ty, Some(7));
         assert_eq!(state.worms[1].weapons[2].ammo, 100);
+    }
+
+    #[test]
+    fn from_init_honours_start_pos_and_visible() {
+        // A non-zero start position and a visible worm flow straight through
+        // `from_init` (Slice 2 scenario: a visible worm placed mid-air).
+        let init = WormInit {
+            index: 0,
+            health: 100,
+            lives: 10,
+            stats_x: 0,
+            weapons: [WeaponInit::default(); NUM_WEAPONS],
+            start_pos: Vec2::new(6553600, 3276800),
+            visible: true,
+        };
+        let w = WormState::from_init(&init);
+        assert_eq!(w.pos, Vec2::new(6553600, 3276800), "pos = init.start_pos");
+        assert!(w.visible, "visible = init.visible");
+        assert_eq!(w.vel, Vec2::zero(), "vel still starts at zero");
+    }
+
+    #[test]
+    fn from_init_defaults_match_slice1() {
+        // Slice-1 defaults: start_pos = (0,0), visible = false keep tick-0 parity.
+        let init = WormInit {
+            index: 0,
+            health: 100,
+            lives: 10,
+            stats_x: 0,
+            weapons: [WeaponInit::default(); NUM_WEAPONS],
+            start_pos: Vec2::zero(),
+            visible: false,
+        };
+        let w = WormState::from_init(&init);
+        assert_eq!(w.pos, Vec2::zero());
+        assert!(!w.visible);
     }
 
     #[test]

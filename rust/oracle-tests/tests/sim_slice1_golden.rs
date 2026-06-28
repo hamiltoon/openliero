@@ -39,6 +39,7 @@ use assets::object::Objects;
 use assets::tc::TcConfig;
 use sim::hash::{hash_components, hash_game_state};
 use sim::state::{SimState, WormInit, NUM_WEAPONS};
+use sim_core::vec::Vec2;
 
 const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
 
@@ -96,10 +97,28 @@ fn sim_slice1_tick0_hash_matches_cpp_oracle() {
     let settings_weapons = [1u32; NUM_WEAPONS];
     let resolved = WormInit::resolve_weapons(&objects, &weap_order, &settings_weapons);
 
-    // Two worms exactly as sim_dump.cpp:87-94 (health=100, lives=10).
+    // Two worms exactly as sim_dump.cpp:87-94 (health=100, lives=10). Slice 2
+    // added `start_pos`/`visible` to WormInit; the tick-0 fixture keeps the
+    // Slice-1 defaults (origin, invisible) so this golden is unchanged.
     let worms_init = vec![
-        WormInit { index: 0, health: 100, lives: 10, stats_x: 0, weapons: resolved },
-        WormInit { index: 1, health: 100, lives: 10, stats_x: 218, weapons: resolved },
+        WormInit {
+            index: 0,
+            health: 100,
+            lives: 10,
+            stats_x: 0,
+            weapons: resolved,
+            start_pos: Vec2::zero(),
+            visible: false,
+        },
+        WormInit {
+            index: 1,
+            health: 100,
+            lives: 10,
+            stats_x: 218,
+            weapons: resolved,
+            start_pos: Vec2::zero(),
+            visible: false,
+        },
     ];
 
     // --- Build tick-0 state and hash it. -------------------------------------

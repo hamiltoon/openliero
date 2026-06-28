@@ -9,7 +9,7 @@
 //! No dynamics live here: no physics, no RNG consumption, no spawned objects.
 
 use assets::level::LevelData;
-use assets::object::Weapon;
+use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
 use assets::tc::Texture;
 use sim_core::fixed::Fixed;
@@ -362,19 +362,42 @@ pub struct WObject {
 }
 
 /// A "sound/explosion" object. Hash reads `id, cur_frame`.
+///
+/// `x`/`y` are the object's pixel position and `anim_delay` its per-frame
+/// animation countdown; all three mirror C++ `SObject` (`sobject.hpp:89-95`:
+/// `int x, y; int id; int cur_frame; int anim_delay;`). They are read by
+/// `SObject::Process` but are **not** hashed (the C++ `stateHash`/Rust `hash.rs`
+/// sobject fold reads `id`+`cur_frame` only), so adding them leaves the sobject
+/// hash and slices 1-4b goldens unchanged.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct SObject {
     pub id: i32,
+    /// Pixel X (C++ `x`). Default 0. Not hashed.
+    pub x: i32,
+    /// Pixel Y (C++ `y`). Default 0. Not hashed.
+    pub y: i32,
     pub cur_frame: i32,
+    /// Per-frame animation countdown (C++ `anim_delay`). Default 0. Not hashed.
+    pub anim_delay: i32,
 }
 
 /// A non-weapon object (debris/splinters). Hash reads `pos, vel, cur_frame, ty.id`.
+///
+/// `owner_idx` mirrors C++ `NObject::owner_idx` (`nobject.hpp:208`): the firing
+/// worm's index, used for self-exclusion / damage attribution. `time_left` mirrors
+/// C++ `NObject::time_left` (`nobject.hpp:205`): the explode countdown. Neither is
+/// hashed (the C++ `stateHash`/Rust `hash.rs` nobject fold omits them), so adding
+/// them leaves the nobject hash and slices 1-4b goldens unchanged.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct NObject {
     pub pos: Vec2,
     pub vel: Vec2,
     pub cur_frame: i32,
     pub ty: Option<i32>,
+    /// Firing worm's index (C++ `owner_idx`). Default 0. Not hashed.
+    pub owner_idx: i32,
+    /// Explode countdown (C++ `time_left`). Default 0. Not hashed.
+    pub time_left: i32,
 }
 
 /// A blood particle. Hash reads `pos`.
@@ -582,6 +605,20 @@ pub struct SimState {
     /// `dirt_effect = -1`, so `draw_dirt_effect` never runs), so they pass an
     /// empty Vec and stay byte-identical.
     pub textures: Vec<Texture>,
+    /// The TC sound/explosion-object parameter table (C++ `common.sobjects`,
+    /// indexed by `SObject::id`). Slice-4c's `SObject::Process` reads a live
+    /// object's `sobject_types[id]` for its `anim_delay`/`num_frames`/damage/
+    /// dirt-effect params. **Not** hashed; slices 1-4b never spawn an sobject, so
+    /// they pass an empty `Vec` and stay byte-identical. Carried now so Slice-4c's
+    /// behaviour tasks have the table in place.
+    pub sobject_types: Vec<SObjectType>,
+    /// The TC non-weapon-object parameter table (C++ `common.nobjects`, indexed
+    /// by `NObject::ty`). Slice-4c's `NObject::Process` reads a live object's
+    /// `nobject_types[ty]` for its speed/gravity/bounce/expl-ground params.
+    /// **Not** hashed; slices 1-4b never spawn an nobject, so they pass an empty
+    /// `Vec` and stay byte-identical. Carried now so Slice-4c's behaviour tasks
+    /// have the table in place.
+    pub nobject_types: Vec<NObjectType>,
 }
 
 impl SimState {
@@ -619,6 +656,8 @@ impl SimState {
         h_signed_recoil: bool,
         large_sprites: SpriteSet,
         textures: Vec<Texture>,
+        sobject_types: Vec<SObjectType>,
+        nobject_types: Vec<NObjectType>,
     ) -> SimState {
         let mut rand = Rand::new();
         rand.seed(seed);
@@ -647,6 +686,8 @@ impl SimState {
             h_signed_recoil,
             large_sprites,
             textures,
+            sobject_types,
+            nobject_types,
         }
     }
 
@@ -926,6 +967,8 @@ mod tests {
             false,
             SpriteSet::default(),
             Vec::new(),
+            Vec::new(),
+            Vec::new(),
         );
         assert_eq!(state.cycles, 0, "cycles must be 0 at tick 0");
         assert_eq!(state.rand.last(), 0, "no RNG consumed -> last() == 0");
@@ -950,6 +993,8 @@ mod tests {
             ControlConsts::default(),
             false,
             SpriteSet::default(),
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
         );
         assert!(state.bonuses.is_empty());
@@ -979,6 +1024,8 @@ mod tests {
             ControlConsts::default(),
             false,
             SpriteSet::default(),
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
         );
         for w in &state.worms {
@@ -1014,6 +1061,8 @@ mod tests {
             ControlConsts::default(),
             false,
             SpriteSet::default(),
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
         );
         let w0 = &state.worms[0];
@@ -1276,6 +1325,8 @@ mod tests {
             false,
             SpriteSet::default(),
             Vec::new(),
+            Vec::new(),
+            Vec::new(),
         );
         assert_eq!(
             state.level.material_flags, flags,
@@ -1313,6 +1364,8 @@ mod tests {
                 ControlConsts::default(),
                 false,
                 SpriteSet::default(),
+                Vec::new(),
+                Vec::new(),
                 Vec::new(),
             );
             s.wobjects.spawn(WObject {
@@ -1510,6 +1563,8 @@ mod tests {
             false,
             large_sprites,
             textures,
+            Vec::new(),
+            Vec::new(),
         );
         let t = &state.textures[6];
         assert_eq!(t.mframe, 38, "greenball mframe");
@@ -1551,6 +1606,8 @@ mod tests {
             false,
             SpriteSet::default(),
             Vec::new(),
+            Vec::new(),
+            Vec::new(),
         );
         assert_eq!(
             state.cossin,
@@ -1560,5 +1617,122 @@ mod tests {
         assert_eq!(state.weapons, weapons, "weapons carried verbatim");
         // Spot-check a known identity: index 0 holds sin(0) = 0 in x.
         assert_eq!(state.cossin[0].x, 0);
+    }
+
+    // ---- Slice 4c datamodel scaffolding --------------------------------------
+
+    #[test]
+    fn sobject_carries_position_and_anim_fields_and_is_copy() {
+        // SObject gains x/y/anim_delay (C++ sobject.hpp:89-95); all default 0.
+        let s = SObject::default();
+        assert_eq!(s.id, 0);
+        assert_eq!(s.x, 0);
+        assert_eq!(s.y, 0);
+        assert_eq!(s.cur_frame, 0);
+        assert_eq!(s.anim_delay, 0);
+        // Copy: assigning leaves the source usable.
+        let s2 = SObject {
+            id: 2,
+            x: -3,
+            y: 4,
+            cur_frame: 5,
+            anim_delay: 6,
+        };
+        let s3 = s2; // Copy, not move
+        assert_eq!(s2, s3);
+    }
+
+    #[test]
+    fn pool_of_sobject_spawns_lowest_free_and_iterates_slot_order() {
+        // The generic Pool<T> works for SObject: cap 700, lowest-free spawn,
+        // slot-order iteration (mirrors the wobjects pool contract).
+        let mut pool: Pool<SObject> = Pool::new(SOBJECT_CAPACITY);
+        assert_eq!(pool.capacity(), 700);
+        assert!(pool.is_empty());
+        let mk = |id: i32| SObject {
+            id,
+            x: id * 10,
+            y: id * 20,
+            cur_frame: 0,
+            anim_delay: 0,
+        };
+        assert_eq!(pool.spawn(mk(1)), Some(0));
+        assert_eq!(pool.spawn(mk(2)), Some(1));
+        assert_eq!(pool.spawn(mk(3)), Some(2));
+        // Free the middle slot; the next spawn reuses the lowest free index.
+        pool.free(1);
+        assert_eq!(pool.len(), 2);
+        let ids: Vec<i32> = pool.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![1, 3], "iter yields live slots in index order");
+        assert_eq!(pool.spawn(mk(4)), Some(1), "reuses lowest free slot");
+        let ids: Vec<i32> = pool.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![1, 4, 3]);
+    }
+
+    #[test]
+    fn nobject_owner_idx_and_time_left_default_zero() {
+        // The new fields default to 0 (C++ NObject owner_idx/time_left).
+        let n = NObject::default();
+        assert_eq!(n.owner_idx, 0);
+        assert_eq!(n.time_left, 0);
+    }
+
+    #[test]
+    fn sim_state_carries_object_type_tables() {
+        // SimState carries the sobject/nobject parameter tables verbatim. Use the
+        // shapes Slice-4c reads: sobject_types[2] = small_explosion, nobject_types[2]
+        // = particle__disappearing (their TC field values are pinned against the real
+        // data in the oracle test; here we only prove SimState::new threads them).
+        let mut sobject_types = vec![SObjectType::default(); 3];
+        sobject_types[2] = SObjectType {
+            num_sounds: 2,
+            anim_delay: 2,
+            num_frames: 5,
+            detect_range: 8,
+            damage: 5,
+            blow_away: 3000,
+            dirt_effect: 2,
+            id: 2,
+            id_str: "small_explosion".into(),
+            ..Default::default()
+        };
+        let mut nobject_types = vec![NObjectType::default(); 3];
+        nobject_types[2] = NObjectType {
+            speed: 80,
+            speed_v: 40,
+            distribution: 10000,
+            gravity: 700,
+            expl_ground: true,
+            id: 2,
+            id_str: "particle__disappearing".into(),
+            ..Default::default()
+        };
+        let state = SimState::new(
+            &synthetic_level(),
+            &two_worms(),
+            0,
+            &[0u8; 256],
+            Vec::new(),
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            SpriteSet::default(),
+            Vec::new(),
+            sobject_types.clone(),
+            nobject_types.clone(),
+        );
+        assert_eq!(
+            state.sobject_types, sobject_types,
+            "sobject table carried verbatim"
+        );
+        assert_eq!(
+            state.nobject_types, nobject_types,
+            "nobject table carried verbatim"
+        );
+        // Spot-check the Slice-4c shapes survive the round-trip.
+        assert_eq!(state.sobject_types[2].id_str, "small_explosion");
+        assert_eq!(state.sobject_types[2].damage, 5);
+        assert_eq!(state.nobject_types[2].id_str, "particle__disappearing");
+        assert!(state.nobject_types[2].expl_ground);
     }
 }

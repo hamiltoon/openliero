@@ -66,6 +66,8 @@ fn build(level: &LevelData, flags: &[u8; 256], pos: Vec2) -> SimState {
         false,
         assets::sprite::SpriteSet::default(),
         Vec::new(),
+        Vec::new(),
+        Vec::new(),
     )
 }
 

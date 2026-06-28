@@ -153,6 +153,8 @@ fn sim_slice2_physics_matches_cpp_oracle() {
         tc.hacks.SignedRecoil,
         large_sprites,
         tc.textures.clone(),
+        Vec::new(),
+        Vec::new(),
     );
 
     // Assert tick-0 components against the freshly-built state FIRST. Then drive

@@ -209,6 +209,8 @@ fn sim_slice4b_greenball_terrain_matches_cpp_oracle() {
         tc.hacks.SignedRecoil,
         large_sprites,
         tc.textures.clone(),
+        objects.sobject_types.clone(),
+        objects.nobject_types.clone(),
     );
 
     let check = |tick: u32, name: &str, got: u32, want: u32| {

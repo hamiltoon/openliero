@@ -156,6 +156,8 @@ fn sim_slice3_control_matches_cpp_oracle() {
         tc.hacks.SignedRecoil,
         large_sprites,
         tc.textures.clone(),
+        Vec::new(),
+        Vec::new(),
     );
 
     let check = |tick: u32, name: &str, got: u32, want: u32| {

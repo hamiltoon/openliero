@@ -90,6 +90,8 @@ fn fire_state() -> SimState {
         false, // h_signed_recoil (fan recoil 2 < 128 -> inert anyway)
         assets::sprite::SpriteSet::default(),
         Vec::new(),
+        Vec::new(),
+        Vec::new(),
     );
     // Aim up-right at cossin index 12 (inside the default left-facing band
     // [aim_max_left=12 .. aim_min_left=64]); process_aiming leaves it untouched

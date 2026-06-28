@@ -234,6 +234,8 @@ mod tests {
             h_signed_recoil: false,
             large_sprites: assets::sprite::SpriteSet::default(),
             textures: Vec::new(),
+            sobject_types: Vec::new(),
+            nobject_types: Vec::new(),
         }
     }
 
@@ -465,13 +467,18 @@ mod tests {
         });
         state.sobjects.spawn(SObject {
             id: 7,
+            x: 111, // decoy: x is NOT hashed
+            y: 222, // decoy: y is NOT hashed
             cur_frame: 8,
+            anim_delay: 33, // decoy: anim_delay is NOT hashed
         });
         state.nobjects.spawn(NObject {
             pos: Vec2::new(3, 4),
             vel: Vec2::new(5, 6),
             cur_frame: 9,
             ty: Some(2),
+            owner_idx: 99, // decoy: owner_idx is NOT hashed
+            time_left: 88, // decoy: time_left is NOT hashed
         });
         state.wobjects.spawn(WObject {
             pos: Vec2::new(7, 8),
@@ -528,5 +535,111 @@ mod tests {
         hn = hn.wrapping_mul(31).wrapping_add(3u32);
         hn = hn.wrapping_mul(31).wrapping_add(4u32);
         assert_eq!(c.nobjects, hn, "component nobjects is pos only");
+    }
+
+    // (Step 3) The sobjects fold — first non-empty — pinned to a literal reference
+    // value hand-computed from the formula (`stateHash.hpp:76-77`/`184-185`), AND
+    // proven to IGNORE the Slice-4c non-hashed fields (`SObject::x/y/anim_delay`).
+    #[test]
+    fn sobject_fold_pinned_and_ignores_position_and_anim_delay() {
+        // Component sobjects fold: h=1; *31+id; *31+cur_frame.
+        // id=5, cur_frame=9 -> 1*31+5=36; 36*31+9=1125.
+        let mut bare = empty_state(0, 0, 1);
+        bare.sobjects.spawn(SObject {
+            id: 5,
+            x: 0,
+            y: 0,
+            cur_frame: 9,
+            anim_delay: 0,
+        });
+        let cb = hash_components(&bare);
+        assert_eq!(
+            cb.sobjects, 1125,
+            "sobjects component fold = ((1*31+id)*31+cur_frame)"
+        );
+
+        // Same id/cur_frame, decoy x/y/anim_delay set: master + component unchanged
+        // (the new fields must NOT enter either fold).
+        let mut decoy = empty_state(0, 0, 1);
+        decoy.sobjects.spawn(SObject {
+            id: 5,
+            x: -7,
+            y: 1234,
+            cur_frame: 9,
+            anim_delay: 42,
+        });
+        let cd = hash_components(&decoy);
+        assert_eq!(
+            cd.sobjects, cb.sobjects,
+            "x/y/anim_delay must not enter the sobjects component fold"
+        );
+        assert_eq!(
+            hash_game_state(&decoy),
+            hash_game_state(&bare),
+            "x/y/anim_delay must not enter the master hash"
+        );
+    }
+
+    // (Step 3) The nobjects fold — first non-empty — pinned to literal reference
+    // values (master = pos.x,pos.y,vel.x,vel.y,cur_frame,type_id per
+    // `stateHash.hpp:85-92`; component = pos.x,pos.y ONLY per `:195-196`), AND
+    // proven to IGNORE the Slice-4c non-hashed fields (`owner_idx`/`time_left`).
+    #[test]
+    fn nobject_fold_pinned_and_ignores_owner_idx_and_time_left() {
+        // Component nobjects fold is pos ONLY: h=1; *31+pos.x; *31+pos.y.
+        // pos=(2,3) -> 1*31+2=33; 33*31+3=1026.
+        let mut bare = empty_state(0, 0, 1);
+        bare.nobjects.spawn(NObject {
+            pos: Vec2::new(2, 3),
+            vel: Vec2::new(4, 5),
+            cur_frame: 6,
+            ty: Some(7),
+            owner_idx: 0,
+            time_left: 0,
+        });
+        let cb = hash_components(&bare);
+        assert_eq!(
+            cb.nobjects, 1026,
+            "nobjects component fold = pos.x, pos.y only"
+        );
+
+        // Master nobjects contribution by hand pins the field ORDER:
+        // pos.x, pos.y, vel.x, vel.y, cur_frame, then ty.id (Some -> pushed).
+        let mut h: u32 = 1;
+        h = h.wrapping_mul(31).wrapping_add(0); // rand.last
+        h = h.wrapping_mul(31).wrapping_add(0); // cycles
+        h = h.wrapping_mul(33) ^ 1u32; // level byte
+        h = h.wrapping_mul(31).wrapping_add(2u32); // pos.x
+        h = h.wrapping_mul(31).wrapping_add(3u32); // pos.y
+        h = h.wrapping_mul(31).wrapping_add(4u32); // vel.x
+        h = h.wrapping_mul(31).wrapping_add(5u32); // vel.y
+        h = h.wrapping_mul(31).wrapping_add(6u32); // cur_frame
+        h = h.wrapping_mul(31).wrapping_add(7u32); // ty.id (Some(7))
+        assert_eq!(
+            hash_game_state(&bare),
+            h,
+            "nobjects master fold order: pos, vel, cur_frame, ty.id"
+        );
+
+        // Decoy owner_idx/time_left set: both hashes unchanged.
+        let mut decoy = empty_state(0, 0, 1);
+        decoy.nobjects.spawn(NObject {
+            pos: Vec2::new(2, 3),
+            vel: Vec2::new(4, 5),
+            cur_frame: 6,
+            ty: Some(7),
+            owner_idx: 123,
+            time_left: -9,
+        });
+        let cd = hash_components(&decoy);
+        assert_eq!(
+            cd.nobjects, cb.nobjects,
+            "owner_idx/time_left must not enter the nobjects component fold"
+        );
+        assert_eq!(
+            hash_game_state(&decoy),
+            hash_game_state(&bare),
+            "owner_idx/time_left must not enter the master hash"
+        );
     }
 }

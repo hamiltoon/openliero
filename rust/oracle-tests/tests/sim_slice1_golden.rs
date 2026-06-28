@@ -150,6 +150,8 @@ fn sim_slice1_tick0_hash_matches_cpp_oracle() {
         tc.hacks.SignedRecoil,
         large_sprites,
         tc.textures.clone(),
+        Vec::new(),
+        Vec::new(),
     );
     let got_state = hash_game_state(&state);
     let c = hash_components(&state);

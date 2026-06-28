@@ -150,6 +150,8 @@ fn fire_state() -> (SimState, Weapon, Vec2, u8, u8) {
         tc.hacks.SignedRecoil,
         load_large_sprites(),
         tc.textures.clone(),
+        Vec::new(),
+        Vec::new(),
     );
 
     // Aim flat-right at cossin index 32 (== (+max, 0); see precompute_cossin). It

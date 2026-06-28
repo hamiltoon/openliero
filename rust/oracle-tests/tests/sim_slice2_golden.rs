@@ -9,21 +9,19 @@
 //! Golden columns (hashes hex):
 //!   `<tick> <state_hash> <rng> <level> <worm0> <worm1> <bob> <bon> <sob> <nob> <wob>`
 //!
-//! ## What is and isn't asserted
+//! ## What is asserted
 //!
-//! This test asserts the COMPONENT columns every tick: `rng` (00000000, the seed
-//! never advances in a worms-only pass), `level` (constant 95f63601, physics
-//! never writes the level this slice), `worm0`, `worm1`, and the five object-pool
-//! columns (all 00000001 — empty pools). The five pools and the level/rng being
-//! constant is exactly the Slice-2 contract: `process_worms` (the Slice-3 rename
-//! of `process_worm_physics`) is a worms-only pass.
+//! This test asserts ALL columns every tick: the COMPONENT columns (`rng`,
+//! `level`, `worm0`, `worm1`, and the five object-pool columns) AND the master
+//! `state_hash`. The master column was read-but-not-asserted in the original
+//! Slice-2 work because the C++ `Game::ProcessFrame` also ran the then-un-ported
+//! `ProcessWeapons` `delay_left` countdown; Slice 3 ported that countdown
+//! (`process_weapons`), closing the gap. The master now matches the C++ golden on
+//! all 101 ticks under empty input.
 //!
-//! The master `state_hash` column is READ but deliberately NOT asserted: it
-//! diverges from the C++ master because the C++ `Game::ProcessFrame` also runs the
-//! un-ported `ProcessWeapons` `delay_left` countdown, which the worm-physics pass
-//! does not yet model. That column is matched in Slice 3 once weapon timers are
-//! ported. Asserting the worm components (which DO include each worm's full hashed
-//! state) over 101 ticks — including the floor bounce — is the deliverable here.
+//! `rng` is 00000000 (the seed never advances in a worms-only pass), `level` is
+//! constant 95f63601 (physics never writes the level this slice), and the five
+//! pool columns are all 00000001 (empty pools) — exactly the Slice-2 contract.
 //!
 //! The scenario is the single source of truth (parsed via `oracle_tests::scenario`)
 //! and the expected values are PARSED from the golden file, never hard-coded.
@@ -39,9 +37,10 @@ use sim_core::vec::Vec2;
 
 const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
 
-/// One parsed golden line's component columns (the master is read but not kept).
+/// One parsed golden line — all 11 columns, master included (asserted since Slice 3).
 struct GoldenTick {
     tick: u32,
+    master: u32,
     rng: u32,
     level: u32,
     worm0: u32,
@@ -57,14 +56,14 @@ fn parse_golden(text: &str) -> Vec<GoldenTick> {
             let mut it = line.split_whitespace();
             let mut next = || it.next().expect("golden column present");
             let tick: u32 = next().parse().expect("tick");
-            let _master = hex(next()); // state_hash: read, NOT asserted (see module doc).
+            let master = hex(next()); // state_hash: ASSERTED (Slice 3 closed the gap).
             let rng = hex(next());
             let level = hex(next());
             let worm0 = hex(next());
             let worm1 = hex(next());
             let pools = [hex(next()), hex(next()), hex(next()), hex(next()), hex(next())];
             assert!(it.next().is_none(), "golden line has exactly 11 columns");
-            GoldenTick { tick, rng, level, worm0, worm1, pools }
+            GoldenTick { tick, master, rng, level, worm0, worm1, pools }
         })
         .collect()
 }
@@ -151,10 +150,8 @@ fn sim_slice2_physics_matches_cpp_oracle() {
 
     let assert_components = |state: &SimState, g: &GoldenTick| {
         let c = hash_components(state);
-        // The master is intentionally not asserted (see module doc); read it so a
-        // future regression in components is still distinguishable from a known
-        // master divergence.
-        let _ = hash_game_state(state);
+        // Assert components first so a divergence localises to tick + subsystem
+        // before the master flags it.
         check(g.tick, "rng", c.rng, g.rng);
         check(g.tick, "level", c.level, g.level);
         check(g.tick, "worm0", c.worms[0], g.worm0);
@@ -164,6 +161,9 @@ fn sim_slice2_physics_matches_cpp_oracle() {
         check(g.tick, "sobjects", c.sobjects, g.pools[2]);
         check(g.tick, "nobjects", c.nobjects, g.pools[3]);
         check(g.tick, "wobjects", c.wobjects, g.pools[4]);
+        // The MASTER: now asserted. Slice 3 ported the ProcessWeapons delay_left
+        // countdown, closing the gap that had kept this un-asserted in Slice 2.
+        check(g.tick, "MASTER state_hash", hash_game_state(state), g.master);
     };
 
     assert_eq!(golden[0].tick, 0, "first golden row is tick 0");
@@ -173,11 +173,6 @@ fn sim_slice2_physics_matches_cpp_oracle() {
     // worms with an empty control state. process_worms advances one worms-only
     // tick (the full per-worm Process pass).
     let empty = [ControlState::new(), ControlState::new()];
-    // NOTE: `process_worms` (renamed from `process_worm_physics` in Slice 3) now
-    // runs each worm's full `Process` pass; under EMPTY input the new control/
-    // aiming/weapon methods are inert on pos/vel, so the worm COMPONENT hashes
-    // this test asserts are unchanged (the master hash now also folds in the
-    // `delay_left` countdown, but the master is deliberately not asserted here).
     // A genuine bounce: worm0 falls (vel.y > 0) then the floor flips it
     // (vel.y <= 0) on some tick whose worm0 component we have asserted matches
     // the C++ golden. Recorded so the test fails loudly if the scenario ever

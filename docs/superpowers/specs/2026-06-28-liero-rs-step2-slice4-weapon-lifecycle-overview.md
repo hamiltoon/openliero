@@ -47,7 +47,7 @@ sub-slice adds **one** new pool / one new RNG cluster against its component hash
 | Sub-slice | Adds | Weapon | New pool(s) | RNG goes live | Level-hash |
 |---|---|---|---|---|---|
 | **4a** | `Worm::Fire` + `WObject::Process`/`BlowUpObject` for a projectile that **explodes into nothing** (free only) | **fan** | `wobjects` | **yes** (Fire spread/colour/time-var) | still **pristine** |
-| **4b** | `BlowUpObject`'s own `dirt_effect` → **`DrawDirtEffect`** (terrain destruction); the headline "destroys terrain" | **greenball** | — | + crater texture-frame | **goes live** |
+| **4b** *(planned — design+plan written)* | `BlowUpObject`'s own `dirt_effect` → **`DrawDirtEffect`** (the level-hash goes live); greenball's texture-6 is *additive* (`n_draw_back=false` ⇒ creates dirt in Background, not carving — `blit.hpp:40`) | **greenball** | — | + 1 `rand(tex.r_frame)=rand(2)` per explode | **goes live** |
 | **4c** | `create_on_exp` **`SObject`** (`Process` + `Create`: sound, screen_flash, worm `DoDamage` + blow-away, dirt-throw + blood, **`NObject`** splinters) + `NObject::Process` | **dart→small_explosion** (or bazooka) | `sobjects`, `nobjects` | + sound/dirt-throw/blood/splinter cluster | live |
 | **4d** | the **Slice-3 deferrals** that belong here: dig-body `DrawDirtEffect`, reload branch (`ammo<=0 → loading_left`/`ComputedLoadingTime`), `leave_shell_timer` shell-drop, `ProcessSight` (laser), weapon-change `load_change` gate | (reuses above) | — | + shell-drop / dig | live |
 
@@ -310,8 +310,12 @@ materials) — **pixel-exact** is the 4b challenge.
   is gated on the **GLOBAL `settings->shadow`** (default `true`, `settings.hpp:74`),
   **NOT a per-weapon shadow flag** (the earlier premise here was wrong). 4a is
   **unaffected**: fan has `dirt_effect=-1` ⇒ no `DrawDirtEffect` ⇒ no `CorrectShadow`.
-  **4b decision** (level-hash goes live): either set `settings->shadow=false` in the
-  dumper (1 line, harmless to slices 1-3) and omit it, **or** port it bit-for-bit. **O4.**
+  **4b decision (made — see the 4b design):** **OMIT via `settings->shadow=false` in
+  the dumper.** Verified inert to 1-4a: the only other `settings->shadow` sim reader is
+  `MakeShadow` (`level.cpp:426`, also writes `material_id`), reached **only** through
+  `GenerateFromSettings` (`level.cpp:397`), which the dumper never calls (it uses
+  `level.load()`). Re-diff the 1-4a goldens to prove it. Port `MakeShadow`+`CorrectShadow`
+  together in a later dedicated shadow slice. **O4 — controller decision still requested.**
 - **Object↔object / object↔worm collision** geometry (4c).
 
 ## Open questions for the controller
@@ -326,8 +330,19 @@ materials) — **pixel-exact** is the 4b challenge.
 - **O4** — RESOLVED (pre-4b audit): `CorrectShadow` **writes `material_id`** (hashed,
   `SetPixel` `blit.cpp:632/635`), gated on the GLOBAL `settings->shadow` (default
   `true`), not a per-weapon flag. 4a defers it naturally (fan `dirt_effect=-1` ⇒ no
-  `DrawDirtEffect`/`CorrectShadow`). 4b: set `settings->shadow=false` in the dumper +
-  omit, or port bit-for-bit.
+  `DrawDirtEffect`/`CorrectShadow`). **4b recommendation (design written): OMIT via
+  `settings->shadow=false` in the dumper** — proven inert to 1-4a (its other reader
+  `MakeShadow` is only reached via `GenerateFromSettings`, never called by the dumper;
+  re-diff gate). Port `MakeShadow`+`CorrectShadow` together later. *(Controller: confirm
+  omit vs port-now.)*
+- **O7** (new, 4b) — greenball's texture-6 dirt-effect is **additive** (`n_draw_back=
+  false` creates dirt in Background; `blit.hpp:40`), so 4b proves "level-hash goes live"
+  via *adding* terrain, not carving. Sufficient for the milestone, or also exercise a
+  *carving* (`n_draw_back=true`) texture in 4b? *(Recommended: 4b additive + unit-tests
+  the carving half; carving lands live in 4c/4d where sobject/dig textures use it.)*
+- **O8** (new, 4b) — reuse `physics_fall_test.lev` (fire greenball at its sky-over-floor
+  surface so the impact window has Background cells), or add a crater-fixture?
+  *(Recommended: reuse it.)*
 - **O5** — 4c weapon: `dart→small_explosion` (clean Fire, isolates explosion RNG)
   vs `bazooka` (full splinter path in one slice)? *(Recommended: dart first.)*
 - **O6** — Scenario weapon-override grammar: `weapon <slot> <name>` per-worm vs a
@@ -338,5 +353,7 @@ materials) — **pixel-exact** is the 4b challenge.
 
 - 4a design: `specs/2026-06-28-liero-rs-step2-slice4a-wobject-fire-lifecycle-design.md`
 - 4a plan: `plans/2026-06-28-liero-rs-step2-slice4a-plan.md`
+- **4b design: `specs/2026-06-28-liero-rs-step2-slice4b-dirt-destruction-design.md`** (planned)
+- **4b plan: `plans/2026-06-28-liero-rs-step2-slice4b-plan.md`** (planned)
 
-4b–4d are sketched above and specced just-in-time when reached.
+4c–4d are sketched above and specced just-in-time when reached.

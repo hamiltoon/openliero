@@ -12,6 +12,7 @@
 pub mod blit;
 pub mod control;
 pub mod hash;
+pub mod nobject;
 pub mod physics;
 pub mod pool;
 pub mod state;

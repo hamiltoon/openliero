@@ -46,7 +46,7 @@ sub-slice adds **one** new pool / one new RNG cluster against its component hash
 
 | Sub-slice | Adds | Weapon | New pool(s) | RNG goes live | Level-hash |
 |---|---|---|---|---|---|
-| **4a** | `Worm::Fire` + `WObject::Process`/`BlowUpObject` for a projectile that **explodes into nothing** (free only) | **fan** | `wobjects` | **yes** (Fire spread/colour/time-var) | still **pristine** |
+| **4a** *(✓ DONE — bit-exact, master+components 93 ticks, on PR #3)* | `Worm::Fire` + `WObject::Process`/`BlowUpObject` for a projectile that **explodes into nothing** (free only) | **fan** | `wobjects` | **yes** (Fire spread/colour/time-var) | still **pristine** |
 | **4b** *(planned — design+plan written)* | `BlowUpObject`'s own `dirt_effect` → **`DrawDirtEffect`** (the level-hash goes live); greenball's texture-6 is *additive* (`n_draw_back=false` ⇒ creates dirt in Background, not carving — `blit.hpp:40`) | **greenball** | — | + 1 `rand(tex.r_frame)=rand(2)` per explode | **goes live** |
 | **4c** | `create_on_exp` **`SObject`** (`Process` + `Create`: sound, screen_flash, worm `DoDamage` + blow-away, dirt-throw + blood, **`NObject`** splinters) + `NObject::Process` | **dart→small_explosion** (or bazooka) | `sobjects`, `nobjects` | + sound/dirt-throw/blood/splinter cluster | live |
 | **4d** | the **Slice-3 deferrals** that belong here: dig-body `DrawDirtEffect`, reload branch (`ammo<=0 → loading_left`/`ComputedLoadingTime`), `leave_shell_timer` shell-drop, `ProcessSight` (laser), weapon-change `load_change` gate | (reuses above) | — | + shell-drop / dig | live |

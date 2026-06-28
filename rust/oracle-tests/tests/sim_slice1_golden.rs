@@ -38,6 +38,7 @@
 use assets::object::Objects;
 use assets::tc::TcConfig;
 use sim::hash::{hash_components, hash_game_state};
+use sim::physics::PhysicsConsts;
 use sim::state::{SimState, WormInit, NUM_WEAPONS};
 use sim_core::vec::Vec2;
 
@@ -122,7 +123,13 @@ fn sim_slice1_tick0_hash_matches_cpp_oracle() {
     ];
 
     // --- Build tick-0 state and hash it. -------------------------------------
-    let state = SimState::new(&level, &worms_init, seed, &tc.materials);
+    let state = SimState::new(
+        &level,
+        &worms_init,
+        seed,
+        &tc.materials,
+        PhysicsConsts::from_tc(&tc),
+    );
     let got_state = hash_game_state(&state);
     let c = hash_components(&state);
 

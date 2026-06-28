@@ -227,6 +227,7 @@ mod tests {
             sobjects: Pool::new(4),
             nobjects: Pool::new(4),
             bobjects: BloodPool::new(4),
+            physics: crate::physics::PhysicsConsts::default(),
         }
     }
 

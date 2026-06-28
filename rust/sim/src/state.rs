@@ -13,6 +13,7 @@ use sim_core::fixed::Fixed;
 use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
+use crate::physics::{worm_process_physics, worm_reactions, PhysicsConsts};
 use crate::pool::{BloodPool, Pool};
 
 /// Number of weapon slots per worm. Mirrors C++ `NUM_WEAPONS` (`worm.hpp:13`).
@@ -357,6 +358,9 @@ pub struct SimState {
     pub sobjects: Pool<SObject>,
     pub nobjects: Pool<NObject>,
     pub bobjects: BloodPool<BObject>,
+    /// The TC physics constants/hacks (`WormGravity`, friction, `MinBounce*`,
+    /// …) the worm-physics pass reads. Built once from the TC; not hashed.
+    pub physics: PhysicsConsts,
 }
 
 impl SimState {
@@ -377,6 +381,7 @@ impl SimState {
         worms_init: &[WormInit],
         seed: u32,
         material_flags: &[u8; 256],
+        physics: PhysicsConsts,
     ) -> SimState {
         let mut rand = Rand::new();
         rand.seed(seed);
@@ -396,6 +401,31 @@ impl SimState {
             sobjects: Pool::new(SOBJECT_CAPACITY),
             nobjects: Pool::new(NOBJECT_CAPACITY),
             bobjects: BloodPool::new(BLOOD_CAPACITY),
+            physics,
+        }
+    }
+
+    /// Advance one worm-physics tick (Slice 2): a *worms-only* pass, **not** the
+    /// full `Game::ProcessFrame` (no `cycles++`, no bonus-drop RNG roll, no
+    /// object `Process` loops — those land in Slice 6). Named `process_worm_physics`
+    /// to keep that distinction honest.
+    ///
+    /// Applies each worm's scripted input to its `control_states`, then — for
+    /// each worm in `worms` order — runs the reaction orchestration
+    /// ([`worm_reactions`]) followed by [`worm_process_physics`]. Inputs shorter
+    /// than `worms` leave the remaining worms' control state unchanged (Slice 2
+    /// drives all-empty input regardless).
+    pub fn process_worm_physics(&mut self, inputs: &[ControlState]) {
+        for (w, input) in self.worms.iter_mut().zip(inputs.iter()) {
+            w.control_states = *input;
+        }
+
+        // Disjoint field borrows: the per-worm pass reads `level`/`physics`
+        // while mutating each worm in turn.
+        let SimState { level, physics, worms, .. } = self;
+        for w in worms.iter_mut() {
+            let reacts = worm_reactions(level, w, physics);
+            worm_process_physics(w, &reacts, physics);
         }
     }
 }
@@ -458,7 +488,7 @@ mod tests {
     #[test]
     fn builds_tick0_global_state() {
         let level = synthetic_level();
-        let state = SimState::new(&level, &two_worms(), 0x1234, &[0u8; 256]);
+        let state = SimState::new(&level, &two_worms(), 0x1234, &[0u8; 256], PhysicsConsts::default());
         assert_eq!(state.cycles, 0, "cycles must be 0 at tick 0");
         assert_eq!(state.rand.last(), 0, "no RNG consumed -> last() == 0");
         assert_eq!(state.level.width, 4);
@@ -469,7 +499,7 @@ mod tests {
 
     #[test]
     fn pools_start_empty() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 1, &[0u8; 256]);
+        let state = SimState::new(&synthetic_level(), &two_worms(), 1, &[0u8; 256], PhysicsConsts::default());
         assert!(state.bonuses.is_empty());
         assert!(state.wobjects.is_empty());
         assert!(state.sobjects.is_empty());
@@ -487,7 +517,7 @@ mod tests {
 
     #[test]
     fn worm_tick0_scalar_values() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256]);
+        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256], PhysicsConsts::default());
         for w in &state.worms {
             assert_eq!(w.pos, Vec2::zero());
             assert_eq!(w.vel, Vec2::zero());
@@ -511,7 +541,7 @@ mod tests {
 
     #[test]
     fn worm_weapons_initialised() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256]);
+        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256], PhysicsConsts::default());
         let w0 = &state.worms[0];
         // Each slot has its type set, ammo from the init, and zero timers.
         for (j, ww) in w0.weapons.iter().enumerate() {
@@ -684,7 +714,7 @@ mod tests {
         let mut flags = [0u8; 256];
         flags[7] = MAT_BACKGROUND;
         let level = synthetic_level(); // material_id[i] = i*3+1; idx 2 -> material 7
-        let state = SimState::new(&level, &two_worms(), 0, &flags);
+        let state = SimState::new(&level, &two_worms(), 0, &flags, PhysicsConsts::default());
         assert_eq!(state.level.material_flags, flags, "flag table copied verbatim");
         // synthetic_level idx 2 (x=2,y=0) = material 7 -> background.
         assert!(state.level.checked_mat_background(2, 0));

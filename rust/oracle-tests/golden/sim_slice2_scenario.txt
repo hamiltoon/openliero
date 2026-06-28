@@ -1,0 +1,19 @@
+# Step 2 Slice 2 scenario — two worms, physics only (no input).
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics) and the Rust N-tick test.
+seed 42
+# physics_fall_test.lev: an open sky band (Background material 130) above a solid
+# floor at y=200 (Dirt material 12). modern_test.lev has NO Background-flagged
+# pixels, so a worm cannot fall in it (see gen_physics_level.py); this fixture lets
+# the worms fall and bounce off the floor within `ticks`.
+level Levels/physics_fall_test.lev
+ticks 100
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# pos_*: 16.16 fixed-point (Itof(px) = px << 16 = px * 65536).
+# Both worms start mid-air in the sky band (y < 200px); different x AND y so the
+# two worm component hashes differ. They free-fall under gravity, then bounce off
+# the floor (collision when worm-center y ~ 196px) -> a vel.y sign flip.
+worm 0  9830400 9830400 100 10 0   1
+worm 1 22937600 8519680 100 10 218 1
+# Sparse per-tick input overrides (7-bit ControlState per worm); absent => 0.
+# Slice 2 has NONE (empty input every tick); Slice 3+ adds:
+# input <tick> <worm0_7bit> <worm1_7bit>

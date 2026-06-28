@@ -1128,11 +1128,7 @@ mod tests {
             });
             hash_game_state(&s)
         };
-        assert_eq!(
-            mk(0),
-            mk(9),
-            "owner_idx must not affect the master hash"
-        );
+        assert_eq!(mk(0), mk(9), "owner_idx must not affect the master hash");
     }
 
     #[test]
@@ -1148,10 +1144,7 @@ mod tests {
         ww.loading_left = 0;
         ww.ammo = 0;
         ww.delay_left = 99;
-        assert!(
-            ww.available(),
-            "available() ignores ammo and delay_left"
-        );
+        assert!(ww.available(), "available() ignores ammo and delay_left");
     }
 
     #[test]

@@ -78,7 +78,7 @@ jobs:
             # Track the current test binary / crate. The "Running" line names the
             # compiled artifact; derive a friendly label from its basename minus
             # the trailing -<hash>. POSIX-only awk (Ubuntu ships mawk).
-            /^[[:space:]]*Running / {
+            /^[ \t]*Running / {
               line = $0
               kind = (line ~ /Running tests\//) ? "integration" : "unit"
               idx = index(line, "(")
@@ -92,7 +92,7 @@ jobs:
               current = path
               next
             }
-            /^[[:space:]]*Doc-tests / {
+            /^[ \t]*Doc-tests / {
               current = "doctest: " $2
               kind = "doc"
               next

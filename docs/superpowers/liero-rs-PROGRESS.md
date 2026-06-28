@@ -8,7 +8,7 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-06-28 · **Current focus:** Step 2, Slice 4b — T0–T7 done, broad review before push
+> **Last updated:** 2026-06-28 · **Current focus:** Step 2, Slice 4c (explosion objects — sobjects+nobjects)
 
 ---
 
@@ -41,22 +41,21 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 ├─ ✅ Slice 1  Level → sim-state + state-hash harness (tick 0)
 ├─ ✅ Slice 2  one worm, physics only
 ├─ ✅ Slice 3  worm control + aiming (master hash turns on)
-├─ 🔄 Slice 4  one weapon, full lifecycle (4a–4d)              ~30%   ◀── HERE
+├─ 🔄 Slice 4  one weapon, full lifecycle (4a–4d)              ~50%   ◀── HERE
 │   ├─ ✅ 4a  projectile lifecycle — fan (RNG goes live)         SHIPPED
-│   ├─ 🔄 4b  terrain destruction — greenball / DrawDirtEffect   ◀── HERE (~95%)
-│   │         (the level hash IS now a time series ✓)           T0–T7✅, broad review → push
-│   ├─ ⬜ 4c  explosion sobjects + nobjects — dart
-│   └─ ⬜ 4d  slice-3/4 deferrals (dig body, reload, shell, …)
+│   ├─ ✅ 4b  terrain destruction — greenball / DrawDirtEffect   SHIPPED (level hash live, 91 ticks bit-exact)
+│   ├─ 🔄 4c  explosion sobjects + nobjects — dart               ◀── HERE (planned, next)
+│   └─ ⬜ 4d  slice-3/4 deferrals (dig body, reload, shell, …)   (planned; executes last)
 ├─ ⬜ Slice 5  remaining object families (nobjects/sobjects/blood/bonuses)
 └─ ⬜ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match
 ```
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~35–45%** |
-| Step 2 (current) | **~50–55%** |
-| Slice 4 (weapon lifecycle) | **~30%** |
-| Slice 4b (current) | **~95%** (T0–T7 done: full port + golden matches C++ over 91 ticks; broad review, then push) |
+| Rewrite track (steps 0–5) | **~38–45%** |
+| Step 2 (current) | **~55–58%** |
+| Slice 4 (weapon lifecycle) | **~50%** (4a + 4b shipped; 4c + 4d planned) |
+| Slice 4c (next) | **0%** (design + plan written; ready to execute) |
 
 ---
 

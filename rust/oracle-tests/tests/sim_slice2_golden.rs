@@ -137,6 +137,7 @@ fn sim_slice2_physics_matches_cpp_oracle() {
         Vec::new(),
         PhysicsConsts::from_tc(&tc),
         ControlConsts::from_tc(&tc),
+        tc.hacks.SignedRecoil,
     );
 
     // Assert tick-0 components against the freshly-built state FIRST. Then drive
@@ -171,7 +172,7 @@ fn sim_slice2_physics_matches_cpp_oracle() {
     assert_components(&state, &golden[0]);
 
     // Slice 2 has no input every tick (the scenario defines none); drive both
-    // worms with an empty control state. process_worms advances one worms-only
+    // worms with an empty control state. process_frame advances one worms-only
     // tick (the full per-worm Process pass).
     let empty = [ControlState::new(), ControlState::new()];
     // A genuine bounce: worm0 falls (vel.y > 0) then the floor flips it
@@ -181,7 +182,7 @@ fn sim_slice2_physics_matches_cpp_oracle() {
     let mut bounce_tick: Option<u32> = None;
     let mut prev_vy = state.worms[0].vel.y;
     for g in &golden[1..] {
-        state.process_worms(&empty);
+        state.process_frame(&empty);
         assert_components(&state, g);
         let vy = state.worms[0].vel.y;
         if bounce_tick.is_none() && prev_vy > 0 && vy < prev_vy {

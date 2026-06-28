@@ -1,4 +1,4 @@
-//! Driver-level tests for [`SimState::process_worms`] — the per-worm `Process`
+//! Driver-level tests for [`SimState::process_frame`] — the per-worm `Process`
 //! pass wired in exact C++ order (`worm.cpp:210-353`).
 //!
 //! These exercise the *cross-method* ordering the unit tests in `control.rs` /
@@ -63,6 +63,7 @@ fn build(level: &LevelData, flags: &[u8; 256], pos: Vec2) -> SimState {
         Vec::new(),
         PhysicsConsts::default(),
         ControlConsts::default(),
+        false,
     )
 }
 
@@ -81,7 +82,7 @@ fn grounded_worm_is_actually_grounded() {
     // worm leaves vel == 0 (no gravity because reacts[kRfUp] > 0; nothing else
     // moves it), which only holds if the UP edge add fired.
     let mut s = grounded_state();
-    s.process_worms(&[ControlState::new()]);
+    s.process_frame(&[ControlState::new()]);
     assert_eq!(
         s.worms[0].vel.y, 0,
         "grounded -> gravity skipped -> vel.y stays 0"
@@ -95,7 +96,7 @@ fn mid_air_worm_falls_under_gravity() {
     // the grounded fixture's stillness is the grounding, not a dead driver.
     let (level, flags) = all_background_level(200, 200);
     let mut s = build(&level, &flags, Vec2::new(itof(100), itof(100)));
-    s.process_worms(&[ControlState::new()]);
+    s.process_frame(&[ControlState::new()]);
     assert_eq!(s.worms[0].vel.y, 1500, "mid-air -> +WormGravity");
 }
 
@@ -112,7 +113,7 @@ fn jump_writes_vel_y_before_physics_using_shared_grounded_reacts() {
     let mut s = grounded_state();
 
     // Tick 1 (empty): arms able_to_jump.
-    s.process_worms(&[ControlState::new()]);
+    s.process_frame(&[ControlState::new()]);
     assert!(
         s.worms[0].able_to_jump,
         "Jump released -> able_to_jump armed"
@@ -122,7 +123,7 @@ fn jump_writes_vel_y_before_physics_using_shared_grounded_reacts() {
     // Tick 2 (Jump): impulse applied in step 6, physics (step 9) skips gravity.
     let mut jump = ControlState::new();
     jump.press(ControlState::JUMP);
-    s.process_worms(&[jump]);
+    s.process_frame(&[jump]);
     assert_eq!(
         s.worms[0].vel.y, -c.jump_force,
         "vel.y == -JumpForce: jump fired (tasks saw grounded) and gravity skipped \
@@ -158,7 +159,7 @@ fn jump_impulse_precedes_physics_on_downward_velocity() {
     let mut s = grounded_state();
 
     // Tick 1 (empty): arm able_to_jump; worm stays grounded with vel == 0.
-    s.process_worms(&[ControlState::new()]);
+    s.process_frame(&[ControlState::new()]);
     assert!(
         s.worms[0].able_to_jump,
         "Jump released -> able_to_jump armed"
@@ -181,7 +182,7 @@ fn jump_impulse_precedes_physics_on_downward_velocity() {
     // then physics sees an UPWARD vel.y (rv = reacts[kRfDown] = 0) and leaves it.
     let mut jump = ControlState::new();
     jump.press(ControlState::JUMP);
-    s.process_worms(&[jump]);
+    s.process_frame(&[jump]);
 
     assert_eq!(
         s.worms[0].vel.y,
@@ -208,7 +209,7 @@ fn walk_writes_vel_x_after_physics() {
 
     let mut right = ControlState::new();
     right.press(ControlState::RIGHT);
-    s.process_worms(&[right]);
+    s.process_frame(&[right]);
     assert_eq!(
         s.worms[0].vel.x, c.walk_vel_right,
         "vel.x == WalkVelRight (walk wrote AFTER physics friction this tick)"
@@ -217,7 +218,7 @@ fn walk_writes_vel_x_after_physics() {
 
     // Next tick (empty, grounded): NOW friction hits the walked velocity:
     // 3000 * 89 / 100 = 2670 (truncating toward zero).
-    s.process_worms(&[ControlState::new()]);
+    s.process_frame(&[ControlState::new()]);
     assert_eq!(
         s.worms[0].vel.x, 2670,
         "next tick friction decays the previously-walked vel.x"
@@ -241,7 +242,7 @@ fn aiming_up_raises_angle_monotonically_until_clamp() {
     // pinned *down* to exactly Itof(64) and then oscillates, so we stop the
     // monotone check on entry to the band (which is itself a rise).
     for _ in 0..200 {
-        s.process_worms(&[up]);
+        s.process_frame(&[up]);
         let a = s.worms[0].aiming_angle;
         assert!(
             a >= prev,
@@ -275,7 +276,7 @@ fn weapon_change_cycles_current_weapon_and_clears_direction_bit() {
     };
 
     // Tick 1: first Change tick — latches, Right consumed, no cycle yet.
-    s.process_worms(&[cr]);
+    s.process_frame(&[cr]);
     assert_eq!(
         s.worms[0].current_weapon, 0,
         "first Change tick consumes Right, no cycle"
@@ -283,7 +284,7 @@ fn weapon_change_cycles_current_weapon_and_clears_direction_bit() {
     assert!(s.worms[0].key_change_pressed, "key_change_pressed latched");
 
     // Tick 2: Right re-set by Unpack, PressedOnce(Right) -> cycle up to slot 1.
-    s.process_worms(&[cr]);
+    s.process_frame(&[cr]);
     assert_eq!(
         s.worms[0].current_weapon, 1,
         "second Change tick cycles to weapon 1"
@@ -316,7 +317,7 @@ fn empty_input_matches_slice2_reactions_then_physics() {
     let mut ref_worm = driven.worms[0].clone();
 
     for _ in 0..30 {
-        driven.process_worms(&[ControlState::new()]);
+        driven.process_frame(&[ControlState::new()]);
 
         let reacts = worm_reactions(&driven.level, &mut ref_worm, &phys);
         worm_process_physics(&mut ref_worm, &reacts, &phys);

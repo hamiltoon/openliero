@@ -140,6 +140,7 @@ fn sim_slice3_control_matches_cpp_oracle() {
         Vec::new(),
         PhysicsConsts::from_tc(&tc),
         ControlConsts::from_tc(&tc),
+        tc.hacks.SignedRecoil,
     );
 
     let check = |tick: u32, name: &str, got: u32, want: u32| {
@@ -169,7 +170,7 @@ fn sim_slice3_control_matches_cpp_oracle() {
         check(g.tick, "MASTER state_hash", hash_game_state(state), g.master);
     };
 
-    // --- Tick 0: assert against the freshly-built state, NO process_worms. ----
+    // --- Tick 0: assert against the freshly-built state, NO process_frame. ----
     assert_eq!(golden[0].tick, 0, "first golden row is tick 0");
     assert_tick(&state, &golden[0]);
 
@@ -194,13 +195,13 @@ fn sim_slice3_control_matches_cpp_oracle() {
     // --- Drive each subsequent tick under SCRIPTED input. THE OFF-BY-ONE:
     // golden line `k` (k>=1) is the result of applying input[k-1] on the pass that
     // advances tick k-1 -> k (design doc, *Input timing*). So produce line `k` by
-    // calling process_worms with input keyed `k-1`.
+    // calling process_frame with input keyed `k-1`.
     for k in 1..=scenario.ticks {
         let inputs = [
             ControlState::unpack(scenario.input(k - 1, 0)),
             ControlState::unpack(scenario.input(k - 1, 1)),
         ];
-        state.process_worms(&inputs);
+        state.process_frame(&inputs);
         assert_tick(&state, &golden[k as usize]);
         record(&state);
     }

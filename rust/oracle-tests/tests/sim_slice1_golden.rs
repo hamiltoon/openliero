@@ -132,6 +132,7 @@ fn sim_slice1_tick0_hash_matches_cpp_oracle() {
         Vec::new(),
         PhysicsConsts::from_tc(&tc),
         ControlConsts::from_tc(&tc),
+        tc.hacks.SignedRecoil,
     );
     let got_state = hash_game_state(&state);
     let c = hash_components(&state);

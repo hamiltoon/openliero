@@ -21,6 +21,7 @@ use crate::control::{
 };
 use crate::physics::{worm_process_physics, worm_reactions, PhysicsConsts};
 use crate::pool::{BloodPool, Pool};
+use crate::weapon::{blow_up, wobject_process, worm_fire, WObjectOutcome};
 
 /// Number of weapon slots per worm. Mirrors C++ `NUM_WEAPONS` (`worm.hpp:13`).
 /// `Settings::kSelectableWeapons` is also 5, so `InitWeapons` fills every slot.
@@ -506,6 +507,11 @@ pub struct SimState {
     /// from [`sim_core::tables::precompute_cossin`]. `Fire` reads it for the
     /// muzzle velocity / firing position and recoil. Not hashed.
     pub cossin: [Vec2; 128],
+    /// The TC `[hacks].SignedRecoil` flag (C++ `common.h[HSignedRecoil]`). Read
+    /// only by [`worm_fire`]'s recoil step; a `recoil >= 128` is reinterpreted as
+    /// `recoil - 256` when set. Built from the TC, **not** hashed (slices 1-3
+    /// never fire, so the value is inert for them).
+    pub h_signed_recoil: bool,
 }
 
 impl SimState {
@@ -521,6 +527,11 @@ impl SimState {
     /// (`TcConfig.materials`); it feeds [`LevelSim::checked_mat_background`], the
     /// collision-probe port. The caller passes the real table (the differential
     /// dumper/test load it from `tc.cfg`).
+    ///
+    /// `h_signed_recoil` is the TC `[hacks].SignedRecoil` flag, threaded onto the
+    /// state for the Fire path's recoil step (slices 1-3 never fire, so it is
+    /// inert there; tests that do not fire pass `false`).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         level: &LevelData,
         worms_init: &[WormInit],
@@ -529,6 +540,7 @@ impl SimState {
         weapons: Vec<Weapon>,
         physics: PhysicsConsts,
         control: ControlConsts,
+        h_signed_recoil: bool,
     ) -> SimState {
         let mut rand = Rand::new();
         rand.seed(seed);
@@ -554,15 +566,33 @@ impl SimState {
             // Built deterministically from the integer Taylor-series table; the
             // caller never supplies it (it is TC-independent).
             cossin: precompute_cossin(),
+            h_signed_recoil,
         }
     }
 
-    /// Advance one worm tick (Slice 3): runs each worm's **full** `Worm::Process`
-    /// body (`worm.cpp:210-353`) in exact C++ order — still a *worms-only* pass,
-    /// **not** the full `Game::ProcessFrame` (no `cycles++`, no bonus-drop RNG
-    /// roll, no object/ninjarope `Process` loops, no `ProcessSight` — those land
-    /// in Slice 6's `process_frame`). Renamed from the Slice-2 `process_worm_physics`
-    /// now that it is no longer physics-only.
+    /// Advance one tick: a **subset** of `Game::ProcessFrame` (`game.cpp:333-355`
+    /// object loops, then `worm.cpp:210-353` per worm) — *not* yet the whole frame
+    /// (no `cycles++`, no bonus-drop RNG roll, no ninjarope `Process`, no
+    /// `ProcessSight`; those land in a later slice). Renamed from the Slice-3
+    /// `process_worms` now that it runs the object-Process loops too.
+    ///
+    /// **Object loops run BEFORE the worm loop**, mirroring `Game::ProcessFrame`'s
+    /// order (`game.cpp:334-355`): `sobjects` (no-op this slice), then the
+    /// **wobjects** walk (the ported projectile per-tick `Process`), then
+    /// `nobjects`/`bobjects` (no-ops). The wobjects walk steps slots in index
+    /// order (mirroring `ExactObjectList::All()`): each live slot is copied out,
+    /// run through [`wobject_process`], then written back ([`Keep`]) or freed
+    /// ([`Explode`] -> [`blow_up`] + `free`, [`Remove`] -> `free`).
+    ///
+    /// **The load-bearing off-by-one:** because the wobjects loop runs *before*
+    /// the worm loop, a shot spawned by [`worm_fire`] (inside the worm loop) is
+    /// NOT visited on its birth tick — its first `pos` advance is the *next* tick.
+    /// Walking by index (not [`Pool::iter`]) is what lets us free a slot mid-walk
+    /// and skip a shot spawned later this same tick.
+    ///
+    /// [`Keep`]: WObjectOutcome::Keep
+    /// [`Explode`]: WObjectOutcome::Explode
+    /// [`Remove`]: WObjectOutcome::Remove
     ///
     /// **Input interleave** (matches the C++ dumper `sim_physics_dump.cpp:233-238`):
     /// for each worm in `worms` order, overwrite its `control_states` from the
@@ -589,16 +619,56 @@ impl SimState {
     /// 11. Change gate: held → [`process_weapon_change`]; else clear
     ///     `key_change_pressed` + [`process_movement`] (walk writes `vel.x`
     ///     **after** physics, so it affects *next* tick's integration).
-    pub fn process_worms(&mut self, inputs: &[ControlState]) {
-        // Disjoint field borrows: the per-worm pass reads `level`/`physics`/
-        // `control` while mutating each worm in turn.
+    pub fn process_frame(&mut self, inputs: &[ControlState]) {
+        // Disjoint field borrows: destructuring `&mut self` binds each field as a
+        // separate `&mut` (default binding mode), so the object loops can hold
+        // `&mut wobjects`/`&mut rand` + `&weapons` while the worm loop separately
+        // holds a `&mut` into `worms` and the Fire gate borrows the *other* fields
+        // — all provably disjoint, which is what makes this borrow-check.
         let SimState {
             level,
             physics,
             control,
             worms,
+            wobjects,
+            rand,
+            weapons,
+            cossin,
+            h_signed_recoil,
             ..
         } = self;
+        let h_signed_recoil = *h_signed_recoil;
+
+        // ----- Object Process loops (game.cpp:334-355), BEFORE the worm loop. --
+        // sobjects: no-op this slice (SObject::Process not ported).
+        // wobjects: the ported projectile per-tick Process. Walk slots in INDEX
+        // order (== ExactObjectList::All()); freeing a slot mid-walk is safe, and
+        // a wobject spawned LATER this tick (by Fire) is not visited.
+        for slot in 0..wobjects.capacity() {
+            let obj_ref = match wobjects.get(slot) {
+                Some(o) => o,
+                None => continue,
+            };
+            let mut obj = *obj_ref;
+            let weapon = &weapons[obj
+                .ty
+                .expect("live wobject must carry a resolved weapon type")
+                as usize];
+            match wobject_process(&mut obj, level, weapon, rand) {
+                WObjectOutcome::Keep => {
+                    *wobjects.get_mut(slot).expect("slot still live") = obj;
+                }
+                WObjectOutcome::Explode => {
+                    blow_up(weapon, rand);
+                    wobjects.free(slot);
+                }
+                WObjectOutcome::Remove => {
+                    wobjects.free(slot);
+                }
+            }
+        }
+        // nobjects / bobjects: no-ops this slice (Process not ported).
+
         for (i, w) in worms.iter_mut().enumerate() {
             // Interleave: apply this worm's input (≈ `Unpack`), then Process it.
             if let Some(input) = inputs.get(i) {
@@ -630,7 +700,17 @@ impl SimState {
             // 7. weapons (delay_left countdown).
             process_weapons(w);
 
-            // 8. Fire gate — OUT (Slice 4).
+            // 8. Fire gate (worm.cpp:336-339), ported verbatim: Fire held, Change
+            //    NOT held, the current slot Available() (loading_left == 0) and its
+            //    delay_left <= 0. (No `ammo > 0` term — the C++ has none here.)
+            let cw = w.current_weapon as usize;
+            if w.control_states.get(ControlState::FIRE)
+                && !w.control_states.get(ControlState::CHANGE)
+                && w.weapons[cw].available()
+                && w.weapons[cw].delay_left <= 0
+            {
+                worm_fire(w, weapons, cossin, h_signed_recoil, rand, wobjects);
+            }
 
             // 9. physics — reads the SAME reacts computed in step 2.
             worm_process_physics(w, &reacts, physics);
@@ -744,6 +824,7 @@ mod tests {
             Vec::new(),
             PhysicsConsts::default(),
             ControlConsts::default(),
+            false,
         );
         assert_eq!(state.cycles, 0, "cycles must be 0 at tick 0");
         assert_eq!(state.rand.last(), 0, "no RNG consumed -> last() == 0");
@@ -766,6 +847,7 @@ mod tests {
             Vec::new(),
             PhysicsConsts::default(),
             ControlConsts::default(),
+            false,
         );
         assert!(state.bonuses.is_empty());
         assert!(state.wobjects.is_empty());
@@ -792,6 +874,7 @@ mod tests {
             Vec::new(),
             PhysicsConsts::default(),
             ControlConsts::default(),
+            false,
         );
         for w in &state.worms {
             assert_eq!(w.pos, Vec2::zero());
@@ -824,6 +907,7 @@ mod tests {
             Vec::new(),
             PhysicsConsts::default(),
             ControlConsts::default(),
+            false,
         );
         let w0 = &state.worms[0];
         // Each slot has its type set, ammo from the init, and zero timers.
@@ -1082,6 +1166,7 @@ mod tests {
             Vec::new(),
             PhysicsConsts::default(),
             ControlConsts::default(),
+            false,
         );
         assert_eq!(
             state.level.material_flags, flags,
@@ -1117,6 +1202,7 @@ mod tests {
                 Vec::new(),
                 PhysicsConsts::default(),
                 ControlConsts::default(),
+                false,
             );
             s.wobjects.spawn(WObject {
                 pos: Vec2::new(1, 2),
@@ -1238,6 +1324,7 @@ mod tests {
             weapons.clone(),
             PhysicsConsts::default(),
             ControlConsts::default(),
+            false,
         );
         assert_eq!(
             state.cossin,

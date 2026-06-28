@@ -76,6 +76,13 @@ impl<T> Pool<T> {
         self.slots.get(slot).and_then(Option::as_ref)
     }
 
+    /// Mutably borrows the live object in `slot`, if any. The driver's
+    /// per-tick object loop uses this to write a processed object back into its
+    /// slot (the `Keep` outcome) after running it through `wobject_process`.
+    pub fn get_mut(&mut self, slot: usize) -> Option<&mut T> {
+        self.slots.get_mut(slot).and_then(Option::as_mut)
+    }
+
     /// Iterates live objects in slot (index) order.
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.slots.iter().filter_map(Option::as_ref)

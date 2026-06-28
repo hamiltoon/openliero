@@ -231,6 +231,7 @@ mod tests {
             control: crate::control::ControlConsts::default(),
             weapons: Vec::new(),
             cossin: sim_core::tables::precompute_cossin(),
+            h_signed_recoil: false,
         }
     }
 

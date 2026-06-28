@@ -37,6 +37,7 @@
 
 use assets::object::Objects;
 use assets::tc::TcConfig;
+use sim::control::ControlConsts;
 use sim::hash::{hash_components, hash_game_state};
 use sim::physics::PhysicsConsts;
 use sim::state::{SimState, WormInit, NUM_WEAPONS};
@@ -129,6 +130,7 @@ fn sim_slice1_tick0_hash_matches_cpp_oracle() {
         seed,
         &tc.materials,
         PhysicsConsts::from_tc(&tc),
+        ControlConsts::from_tc(&tc),
     );
     let got_state = hash_game_state(&state);
     let c = hash_components(&state);

@@ -31,6 +31,7 @@
 use assets::object::Objects;
 use assets::tc::TcConfig;
 use oracle_tests::scenario::Scenario;
+use sim::control::ControlConsts;
 use sim::hash::{hash_components, hash_game_state};
 use sim::physics::PhysicsConsts;
 use sim::state::{ControlState, SimState, WormInit, NUM_WEAPONS};
@@ -135,6 +136,7 @@ fn sim_slice2_physics_matches_cpp_oracle() {
         scenario.seed,
         &tc.materials,
         PhysicsConsts::from_tc(&tc),
+        ControlConsts::from_tc(&tc),
     );
 
     // Assert tick-0 components against the freshly-built state FIRST. Then drive

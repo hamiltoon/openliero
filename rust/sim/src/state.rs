@@ -13,6 +13,7 @@ use sim_core::fixed::Fixed;
 use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
+use crate::control::ControlConsts;
 use crate::physics::{worm_process_physics, worm_reactions, PhysicsConsts};
 use crate::pool::{BloodPool, Pool};
 
@@ -85,6 +86,31 @@ impl ControlState {
         } else {
             self.0 &= !(1u32 << n);
         }
+    }
+
+    /// Sets control bit `n`, mirroring C++ `Worm::Press` (`worm.hpp:199`:
+    /// `control_states.Set(control, true)`).
+    pub fn press(&mut self, n: u32) {
+        self.set(n, true);
+    }
+
+    /// Clears control bit `n`, mirroring C++ `Worm::Release` (`worm.hpp:197`:
+    /// `control_states.Set(control, false)`).
+    pub fn release(&mut self, n: u32) {
+        self.set(n, false);
+    }
+
+    /// Returns whether control bit `n` is set and **clears it**, mirroring C++
+    /// `Worm::PressedOnce` (`worm.hpp:191-195`): read the bit, `Set(control,
+    /// false)`, return the prior value. The ported control paths use this to
+    /// consume an edge; because the driver re-`Unpack`s `control_states` from the
+    /// scripted input each tick, the C++ `prev_control_states` edge detection
+    /// degenerates to this per-tick read-and-clear (design doc,
+    /// *Control-state mutation*).
+    pub fn pressed_once(&mut self, n: u32) -> bool {
+        let was = self.get(n);
+        self.set(n, false);
+        was
     }
 }
 
@@ -204,6 +230,38 @@ pub struct WormState {
     pub index: i32,
     /// Stats-panel X. Scenario field; not hashed.
     pub stats_x: i32,
+
+    // --- Slice 3 control state (NOT hashed) -------------------------------
+    // The non-hashed worm state the ported control/aiming paths read/write
+    // across ticks to make the *hashed* fields (aiming_angle, control_states,
+    // vel, weapon delays, ninjarope) evolve correctly. Defaults are the C++
+    // ctor / `ResetWorms` constants (design doc, *Datamodel additions*; see
+    // `from_init`). The control logic that reads these lands in later tasks.
+    /// `Worm::aiming_speed` (`worm.hpp:226`): aim-angle velocity. Drives
+    /// `aiming_angle`.
+    pub aiming_speed: Fixed,
+    /// `Worm::direction` (`worm.hpp:262`): which way the worm faces (0 left,
+    /// 1 right). Clamps + flips `aiming_angle`.
+    pub direction: i32,
+    /// `Worm::movable` (`worm.hpp`, ctor sets `true`): gates aiming/movement.
+    pub movable: bool,
+    /// `Worm::able_to_jump` (`worm.hpp:228`): previous Jump-key edge state.
+    pub able_to_jump: bool,
+    /// `Worm::able_to_dig` (`worm.hpp:228`): previous dig edge state (dig body
+    /// deferred; flag toggles only).
+    pub able_to_dig: bool,
+    /// `Worm::key_change_pressed` (`worm.hpp:229`): edge latch for the Change
+    /// key in `ProcessWeaponChange`; gates the Left/Right `Release`.
+    pub key_change_pressed: bool,
+    /// `Worm::current_weapon` (`worm.hpp:250`; `ResetWorms` sets 0): selected
+    /// weapon slot.
+    pub current_weapon: i32,
+    /// `Worm::fire_cone` (`worm.hpp:252`): firecone countdown (inert this slice;
+    /// `ProcessWeapons` decrement, not hashed).
+    pub fire_cone: i32,
+    /// `Worm::leave_shell_timer` (`worm.hpp:253`): shell-drop countdown (inert;
+    /// only `Worm::Fire` sets it, and gates a `rand()` branch — stays 0).
+    pub leave_shell_timer: i32,
 }
 
 /// `Worm::kKilledTimerInitial` (`worm.hpp:243`): the respawn countdown the worm
@@ -238,6 +296,17 @@ impl WormState {
             ninjarope: Ninjarope::default(),
             index: init.index,
             stats_x: init.stats_x,
+            // Post-`ResetWorms`/ctor control defaults (design doc, *Datamodel
+            // additions*; verified against worm.hpp + game.cpp ResetWorms).
+            aiming_speed: 0,
+            direction: 0,
+            movable: true, // ctor sets `movable(true)` (worm.hpp)
+            able_to_jump: false,
+            able_to_dig: false,
+            key_change_pressed: false,
+            current_weapon: 0, // ResetWorms sets `current_weapon = 0` (game.cpp:164)
+            fire_cone: 0,
+            leave_shell_timer: 0,
         }
     }
 }
@@ -361,6 +430,9 @@ pub struct SimState {
     /// The TC physics constants/hacks (`WormGravity`, friction, `MinBounce*`,
     /// …) the worm-physics pass reads. Built once from the TC; not hashed.
     pub physics: PhysicsConsts,
+    /// The TC constants/hacks (aim/move/jump/ninjarope) the worm control +
+    /// aiming paths read. Built once from the same TC; not hashed.
+    pub control: ControlConsts,
 }
 
 impl SimState {
@@ -382,6 +454,7 @@ impl SimState {
         seed: u32,
         material_flags: &[u8; 256],
         physics: PhysicsConsts,
+        control: ControlConsts,
     ) -> SimState {
         let mut rand = Rand::new();
         rand.seed(seed);
@@ -402,6 +475,7 @@ impl SimState {
             nobjects: Pool::new(NOBJECT_CAPACITY),
             bobjects: BloodPool::new(BLOOD_CAPACITY),
             physics,
+            control,
         }
     }
 
@@ -488,7 +562,7 @@ mod tests {
     #[test]
     fn builds_tick0_global_state() {
         let level = synthetic_level();
-        let state = SimState::new(&level, &two_worms(), 0x1234, &[0u8; 256], PhysicsConsts::default());
+        let state = SimState::new(&level, &two_worms(), 0x1234, &[0u8; 256], PhysicsConsts::default(), ControlConsts::default());
         assert_eq!(state.cycles, 0, "cycles must be 0 at tick 0");
         assert_eq!(state.rand.last(), 0, "no RNG consumed -> last() == 0");
         assert_eq!(state.level.width, 4);
@@ -499,7 +573,7 @@ mod tests {
 
     #[test]
     fn pools_start_empty() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 1, &[0u8; 256], PhysicsConsts::default());
+        let state = SimState::new(&synthetic_level(), &two_worms(), 1, &[0u8; 256], PhysicsConsts::default(), ControlConsts::default());
         assert!(state.bonuses.is_empty());
         assert!(state.wobjects.is_empty());
         assert!(state.sobjects.is_empty());
@@ -517,7 +591,7 @@ mod tests {
 
     #[test]
     fn worm_tick0_scalar_values() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256], PhysicsConsts::default());
+        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256], PhysicsConsts::default(), ControlConsts::default());
         for w in &state.worms {
             assert_eq!(w.pos, Vec2::zero());
             assert_eq!(w.vel, Vec2::zero());
@@ -541,7 +615,7 @@ mod tests {
 
     #[test]
     fn worm_weapons_initialised() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256], PhysicsConsts::default());
+        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256], PhysicsConsts::default(), ControlConsts::default());
         let w0 = &state.worms[0];
         // Each slot has its type set, ammo from the init, and zero timers.
         for (j, ww) in w0.weapons.iter().enumerate() {
@@ -602,6 +676,70 @@ mod tests {
         assert_eq!(cs.pack(), 1 << 4);
         cs.set(ControlState::FIRE, false);
         assert_eq!(cs.pack(), 0);
+    }
+
+    #[test]
+    fn from_init_sets_control_defaults() {
+        // The 9 Slice-3 control fields take their post-`ResetWorms`/ctor
+        // constants (worm.hpp + game.cpp:164 ResetWorms). Verified per design
+        // doc *Datamodel additions*.
+        let init = WormInit {
+            index: 0,
+            health: 100,
+            lives: 10,
+            stats_x: 0,
+            weapons: [WeaponInit::default(); NUM_WEAPONS],
+            start_pos: Vec2::zero(),
+            visible: false,
+        };
+        let w = WormState::from_init(&init);
+        assert_eq!(w.aiming_speed, 0, "aiming_speed{{0}}");
+        assert_eq!(w.direction, 0, "direction{{0}}");
+        assert!(w.movable, "ctor sets movable(true)");
+        assert!(!w.able_to_jump, "able_to_jump{{false}}");
+        assert!(!w.able_to_dig, "able_to_dig{{false}}");
+        assert!(!w.key_change_pressed, "key_change_pressed{{false}}");
+        assert_eq!(w.current_weapon, 0, "ResetWorms sets current_weapon = 0");
+        assert_eq!(w.fire_cone, 0, "fire_cone{{0}}");
+        assert_eq!(w.leave_shell_timer, 0, "leave_shell_timer{{0}}");
+    }
+
+    #[test]
+    fn control_state_press_sets_and_release_clears() {
+        // press(n) sets the bit (C++ Press -> Set(n, true)); release(n) clears it
+        // (C++ Release -> Set(n, false)). pack() reflects each change.
+        let mut cs = ControlState::new();
+        cs.press(ControlState::JUMP);
+        assert!(cs.get(ControlState::JUMP));
+        assert_eq!(cs.pack(), 1 << 6);
+        // Pressing an already-set bit is idempotent.
+        cs.press(ControlState::JUMP);
+        assert_eq!(cs.pack(), 1 << 6);
+        cs.release(ControlState::JUMP);
+        assert!(!cs.get(ControlState::JUMP));
+        assert_eq!(cs.pack(), 0);
+        // Releasing a clear bit is a no-op.
+        cs.release(ControlState::JUMP);
+        assert_eq!(cs.pack(), 0);
+    }
+
+    #[test]
+    fn control_state_pressed_once_returns_prior_bit_and_clears_it() {
+        // PressedOnce (worm.hpp:191-195): read the bit, clear it, return the
+        // prior value. The clear must be visible in pack().
+        let mut cs = ControlState::new();
+        cs.press(ControlState::LEFT);
+        cs.press(ControlState::RIGHT);
+        // First read of LEFT: true, and the bit is consumed.
+        assert!(cs.pressed_once(ControlState::LEFT), "set bit -> true");
+        assert!(!cs.get(ControlState::LEFT), "pressed_once cleared LEFT");
+        assert_eq!(cs.pack(), 1 << 3, "only RIGHT remains set");
+        // Second read of LEFT: now false (already cleared), still clear.
+        assert!(!cs.pressed_once(ControlState::LEFT), "clear bit -> false");
+        assert_eq!(cs.pack(), 1 << 3, "RIGHT still set, LEFT stays clear");
+        // RIGHT is independent and still consumable.
+        assert!(cs.pressed_once(ControlState::RIGHT), "RIGHT still set -> true");
+        assert_eq!(cs.pack(), 0, "both bits now cleared");
     }
 
     #[test]
@@ -714,7 +852,7 @@ mod tests {
         let mut flags = [0u8; 256];
         flags[7] = MAT_BACKGROUND;
         let level = synthetic_level(); // material_id[i] = i*3+1; idx 2 -> material 7
-        let state = SimState::new(&level, &two_worms(), 0, &flags, PhysicsConsts::default());
+        let state = SimState::new(&level, &two_worms(), 0, &flags, PhysicsConsts::default(), ControlConsts::default());
         assert_eq!(state.level.material_flags, flags, "flag table copied verbatim");
         // synthetic_level idx 2 (x=2,y=0) = material 7 -> background.
         assert!(state.level.checked_mat_background(2, 0));

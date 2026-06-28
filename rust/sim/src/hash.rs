@@ -228,6 +228,7 @@ mod tests {
             nobjects: Pool::new(4),
             bobjects: BloodPool::new(4),
             physics: crate::physics::PhysicsConsts::default(),
+            control: crate::control::ControlConsts::default(),
         }
     }
 
@@ -336,6 +337,16 @@ mod tests {
             },
             index: 0,
             stats_x: 0,
+            // Slice-3 control fields are not hashed; defaults suffice here.
+            aiming_speed: 0,
+            direction: 0,
+            movable: true,
+            able_to_jump: false,
+            able_to_dig: false,
+            key_change_pressed: false,
+            current_weapon: 0,
+            fire_cone: 0,
+            leave_shell_timer: 0,
         }
     }
 

@@ -50,9 +50,12 @@ golden. `data/TC/openliero` real TC; weapon **greenball**.
   dirt into Background (`blit.cpp:584-621`); the scenario must straddle the surface or
   `level` never moves. Port the `n_draw_back=true` carving half too (complete fn),
   exercised only in unit tests this slice.
-- **CorrectShadow OMITTED** (O4): `settings->shadow=false` in the dumper. Provably
-  inert to 1–4a (its other reader `MakeShadow` is only reached via
-  `GenerateFromSettings`, which the dumper never calls) — **re-diff to prove it**.
+- **CorrectShadow OMITTED** (O4): `settings->shadow=false` in the dumper. `CorrectShadow`
+  (gated on `settings->shadow`) writes `material_id` and IS reachable from the dumper's
+  Process loop (worm dig, dirt-effect/`expl_ground` explosions); it is inert to 1–4a
+  ONLY because those scenarios trigger no such event in the dumped ticks — **re-diff to
+  prove it**. (`MakeShadow`, the other shadow `material_id` writer, runs only via
+  `GenerateFromSettings`, which the dumper never calls — a secondary point, not the reason.)
 - **Only `material_id` is hashed** — no `materials` cache, no `display_valid`, no
   dirty list in the Rust port. Branch reads `material_flags[material_id[idx]]`; writes
   `material_id[idx]`.

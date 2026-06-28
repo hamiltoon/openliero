@@ -181,8 +181,12 @@ int main(int argc, char** argv) {
   settings->game_mode = Settings::kGmKillEmAll;
   settings->lives = scn.worms[0].lives;
   settings->loading_time = 0;
-  // O4: omit CorrectShadow for dirt-effect slices; inert to 1-4a because MakeShadow is
-  // only reached via GenerateFromSettings, which this dumper never calls (uses load()).
+  // O4: omit CorrectShadow for the dirt-effect slices. CorrectShadow (blit.cpp:624,
+  // gated on settings->shadow) writes material_id and IS reachable from this dumper's
+  // Process loop (worm dig, dirt-effect / expl_ground explosions). It is inert to
+  // slices 1-4a only because those scenarios trigger no such event in the dumped ticks;
+  // the empty re-diff confirms that. (MakeShadow, the other shadow material_id writer,
+  // runs only via GenerateFromSettings, which this load()-based dumper never calls.)
   settings->shadow = false;
 
   auto sound_player = std::make_shared<NullSoundPlayer>();

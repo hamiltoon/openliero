@@ -8,7 +8,7 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-06-28 · **Current focus:** Step 2, Slice 4b — Task 2 (`blow_up` dirt-effect branch)
+> **Last updated:** 2026-06-28 · **Current focus:** Step 2, Slice 4b — Task 3 (driver integration: explosion → terrain)
 
 ---
 
@@ -43,8 +43,8 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 ├─ ✅ Slice 3  worm control + aiming (master hash turns on)
 ├─ 🔄 Slice 4  one weapon, full lifecycle (4a–4d)              ~30%   ◀── HERE
 │   ├─ ✅ 4a  projectile lifecycle — fan (RNG goes live)         SHIPPED
-│   ├─ 🔄 4b  terrain destruction — greenball / DrawDirtEffect   ◀── HERE (~22%)
-│   │         (the level hash becomes a time series)            T0–T1✅, T2 of 8 next
+│   ├─ 🔄 4b  terrain destruction — greenball / DrawDirtEffect   ◀── HERE (~38%)
+│   │         (the level hash becomes a time series)            T0–T2✅, T3 of 8 next
 │   ├─ ⬜ 4c  explosion sobjects + nobjects — dart
 │   └─ ⬜ 4d  slice-3/4 deferrals (dig body, reload, shell, …)
 ├─ ⬜ Slice 5  remaining object families (nobjects/sobjects/blood/bonuses)
@@ -56,7 +56,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 | Rewrite track (steps 0–5) | **~35–45%** |
 | Step 2 (current) | **~50–55%** |
 | Slice 4 (weapon lifecycle) | **~30%** |
-| Slice 4b (current) | **~22%** (T0 datamodel + T1 `draw_dirt_effect` done; 6 tasks left) |
+| Slice 4b (current) | **~38%** (T0 datamodel + T1 `draw_dirt_effect` + T2 `blow_up` branch done; 5 tasks left) |
 
 ---
 

@@ -9,6 +9,7 @@
 //! [`assets`] (data parsers); rendering, audio, input, and networking live in
 //! other crates layered on top.
 
+pub mod blit;
 pub mod control;
 pub mod hash;
 pub mod physics;

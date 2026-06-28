@@ -13,7 +13,7 @@
 
 use sim_core::fixed::{ftoi, itof};
 
-use crate::state::{ControlState, WormState};
+use crate::state::{ControlState, WormState, NUM_WEAPONS};
 
 /// The TC constants/hacks the worm control + aiming paths read. Field groups
 /// mirror the design-doc table (Aiming / Movement / Jump / Ninjarope); each
@@ -385,6 +385,177 @@ pub fn process_weapons(worm: &mut WormState) {
         // nobject_types[7].Create1(...). Unimplemented: never armed without Fire.
         unreachable!("leave_shell_timer is always 0 this slice (no Fire path arms it)");
     }
+}
+
+// ---------------------------------------------------------------------------
+// ProcessWeaponChange (worm.cpp:1064-1098)
+// ---------------------------------------------------------------------------
+
+/// Port of `Worm::ProcessWeaponChange` (`src/game/worm.cpp:1064-1098`) — cycle
+/// the selected weapon while the Change key is held.
+///
+/// Runs in step 11 of the per-worm pass *only* when `Pressed(kChange)` (the
+/// driver gates this against [`process_movement`]; Task 5 wires it). Hashed
+/// output: `control_states.Pack()` — the Left/Right bit clears below. Non-hashed
+/// `current_weapon`/`key_change_pressed` steer it across ticks.
+///
+/// In C++ order:
+///
+/// 1. **First change-tick edge** (`worm.cpp:1065-1070`): while
+///    `!key_change_pressed`, `Release(kLeft)` and `Release(kRight)` clear those
+///    bits and `key_change_pressed` latches `true`. Because the Release runs
+///    *before* the `PressedOnce` reads below, the very first tick of a Change
+///    hold consumes that tick's Left/Right press — so a fresh hold cycles on
+///    tick 2 onward, not tick 1.
+/// 2. `fire_cone = 0`, `animate = false` (`worm.cpp:1072-1073`) — non-hashed;
+///    only `fire_cone` is tracked, `animate` is render-only (skipped).
+/// 3. Loop-sound stop (`worm.cpp:1075-1077`) — SKIPPED (sound not hashed).
+/// 4. **Cycle gate** (`worm.cpp:1079`): `weapons[current_weapon].Available() ||
+///    settings->load_change`. `Available()` is `loading_left == 0`
+///    (`worm.hpp:35`), which holds every tick this slice (no reload arms
+///    `loading_left` — see [`process_weapons`]); `load_change` defaults `true`
+///    (`settings.hpp:75`). So the gate is unconditionally true here and cycling
+///    always runs; the `loading_left == 0` invariant is pinned with a
+///    `debug_assert!`.
+/// 5. **`PressedOnce(kLeft)`** (`worm.cpp:1080-1087`): decrement `current_weapon`,
+///    wrapping below 0 to `kSelectableWeapons - 1` (== `NUM_WEAPONS - 1`), and
+///    clear the Left bit. `hotspot_x/y` are render-only (skipped).
+/// 6. **`PressedOnce(kRight)`** (`worm.cpp:1089-1096`): increment `current_weapon`,
+///    wrapping at `kSelectableWeapons` back to 0, and clear the Right bit.
+///
+/// The `Unpack`-each-tick degeneration (design doc, *Control-state mutation*):
+/// the driver re-`Unpack`s `control_states` from the scripted input every tick,
+/// so once `key_change_pressed` is latched a held Change+Right re-sets the Right
+/// bit each tick and `PressedOnce` fires every tick — holding for *k* steady
+/// ticks cycles *k* times.
+pub fn process_weapon_change(worm: &mut WormState) {
+    // worm.cpp:1065-1070 — first change-tick: clear Left/Right, latch.
+    if !worm.key_change_pressed {
+        worm.control_states.release(ControlState::LEFT);
+        worm.control_states.release(ControlState::RIGHT);
+        worm.key_change_pressed = true;
+    }
+
+    // worm.cpp:1072 — fire_cone = 0. (animate = false at :1073 is render-only.)
+    worm.fire_cone = 0;
+
+    // worm.cpp:1075-1077 — loop-sound stop: SKIPPED (sound not hashed).
+
+    // worm.cpp:1079 gate — Available() || load_change. Available() == loading_left
+    // == 0 holds every tick this slice (no reload), and load_change defaults true,
+    // so the gate is always entered. Pin the Available() invariant.
+    debug_assert!(
+        worm.weapons[worm.current_weapon as usize].loading_left == 0,
+        "ProcessWeaponChange gate: Available() (loading_left==0) holds this slice; \
+         reload is Slice-4 (Fire) territory"
+    );
+
+    // worm.cpp:1080-1087 — PressedOnce(Left): cycle down, wrap to NUM_WEAPONS-1.
+    if worm.control_states.pressed_once(ControlState::LEFT) {
+        worm.current_weapon -= 1;
+        if worm.current_weapon < 0 {
+            worm.current_weapon = NUM_WEAPONS as i32 - 1;
+        }
+        // hotspot_x/y = Ftoi(pos) — render-only, not hashed; skipped.
+    }
+
+    // worm.cpp:1089-1096 — PressedOnce(Right): cycle up, wrap to 0.
+    if worm.control_states.pressed_once(ControlState::RIGHT) {
+        worm.current_weapon += 1;
+        if worm.current_weapon >= NUM_WEAPONS as i32 {
+            worm.current_weapon = 0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ProcessMovement (worm.cpp:850-957)
+// ---------------------------------------------------------------------------
+
+/// Port of `Worm::ProcessMovement` (`src/game/worm.cpp:850-957`) — walk left/
+/// right, face the worm, and re-arm the dig (terrain dig body DEFERRED).
+///
+/// Runs in step 11 of the per-worm pass when Change is *not* held (the driver's
+/// `else` branch; Task 5 wires it, and that branch also clears
+/// `key_change_pressed`). Hashed outputs: `vel.x` (the walk accel) and
+/// `aiming_angle` (the direction-flip `Itof(128) - aiming_angle`). Non-hashed
+/// `direction`/`aiming_speed`/`able_to_dig` steer hashed state across ticks.
+///
+/// The whole body is gated on `movable` (`worm.cpp:853`). In C++ order:
+///
+/// * **Walk left** (`worm.cpp:857-871`, `kLeft && !kRight`): while `vel.x >
+///   MaxVelLeft`, `vel.x -= WalkVelLeft` (a single guarded add — it may overshoot
+///   the cap, there is no clamp to the exact value). On a facing change
+///   (`direction != 0`): `aiming_speed = 0`, and if `aiming_angle >= Itof(64)`
+///   flip it to `Itof(128) - aiming_angle`, then `direction = 0`.
+/// * **Walk right** (`worm.cpp:873-887`, `!kLeft && kRight`): the mirror with
+///   `WalkVelRight`/`MaxVelRight`, the `aiming_angle <= Itof(64)` flip, and
+///   `direction = 1`.
+/// * **Dig** (`worm.cpp:889-951`, `kLeft && kRight`): if `able_to_dig`, clear it
+///   and run `DrawDirtEffect` — which draws `rand()` **and** writes the level.
+///   That body is **DEFERRED to Slice 4**; only the `able_to_dig` toggle and the
+///   Left+Right condition are ported, with the deferred call site guarded by a
+///   `debug_assert!`. The slice-3 scenario never holds Left+Right, so this is
+///   unreachable in the real run (design doc, *RNG decision* / *The hard 10%*).
+///   The `else` (not both held) re-arms `able_to_dig = true`.
+/// * Idle `animate = false` (`worm.cpp:953-955`) — render-only, skipped.
+///
+/// `vel.x` arithmetic is `wrapping_*` to match C++ `int` semantics; the angle
+/// flip uses `itof`/`wrapping_sub` (same discipline as the aiming port).
+pub fn process_movement(worm: &mut WormState, c: &ControlConsts) {
+    if !worm.movable {
+        return;
+    }
+
+    let k_left = worm.control_states.get(ControlState::LEFT);
+    let k_right = worm.control_states.get(ControlState::RIGHT);
+
+    // worm.cpp:857-871 — walk left.
+    if k_left && !k_right {
+        if worm.vel.x > c.max_vel_left {
+            worm.vel.x = worm.vel.x.wrapping_sub(c.walk_vel_left);
+        }
+        if worm.direction != 0 {
+            worm.aiming_speed = 0;
+            if worm.aiming_angle >= itof(64) {
+                worm.aiming_angle = itof(128).wrapping_sub(worm.aiming_angle);
+            }
+            worm.direction = 0;
+        }
+        // animate = true — render-only (skipped).
+    }
+
+    // worm.cpp:873-887 — walk right.
+    if !k_left && k_right {
+        if worm.vel.x < c.max_vel_right {
+            worm.vel.x = worm.vel.x.wrapping_add(c.walk_vel_right);
+        }
+        if worm.direction != 1 {
+            worm.aiming_speed = 0;
+            if worm.aiming_angle <= itof(64) {
+                worm.aiming_angle = itof(128).wrapping_sub(worm.aiming_angle);
+            }
+            worm.direction = 1;
+        }
+    }
+
+    // worm.cpp:889-951 — dig detection. The DrawDirtEffect body is DEFERRED.
+    if k_left && k_right {
+        if worm.able_to_dig {
+            worm.able_to_dig = false;
+            // worm.cpp:893-948: DrawDirtEffect draws rand() AND writes material_id.
+            // DEFERRED to Slice 4; the scenario never holds Left+Right, so this is
+            // unreachable. A debug build trips this guard if it ever does.
+            debug_assert!(
+                false,
+                "dig DrawDirtEffect deferred to Slice 4; scenario must not hold Left+Right"
+            );
+        }
+    } else {
+        worm.able_to_dig = true;
+    }
+
+    // worm.cpp:953-955 — idle animate = false (render-only, skipped).
 }
 
 #[cfg(test)]
@@ -1000,5 +1171,368 @@ MultiJump = true
         assert_eq!(w.leave_shell_timer, 0);
         process_weapons(&mut w);
         assert_eq!(w.leave_shell_timer, 0, "shell branch skipped, timer untouched");
+    }
+
+    // ---- process_weapon_change (ProcessWeaponChange port) --------------------
+    //
+    // Hand-folded against worm.cpp:1064-1098. Hashed output under test:
+    // `control_states.Pack()` (the Left/Right bit clears via Release/PressedOnce).
+    // Non-hashed `current_weapon`/`key_change_pressed` steer it across ticks.
+    // Cycle direction: PressedOnce(Left) decrements (wraps to NUM_WEAPONS-1),
+    // PressedOnce(Right) increments (wraps to 0); kSelectableWeapons == NUM_WEAPONS.
+
+    // A bare, movable worm with a carried weapon in every slot (loading_left == 0
+    // so the Available() gate holds), current_weapon 0, key_change_pressed false.
+    fn change_worm() -> WormState {
+        WormState::from_init(&WormInit {
+            index: 0,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit { ty: Some(0), ammo: 10 }; NUM_WEAPONS],
+            start_pos: Vec2::zero(),
+            visible: true,
+        })
+    }
+
+    #[test]
+    fn weapon_change_first_tick_releases_left_right_and_latches() {
+        // worm.cpp:1065-1070: !key_change_pressed -> Release(Left), Release(Right),
+        // key_change_pressed = true. The Release pre-clears the bits, so the
+        // PressedOnce reads below see false -> NO cycle on the first change-tick.
+        let mut w = change_worm();
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::LEFT);
+        w.control_states.press(ControlState::RIGHT);
+
+        process_weapon_change(&mut w);
+
+        assert!(w.key_change_pressed, "first tick latches key_change_pressed");
+        assert!(!w.control_states.get(ControlState::LEFT), "Left released");
+        assert!(!w.control_states.get(ControlState::RIGHT), "Right released");
+        assert_eq!(w.current_weapon, 0, "first tick eats the press -> no cycle");
+        assert_eq!(
+            w.control_states.pack(),
+            1 << ControlState::CHANGE,
+            "pack(): only Change remains set"
+        );
+    }
+
+    #[test]
+    fn weapon_change_right_cycles_up_and_clears_bit() {
+        // Steady state (key_change_pressed already latched): PressedOnce(Right)
+        // increments current_weapon and clears the Right bit (worm.cpp:1089-1096).
+        let mut w = change_worm();
+        w.key_change_pressed = true;
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::RIGHT);
+
+        process_weapon_change(&mut w);
+
+        assert_eq!(w.current_weapon, 1, "Right: current_weapon 0 -> 1");
+        assert!(!w.control_states.get(ControlState::RIGHT), "Right bit cleared");
+        assert_eq!(
+            w.control_states.pack(),
+            1 << ControlState::CHANGE,
+            "pack(): only Change remains"
+        );
+    }
+
+    #[test]
+    fn weapon_change_right_wraps_to_zero() {
+        // worm.cpp:1090-1092: ++current_weapon >= kSelectableWeapons -> 0.
+        let mut w = change_worm();
+        w.key_change_pressed = true;
+        w.current_weapon = NUM_WEAPONS as i32 - 1; // 4
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::RIGHT);
+
+        process_weapon_change(&mut w);
+
+        assert_eq!(w.current_weapon, 0, "Right at slot 4 wraps to 0");
+    }
+
+    #[test]
+    fn weapon_change_left_cycles_down_and_clears_bit() {
+        // PressedOnce(Left) decrements current_weapon and clears the Left bit
+        // (worm.cpp:1080-1087).
+        let mut w = change_worm();
+        w.key_change_pressed = true;
+        w.current_weapon = 2;
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::LEFT);
+
+        process_weapon_change(&mut w);
+
+        assert_eq!(w.current_weapon, 1, "Left: current_weapon 2 -> 1");
+        assert!(!w.control_states.get(ControlState::LEFT), "Left bit cleared");
+        assert_eq!(w.control_states.pack(), 1 << ControlState::CHANGE);
+    }
+
+    #[test]
+    fn weapon_change_left_wraps_to_max() {
+        // worm.cpp:1081-1083: --current_weapon < 0 -> kSelectableWeapons - 1.
+        let mut w = change_worm();
+        w.key_change_pressed = true;
+        w.current_weapon = 0;
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::LEFT);
+
+        process_weapon_change(&mut w);
+
+        assert_eq!(
+            w.current_weapon,
+            NUM_WEAPONS as i32 - 1,
+            "Left at slot 0 wraps to NUM_WEAPONS-1 (4)"
+        );
+    }
+
+    #[test]
+    fn weapon_change_left_and_right_same_tick_net_zero() {
+        // Steady state, both Left and Right held (re-set by Unpack): PressedOnce
+        // fires both -> -1 then +1 -> net unchanged, both bits cleared. Order is
+        // Left (decrement) then Right (increment) per worm.cpp:1080-1096.
+        let mut w = change_worm();
+        w.key_change_pressed = true;
+        w.current_weapon = 3;
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::LEFT);
+        w.control_states.press(ControlState::RIGHT);
+
+        process_weapon_change(&mut w);
+
+        assert_eq!(w.current_weapon, 3, "Left then Right: -1 then +1 -> net 0");
+        assert_eq!(
+            w.control_states.pack(),
+            1 << ControlState::CHANGE,
+            "both Left and Right bits cleared"
+        );
+    }
+
+    #[test]
+    fn weapon_change_unpack_each_tick_cycles_k_times() {
+        // The Unpack-each-tick degeneration (design doc, *Control-state mutation*):
+        // once key_change_pressed is latched, re-Unpacking Change+Right every tick
+        // makes PressedOnce(Right) fire each tick -> holding for k ticks cycles k
+        // times. k = 7 from slot 0 wraps: 7 % 5 == 2.
+        let mut w = change_worm();
+        w.key_change_pressed = true; // already latched (steady hold)
+        for _ in 0..7 {
+            // Mimic the driver's per-tick Unpack of the scripted input.
+            w.control_states =
+                ControlState::unpack((1 << ControlState::CHANGE) | (1 << ControlState::RIGHT));
+            process_weapon_change(&mut w);
+        }
+        assert_eq!(w.current_weapon, 7 % NUM_WEAPONS as i32, "7 cycles from 0 -> 2");
+    }
+
+    #[test]
+    fn weapon_change_first_tick_then_steady_cycles_k_minus_one() {
+        // Starting unlatched (key_change_pressed false): the first change-tick's
+        // Release eats that tick's Right press, so holding Change+Right for k=3
+        // ticks yields only 2 cycles (tick1 = latch+Release, ticks 2-3 cycle).
+        let mut w = change_worm(); // key_change_pressed = false
+        for _ in 0..3 {
+            w.control_states =
+                ControlState::unpack((1 << ControlState::CHANGE) | (1 << ControlState::RIGHT));
+            process_weapon_change(&mut w);
+        }
+        assert_eq!(w.current_weapon, 2, "first tick eats one: 3 ticks -> 2 cycles");
+    }
+
+    // ---- process_movement (ProcessMovement port) ----------------------------
+    //
+    // Hand-folded against worm.cpp:850-957. Hashed outputs under test: `vel.x`
+    // (walk accel, truncating) and `aiming_angle` (the direction-flip
+    // `Itof(128) - aiming_angle`). Non-hashed `direction`/`aiming_speed`/
+    // `able_to_dig` steer hashed state across ticks. The dig DrawDirtEffect body
+    // (worm.cpp:893-948) is DEFERRED to Slice 4 — only the able_to_dig toggle +
+    // the Left+Right condition are ported, guarded with a `debug_assert!`. Uses
+    // the real `data/TC/openliero` walk constants via Default: WalkVelLeft/Right
+    // 3000, MaxVelLeft -29184, MaxVelRight 29184.
+
+    // A bare, movable worm at rest with the given facing direction.
+    fn move_worm(direction: i32) -> WormState {
+        let mut w = change_worm();
+        w.direction = direction;
+        w
+    }
+
+    #[test]
+    fn walk_right_accelerates_vel_x() {
+        // direction already 1 (no flip): vel.x += WalkVelRight while < MaxVelRight.
+        let c = ControlConsts::default();
+        let mut w = move_worm(1);
+        w.vel = Vec2::new(0, 0);
+        w.control_states.press(ControlState::RIGHT);
+        process_movement(&mut w, &c);
+        assert_eq!(w.vel.x, 3000, "vel.x += WalkVelRight");
+        assert_eq!(w.direction, 1, "already facing right -> no flip");
+    }
+
+    #[test]
+    fn walk_right_caps_at_max_vel_right() {
+        // At/above MaxVelRight the `vel.x < MaxVelRight` guard is false -> no add.
+        let c = ControlConsts::default();
+        let mut w = move_worm(1);
+        w.vel = Vec2::new(29184, 0); // == MaxVelRight
+        w.control_states.press(ControlState::RIGHT);
+        process_movement(&mut w, &c);
+        assert_eq!(w.vel.x, 29184, "at the cap -> no further accel");
+
+        // Just below the cap: a single guarded add overshoots it (C++ adds once,
+        // no clamp to the exact cap).
+        let mut w2 = move_worm(1);
+        w2.vel = Vec2::new(29000, 0); // < MaxVelRight
+        w2.control_states.press(ControlState::RIGHT);
+        process_movement(&mut w2, &c);
+        assert_eq!(w2.vel.x, 32000, "below cap -> one add overshoots (no clamp)");
+    }
+
+    #[test]
+    fn walk_left_accelerates_vel_x() {
+        // direction already 0 (no flip): vel.x -= WalkVelLeft while > MaxVelLeft.
+        let c = ControlConsts::default();
+        let mut w = move_worm(0);
+        w.vel = Vec2::new(0, 0);
+        w.control_states.press(ControlState::LEFT);
+        process_movement(&mut w, &c);
+        assert_eq!(w.vel.x, -3000, "vel.x -= WalkVelLeft");
+        assert_eq!(w.direction, 0, "already facing left -> no flip");
+    }
+
+    #[test]
+    fn walk_left_caps_at_max_vel_left() {
+        // At MaxVelLeft the `vel.x > MaxVelLeft` guard is false -> no subtract.
+        let c = ControlConsts::default();
+        let mut w = move_worm(0);
+        w.vel = Vec2::new(-29184, 0); // == MaxVelLeft
+        w.control_states.press(ControlState::LEFT);
+        process_movement(&mut w, &c);
+        assert_eq!(w.vel.x, -29184, "at the cap -> no further accel");
+    }
+
+    #[test]
+    fn walk_right_flips_direction_and_aiming_angle() {
+        // direction 0 -> 1: aiming_speed = 0, and (aiming_angle <= Itof(64)) ->
+        // aiming_angle = Itof(128) - aiming_angle. 30 <= 64 -> 128 - 30 = 98.
+        let c = ControlConsts::default();
+        let mut w = move_worm(0);
+        w.aiming_speed = 5000;
+        w.aiming_angle = itof(30);
+        w.control_states.press(ControlState::RIGHT);
+        process_movement(&mut w, &c);
+        assert_eq!(w.direction, 1, "direction flips to right");
+        assert_eq!(w.aiming_speed, 0, "aiming_speed zeroed on flip");
+        assert_eq!(w.aiming_angle, itof(98), "Itof(128) - Itof(30) = Itof(98)");
+    }
+
+    #[test]
+    fn walk_left_flips_direction_and_aiming_angle() {
+        // direction 1 -> 0: aiming_speed = 0, and (aiming_angle >= Itof(64)) ->
+        // aiming_angle = Itof(128) - aiming_angle. 100 >= 64 -> 128 - 100 = 28.
+        let c = ControlConsts::default();
+        let mut w = move_worm(1);
+        w.aiming_speed = -5000;
+        w.aiming_angle = itof(100);
+        w.control_states.press(ControlState::LEFT);
+        process_movement(&mut w, &c);
+        assert_eq!(w.direction, 0, "direction flips to left");
+        assert_eq!(w.aiming_speed, 0, "aiming_speed zeroed on flip");
+        assert_eq!(w.aiming_angle, itof(28), "Itof(128) - Itof(100) = Itof(28)");
+    }
+
+    #[test]
+    fn walk_right_flip_skips_angle_when_above_64() {
+        // direction 0 -> 1 but aiming_angle > Itof(64): the `<= Itof(64)` guard is
+        // false, so the angle is NOT flipped (aiming_speed still zeroes).
+        let c = ControlConsts::default();
+        let mut w = move_worm(0);
+        w.aiming_speed = 7;
+        w.aiming_angle = itof(100); // > 64 -> no flip
+        w.control_states.press(ControlState::RIGHT);
+        process_movement(&mut w, &c);
+        assert_eq!(w.direction, 1);
+        assert_eq!(w.aiming_speed, 0, "speed still zeroed on a direction change");
+        assert_eq!(w.aiming_angle, itof(100), "angle untouched (100 > 64)");
+    }
+
+    #[test]
+    fn movement_gated_off_when_not_movable() {
+        // !movable -> the whole body is skipped; nothing moves or toggles.
+        let c = ControlConsts::default();
+        let mut w = move_worm(0);
+        w.movable = false;
+        w.able_to_dig = false;
+        w.vel = Vec2::new(0, 0);
+        w.control_states.press(ControlState::RIGHT);
+        process_movement(&mut w, &c);
+        assert_eq!(w.vel.x, 0, "no walk when !movable");
+        assert_eq!(w.direction, 0, "no flip when !movable");
+        assert!(!w.able_to_dig, "able_to_dig untouched when !movable");
+    }
+
+    #[test]
+    fn able_to_dig_rearms_on_single_direction() {
+        // worm.cpp:949-951: !(Left && Right) -> able_to_dig = true. A single
+        // direction (or none) re-arms the dig.
+        let c = ControlConsts::default();
+        let mut w = move_worm(1);
+        w.able_to_dig = false;
+        w.control_states.press(ControlState::RIGHT);
+        process_movement(&mut w, &c);
+        assert!(w.able_to_dig, "single-direction input re-arms able_to_dig");
+    }
+
+    #[test]
+    fn able_to_dig_rearms_when_idle() {
+        // No keys -> !(Left && Right) -> able_to_dig = true.
+        let c = ControlConsts::default();
+        let mut w = move_worm(0);
+        w.able_to_dig = false;
+        process_movement(&mut w, &c);
+        assert!(w.able_to_dig, "idle re-arms able_to_dig");
+    }
+
+    #[test]
+    fn single_direction_does_not_trigger_dig_assert() {
+        // The slice-3 scenario only ever holds a single direction; with able_to_dig
+        // true, a single-direction walk must NOT reach the deferred dig assert.
+        let c = ControlConsts::default();
+        let mut w = move_worm(1);
+        w.able_to_dig = true;
+        w.vel = Vec2::new(0, 0);
+        w.control_states.press(ControlState::RIGHT);
+        process_movement(&mut w, &c); // must not panic
+        assert_eq!(w.vel.x, 3000, "single-direction walk still accelerates");
+        assert!(w.able_to_dig, "single direction leaves able_to_dig set");
+    }
+
+    #[test]
+    #[should_panic(expected = "dig DrawDirtEffect deferred to Slice 4")]
+    fn dig_branch_with_able_to_dig_trips_deferred_assert() {
+        // worm.cpp:889-948: Left && Right && able_to_dig reaches the DrawDirtEffect
+        // body, which is DEFERRED. In debug it trips the guard. The scenario never
+        // holds Left+Right, so this is unreachable in the real run.
+        let c = ControlConsts::default();
+        let mut w = move_worm(0);
+        w.able_to_dig = true;
+        w.control_states.press(ControlState::LEFT);
+        w.control_states.press(ControlState::RIGHT);
+        process_movement(&mut w, &c);
+    }
+
+    #[test]
+    fn dig_branch_without_able_to_dig_does_not_panic() {
+        // Left && Right but able_to_dig false: the inner `if able_to_dig` is
+        // skipped, so the deferred body is never reached (no panic). able_to_dig
+        // stays false (the else re-arm is not taken when both are held).
+        let c = ControlConsts::default();
+        let mut w = move_worm(0);
+        w.able_to_dig = false;
+        w.control_states.press(ControlState::LEFT);
+        w.control_states.press(ControlState::RIGHT);
+        process_movement(&mut w, &c); // must not panic
+        assert!(!w.able_to_dig, "L+R with able_to_dig false stays false (no re-arm)");
     }
 }

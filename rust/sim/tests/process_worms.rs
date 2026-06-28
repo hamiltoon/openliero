@@ -125,6 +125,66 @@ fn jump_writes_vel_y_before_physics_using_shared_grounded_reacts() {
 }
 
 #[test]
+fn jump_impulse_precedes_physics_on_downward_velocity() {
+    // DISCRIMINATING ordering test. The sibling `jump_writes_vel_y_before_physics_*`
+    // test jumps from rest (vel.y == 0), where swapping steps 6 and 9 yields the
+    // SAME result (a zero-velocity grounded bounce/stop is a no-op and gravity is
+    // gated off when grounded). This test pins the order with a GROUNDED worm
+    // carrying a DOWNWARD vel.y on the jump tick, so the two orderings diverge.
+    //
+    // The grounded fixture's reacts are [down=0, left=0, up=10, right=0] (the UP
+    // edge add grounds the worm; RF_DOWN stays 0).
+    //
+    // jump-first (CORRECT, current order — process_tasks step 6 BEFORE physics step 9):
+    //   tasks:   vel.y = 40000 - JumpForce(56064) = -16064  (now upward)
+    //   physics: vel.y < 0 -> rv = reacts[kRfDown] = 0 -> vertical branch skipped;
+    //            gravity skipped (reacts[kRfUp] != 0) -> vel.y stays -16064.
+    //
+    // physics-first (WRONG, steps 6 and 9 reordered):
+    //   physics: vel.y > 0 -> rv = reacts[kRfUp] = 10; abs(40000) <= MinBounceDown
+    //            (53248) -> STOP: vel.y = 0; gravity skipped -> vel.y = 0.
+    //   tasks:   vel.y = 0 - JumpForce = -56064.
+    //
+    // -16064 != -56064, so this test FAILS if the jump/physics steps are swapped.
+    let c = ControlConsts::default();
+    let p = PhysicsConsts::default();
+    let mut s = grounded_state();
+
+    // Tick 1 (empty): arm able_to_jump; worm stays grounded with vel == 0.
+    s.process_worms(&[ControlState::new()]);
+    assert!(s.worms[0].able_to_jump, "Jump released -> able_to_jump armed");
+    assert_eq!(s.worms[0].vel.y, 0, "grounded -> still at rest before the injection");
+
+    // Inject a downward velocity that is at/below MinBounceDown, so the
+    // physics-first vertical branch would STOP it (vel.y -> 0) rather than bounce.
+    let down = 40000;
+    assert!(
+        down <= p.min_bounce_down,
+        "downward vel must be <= MinBounceDown so the physics-first branch stops it"
+    );
+    s.worms[0].vel.y = down;
+
+    // Tick 2 (Jump): jump-first applies the impulse to the downward vel.y FIRST,
+    // then physics sees an UPWARD vel.y (rv = reacts[kRfDown] = 0) and leaves it.
+    let mut jump = ControlState::new();
+    jump.press(ControlState::JUMP);
+    s.process_worms(&[jump]);
+
+    assert_eq!(
+        s.worms[0].vel.y,
+        down - c.jump_force,
+        "jump-first: impulse applied to the downward vel.y BEFORE physics"
+    );
+    // Pin the exact value and prove it differs from the physics-first ordering,
+    // which would stop vel.y to 0 then jump to -JumpForce.
+    assert_eq!(s.worms[0].vel.y, -16064, "exact jump-first vel.y");
+    assert_ne!(
+        s.worms[0].vel.y, -c.jump_force,
+        "differs from the physics-first result (-JumpForce = -56064)"
+    );
+}
+
+#[test]
 fn walk_writes_vel_x_after_physics() {
     // On a grounded worm, a Right tick: physics runs friction on the OLD vel.x (0)
     // first, THEN process_movement adds WalkVelRight. So vel.x == WalkVelRight

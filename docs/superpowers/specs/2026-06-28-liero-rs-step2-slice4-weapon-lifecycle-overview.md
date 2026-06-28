@@ -48,7 +48,7 @@ sub-slice adds **one** new pool / one new RNG cluster against its component hash
 |---|---|---|---|---|---|
 | **4a** *(✓ DONE — bit-exact, master+components 93 ticks, on PR #3)* | `Worm::Fire` + `WObject::Process`/`BlowUpObject` for a projectile that **explodes into nothing** (free only) | **fan** | `wobjects` | **yes** (Fire spread/colour/time-var) | still **pristine** |
 | **4b** *(planned — design+plan written)* | `BlowUpObject`'s own `dirt_effect` → **`DrawDirtEffect`** (the level-hash goes live); greenball's texture-6 is *additive* (`n_draw_back=false` ⇒ creates dirt in Background, not carving — `blit.hpp:40`) | **greenball** | — | + 1 `rand(tex.r_frame)=rand(2)` per explode | **goes live** |
-| **4c** | `create_on_exp` **`SObject`** (`Process` + `Create`: sound, screen_flash, worm `DoDamage` + blow-away, dirt-throw + blood, **`NObject`** splinters) + `NObject::Process` | **dart→small_explosion** (or bazooka) | `sobjects`, `nobjects` | + sound/dirt-throw/blood/splinter cluster | live |
+| **4c** *(planned — design+plan written)* | `create_on_exp` **`SObject::Create`** (sound, screen_flash, dirt-throw → **`NObject`** dirt-debris, crater) + `SObject::Process` + `NObject::Process`/`Create*`. **Deferred:** worm `DoDamage`+blow-away+blood (O10, worms kept out of range; the `cycles=0` blood-trail trap) and the splinter path (O9, dart spawns none). **`small_explosion`'s `dirtEffect=2` is a *carving* texture (`n_draw_back=true`)** ⇒ 4c reuses 4b's `draw_dirt_effect` and is its first *live* carve | **dart→small_explosion** (O5 confirmed; `bazooka→large_explosion` adds the splinter path — O9) | `sobjects`, `nobjects` | + sound `rand(2)` / dirt-throw `rand(8)`+`rand(128)`+`Create2` / crater `rand(2)` cluster (dart Fire = **0** rand) | live (carving) |
 | **4d** | the **Slice-3 deferrals** that belong here: dig-body `DrawDirtEffect`, reload branch (`ammo<=0 → loading_left`/`ComputedLoadingTime`), `leave_shell_timer` shell-drop, `ProcessSight` (laser), weapon-change `load_change` gate | (reuses above) | — | + shell-drop / dig | live |
 
 **Ordering rationale (sim-first, simplest weapon first):**
@@ -343,11 +343,36 @@ materials) — **pixel-exact** is the 4b challenge.
 - **O8** (new, 4b) — reuse `physics_fall_test.lev` (fire greenball at its sky-over-floor
   surface so the impact window has Background cells), or add a crater-fixture?
   *(Recommended: reuse it.)*
-- **O5** — 4c weapon: `dart→small_explosion` (clean Fire, isolates explosion RNG)
-  vs `bazooka` (full splinter path in one slice)? *(Recommended: dart first.)*
+- **O5** (resolved → recommendation, 4c design written) — 4c weapon =
+  **`dart→small_explosion`**: dart Fire draws **0** rand (`distribution=0`,
+  `shotType=1` deterministic frame, `timeToExploV=0`, `wormCollide=false`) so every
+  new `rand()` in 4c is in the explosion — clean isolation of the sobject + dirt-throw
+  + dirt-debris cluster. `bazooka→large_explosion` (12 wobject splinters) is the
+  splinter-path alternative — see O9. *(Recommended: dart→small_explosion; confirm.)*
 - **O6** — Scenario weapon-override grammar: `weapon <slot> <name>` per-worm vs a
   single `loadout` line? *(Recommended: `weapon <slot> <name>`, applied to both
   worms; minimal.)*
+- **O9** (new, 4c) — dart→small_explosion does **not** exercise the **splinter** RNG
+  path (wobject `BlowUpObject` splinters `weapon.cpp:96-114`; nobject explode-splinters
+  `nobject.cpp:221-228`): dart `splinterAmount=0`, sobjects don't splinter, and the
+  dirt-debris `particle__disappearing` `splinterAmount=0`. Port the splinter code
+  (guarded) in 4c, exercise it **live** in a 4c follow-up / 4d via
+  **`bazooka→large_explosion`** — or fold a bazooka shot into the 4c scenario?
+  *(Recommended: defer to a small bazooka follow-up; keep 4c one new RNG cluster.)*
+- **O10** (new, 4c) — keep all worms **outside** every explosion's `±detect_range`
+  box in 4c (no `DoDamage`/blow-away/blood; mirrors 4a/4b worm-inert posture) vs
+  exercise explosion **damage** now? Damage drags in `DoDamage` mutating hashed worm
+  fields **and** the **`cycles=0` blood-trail trap** (blood nobject 6 has
+  `blood_trail`+`delay=10` ⇒ with frozen `cycles` it spawns a `BObject` *every* tick,
+  storming `bobjects`). *(Recommended: worms out of range for 4c; land explosion
+  damage+blood once `cycles` is freed (Slice 6) or with an explicit frozen-`cycles`
+  decision.)*
+- **O11** (new, 4c finding) — the **`nobjects` component hash fold is weaker than the
+  master**: component folds only `pos.x,pos.y` (`stateHash.hpp:195-196`) while master
+  folds `pos`+`vel`+`cur_frame`+`type->id` (`:85-92`). Nobject `vel`/`cur_frame`/`type`
+  desyncs are invisible to the `nobjects` column and localise via the master only.
+  *(Recommended: accept — it is the C++ contract; document, don't change
+  `stateHash.hpp`.)*
 
 ## Next artifacts
 
@@ -355,5 +380,7 @@ materials) — **pixel-exact** is the 4b challenge.
 - 4a plan: `plans/2026-06-28-liero-rs-step2-slice4a-plan.md`
 - **4b design: `specs/2026-06-28-liero-rs-step2-slice4b-dirt-destruction-design.md`** (planned)
 - **4b plan: `plans/2026-06-28-liero-rs-step2-slice4b-plan.md`** (planned)
+- **4c design: `specs/2026-06-28-liero-rs-step2-slice4c-explosion-objects-design.md`** (planned)
+- **4c plan: `plans/2026-06-28-liero-rs-step2-slice4c-plan.md`** (planned)
 
-4c–4d are sketched above and specced just-in-time when reached.
+4d is sketched above and specced just-in-time when reached.

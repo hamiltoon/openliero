@@ -42,6 +42,16 @@ use sim_core::vec::Vec2;
 
 const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
 
+/// Load the shipped 16x16 large-sprite bank (C++ `large_sprites.Allocate(16,16,110)`)
+/// from `sprites/large.tga`. Threaded into `SimState` for Slice-4b's DrawDirtEffect;
+/// the fan's `dirt_effect = -1` so it is never indexed here, and it is not hashed,
+/// so this golden is unchanged.
+fn load_large_sprites() -> assets::sprite::SpriteSet {
+    let bytes = std::fs::read(format!("{TC_ROOT}/sprites/large.tga")).expect("read large.tga");
+    let tga = assets::sprite::Tga::load(&bytes).expect("large.tga parses");
+    assets::sprite::SpriteSet::from_tga(&tga, 16, 16, 110).expect("large sprite bank")
+}
+
 /// The empty-pool component hash (FNV-1a of a zero-length pool). Every pool reads
 /// this while idle; `wob` leaving this value is how we know a projectile is live.
 const EMPTY_POOL: u32 = 0x0000_0001;
@@ -182,6 +192,7 @@ fn sim_slice4a_fan_fire_matches_cpp_oracle() {
     // --- Build tick-0 state. Slice 4a passes the FULL weapon table (slices 1-3
     // passed `Vec::new()` — no firing); wobject_process/worm_fire look up weapon
     // params by `ty`, which is the verified id == index. ----------------------
+    let large_sprites = load_large_sprites();
     let mut state = SimState::new(
         &level,
         &worms_init,
@@ -191,6 +202,8 @@ fn sim_slice4a_fan_fire_matches_cpp_oracle() {
         PhysicsConsts::from_tc(&tc),
         ControlConsts::from_tc(&tc),
         tc.hacks.SignedRecoil,
+        large_sprites,
+        tc.textures.clone(),
     );
 
     let check = |tick: u32, name: &str, got: u32, want: u32| {

@@ -232,6 +232,8 @@ mod tests {
             weapons: Vec::new(),
             cossin: sim_core::tables::precompute_cossin(),
             h_signed_recoil: false,
+            large_sprites: assets::sprite::SpriteSet::default(),
+            textures: Vec::new(),
         }
     }
 

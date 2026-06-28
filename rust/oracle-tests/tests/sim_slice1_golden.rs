@@ -45,6 +45,15 @@ use sim_core::vec::Vec2;
 
 const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
 
+/// Load the shipped 16x16 large-sprite bank (C++ `large_sprites.Allocate(16,16,110)`)
+/// from `sprites/large.tga`. Threaded into `SimState` for Slice-4b's DrawDirtEffect;
+/// not hashed, so it does not affect this golden.
+fn load_large_sprites() -> assets::sprite::SpriteSet {
+    let bytes = std::fs::read(format!("{TC_ROOT}/sprites/large.tga")).expect("read large.tga");
+    let tga = assets::sprite::Tga::load(&bytes).expect("large.tga parses");
+    assets::sprite::SpriteSet::from_tga(&tga, 16, 16, 110).expect("large sprite bank")
+}
+
 #[test]
 fn sim_slice1_tick0_hash_matches_cpp_oracle() {
     // --- Parse the golden line: 13 whitespace-separated columns. -------------
@@ -123,6 +132,12 @@ fn sim_slice1_tick0_hash_matches_cpp_oracle() {
         },
     ];
 
+    // --- Load the real 16x16 large-sprite bank + TC texture table (Slice-4b
+    // Task 1's DrawDirtEffect reads them). This slice never indexes them, but we
+    // load the real assets so the state is honest and ready for the dig slice;
+    // they are not hashed, so this golden is unchanged.
+    let large_sprites = load_large_sprites();
+
     // --- Build tick-0 state and hash it. -------------------------------------
     let state = SimState::new(
         &level,
@@ -133,6 +148,8 @@ fn sim_slice1_tick0_hash_matches_cpp_oracle() {
         PhysicsConsts::from_tc(&tc),
         ControlConsts::from_tc(&tc),
         tc.hacks.SignedRecoil,
+        large_sprites,
+        tc.textures.clone(),
     );
     let got_state = hash_game_state(&state);
     let c = hash_components(&state);

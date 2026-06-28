@@ -64,6 +64,8 @@ fn build(level: &LevelData, flags: &[u8; 256], pos: Vec2) -> SimState {
         PhysicsConsts::default(),
         ControlConsts::default(),
         false,
+        assets::sprite::SpriteSet::default(),
+        Vec::new(),
     )
 }
 

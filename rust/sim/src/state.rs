@@ -10,6 +10,8 @@
 
 use assets::level::LevelData;
 use assets::object::Weapon;
+use assets::sprite::SpriteSet;
+use assets::tc::Texture;
 use sim_core::fixed::Fixed;
 use sim_core::rng::Rand;
 use sim_core::tables::precompute_cossin;
@@ -476,6 +478,61 @@ impl LevelSim {
         let flags = self.material_flags[self.material_id[idx] as usize];
         (flags & MAT_DIRT_ROCK) != 0
     }
+
+    // ----- Slice 4b flag-read predicates --------------------------------------
+    //
+    // SHAPE CHOICE: these take **in-bounds `(x, y)`** (NOT a flat index). They
+    // index the flattened `x + y*width` directly with **no `inside` gate** —
+    // the same inner read `dirt_rock` performs *after* its gate. The caller in
+    // Task 1 (`DrawDirtEffect`) clips its 16x16 stamp to the level *before*
+    // probing, so every coordinate it passes is already in range; pushing a
+    // redundant per-pixel bounds check into these helpers would be wasted work
+    // (and would diverge from the C++ `PixelMat(x, y).Background()` shape, which
+    // is also unchecked once the caller has clipped). `(x, y)` matches the 4a
+    // probes (`checked_mat_background`/`dirt_rock`) so Task 1 walks one
+    // coordinate convention throughout. The companion writer `set_material`
+    // takes a flat index because Task 1 computes the index once per pixel and
+    // both reads and the write share it.
+
+    /// Background bit (`material.hpp:18`) of the **in-bounds** pixel `(x, y)`.
+    /// Looks up `material_flags[material_id[x + y*width]]` and tests
+    /// [`MAT_BACKGROUND`]. In-bounds only (see the shape note above).
+    pub fn background(&self, x: i32, y: i32) -> bool {
+        let idx = (x + y * self.width) as usize;
+        (self.material_flags[self.material_id[idx] as usize] & MAT_BACKGROUND) != 0
+    }
+
+    /// Either dirt bit (`material.hpp`: `kDirt | kDirt2`) of the in-bounds
+    /// pixel `(x, y)` — the "any destructible dirt" predicate `DrawDirtEffect`
+    /// uses to decide a pixel may be dug.
+    pub fn any_dirt(&self, x: i32, y: i32) -> bool {
+        let idx = (x + y * self.width) as usize;
+        (self.material_flags[self.material_id[idx] as usize] & (MAT_DIRT | MAT_DIRT2)) != 0
+    }
+
+    /// First dirt bit ([`MAT_DIRT`]) of the in-bounds pixel `(x, y)`.
+    pub fn dirt(&self, x: i32, y: i32) -> bool {
+        let idx = (x + y * self.width) as usize;
+        (self.material_flags[self.material_id[idx] as usize] & MAT_DIRT) != 0
+    }
+
+    /// Second dirt bit ([`MAT_DIRT2`]) of the in-bounds pixel `(x, y)`.
+    pub fn dirt2(&self, x: i32, y: i32) -> bool {
+        let idx = (x + y * self.width) as usize;
+        (self.material_flags[self.material_id[idx] as usize] & MAT_DIRT2) != 0
+    }
+
+    /// The FIRST `material_id` writer (used by `DrawDirtEffect` in Task 1 to
+    /// stamp destroyed terrain). Sets `material_id[idx] = v` and **nothing
+    /// else**: the C++ engine also maintains a derived `materials` flag cache, a
+    /// `display_valid` flag and a dirty-rect list, but those are render/derived
+    /// state that the Rust port omits (they are not hashed — the level hash
+    /// reads `material_id` only), so a single store is the whole operation here.
+    /// A subsequent flag-read ([`background`](Self::background)/[`dirt`](Self::dirt)
+    /// /…) reflects the new material via `material_flags`.
+    pub fn set_material(&mut self, idx: usize, v: u8) {
+        self.material_id[idx] = v;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -512,6 +569,19 @@ pub struct SimState {
     /// `recoil - 256` when set. Built from the TC, **not** hashed (slices 1-3
     /// never fire, so the value is inert for them).
     pub h_signed_recoil: bool,
+    /// The 16x16 large-sprite bank (C++ `common.largeSprites`). Slice-4b Task 1's
+    /// `DrawDirtEffect` reads a texture's `mframe` sprite from here (`sprite(n)`
+    /// is a 256-byte 16x16 slice) to decide which crater pixels become
+    /// background. Loaded from `sprites/large.tga`; **not** hashed (the level
+    /// hash reads the material map). Slices 1-4a never index it (no dig runs), so
+    /// they pass an empty bank and stay byte-identical.
+    pub large_sprites: SpriteSet,
+    /// The TC texture table (C++ `common.textures`, `TcConfig.textures`).
+    /// `DrawDirtEffect` looks up `textures[dirt_effect]` for its `mframe`/`sframe`
+    /// frames + `ndrawback`. **Not** hashed; slices 1-4a never index it (the fan's
+    /// `dirt_effect = -1`, so `draw_dirt_effect` never runs), so they pass an
+    /// empty Vec and stay byte-identical.
+    pub textures: Vec<Texture>,
 }
 
 impl SimState {
@@ -531,6 +601,12 @@ impl SimState {
     /// `h_signed_recoil` is the TC `[hacks].SignedRecoil` flag, threaded onto the
     /// state for the Fire path's recoil step (slices 1-3 never fire, so it is
     /// inert there; tests that do not fire pass `false`).
+    ///
+    /// `large_sprites` + `textures` are the assets Slice-4b Task 1's
+    /// `DrawDirtEffect` reads (the 16x16 sprite bank and the TC texture table).
+    /// Neither is hashed; slices 1-4a never index them (no dig), so they pass an
+    /// empty `SpriteSet`/`Vec` and the goldens stay byte-identical. (The arg list
+    /// is long; a builder is noted for later — see the prior reviews.)
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         level: &LevelData,
@@ -541,6 +617,8 @@ impl SimState {
         physics: PhysicsConsts,
         control: ControlConsts,
         h_signed_recoil: bool,
+        large_sprites: SpriteSet,
+        textures: Vec<Texture>,
     ) -> SimState {
         let mut rand = Rand::new();
         rand.seed(seed);
@@ -567,6 +645,8 @@ impl SimState {
             // caller never supplies it (it is TC-independent).
             cossin: precompute_cossin(),
             h_signed_recoil,
+            large_sprites,
+            textures,
         }
     }
 
@@ -842,6 +922,8 @@ mod tests {
             PhysicsConsts::default(),
             ControlConsts::default(),
             false,
+            SpriteSet::default(),
+            Vec::new(),
         );
         assert_eq!(state.cycles, 0, "cycles must be 0 at tick 0");
         assert_eq!(state.rand.last(), 0, "no RNG consumed -> last() == 0");
@@ -865,6 +947,8 @@ mod tests {
             PhysicsConsts::default(),
             ControlConsts::default(),
             false,
+            SpriteSet::default(),
+            Vec::new(),
         );
         assert!(state.bonuses.is_empty());
         assert!(state.wobjects.is_empty());
@@ -892,6 +976,8 @@ mod tests {
             PhysicsConsts::default(),
             ControlConsts::default(),
             false,
+            SpriteSet::default(),
+            Vec::new(),
         );
         for w in &state.worms {
             assert_eq!(w.pos, Vec2::zero());
@@ -925,6 +1011,8 @@ mod tests {
             PhysicsConsts::default(),
             ControlConsts::default(),
             false,
+            SpriteSet::default(),
+            Vec::new(),
         );
         let w0 = &state.worms[0];
         // Each slot has its type set, ammo from the init, and zero timers.
@@ -1184,6 +1272,8 @@ mod tests {
             PhysicsConsts::default(),
             ControlConsts::default(),
             false,
+            SpriteSet::default(),
+            Vec::new(),
         );
         assert_eq!(
             state.level.material_flags, flags,
@@ -1220,6 +1310,8 @@ mod tests {
                 PhysicsConsts::default(),
                 ControlConsts::default(),
                 false,
+                SpriteSet::default(),
+                Vec::new(),
             );
             s.wobjects.spawn(WObject {
                 pos: Vec2::new(1, 2),
@@ -1316,6 +1408,116 @@ mod tests {
         );
     }
 
+    // ---- Slice 4b datamodel: flag-read predicates + set_material -------------
+
+    // A 4x4 level whose top row pins one cell of each material class:
+    // (0,0) background, (1,0) dirt, (2,0) dirt2, (3,0) rock. material 0 (the
+    // default fill) carries NO flags, so every other cell is "nothing".
+    fn flag_read_level() -> LevelSim {
+        let mut material_flags = [0u8; 256];
+        material_flags[1] = MAT_BACKGROUND;
+        material_flags[2] = MAT_DIRT;
+        material_flags[3] = MAT_DIRT2;
+        material_flags[4] = MAT_ROCK;
+
+        let mut material_id = vec![0u8; 16]; // material 0: no flags
+        material_id[0] = 1; // (0,0) background
+        material_id[1] = 2; // (1,0) dirt
+        material_id[2] = 3; // (2,0) dirt2
+        material_id[3] = 4; // (3,0) rock
+
+        LevelSim {
+            width: 4,
+            height: 4,
+            material_id,
+            material_flags,
+        }
+    }
+
+    #[test]
+    fn flag_reads_discriminate_background_dirt_dirt2_rock() {
+        let lvl = flag_read_level();
+        // background cell: only `background` is true.
+        assert!(lvl.background(0, 0), "background cell -> background");
+        assert!(!lvl.any_dirt(0, 0));
+        assert!(!lvl.dirt(0, 0));
+        assert!(!lvl.dirt2(0, 0));
+        // dirt cell: `any_dirt` + `dirt` true, `dirt2`/`background` false.
+        assert!(!lvl.background(1, 0));
+        assert!(lvl.any_dirt(1, 0), "dirt cell -> any_dirt");
+        assert!(lvl.dirt(1, 0), "dirt cell -> dirt");
+        assert!(!lvl.dirt2(1, 0));
+        // dirt2 cell: `any_dirt` + `dirt2` true, `dirt`/`background` false.
+        assert!(!lvl.background(2, 0));
+        assert!(lvl.any_dirt(2, 0), "dirt2 cell -> any_dirt");
+        assert!(!lvl.dirt(2, 0));
+        assert!(lvl.dirt2(2, 0), "dirt2 cell -> dirt2");
+        // rock cell: none of the four background/dirt predicates fire.
+        assert!(!lvl.background(3, 0));
+        assert!(!lvl.any_dirt(3, 0), "rock is not dirt");
+        assert!(!lvl.dirt(3, 0));
+        assert!(!lvl.dirt2(3, 0));
+    }
+
+    #[test]
+    fn set_material_updates_the_map_and_only_that_cell() {
+        let mut lvl = flag_read_level();
+        // (1,1) = idx 5 starts as material 0 (no flags): nothing reads true.
+        assert!(!lvl.background(1, 1));
+        assert!(!lvl.dirt(1, 1));
+        // Point it at material 1 (background): the background read flips true.
+        lvl.set_material(5, 1);
+        assert!(lvl.background(1, 1), "set_material 1 -> background reads true");
+        assert!(!lvl.dirt(1, 1));
+        // Re-point at material 2 (dirt): the dirt read flips true, background off.
+        lvl.set_material(5, 2);
+        assert!(lvl.dirt(1, 1), "set_material 2 -> dirt reads true");
+        assert!(!lvl.background(1, 1));
+        // set_material touches ONLY idx 5 — the (0,0) background cell is intact.
+        assert!(lvl.background(0, 0), "neighbouring cell untouched");
+    }
+
+    #[test]
+    fn sim_state_carries_large_sprites_and_textures() {
+        // textures[6] is greenball: { mframe:38, rframe:2, sframe:82, ndrawback:false }.
+        let mut textures = vec![Texture::default(); 7];
+        textures[6] = Texture {
+            mframe: 38,
+            rframe: 2,
+            sframe: 82,
+            ndrawback: false,
+        };
+        // The large-sprite bank is 16x16 x 110 (C++ large_sprites.Allocate(16,16,110)).
+        let large_sprites = SpriteSet {
+            width: 16,
+            height: 16,
+            count: 110,
+            data: vec![0u8; 110 * 16 * 16],
+        };
+        let state = SimState::new(
+            &synthetic_level(),
+            &two_worms(),
+            0,
+            &[0u8; 256],
+            Vec::new(),
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            large_sprites,
+            textures,
+        );
+        let t = &state.textures[6];
+        assert_eq!(t.mframe, 38, "greenball mframe");
+        assert_eq!(t.rframe, 2, "greenball rframe");
+        assert_eq!(t.sframe, 82, "greenball sframe");
+        assert!(!t.ndrawback, "greenball ndrawback");
+        assert_eq!(
+            state.large_sprites.sprite(38).len(),
+            256,
+            "a 16x16 large sprite is 256 bytes"
+        );
+    }
+
     #[test]
     fn sim_state_carries_cossin_and_weapons() {
         // cossin matches the sim-core table verbatim; weapons are carried as given.
@@ -1342,6 +1544,8 @@ mod tests {
             PhysicsConsts::default(),
             ControlConsts::default(),
             false,
+            SpriteSet::default(),
+            Vec::new(),
         );
         assert_eq!(
             state.cossin,

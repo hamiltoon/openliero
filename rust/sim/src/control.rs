@@ -299,6 +299,94 @@ pub fn process_tasks(worm: &mut WormState, reacts: &[i32; 4], c: &ControlConsts)
     }
 }
 
+// ---------------------------------------------------------------------------
+// ProcessWeapons (worm.cpp:811-848)
+// ---------------------------------------------------------------------------
+
+/// Port of `Worm::ProcessWeapons` (`src/game/worm.cpp:811-848`) — the per-tick
+/// weapon-timer countdown.
+///
+/// This is the Slice-3 MASTER-hash linchpin: in Slice 2 the master hash diverged
+/// precisely because the per-slot `delay_left` countdown was not ported. The
+/// state hash (`stateHash.hpp:38-44`) reads each slot's `ammo`, `delay_left`,
+/// `loading_left`, and `type->id`, so the arithmetic here must be bit-exact.
+///
+/// In C++ order:
+///
+/// 1. **Per-slot `delay_left` countdown** (`worm.cpp:814-818`): every slot with
+///    `delay_left >= 0` decrements by 1. The `>= 0` guard means `0 -> -1` and then
+///    holds at `-1` (off-by-one here is exactly what desynced the master in
+///    Slice 2).
+/// 2. **Current-weapon reload** (`worm.cpp:823-827`) — **DEFERRED to Slice 4**:
+///    when `ammo <= 0`, C++ sets `loading_left = w.ComputedLoadingTime(...)` and
+///    `ammo = w.ammo`. That needs the [`Weapon`](assets::object::Weapon)
+///    definition (`ComputedLoadingTime`/`ammo`), which `WormState` does not carry,
+///    and is only reached once `Worm::Fire` depletes ammo. This slice never sets
+///    Fire, so `ammo > 0` on every slot and the branch never runs — guarded with a
+///    `debug_assert!`.
+/// 3. **Current-weapon loading countdown** (`worm.cpp:829-835`): while
+///    `loading_left > 0`, decrement it. (The reload SOUND at `<= 0` is not
+///    simulated — sound is not hashed.) `loading_left` only becomes `> 0` via the
+///    deferred reload, so it stays `0` this slice; the decrement is a faithful
+///    no-op here.
+/// 4. **`fire_cone` countdown** (`worm.cpp:837-839`): decrement while `> 0`
+///    (non-hashed).
+/// 5. **Shell drop** (`worm.cpp:841-847`) — **DEFERRED to Slice 4**: when
+///    `leave_shell_timer > 0`, C++ decrements it and on reaching `0` draws RNG
+///    twice (`game.rand`) and spawns `nobject_types[7]`. Only `Worm::Fire` arms
+///    `leave_shell_timer`, so it is `0` every tick this slice (keeping the RNG
+///    pristine — design doc, *RNG decision*). Guarded with a `debug_assert!`; the
+///    body is `unreachable!` since it is never armed without Fire.
+///
+/// Takes no `Rand`: the only RNG-drawing path (the shell drop) is unreachable
+/// this slice, which is what keeps `rand.last == 0` every tick.
+pub fn process_weapons(worm: &mut WormState) {
+    // worm.cpp:814-818 — per-slot delay_left countdown (the MASTER-hash linchpin).
+    // The `>= 0` guard is bounded, so a plain `- 1` cannot overflow.
+    for weapon in worm.weapons.iter_mut() {
+        if weapon.delay_left >= 0 {
+            weapon.delay_left -= 1;
+        }
+    }
+
+    let ww = &mut worm.weapons[worm.current_weapon as usize];
+
+    // worm.cpp:823-827 — reload when depleted. DEFERRED to Slice 4 (Fire): needs
+    // the Weapon definition (ComputedLoadingTime/ammo) not carried in WormState and
+    // is only reached once Fire depletes ammo. ammo > 0 on every slot this slice.
+    debug_assert!(
+        ww.ammo > 0,
+        "ProcessWeapons reload branch (ammo<=0) is Slice-4 (Fire) territory; \
+         needs Weapon data and is unreached while ammo>0"
+    );
+
+    // worm.cpp:829-835 — loading countdown. loading_left only becomes > 0 via the
+    // deferred reload, so this is a faithful no-op this slice; the SoundReloaded
+    // play at <= 0 is not simulated (not hashed).
+    if ww.loading_left > 0 {
+        ww.loading_left -= 1;
+    }
+
+    // worm.cpp:837-839 — firecone countdown (non-hashed).
+    if worm.fire_cone > 0 {
+        worm.fire_cone -= 1;
+    }
+
+    // worm.cpp:841-847 — shell drop. DEFERRED to Slice 4 (Fire): only Worm::Fire
+    // arms leave_shell_timer, and the timer-expiry body draws RNG twice and spawns
+    // nobject_types[7]. It is 0 every tick this slice (RNG stays pristine).
+    debug_assert!(
+        worm.leave_shell_timer == 0,
+        "ProcessWeapons shell-drop (leave_shell_timer>0) is Slice-4 (Fire) \
+         territory; only Worm::Fire arms it and it draws RNG"
+    );
+    if worm.leave_shell_timer > 0 {
+        // worm.cpp:842-846: --leave_shell_timer; on reaching 0, game.rand() twice +
+        // nobject_types[7].Create1(...). Unimplemented: never armed without Fire.
+        unreachable!("leave_shell_timer is always 0 this slice (no Fire path arms it)");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,5 +880,125 @@ MultiJump = true
         w.control_states.press(ControlState::JUMP);
         process_tasks(&mut w, &[0, 0, 0, 0], &c); // airborne, gated
         assert!(!w.ninjarope.out, "retract even when jump impulse is gated");
+    }
+
+    // ---- process_weapons (ProcessWeapons port) -------------------------------
+    //
+    // Hand-folded against worm.cpp:811-848. Hashed outputs under test: every
+    // slot's `delay_left` (the per-tick countdown — the Slice-2 MASTER-hash
+    // linchpin), plus the current weapon's `loading_left`/`ammo`. Non-hashed
+    // `fire_cone`/`leave_shell_timer` countdowns are also checked. The `ammo<=0`
+    // reload and `leave_shell_timer>0` shell-drop branches are Slice-4 (Fire)
+    // territory and never run this slice (`ammo>0`, `leave_shell_timer==0`); see
+    // `process_weapons` for the deferral.
+
+    // A bare worm whose every weapon slot carries ammo (so the current-weapon
+    // `ammo<=0` reload branch — which needs Weapon data we don't carry — is never
+    // entered) and the given per-slot `delay_left`. current_weapon stays 0.
+    fn weapon_worm(delays: [i32; NUM_WEAPONS]) -> WormState {
+        let mut w = WormState::from_init(&WormInit {
+            index: 0,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit { ty: Some(0), ammo: 10 }; NUM_WEAPONS],
+            start_pos: Vec2::zero(),
+            visible: true,
+        });
+        for (slot, d) in w.weapons.iter_mut().zip(delays.iter()) {
+            slot.delay_left = *d;
+        }
+        w
+    }
+
+    #[test]
+    fn delay_left_decrements_all_slots_and_stops_at_floor() {
+        // worm.cpp:814-818: every slot with delay_left >= 0 decrements by 1.
+        // Boundary: 1 -> 0 -> stays -1; 0 -> -1 -> stays -1; -1 stays -1 (>= 0 guard).
+        let mut w = weapon_worm([3, 1, 0, -1, 5]);
+
+        process_weapons(&mut w);
+        let after1: Vec<i32> = w.weapons.iter().map(|s| s.delay_left).collect();
+        assert_eq!(after1, vec![2, 0, -1, -1, 4], "tick 1: each >= 0 slot -= 1");
+
+        process_weapons(&mut w);
+        let after2: Vec<i32> = w.weapons.iter().map(|s| s.delay_left).collect();
+        // slot1 hit the floor (0 -> -1), slot2 already at -1 stays, slots 0/4 keep ticking.
+        assert_eq!(after2, vec![1, -1, -1, -1, 3], "tick 2: stops at the -1 floor");
+    }
+
+    #[test]
+    fn delay_left_zero_goes_to_minus_one_then_holds() {
+        // The exact >= 0 boundary on a single slot across three ticks: 0 -> -1 -> -1.
+        let mut w = weapon_worm([0, 0, 0, 0, 0]);
+        process_weapons(&mut w);
+        assert_eq!(w.weapons[0].delay_left, -1, "0 -> -1 (decrement ran at the boundary)");
+        process_weapons(&mut w);
+        assert_eq!(w.weapons[0].delay_left, -1, "-1 stays -1 (guard blocks further decrement)");
+    }
+
+    #[test]
+    fn ammo_positive_leaves_loading_left_and_ammo_untouched() {
+        // worm.cpp:823-827: reload branch is gated on ammo <= 0. With ammo > 0 it
+        // is skipped, so loading_left stays 0 and ammo is unchanged (the scenario's
+        // hashed invariant: no Fire -> ammo never depletes -> no reload).
+        let mut w = weapon_worm([5, 5, 5, 5, 5]);
+        w.weapons[0].loading_left = 0;
+        process_weapons(&mut w);
+        assert_eq!(w.weapons[0].loading_left, 0, "ammo>0 -> reload skipped -> loading_left stays 0");
+        assert_eq!(w.weapons[0].ammo, 10, "ammo untouched without a reload");
+    }
+
+    #[test]
+    fn loading_left_counts_down_when_positive() {
+        // worm.cpp:829-835: once a reload has armed loading_left (> 0) it decrements
+        // each tick (ammo stays > 0 post-reload, so the reload branch is skipped).
+        // The reload SOUND at <= 0 (832-834) is not simulated (not hashed).
+        let mut w = weapon_worm([5, 5, 5, 5, 5]);
+        w.weapons[0].loading_left = 3;
+        process_weapons(&mut w);
+        assert_eq!(w.weapons[0].loading_left, 2, "loading_left -= 1");
+        assert_eq!(w.weapons[0].ammo, 10, "ammo unchanged while reloading");
+        process_weapons(&mut w);
+        assert_eq!(w.weapons[0].loading_left, 1);
+    }
+
+    #[test]
+    fn loading_left_only_touches_current_weapon() {
+        // The reload/loading countdown reads weapons[current_weapon] only. A
+        // non-current slot's loading_left is left alone.
+        let mut w = weapon_worm([5, 5, 5, 5, 5]);
+        w.current_weapon = 2;
+        w.weapons[2].loading_left = 4;
+        w.weapons[0].loading_left = 9; // non-current; must not move
+        process_weapons(&mut w);
+        assert_eq!(w.weapons[2].loading_left, 3, "current weapon counts down");
+        assert_eq!(w.weapons[0].loading_left, 9, "non-current weapon untouched");
+    }
+
+    #[test]
+    fn fire_cone_decrements_while_positive_and_stops_at_zero() {
+        // worm.cpp:837-839: fire_cone-- while > 0, holds at 0 (not hashed, but a
+        // faithful per-tick countdown).
+        let mut w = weapon_worm([5, 5, 5, 5, 5]);
+        w.fire_cone = 2;
+        process_weapons(&mut w);
+        assert_eq!(w.fire_cone, 1);
+        process_weapons(&mut w);
+        assert_eq!(w.fire_cone, 0);
+        process_weapons(&mut w);
+        assert_eq!(w.fire_cone, 0, "fire_cone holds at 0 (> 0 guard)");
+    }
+
+    #[test]
+    fn leave_shell_timer_zero_skips_shell_branch_without_panic() {
+        // worm.cpp:841-847: the shell-drop branch is gated on leave_shell_timer > 0
+        // and draws RNG. It is Slice-4 (Fire) territory; leave_shell_timer == 0
+        // every tick this slice, so process_weapons must skip it cleanly (no panic,
+        // timer stays 0, RNG untouched — process_weapons takes no Rand).
+        let mut w = weapon_worm([5, 5, 5, 5, 5]);
+        assert_eq!(w.leave_shell_timer, 0);
+        process_weapons(&mut w);
+        assert_eq!(w.leave_shell_timer, 0, "shell branch skipped, timer untouched");
     }
 }

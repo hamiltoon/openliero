@@ -181,6 +181,9 @@ int main(int argc, char** argv) {
   settings->game_mode = Settings::kGmKillEmAll;
   settings->lives = scn.worms[0].lives;
   settings->loading_time = 0;
+  // O4: omit CorrectShadow for dirt-effect slices; inert to 1-4a because MakeShadow is
+  // only reached via GenerateFromSettings, which this dumper never calls (uses load()).
+  settings->shadow = false;
 
   auto sound_player = std::make_shared<NullSoundPlayer>();
   Game game(common, settings, sound_player);

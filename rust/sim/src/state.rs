@@ -21,8 +21,10 @@ use crate::control::{
     process_aiming, process_movement, process_tasks, process_weapon_change, process_weapons,
     ControlConsts,
 };
+use crate::nobject::{nobject_process, NObjectOutcome};
 use crate::physics::{worm_process_physics, worm_reactions, PhysicsConsts};
 use crate::pool::{BloodPool, Pool};
+use crate::sobject::{sobject_process, SObjectOutcome};
 use crate::weapon::{blow_up, wobject_process, worm_fire, WObjectOutcome};
 
 /// Number of weapon slots per worm. Mirrors C++ `NUM_WEAPONS` (`worm.hpp:13`).
@@ -762,12 +764,37 @@ impl SimState {
             textures,
             sobject_types,
             nobject_types,
+            cycles,
             ..
         } = self;
         let h_signed_recoil = *h_signed_recoil;
+        // `cycles` is 0 in 4c (no `++cycles` yet); the nobjects loop needs it for
+        // the `cycles % delay` / `cycles & 7` gates inside `nobject_process`. Read
+        // it as a value; the loop must NOT mutate it.
+        let cycles = *cycles;
 
         // ----- Object Process loops (game.cpp:334-355), BEFORE the worm loop. --
-        // sobjects: no-op this slice (SObject::Process not ported).
+        // sobjects: the ported SObject::Process (animation + free), FIRST. Walk
+        // slots in INDEX order (== ExactObjectList::All()). Because this loop runs
+        // BEFORE the wobjects loop, an sobject spawned LATER this tick (by
+        // `blow_up` in the wobjects-loop Explode arm) is NOT visited — its first
+        // animation step is next tick (game.cpp:334-337 precedes :339-342). No rand.
+        for slot in 0..sobjects.capacity() {
+            let obj_ref = match sobjects.get(slot) {
+                Some(o) => o,
+                None => continue,
+            };
+            let mut obj = *obj_ref;
+            let ty = &sobject_types[obj.id as usize];
+            match sobject_process(&mut obj, ty) {
+                SObjectOutcome::Keep => {
+                    *sobjects.get_mut(slot).expect("slot still live") = obj;
+                }
+                SObjectOutcome::Free => {
+                    sobjects.free(slot);
+                }
+            }
+        }
         // wobjects: the ported projectile per-tick Process. Walk slots in INDEX
         // order (== ExactObjectList::All()); freeing a slot mid-walk is safe, and
         // a wobject spawned LATER this tick (by Fire) is not visited.
@@ -810,7 +837,45 @@ impl SimState {
                 }
             }
         }
-        // nobjects / bobjects: no-ops this slice (Process not ported).
+        // nobjects: the ported NObject::Process, THIRD (game.cpp:344-347). Walk
+        // slots in INDEX order. Because this loop runs AFTER the wobjects loop,
+        // dirt-debris spawned THIS tick (by `blow_up` -> `sobject_create`'s
+        // dirt-throw, during the wobjects loop) ARE processed on their birth tick:
+        // combined with `Create2`'s own birth `pos += vel`, that is the load-bearing
+        // "double-step". Copy-out-by-value lets `nobject_process` take `&mut nobjects`
+        // (its splinter-spawn arm) while `obj` is a local copy — same pattern as the
+        // wobjects loop handing `&mut wobjects` to `blow_up`. The explode arms run
+        // INSIDE `nobject_process`; the driver only frees on Explode/Remove.
+        for slot in 0..nobjects.capacity() {
+            let obj_ref = match nobjects.get(slot) {
+                Some(o) => o,
+                None => continue,
+            };
+            let mut obj = *obj_ref;
+            let ty = &nobject_types[obj
+                .ty
+                .expect("live nobject must carry a resolved type") as usize];
+            match nobject_process(
+                &mut obj,
+                ty,
+                nobject_types,
+                level,
+                cossin,
+                large_sprites,
+                textures,
+                nobjects,
+                cycles,
+                rand,
+            ) {
+                NObjectOutcome::Keep => {
+                    *nobjects.get_mut(slot).expect("slot still live") = obj;
+                }
+                NObjectOutcome::Explode | NObjectOutcome::Remove => {
+                    nobjects.free(slot);
+                }
+            }
+        }
+        // bobjects: no-op this slice (empty pool; BObject::Process not ported).
 
         for (i, w) in worms.iter_mut().enumerate() {
             // Interleave: apply this worm's input (≈ `Unpack`), then Process it.

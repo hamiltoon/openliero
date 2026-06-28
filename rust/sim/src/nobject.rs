@@ -52,11 +52,15 @@
 //! as [`crate::weapon`] omits them.
 
 use assets::object::NObjectType;
+use assets::sprite::SpriteSet;
+use assets::tc::Texture;
+use sim_core::fixed::{ftoi, itof};
 use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
+use crate::blit::draw_dirt_effect;
 use crate::pool::Pool;
-use crate::state::NObject;
+use crate::state::{LevelSim, NObject};
 
 /// Port of `NObjectType::Create` (`nobject.cpp:7-39`) — the shared spawn core.
 ///
@@ -191,6 +195,275 @@ pub fn nobject_create2(
         .expect("nobject just spawned in this slot");
     obj.pos = obj.pos.add(obj.vel);
     slot
+}
+
+/// The verdict a single [`nobject_process`] pass returns to the driver (Task 5),
+/// mirroring the `do_explode` / `worm_destroy` tail of C++ `NObject::Process`
+/// (`nobject.cpp:205-233`):
+///
+/// * [`Keep`](NObjectOutcome::Keep) — the object lives on (no free).
+/// * [`Explode`](NObjectOutcome::Explode) — `do_explode` was set (ground-explode,
+///   timeout, or — when ported — worm-explode). **The explode side-effects
+///   (`create_on_exp` / `dirt_effect` / splinter scatter) have ALREADY run inside
+///   `nobject_process`** (unlike [`crate::weapon::WObjectOutcome::Explode`], which
+///   asks the driver to call `blow_up`); the driver only performs the final
+///   `Pool::free` (`nobject.cpp:230-232`, `if (used) game.nobjects.Free(this)`).
+/// * [`Remove`](NObjectOutcome::Remove) — the `worm_destroy && used` path
+///   (`nobject.cpp:197-199`): free **without** exploding. Never produced while the
+///   worm-hit loop is deferred (`hit_damage <= 0` for the 4c types), but part of
+///   the contract Task 5 consumes.
+///
+/// As with [`crate::weapon::wobject_process`], the verdict is split out instead of
+/// freeing inside `Process` because the C++ frees `this` mid-iteration, which the
+/// borrow checker forbids while the driver still holds the pool.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NObjectOutcome {
+    Keep,
+    Explode,
+    Remove,
+}
+
+/// Port of `NObject::Process` (`nobject.cpp:68-234`) — advance one nobject by one
+/// tick.
+///
+/// The 4c dirt-debris path (`particle__disappearing`: `bounce=0`,
+/// `blood_trail=false`, `num_frames=0`, `hit_damage=0`, `time_to_explo=0`,
+/// `create_on_exp=-1`, `dirt_effect=-1`, `splinter_amount=0`) draws **zero rand**:
+/// it integrates `pos += vel`, clamps at the level edges, and on a ground hit
+/// zeroes `vel` and (because `expl_ground=true`) returns
+/// [`Explode`](NObjectOutcome::Explode) — and every explode arm is skipped, so it
+/// just frees. The whole function is ported; branches that need state this slice
+/// does not own are **guarded** so a config that would take an un-ported path
+/// trips loudly in debug builds:
+///
+/// * **bounce** (`:81-93`) — `if ty.bounce > 0`, the natural C++ guard; fully
+///   ported (reflects `vel`, no rand). Skipped for the dirt particle (`bounce=0`).
+/// * **blood_trail** (`:95-97`) — `debug_assert!`ed off (O10). *cycles=0 trap:* the
+///   gate is `cycles % blood_trail_delay == 0`, which is **true at `cycles == 0`**,
+///   so a `blood_trail` type would spawn a `BObject` (via `CreateBObject`, no rand)
+///   every frozen/warm-up tick. Needs the bobjects pool — deferred.
+/// * **boundary clamp** (`:100-113`) — fully ported. **Clamps to `Itof(width)` /
+///   `Itof(height)`, NOT `width-1`** — the load-bearing difference from
+///   [`crate::weapon::wobject_process`], which clamps to `width-1`.
+/// * **ground vs air** (`:115-141`) — fully ported via [`LevelSim::inside`] /
+///   [`LevelSim::dirt_rock`] (NOT `checked_mat_background`), exactly as
+///   `wobject_process`. The `BlitImageOnMap`-on-ground arm (`:119-128`, gated
+///   `start_frame > 0 && draw_on_map`) and the `leave_obj` sobject trail
+///   (`:133-138`) are `debug_assert!`ed off (need sprite-blit / sobject Create).
+/// * **animation** (`:143-158`) — `if ty.num_frames > 0` natural guard; fully
+///   ported (no rand). Inert for the dirt particle (`num_frames=0`).
+/// * **timeout** (`:160-164`) — `if ty.time_to_explo > 0` natural guard; fully
+///   ported (no rand). Inert for the dirt particle (`time_to_explo=0`).
+/// * **worm-hit** (`:166-203`) — `debug_assert!`ed off (O10): the live loop draws
+///   `rand(3)` + a `rand(128)` blood fan and needs the worm list / `DoDamage`.
+///   Inert for the dirt particle (`hit_damage=0`).
+/// * **explode arms** (`:205-233`, `if do_explode`) — `create_on_exp`
+///   `debug_assert!`ed off (needs SObject Create); `dirt_effect` fully ported via
+///   [`draw_dirt_effect`] (`CorrectShadow` omitted, O4); splinter scatter fully
+///   ported via [`nobject_create2`] (`rand(128)` + `rand(2)` per splinter, then
+///   Create2's draws). All three are skipped for the dirt particle.
+///
+/// `inew` is computed once before the clamp and reused by the ground test (the
+/// clamp mutates `pos`, `inew` stays frozen) — the same ordering quirk as
+/// `wobject_process`. `used` (the C++ live-flag) is always true for an object the
+/// driver is processing, so `if (used) Free` becomes an unconditional free on the
+/// [`Explode`](NObjectOutcome::Explode) / [`Remove`](NObjectOutcome::Remove) verdict.
+#[allow(clippy::too_many_arguments)]
+pub fn nobject_process(
+    obj: &mut NObject,
+    ty: &NObjectType,
+    nobject_types: &[NObjectType],
+    level: &mut LevelSim,
+    cossin: &[Vec2; 128],
+    large_sprites: &SpriteSet,
+    textures: &[Texture],
+    nobjects: &mut Pool<NObject>,
+    cycles: i32,
+    rand: &mut Rand,
+) -> NObjectOutcome {
+    let mut bounced = false;
+    let mut do_explode = false;
+
+    // :74 pos += vel.
+    obj.pos = obj.pos.add(obj.vel);
+
+    // :76-77 inew = Ftoi(pos + vel), ipos = Ftoi(pos). Arithmetic-shift floor.
+    let mut inew_x = ftoi(obj.pos.x.wrapping_add(obj.vel.x));
+    let mut inew_y = ftoi(obj.pos.y.wrapping_add(obj.vel.y));
+    let ipos_x = ftoi(obj.pos.x);
+    let ipos_y = ftoi(obj.pos.y);
+
+    // :81-93 bounce. Natural C++ guard `ty.bounce > 0` (skipped for the dirt
+    // particle, bounce=0). The two probes mutate `vel` sequentially: the second
+    // reads the value the first wrote (corner case), so mirror in-place.
+    if ty.bounce > 0 {
+        // :82 x probe: (inew.x, ipos.y).
+        if !level.inside(inew_x, ipos_y) || level.dirt_rock(inew_x, ipos_y) {
+            // :83 vel.x = -vel.x * bounce / 100; :84 vel.y = (vel.y * 4) / 5.
+            obj.vel.x = obj
+                .vel
+                .x
+                .wrapping_neg()
+                .wrapping_mul(ty.bounce)
+                .wrapping_div(100);
+            obj.vel.y = obj.vel.y.wrapping_mul(4).wrapping_div(5);
+            bounced = true;
+        }
+        // :88 y probe: (ipos.x, inew.y).
+        if !level.inside(ipos_x, inew_y) || level.dirt_rock(ipos_x, inew_y) {
+            // :89 vel.y = -vel.y * bounce / 100; :90 vel.x = (vel.x * 4) / 5.
+            obj.vel.y = obj
+                .vel
+                .y
+                .wrapping_neg()
+                .wrapping_mul(ty.bounce)
+                .wrapping_div(100);
+            obj.vel.x = obj.vel.x.wrapping_mul(4).wrapping_div(5);
+            bounced = true;
+        }
+    }
+
+    // :95-97 blood_trail BObject spawn — deferred (O10). cycles=0 trap, see doc.
+    debug_assert!(
+        !ty.blood_trail,
+        "blood_trail BObject spawn deferred (O10); cycles=0 trap (cycles % delay == 0 fires at cycles 0)"
+    );
+
+    // :100 recompute inew = Ftoi(pos + vel) (uses the post-bounce vel).
+    inew_x = ftoi(obj.pos.x.wrapping_add(obj.vel.x));
+    inew_y = ftoi(obj.pos.y.wrapping_add(obj.vel.y));
+
+    // :102-113 boundary clamp. NOTE: clamps to Itof(width)/Itof(height), NOT
+    // width-1 (the difference from wobject_process). `inew` is NOT recomputed
+    // after the clamp — it stays frozen for the ground test below.
+    if inew_x < 0 {
+        obj.pos.x = 0;
+    }
+    if inew_y < 0 {
+        obj.pos.y = 0;
+    }
+    if inew_x >= level.width {
+        obj.pos.x = itof(level.width);
+    }
+    if inew_y >= level.height {
+        obj.pos.y = itof(level.height);
+    }
+
+    // :115-141 ground collision vs free air (frozen `inew`).
+    if !level.inside(inew_x, inew_y) || level.dirt_rock(inew_x, inew_y) {
+        // :116 vel.Zero().
+        obj.vel = Vec2::zero();
+
+        if ty.expl_ground {
+            // :119-128 BlitImageOnMap-on-ground arm — deferred (needs sprite
+            // blit). Inert for the dirt particle (draw_on_map=false).
+            debug_assert!(
+                !(ty.start_frame > 0 && ty.draw_on_map),
+                "BlitImageOnMap-on-ground-explode deferred (needs small-sprite blit)"
+            );
+            // :130
+            do_explode = true;
+        }
+    } else {
+        // :133-138 leave_obj sobject trail — deferred (needs SObject Create).
+        // C++ gate is `!bounced && leave_obj_delay != 0 && leave_obj >= 0 && ...`;
+        // the assert reproduces that gate so `bounced` is load-bearing (the trail
+        // is suppressed right after a bounce). Inert for the dirt particle
+        // (leave_obj=-1).
+        debug_assert!(
+            bounced || ty.leave_obj < 0 || ty.leave_obj_delay == 0,
+            "leave_obj sobject trail deferred (needs SObject Create)"
+        );
+        // :140 vel.y += gravity.
+        obj.vel.y = obj.vel.y.wrapping_add(ty.gravity);
+    }
+
+    // :143-158 animation. Natural C++ guard `num_frames > 0`; no rand. Inert for
+    // the dirt particle (num_frames=0).
+    if ty.num_frames > 0 && (cycles & 7) == 0 {
+        if obj.vel.x > 0 {
+            obj.cur_frame += 1;
+            if obj.cur_frame > ty.num_frames {
+                obj.cur_frame = 0;
+            }
+        } else if obj.vel.x < 0 {
+            obj.cur_frame -= 1;
+            if obj.cur_frame < 0 {
+                obj.cur_frame = ty.num_frames;
+            }
+        }
+    }
+
+    // :160-164 timeout. Natural C++ guard `time_to_explo > 0`; no rand. `--time_left
+    // <= 0` decrements first. Inert for the dirt particle (time_to_explo=0).
+    if ty.time_to_explo > 0 {
+        obj.time_left -= 1;
+        if obj.time_left <= 0 {
+            do_explode = true;
+        }
+    }
+
+    // :166-203 worm-hit — deferred (O10). The live loop draws rand(3) + a
+    // rand(128) blood fan and needs the worm list / DoDamage; it can set
+    // do_explode (worm_explode) or free without exploding (worm_destroy ->
+    // Remove). Inert for the dirt particle (hit_damage=0).
+    if !do_explode {
+        debug_assert!(
+            ty.hit_damage <= 0,
+            "worm-hit loop (rand(3) + rand(128) blood fan) deferred (O10)"
+        );
+    }
+
+    // :205-233 explode arms.
+    if do_explode {
+        // :206-209 create_on_exp sobject — deferred (needs SObject Create). Inert
+        // for the dirt particle (create_on_exp=-1).
+        debug_assert!(
+            ty.create_on_exp < 0,
+            "create_on_exp sobject spawn deferred (needs SObject Create)"
+        );
+
+        // :211-219 dirt_effect crater. Fully ported; CorrectShadow omitted (O4).
+        // Inert for the dirt particle (dirt_effect=-1).
+        if ty.dirt_effect >= 0 {
+            draw_dirt_effect(
+                level,
+                large_sprites,
+                textures,
+                ty.dirt_effect,
+                ftoi(obj.pos.x) - 7,
+                ftoi(obj.pos.y) - 7,
+                rand,
+            );
+        }
+
+        // :221-228 splinter scatter. Per splinter: rand(128) [kAngle] + rand(2)
+        // [kColorSub], then nobject_types[splinter_type].Create2 (its own draws).
+        // Inert for the dirt particle (splinter_amount=0).
+        if ty.splinter_amount > 0 {
+            for _ in 0..ty.splinter_amount {
+                let angle = rand.bound(128) as i32;
+                let color_sub = rand.bound(2) as i32;
+                nobject_create2(
+                    &nobject_types[ty.splinter_type as usize],
+                    angle,
+                    Vec2::zero(),
+                    obj.pos,
+                    ty.splinter_colour - color_sub,
+                    obj.owner_idx,
+                    cossin,
+                    rand,
+                    nobjects,
+                );
+            }
+        }
+
+        // :230-232 if (used) Free(this) — `used` always true for a processed
+        // object; the driver performs the free on the Explode verdict.
+        return NObjectOutcome::Explode;
+    }
+
+    NObjectOutcome::Keep
 }
 
 #[cfg(test)]
@@ -483,5 +756,474 @@ mod tests {
             r2.last(),
             "Create2 draws one more rng (speed_v) than Create1 for the same type"
         );
+    }
+
+    // ====================== nobject_process (Task 2) ==========================
+
+    use crate::state::{LevelSim, MAT_BACKGROUND, MAT_ROCK};
+
+    // An all-background level (every pixel material 0, which carries the
+    // Background flag and is NOT DirtRock) — open air everywhere in [0,w)x[0,h).
+    fn bg_level(width: i32, height: i32) -> LevelSim {
+        let mut material_flags = [0u8; 256];
+        material_flags[0] = MAT_BACKGROUND;
+        material_flags[1] = MAT_ROCK;
+        LevelSim {
+            width,
+            height,
+            material_id: vec![0u8; (width * height) as usize],
+            material_flags,
+        }
+    }
+
+    // Background level with a solid rock floor at rows y >= floor_y.
+    fn level_with_floor(width: i32, height: i32, floor_y: i32) -> LevelSim {
+        let mut level = bg_level(width, height);
+        for y in floor_y..height {
+            for x in 0..width {
+                level.material_id[(y * width + x) as usize] = 1; // rock
+            }
+        }
+        level
+    }
+
+    // Background level with a solid rock wall at cols x >= wall_x.
+    fn level_with_wall(width: i32, height: i32, wall_x: i32) -> LevelSim {
+        let mut level = bg_level(width, height);
+        for y in 0..height {
+            for x in wall_x..width {
+                level.material_id[(y * width + x) as usize] = 1; // rock
+            }
+        }
+        level
+    }
+
+    // The 4c dirt-debris type `particle__disappearing`: expl_ground=true, all the
+    // other Process branches inert. Draws ZERO rand in Process.
+    fn particle_disappearing() -> NObjectType {
+        NObjectType {
+            id: 4,
+            expl_ground: true,
+            draw_on_map: false,
+            start_frame: 0,
+            bounce: 0,
+            blood_trail: false,
+            num_frames: 0,
+            hit_damage: 0,
+            time_to_explo: 0,
+            create_on_exp: -1,
+            dirt_effect: -1,
+            splinter_amount: 0,
+            leave_obj: -1,
+            gravity: 700,
+            ..Default::default()
+        }
+    }
+
+    // Empty sprite bank + texture table for paths that never call draw_dirt_effect
+    // (dirt_effect < 0). The signature still needs them.
+    fn no_sprites() -> SpriteSet {
+        SpriteSet {
+            width: 16,
+            height: 16,
+            count: 0,
+            data: Vec::new(),
+        }
+    }
+
+    // Run nobject_process with throwaway sprite/texture args (dirt_effect<0 cases).
+    #[allow(clippy::too_many_arguments)]
+    fn run_process(
+        obj: &mut NObject,
+        ty: &NObjectType,
+        nobject_types: &[NObjectType],
+        level: &mut LevelSim,
+        cossin: &[Vec2; 128],
+        nobjects: &mut Pool<NObject>,
+        cycles: i32,
+        rand: &mut Rand,
+    ) -> NObjectOutcome {
+        let sprites = no_sprites();
+        nobject_process(
+            obj,
+            ty,
+            nobject_types,
+            level,
+            cossin,
+            &sprites,
+            &[],
+            nobjects,
+            cycles,
+            rand,
+        )
+    }
+
+    // ---- Step 1: move + gravity + boundary clamp -----------------------------
+
+    #[test]
+    fn process_moves_then_applies_gravity_in_open_air() {
+        let cossin = precompute_cossin();
+        // Air-only type: gravity 700, expl_ground false so an in-air step never
+        // explodes.
+        let ty = NObjectType {
+            id: 5,
+            gravity: 700,
+            expl_ground: false,
+            leave_obj: -1,
+            ..Default::default()
+        };
+        let mut level = bg_level(100, 100);
+        let mut pool: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+
+        let mut obj = NObject {
+            pos: Vec2::new(itof(50), itof(50)),
+            vel: Vec2::new(itof(1), itof(2)),
+            ty: Some(5),
+            ..Default::default()
+        };
+
+        let out = run_process(
+            &mut obj, &ty, &[], &mut level, &cossin, &mut pool, 0, &mut rand,
+        );
+
+        assert_eq!(out, NObjectOutcome::Keep, "open-air, no explode");
+        // pos += vel (no clamp; well inside).
+        assert_eq!(obj.pos, Vec2::new(itof(51), itof(52)), "pos += vel");
+        // Air branch: vel.y += gravity; vel.x unchanged.
+        assert_eq!(
+            obj.vel,
+            Vec2::new(itof(1), itof(2) + 700),
+            "vel.y += gravity (air branch)"
+        );
+        assert_eq!(rand.last(), 0, "Process drew no rand in open air");
+        assert_eq!(pool.len(), 0, "no spawns");
+    }
+
+    #[test]
+    fn process_clamps_pos_past_each_edge_to_itof_dim() {
+        let cossin = precompute_cossin();
+        // gravity 0 so vel changes don't distract; expl_ground false.
+        let ty = NObjectType {
+            id: 5,
+            gravity: 0,
+            expl_ground: false,
+            leave_obj: -1,
+            ..Default::default()
+        };
+        let (w, h) = (100, 100);
+
+        // (start_pos, vel, expected clamped component, axis, edge name).
+        let cases = [
+            (Vec2::new(itof(1), itof(50)), Vec2::new(itof(-5), 0), 0, 'x', "left"),
+            (
+                Vec2::new(itof(98), itof(50)),
+                Vec2::new(itof(5), 0),
+                itof(w),
+                'x',
+                "right -> Itof(width), NOT width-1",
+            ),
+            (Vec2::new(itof(50), itof(1)), Vec2::new(0, itof(-5)), 0, 'y', "top"),
+            (
+                Vec2::new(itof(50), itof(98)),
+                Vec2::new(0, itof(5)),
+                itof(h),
+                'y',
+                "bottom -> Itof(height), NOT height-1",
+            ),
+        ];
+
+        for (pos, vel, expected, axis, name) in cases {
+            let mut level = bg_level(w, h);
+            let mut pool: Pool<NObject> = Pool::new(4);
+            let mut rand = seeded();
+            let mut obj = NObject {
+                pos,
+                vel,
+                ty: Some(5),
+                ..Default::default()
+            };
+            run_process(
+                &mut obj, &ty, &[], &mut level, &cossin, &mut pool, 0, &mut rand,
+            );
+            let got = if axis == 'x' { obj.pos.x } else { obj.pos.y };
+            assert_eq!(got, expected, "clamp at {name} edge");
+        }
+    }
+
+    // ---- Step 2: ground explode (expl_ground), no rand, just-free ------------
+
+    #[test]
+    fn process_ground_hit_zeroes_vel_and_explodes_without_rand() {
+        let cossin = precompute_cossin();
+        let ty = particle_disappearing();
+        let mut level = level_with_floor(100, 100, 60);
+        let before_level = level.material_id.clone();
+        let mut pool: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+        // Pre-advance the rng so "unchanged" is a real assertion, not == 0.
+        rand.bound(99);
+        let rng_before = rand.last();
+
+        let mut obj = NObject {
+            pos: Vec2::new(itof(50), itof(59)),
+            vel: Vec2::new(0, itof(2)),
+            ty: Some(4),
+            ..Default::default()
+        };
+
+        let out = run_process(
+            &mut obj, &ty, &[], &mut level, &cossin, &mut pool, 0, &mut rand,
+        );
+
+        assert_eq!(out, NObjectOutcome::Explode, "expl_ground on a floor -> Explode");
+        assert_eq!(obj.vel, Vec2::zero(), "vel.Zero() on ground contact");
+        assert_eq!(
+            rand.last(),
+            rng_before,
+            "dirt-debris Process draws NO rand (all explode arms inert)"
+        );
+        assert_eq!(pool.len(), 0, "create_on_exp/splinter all -1/0: no spawns");
+        assert_eq!(
+            level.material_id, before_level,
+            "draw_on_map=false & dirt_effect=-1: level untouched"
+        );
+    }
+
+    // ---- Step 3: bounce (guarded behind bounce>0), x and y reflect -----------
+
+    #[test]
+    fn process_bounce_reflects_x_and_y_against_walls() {
+        let cossin = precompute_cossin();
+        let ty = NObjectType {
+            id: 6,
+            bounce: 50,
+            gravity: 0,
+            expl_ground: false,
+            leave_obj: -1,
+            ..Default::default()
+        };
+
+        // --- x reflect only: vertical wall at x>=60; ipos.x<60 so y-probe skips.
+        {
+            let mut level = level_with_wall(100, 100, 60);
+            let mut pool: Pool<NObject> = Pool::new(4);
+            let mut rand = seeded();
+            let mut obj = NObject {
+                pos: Vec2::new(itof(57), itof(50)),
+                vel: Vec2::new(itof(2), itof(3)),
+                ty: Some(6),
+                ..Default::default()
+            };
+            let out = run_process(
+                &mut obj, &ty, &[], &mut level, &cossin, &mut pool, 0, &mut rand,
+            );
+            assert_eq!(out, NObjectOutcome::Keep);
+            // vel.x = -itof(2)*50/100 = -itof(1); vel.y = itof(3)*4/5 (trunc).
+            assert_eq!(obj.vel.x, -itof(1), "x reflect: -vel.x*bounce/100");
+            assert_eq!(obj.vel.y, itof(3) * 4 / 5, "y damped by 4/5 on x-bounce");
+            assert_ne!(obj.vel.x, itof(2), "vel.x actually reflected");
+            assert_eq!(rand.last(), 0, "bounce draws no rand");
+        }
+
+        // --- y reflect only: horizontal floor at y>=60; ipos.y<60 so x-probe skips.
+        {
+            let mut level = level_with_floor(100, 100, 60);
+            let mut pool: Pool<NObject> = Pool::new(4);
+            let mut rand = seeded();
+            let mut obj = NObject {
+                pos: Vec2::new(itof(50), itof(57)),
+                vel: Vec2::new(itof(3), itof(2)),
+                ty: Some(6),
+                ..Default::default()
+            };
+            let out = run_process(
+                &mut obj, &ty, &[], &mut level, &cossin, &mut pool, 0, &mut rand,
+            );
+            assert_eq!(out, NObjectOutcome::Keep);
+            // vel.y = -itof(2)*50/100 = -itof(1); vel.x = itof(3)*4/5 (trunc).
+            assert_eq!(obj.vel.y, -itof(1), "y reflect: -vel.y*bounce/100");
+            assert_eq!(obj.vel.x, itof(3) * 4 / 5, "x damped by 4/5 on y-bounce");
+            assert_ne!(obj.vel.y, itof(2), "vel.y actually reflected");
+        }
+    }
+
+    // ---- Step 4: inert guarded branches draw no rand -------------------------
+
+    #[test]
+    fn process_dirt_debris_in_air_leaves_rng_untouched() {
+        let cossin = precompute_cossin();
+        let ty = particle_disappearing();
+        let mut level = bg_level(100, 100);
+        let mut pool: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+        // Advance the engine a few times so rng_before is a non-trivial value.
+        rand.bound(7);
+        rand.bound(123);
+        rand.bound(9999);
+        let rng_before = rand.last();
+
+        let mut obj = NObject {
+            pos: Vec2::new(itof(40), itof(40)),
+            vel: Vec2::new(itof(1), itof(1)),
+            ty: Some(4),
+            time_left: 0,
+            ..Default::default()
+        };
+
+        let out = run_process(
+            &mut obj, &ty, &[], &mut level, &cossin, &mut pool, 5, &mut rand,
+        );
+
+        assert_eq!(out, NObjectOutcome::Keep, "open air, no explode");
+        assert_eq!(
+            rand.last(),
+            rng_before,
+            "blood_trail/anim/timeout/worm-hit all inert: rand.last unchanged"
+        );
+        assert_eq!(pool.len(), 0, "no spawns");
+        // time_to_explo=0 so the timeout decrement never runs.
+        assert_eq!(obj.time_left, 0, "time_left untouched (no timeout)");
+    }
+
+    // ---- Step 5: explode side-effects guarded (splinter arm covered) ---------
+
+    #[test]
+    fn process_explode_runs_splinter_arm_with_exact_rng_order() {
+        let cossin = precompute_cossin();
+        // Splinter type shaped like the dirt particle (speed_v=40, dist=10000) so
+        // its Create2 draws rand(40), rand(20000), rand(20000) and Create draws
+        // nothing. Index 0 in the nobject_types table.
+        let splinter_ty = dirt_like_nobject(0);
+        let nobject_types = vec![splinter_ty];
+
+        // Exploding type: expl_ground, splinter_amount=2 into type 0, no
+        // create_on_exp / dirt_effect (isolate the splinter arm).
+        let ty = NObjectType {
+            id: 7,
+            expl_ground: true,
+            draw_on_map: false,
+            start_frame: 0,
+            create_on_exp: -1,
+            dirt_effect: -1,
+            splinter_amount: 2,
+            splinter_type: 0,
+            splinter_colour: 80,
+            leave_obj: -1,
+            gravity: 0,
+            ..Default::default()
+        };
+
+        let mut level = level_with_floor(100, 100, 60);
+        let mut pool: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+
+        let mut obj = NObject {
+            pos: Vec2::new(itof(50), itof(59)),
+            vel: Vec2::new(0, itof(2)),
+            ty: Some(7),
+            owner_idx: 3,
+            ..Default::default()
+        };
+
+        let out = run_process_with(
+            &mut obj,
+            &ty,
+            &nobject_types,
+            &mut level,
+            &cossin,
+            &mut pool,
+            0,
+            &mut rand,
+        );
+
+        // Reference rng stream: per splinter rand(128) + rand(2), then Create2's
+        // rand(40), rand(20000), rand(20000) — for 2 splinters, in order.
+        let mut refr = seeded();
+        let mut first_color_sub = 0;
+        for i in 0..2 {
+            let _angle = refr.bound(128);
+            let color_sub = refr.bound(2);
+            if i == 0 {
+                first_color_sub = color_sub as i32;
+            }
+            refr.bound(40); // Create2 speed_v
+            refr.bound(20000); // dist x
+            refr.bound(20000); // dist y
+        }
+
+        assert_eq!(out, NObjectOutcome::Explode, "ground explode -> Explode");
+        assert_eq!(pool.len(), 2, "splinter_amount=2 spawned two nobjects");
+        assert_eq!(
+            rand.last(),
+            refr.last(),
+            "exact rng order: 2x [rand(128), rand(2), rand(40), rand(20000), rand(20000)]"
+        );
+        // First splinter's cur_frame = splinter_colour - kColorSub (color path,
+        // start_frame<=0 & color!=0 -> no draw inside Create).
+        let first = *pool.get(0).expect("first splinter spawned");
+        assert_eq!(
+            first.cur_frame,
+            80 - first_color_sub,
+            "splinter cur_frame = splinter_colour - rand(2)"
+        );
+        assert_eq!(first.owner_idx, 3, "splinter inherits owner_idx");
+        assert_eq!(first.ty, Some(0), "splinter is nobject_types[splinter_type]");
+    }
+
+    #[test]
+    fn dirt_debris_explode_hits_no_side_effect_arm() {
+        // The companion to Step 5: the real dirt particle explodes on the floor
+        // but every side-effect arm (create_on_exp/dirt_effect/splinter) is
+        // skipped, so nothing spawns and no rand is drawn.
+        let cossin = precompute_cossin();
+        let ty = particle_disappearing();
+        let mut level = level_with_floor(100, 100, 60);
+        let mut pool: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+        rand.bound(55);
+        let rng_before = rand.last();
+
+        let mut obj = NObject {
+            pos: Vec2::new(itof(50), itof(59)),
+            vel: Vec2::new(0, itof(2)),
+            ty: Some(4),
+            ..Default::default()
+        };
+
+        let out = run_process(
+            &mut obj, &ty, &[], &mut level, &cossin, &mut pool, 0, &mut rand,
+        );
+
+        assert_eq!(out, NObjectOutcome::Explode);
+        assert_eq!(pool.len(), 0, "dirt-debris explode spawns nothing");
+        assert_eq!(rand.last(), rng_before, "dirt-debris explode draws no rand");
+    }
+
+    // run_process variant that takes a real nobject_types table (splinter arm).
+    #[allow(clippy::too_many_arguments)]
+    fn run_process_with(
+        obj: &mut NObject,
+        ty: &NObjectType,
+        nobject_types: &[NObjectType],
+        level: &mut LevelSim,
+        cossin: &[Vec2; 128],
+        nobjects: &mut Pool<NObject>,
+        cycles: i32,
+        rand: &mut Rand,
+    ) -> NObjectOutcome {
+        let sprites = no_sprites();
+        nobject_process(
+            obj,
+            ty,
+            nobject_types,
+            level,
+            cossin,
+            &sprites,
+            &[],
+            nobjects,
+            cycles,
+            rand,
+        )
     }
 }

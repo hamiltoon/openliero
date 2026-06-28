@@ -218,16 +218,18 @@ Refines the breakdown's six-step ordering:
    tick-for-tick over 146 ticks incl. aim/jump/weapon-change/ninjarope phases.)
 4. **One weapon, full lifecycle.** `Worm::Fire` → `WObject::Process` (move, collide,
    explode) → terrain destruction → resulting `SObject`/`NObject`. Simplest
-   projectile first; the roadmap's headline milestone. **← 4a DONE & bit-exact**
-   (sub-slice **4a = fan**, the explodes-into-nothing projectile: `worm_fire`/
-   `weapon_fire`/`wobject_process`/`blow_up`, the driver promoted to a ProcessFrame
-   subset `process_frame` (object loops before worms + Fire gate), C++ dumper extended
-   with object loops + a `weapon` directive (slice-2/3 goldens byte-identical), golden
-   `sim_slice4a.txt` matches C++ master+components tick-for-tick over 93 ticks. **RNG
-   now live** (Fire draws move the `rng` column); **level still pristine** (fan
-   `dirt_effect=-1`). 4b terrain-destruction / 4c sobjects+nobjects / 4d Slice-3
-   deferrals still pending. The milestone also surfaced + fixed a latent `if(visible)`
-   gate bug in the worm loop.)
+   projectile first; the roadmap's headline milestone. **← 4a + 4b DONE & bit-exact**
+   (**4a = fan**, the explodes-into-nothing projectile: `worm_fire`/`weapon_fire`/
+   `wobject_process`/`blow_up`, the driver promoted to a ProcessFrame subset
+   `process_frame` (object loops before worms + Fire gate), C++ dumper extended with
+   object loops + a `weapon` directive, golden `sim_slice4a.txt` matches C++ over 93
+   ticks — **RNG now live**, level still pristine. **4b = greenball** terrain
+   destruction: `draw_dirt_effect` (the `DrawDirtEffect` blit port, both `n_draw_back`
+   branches), `blow_up`'s `dirt_effect` branch, `settings->shadow=false` in the dumper
+   (O4), golden `sim_slice4b.txt` matches C++ master+components over 91 ticks — **the
+   `level` hash is now a live time series** (`95f63601→ddd76202→63307ba3` across two
+   shots). 4c sobjects+nobjects / 4d Slice-3 deferrals planned next. 4a's milestone
+   also surfaced + fixed a latent `if(visible)` worm-gate bug.)
 5. **Remaining object families.** nobjects (incl. splinters), sobjects (blast →
    terrain + worm damage), bobjects (blood), bonuses (spawn/pickup). Each vs its
    component hash.

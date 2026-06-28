@@ -211,10 +211,23 @@ Refines the breakdown's six-step ordering:
    oracle, golden `sim_slice2.txt`; Rust matches C++ worm component hash tick-for-tick
    over 101 ticks incl. a floor bounce. Master hash carried un-asserted until slice 3.)
 3. **Worm control + aiming.** The rest of `Worm::Process` minus combat (movement,
-   aim, jump/dig, direction, weapon-change); match the full worm hash.
+   aim, jump/dig, direction, weapon-change); match the full worm hash. **← DONE &
+   bit-exact** (`sim::control`: `process_aiming`/`process_tasks`/`process_weapons`/
+   `process_weapon_change`/`process_movement`; `process_worms` per-worm pass; the
+   **master** `state_hash` turned ON here, golden `sim_slice3.txt` matches C++
+   tick-for-tick over 146 ticks incl. aim/jump/weapon-change/ninjarope phases.)
 4. **One weapon, full lifecycle.** `Worm::Fire` → `WObject::Process` (move, collide,
    explode) → terrain destruction → resulting `SObject`/`NObject`. Simplest
-   projectile first; the roadmap's headline milestone.
+   projectile first; the roadmap's headline milestone. **← 4a DONE & bit-exact**
+   (sub-slice **4a = fan**, the explodes-into-nothing projectile: `worm_fire`/
+   `weapon_fire`/`wobject_process`/`blow_up`, the driver promoted to a ProcessFrame
+   subset `process_frame` (object loops before worms + Fire gate), C++ dumper extended
+   with object loops + a `weapon` directive (slice-2/3 goldens byte-identical), golden
+   `sim_slice4a.txt` matches C++ master+components tick-for-tick over 93 ticks. **RNG
+   now live** (Fire draws move the `rng` column); **level still pristine** (fan
+   `dirt_effect=-1`). 4b terrain-destruction / 4c sobjects+nobjects / 4d Slice-3
+   deferrals still pending. The milestone also surfaced + fixed a latent `if(visible)`
+   gate bug in the worm loop.)
 5. **Remaining object families.** nobjects (incl. splinters), sobjects (blast →
    terrain + worm damage), bobjects (blood), bonuses (spawn/pickup). Each vs its
    component hash.

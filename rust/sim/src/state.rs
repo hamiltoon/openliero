@@ -675,14 +675,24 @@ impl SimState {
                 w.control_states = *input;
             }
 
-            // 1. health = min(health, settings_health): inert (no healing this
-            //    slice; health == settings_health == start), so skipped.
-
-            // The whole body of `Worm::Process` is gated `if (visible)`
-            // (worm.cpp:218): an invisible worm draws no RNG, never moves, fires,
-            // or counts down its weapon delays — its component hash stays CONSTANT.
-            // Slices 1-3 never exercised this (slice 3 had both worms visible); the
-            // slice-4a invisible/inert worm1 is the first to require the gate.
+            // PARTIAL port of `Worm::Process` (worm.cpp:210-451). The full C++
+            // structure is:
+            //   health = min(health, settings_health);          // 213 — ALWAYS
+            //   if ((mode != KillEmAll && mode != Scales) || lives > 0) {  // 215
+            //     if (visible) { ...active-sim body (steps 2-11)... }      // 218
+            //     else { steerable_count = 0; PressedOnce(kFire)->ready;   // 431-450
+            //            --killed_timer; BeginRespawn; DoRespawning; }
+            //   }
+            // We port ONLY the `if (visible)` active-simulation arm below. The
+            // health=min clamp (213), the game-mode/lives gate (215), and the
+            // entire dead-worm `else` arm (431-450) are DELIBERATELY UNPORTED:
+            // they are inert while no worm dies/respawns (health == settings_health,
+            // no kFire on an idle invisible worm, hash stays CONSTANT), so slices
+            // 1-4a match bit-exact. FORWARD-NOTE / latent bug: the first slice that
+            // drives a DEAD or respawning worm MUST port the `else` arm (killed_timer
+            // countdown + BeginRespawn/DoRespawning) AND the health clamp + lives
+            // gate — without it a Rust dead worm never counts down and never respawns
+            // (hash diverges). See slice-3 reko (settings_health + visible/dead split).
             if w.visible {
                 // 2. reaction orchestration -> reacts (shared by tasks + physics).
                 let reacts = worm_reactions(level, w, physics);

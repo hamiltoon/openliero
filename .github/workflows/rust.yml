@@ -56,7 +56,16 @@ jobs:
       # Capture the output so a later step can summarize it, but keep the gate:
       # `set -o pipefail` makes the step inherit cargo's exit code, so a single
       # failing test still fails the job. The summary below is purely additive.
+      #
+      # CARGO_TERM_COLOR=never disables cargo's ANSI colorisation. On the runner
+      # cargo wraps its status lines in colour codes (e.g.
+      # ESC[1mESC[92m     RunningESC[0m ...), so $1 became the escape sequence
+      # rather than the word "Running" and the summary parser below never matched
+      # those lines, leaving every name/Kind/golden row empty. The libtest
+      # "test result:" lines are plain, which is why the totals still worked.
       - name: Run differential tests
+        env:
+          CARGO_TERM_COLOR: never
         run: |
           set -o pipefail
           cargo test --manifest-path rust/Cargo.toml --workspace 2>&1 | tee test-output.txt
@@ -75,6 +84,13 @@ jobs:
             # Initialise counters: an uninitialised subscript stringifies to ""
             # (not 0) in some awks, which would misplace the first entry.
             BEGIN { n = 0; total_pass = 0; total_fail = 0; overall_fail = 0 }
+            # Belt-and-suspenders: strip any ANSI colour escapes from every line
+            # before the rules below split it into fields. \033 is the ESC byte
+            # (octal), portable across mawk/gawk/BSD awk. The Run step also sets
+            # CARGO_TERM_COLOR=never, so input should already be plain; this is a
+            # second line of defence in case some tool re-introduces colour.
+            # (Unpatterned rule runs first, so gsub re-splits $0 for the rules.)
+            { gsub(/\033\[[0-9;]*m/, "") }
             # Track the current test binary / crate. The "Running" line names the
             # compiled artifact; derive a friendly label from its basename minus
             # the trailing -<hash>. Detect by FIELD VALUE ($1=="Running"), NOT a

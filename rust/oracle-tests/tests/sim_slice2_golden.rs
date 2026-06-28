@@ -15,8 +15,8 @@
 //! never advances in a worms-only pass), `level` (constant 95f63601, physics
 //! never writes the level this slice), `worm0`, `worm1`, and the five object-pool
 //! columns (all 00000001 — empty pools). The five pools and the level/rng being
-//! constant is exactly the Slice-2 contract: `process_worm_physics` is a
-//! worms-only pass.
+//! constant is exactly the Slice-2 contract: `process_worms` (the Slice-3 rename
+//! of `process_worm_physics`) is a worms-only pass.
 //!
 //! The master `state_hash` column is READ but deliberately NOT asserted: it
 //! diverges from the C++ master because the C++ `Game::ProcessFrame` also runs the
@@ -170,9 +170,14 @@ fn sim_slice2_physics_matches_cpp_oracle() {
     assert_components(&state, &golden[0]);
 
     // Slice 2 has no input every tick (the scenario defines none); drive both
-    // worms with an empty control state. process_worm_physics advances one
-    // worms-only physics tick.
+    // worms with an empty control state. process_worms advances one worms-only
+    // tick (the full per-worm Process pass).
     let empty = [ControlState::new(), ControlState::new()];
+    // NOTE: `process_worms` (renamed from `process_worm_physics` in Slice 3) now
+    // runs each worm's full `Process` pass; under EMPTY input the new control/
+    // aiming/weapon methods are inert on pos/vel, so the worm COMPONENT hashes
+    // this test asserts are unchanged (the master hash now also folds in the
+    // `delay_left` countdown, but the master is deliberately not asserted here).
     // A genuine bounce: worm0 falls (vel.y > 0) then the floor flips it
     // (vel.y <= 0) on some tick whose worm0 component we have asserted matches
     // the C++ golden. Recorded so the test fails loudly if the scenario ever
@@ -180,7 +185,7 @@ fn sim_slice2_physics_matches_cpp_oracle() {
     let mut bounce_tick: Option<u32> = None;
     let mut prev_vy = state.worms[0].vel.y;
     for g in &golden[1..] {
-        state.process_worm_physics(&empty);
+        state.process_worms(&empty);
         assert_components(&state, g);
         let vy = state.worms[0].vel.y;
         if bounce_tick.is_none() && prev_vy > 0 && vy < prev_vy {

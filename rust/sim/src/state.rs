@@ -13,7 +13,10 @@ use sim_core::fixed::Fixed;
 use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
-use crate::control::ControlConsts;
+use crate::control::{
+    process_aiming, process_movement, process_tasks, process_weapon_change, process_weapons,
+    ControlConsts,
+};
 use crate::physics::{worm_process_physics, worm_reactions, PhysicsConsts};
 use crate::pool::{BloodPool, Pool};
 
@@ -479,27 +482,87 @@ impl SimState {
         }
     }
 
-    /// Advance one worm-physics tick (Slice 2): a *worms-only* pass, **not** the
-    /// full `Game::ProcessFrame` (no `cycles++`, no bonus-drop RNG roll, no
-    /// object `Process` loops — those land in Slice 6). Named `process_worm_physics`
-    /// to keep that distinction honest.
+    /// Advance one worm tick (Slice 3): runs each worm's **full** `Worm::Process`
+    /// body (`worm.cpp:210-353`) in exact C++ order — still a *worms-only* pass,
+    /// **not** the full `Game::ProcessFrame` (no `cycles++`, no bonus-drop RNG
+    /// roll, no object/ninjarope `Process` loops, no `ProcessSight` — those land
+    /// in Slice 6's `process_frame`). Renamed from the Slice-2 `process_worm_physics`
+    /// now that it is no longer physics-only.
     ///
-    /// Applies each worm's scripted input to its `control_states`, then — for
-    /// each worm in `worms` order — runs the reaction orchestration
-    /// ([`worm_reactions`]) followed by [`worm_process_physics`]. Inputs shorter
-    /// than `worms` leave the remaining worms' control state unchanged (Slice 2
-    /// drives all-empty input regardless).
-    pub fn process_worm_physics(&mut self, inputs: &[ControlState]) {
-        for (w, input) in self.worms.iter_mut().zip(inputs.iter()) {
-            w.control_states = *input;
-        }
+    /// **Input interleave** (matches the C++ dumper `sim_physics_dump.cpp:233-238`):
+    /// for each worm in `worms` order, overwrite its `control_states` from the
+    /// tick's input (mirroring `ControlState::Unpack`), then run that worm's full
+    /// pass before moving to the next worm. Inputs shorter than `worms` leave the
+    /// remaining worms' control state unchanged.
+    ///
+    /// Per-worm order (design doc, *Per-worm pass: exact ordering*):
+    ///
+    /// 1. `health = min(health, settings_health)` — inert this slice (no healing;
+    ///    `health` starts at `settings_health` and never exceeds it), so skipped.
+    /// 2. [`worm_reactions`] → `reacts` (may nudge `pos.y`/`vel.y`). Computed
+    ///    **once** and read by BOTH `process_tasks` (jump) AND `worm_process_physics`
+    ///    — never recomputed between (load-bearing).
+    /// 3. `process_steerables` — no-op (empty `wobjects`).
+    /// 4. movable reset.
+    /// 5. [`process_aiming`].
+    /// 6. [`process_tasks`] — jump reads `reacts[kRfUp]` and writes `vel.y`
+    ///    **before** physics reads it (step 9).
+    /// 7. [`process_weapons`].
+    /// 8. *(Fire gate — OUT, Slice 4.)*
+    /// 9. [`worm_process_physics`] — reads the SAME `reacts`.
+    /// 10. *(ProcessSight — OUT, omitted.)*
+    /// 11. Change gate: held → [`process_weapon_change`]; else clear
+    ///     `key_change_pressed` + [`process_movement`] (walk writes `vel.x`
+    ///     **after** physics, so it affects *next* tick's integration).
+    pub fn process_worms(&mut self, inputs: &[ControlState]) {
+        // Disjoint field borrows: the per-worm pass reads `level`/`physics`/
+        // `control` while mutating each worm in turn.
+        let SimState { level, physics, control, worms, .. } = self;
+        for (i, w) in worms.iter_mut().enumerate() {
+            // Interleave: apply this worm's input (≈ `Unpack`), then Process it.
+            if let Some(input) = inputs.get(i) {
+                w.control_states = *input;
+            }
 
-        // Disjoint field borrows: the per-worm pass reads `level`/`physics`
-        // while mutating each worm in turn.
-        let SimState { level, physics, worms, .. } = self;
-        for w in worms.iter_mut() {
+            // 1. health = min(health, settings_health): inert (no healing this
+            //    slice; health == settings_health == start), so skipped.
+
+            // 2. reaction orchestration -> reacts (shared by tasks + physics).
             let reacts = worm_reactions(level, w, physics);
+
+            // 3. process_steerables: no-op this slice (empty wobjects).
+
+            // 4. movable reset (worm.cpp:330-333).
+            if !w.movable
+                && !w.control_states.get(ControlState::LEFT)
+                && !w.control_states.get(ControlState::RIGHT)
+            {
+                w.movable = true;
+            }
+
+            // 5. aiming.
+            process_aiming(w, control);
+
+            // 6. tasks (jump reads reacts[kRfUp], writes vel.y BEFORE physics).
+            process_tasks(w, &reacts, control);
+
+            // 7. weapons (delay_left countdown).
+            process_weapons(w);
+
+            // 8. Fire gate — OUT (Slice 4).
+
+            // 9. physics — reads the SAME reacts computed in step 2.
             worm_process_physics(w, &reacts, physics);
+
+            // 10. ProcessSight — omitted.
+
+            // 11. change/movement gate (worm.cpp:348-353).
+            if w.control_states.get(ControlState::CHANGE) {
+                process_weapon_change(w);
+            } else {
+                w.key_change_pressed = false;
+                process_movement(w, control);
+            }
         }
     }
 }

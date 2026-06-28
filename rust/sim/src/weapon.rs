@@ -25,10 +25,13 @@
 //! arithmetic shift. `Ftoi(aiming_angle)` is the arithmetic `>> 16` ([`ftoi`]).
 
 use assets::object::Weapon;
+use assets::sprite::SpriteSet;
+use assets::tc::Texture;
 use sim_core::fixed::{ftoi, itof};
 use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
+use crate::blit::draw_dirt_effect;
 use crate::pool::Pool;
 use crate::state::{LevelSim, WObject, WormState};
 
@@ -343,40 +346,70 @@ pub fn wobject_process(
     }
 }
 
-/// Port of `WObject::BlowUpObject` (`weapon.cpp:78-125`) for **fan**.
+/// Port of `WObject::BlowUpObject` (`weapon.cpp:78-125`) — the `dirt_effect`
+/// crater branch (`weapon.cpp:117-124`).
 ///
 /// In C++ this frees the wobject, then (conditionally) spawns a `create_on_exp`
 /// sobject, plays the explosion sound, scatters `splinter_amount` nobjects, and
-/// applies a `dirt_effect` crater. Fan has `create_on_exp = -1`,
-/// `splinter_amount = 0` and `dirt_effect = -1`, so **none** of those fire: the
-/// fan explosion is "explodes into nothing". The sound is a render-only side
-/// effect with no sim/RNG impact and is omitted. The actual `Pool::free` is the
-/// driver's job (it frees the slot after this returns).
+/// applies a `dirt_effect` crater. The actual `Pool::free` is the driver's job
+/// (it frees the slot after this returns), and the sound is a render-only side
+/// effect with no sim/RNG impact, so it is omitted.
 ///
-/// So for fan this is a near-empty function: the deferred side-effect branches
-/// are `debug_assert`ed off (referencing 4b/4c) so a non-fan config trips loudly.
-/// `_rand` is unused for fan but kept in the signature for the splinter/dirt RNG
-/// the later slices draw here.
-pub fn blow_up(weapon: &Weapon, _rand: &mut Rand) {
+/// The **`dirt_effect` branch is now live** (Slice-4b): when `dirt_effect >= 0`
+/// it calls [`draw_dirt_effect`] to carve a 16x16 crater centred on the wobject,
+/// with the C++ `Ftoi(x) - 7, Ftoi(y) - 7` top-left offset ([`ftoi`] is the
+/// arithmetic `>> 16`). This is where greenball-style explosions (dirt_effect=6)
+/// destroy terrain and draw their `rand(rframe)`. **`CorrectShadow` is omitted
+/// (O4)** — the dumper sets `settings->shadow = false`, so it never runs.
+///
+/// Branch behaviour by weapon:
+/// * **fan** (`dirt_effect = -1`) — branch skipped: inert, draws no RNG, writes
+///   no `material_id`. The 4a path is preserved, which is why slice-4a stays
+///   green even though this signature changed (the driver passes the new args
+///   but the branch never fires for fan).
+/// * **greenball** (`dirt_effect = 6`) — branch fires: a crater is stamped and
+///   exactly one `rand(rframe)` is drawn.
+///
+/// The `create_on_exp` sobject spawn and the `splinter_amount` scatter (+ their
+/// RNG) are still `debug_assert`ed off (deferred to 4c) so a config that would
+/// take an un-ported branch trips loudly in debug builds.
+#[allow(clippy::too_many_arguments)]
+pub fn blow_up(
+    weapon: &Weapon,
+    level: &mut LevelSim,
+    large_sprites: &SpriteSet,
+    textures: &[Texture],
+    pos: Vec2,
+    rand: &mut Rand,
+) {
     debug_assert!(
         weapon.create_on_exp < 0,
-        "create_on_exp sobject spawn deferred (4b/4c)"
+        "create_on_exp sobject spawn deferred (4c)"
     );
     debug_assert!(
         weapon.splinter_amount <= 0,
-        "splinter scatter (+ its rng) deferred (4b/4c)"
+        "splinter scatter (+ its rng) deferred (4c)"
     );
-    debug_assert!(
-        weapon.dirt_effect < 0,
-        "DrawDirtEffect crater deferred (4b/4c)"
-    );
-    // Fan: nothing else. The driver frees the slot after this returns.
+
+    if weapon.dirt_effect >= 0 {
+        draw_dirt_effect(
+            level,
+            large_sprites,
+            textures,
+            weapon.dirt_effect,
+            ftoi(pos.x) - 7,
+            ftoi(pos.y) - 7,
+            rand,
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{LevelSim, WeaponInit, WormInit, MAT_ROCK, NUM_WEAPONS};
+    use crate::state::{
+        LevelSim, WeaponInit, WormInit, MAT_BACKGROUND, MAT_DIRT, MAT_ROCK, NUM_WEAPONS,
+    };
     use sim_core::tables::precompute_cossin;
 
     // The real fan weapon, loaded from the shipped TC config. Cross-ref lists are
@@ -941,23 +974,135 @@ mod tests {
         assert_eq!(obj.vel, Vec2::new(itof(2), 0), "gravity 0 -> vel unchanged");
     }
 
-    // ---- blow_up: fan path is a no-op (no rng, no panic) --------------------
+    // ---- blow_up: dirt_effect branch (greenball) + fan regression ----------
+
+    const SPRITE_SIZE: usize = 256; // 16 x 16
+
+    // A SpriteSet of `count` 16x16 sprites with each (index, bytes) override laid
+    // over an all-zero bank (mirrors blit.rs's test helper).
+    fn make_sprites(count: i32, overrides: &[(usize, Vec<u8>)]) -> SpriteSet {
+        let mut data = vec![0u8; count as usize * SPRITE_SIZE];
+        for (idx, bytes) in overrides {
+            assert_eq!(bytes.len(), SPRITE_SIZE);
+            data[idx * SPRITE_SIZE..idx * SPRITE_SIZE + SPRITE_SIZE].copy_from_slice(bytes);
+        }
+        SpriteSet { width: 16, height: 16, count, data }
+    }
+
+    // The shipped greenball weapon shape relevant to blow_up: dirt_effect = 6
+    // (indexes the texture table), create_on_exp = -1, splinter_amount = 0 so the
+    // ONLY rng blow_up draws is draw_dirt_effect's rand(rframe).
+    fn greenball_weapon() -> Weapon {
+        Weapon {
+            id: 6,
+            dirt_effect: 6,
+            create_on_exp: -1,
+            splinter_amount: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn greenball_blow_up_writes_terrain_and_draws_one_rand() {
+        // Greenball: dirt_effect = 6 -> blow_up stamps a 16x16 crater at
+        // (Ftoi(pos.x)-7, Ftoi(pos.y)-7) via draw_dirt_effect.
+        let weapon = greenball_weapon();
+
+        // mask 38 = all case-6 (fill every Background cell); fill frames 82=const
+        // 200, 83=const 201, so the written value reveals which frame was picked.
+        let sprites = make_sprites(
+            84,
+            &[
+                (38, vec![6u8; SPRITE_SIZE]),
+                (82, vec![200u8; SPRITE_SIZE]),
+                (83, vec![201u8; SPRITE_SIZE]),
+            ],
+        );
+        // dirt_effect (=6) indexes the texture table; textures[6] is greenball.
+        let mut textures = vec![Texture::default(); 7];
+        textures[6] = Texture { sframe: 82, rframe: 2, mframe: 38, ndrawback: false };
+
+        // Background-above-Dirt boundary: rows < 20 are Background (material 0),
+        // rows >= 20 are Dirt (material 5).
+        let mut material_flags = [0u8; 256];
+        material_flags[0] = MAT_BACKGROUND;
+        material_flags[5] = MAT_DIRT;
+        let width = 40;
+        let height = 40;
+        let mut material_id = vec![0u8; (width * height) as usize];
+        for y in 20..height {
+            for x in 0..width {
+                material_id[(y * width + x) as usize] = 5;
+            }
+        }
+        let mut level = LevelSim { width, height, material_id, material_flags };
+
+        // pos = (20.5, 20.5) in 16.16. Ftoi TRUNCATES to 20 (not rounds to 21),
+        // so the window top-left = (20-7, 20-7) = (13, 13).
+        let pos = Vec2::new(itof(20) + 0x8000, itof(20) + 0x8000);
+        assert_eq!(ftoi(pos.x), 20, "Ftoi truncates 20.5 -> 20");
+
+        // Oracle: exactly one rand(2) selects the fill frame (82 + draw).
+        let mut oracle = seeded();
+        let draw = oracle.bound(2);
+        let expected_last = oracle.last();
+        let fill_val = 200u8.wrapping_add(draw as u8);
+
+        let mut rand = seeded();
+        blow_up(&weapon, &mut level, &sprites, &textures, pos, &mut rand);
+
+        // (a) exactly one rand(2): no create_on_exp / splinter draws.
+        assert_eq!(rand.last(), expected_last, "only draw_dirt_effect's rand(2)");
+
+        // (b) -7,-7 offset + Ftoi truncation: top-left written cell is (13,13);
+        // the cells just left/above the window are untouched.
+        let at = |x: i32, y: i32| level.material_id[(y * width + x) as usize];
+        assert_eq!(at(13, 13), fill_val, "window top-left = (Ftoi-7, Ftoi-7) = (13,13)");
+        assert_eq!(at(12, 13), 0, "x=12 is left of the window -> untouched");
+        assert_eq!(at(13, 12), 0, "y=12 is above the window -> untouched");
+
+        // (c) Background cells in the window changed; Dirt cells did NOT (the
+        // additive-over-Background path only writes Background cells).
+        assert_eq!(at(28, 19), fill_val, "last Background cell in-window written");
+        assert_eq!(at(13, 20), 5, "first Dirt cell in-window untouched");
+        assert_eq!(at(28, 28), 5, "last Dirt cell in-window untouched");
+    }
 
     #[test]
     fn fan_blow_up_is_inert_and_draws_no_rng() {
         // Fan has create_on_exp/dirt_effect = -1 and splinter_amount = 0, so
-        // blow_up does nothing for it: no sobject, no dirt, no splinters, no rng.
+        // blow_up does nothing for it: no dirt write, no rng. The 4a path is
+        // preserved despite the new signature — the dirt_effect branch is skipped
+        // for dirt_effect < 0, so the assets are never read.
         let fan = fan_weapon(7);
+        assert_eq!(fan.dirt_effect, -1, "fan dirt_effect is the -1 sentinel");
+
+        let sprites = make_sprites(1, &[]);
+        let textures: Vec<Texture> = Vec::new();
+        let mut level = air_level();
+        let before = level.material_id.clone();
+
         let mut rand = seeded();
         rand.bound(1000);
         let last_before = rand.last();
 
-        blow_up(&fan, &mut rand);
+        blow_up(
+            &fan,
+            &mut level,
+            &sprites,
+            &textures,
+            Vec2::new(itof(50), itof(50)),
+            &mut rand,
+        );
 
         assert_eq!(
             rand.last(),
             last_before,
             "fan blow_up draws no rng (rand.last unchanged)"
+        );
+        assert_eq!(
+            level.material_id, before,
+            "fan blow_up writes no material (4a path preserved)"
         );
     }
 }

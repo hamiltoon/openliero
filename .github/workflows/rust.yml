@@ -78,10 +78,12 @@ jobs:
             # Track the current test binary / crate. The "Running" line names the
             # compiled artifact; derive a friendly label from its basename minus
             # the trailing -<hash>. Detect by FIELD VALUE ($1=="Running"), NOT a
-            # leading-whitespace regex: the runner's mawk does not reliably honour
-            # /^[ \t]*Running / on cargo's indented lines, which silently left every
-            # name/Kind/golden-row empty. Default FS strips leading blanks, so $1 is
-            # robust across mawk/gawk/BSD awk. Do not revert to a whitespace regex.
+            # leading-whitespace regex: mawk on the runner does not reliably honour
+            # /^[ \t]*Running / on the indented cargo lines, which silently left
+            # every name/Kind/golden row empty. Default FS strips leading blanks, so
+            # $1 is robust across mawk/gawk/BSD awk. Do not revert to a regex here.
+            # (NOTE: this whole awk body is inside a single-quoted shell string, so
+            # it must contain NO apostrophe anywhere, even in comments.)
             $1 == "Running" {
               line = $0
               kind = ($2 ~ /^tests\//) ? "integration" : "unit"

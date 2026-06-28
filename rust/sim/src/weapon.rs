@@ -246,7 +246,11 @@ pub enum WObjectOutcome {
 /// their fan-shaped no-op values. The `collide_with_objects` impulse loop and
 /// the worm-hit loop need the object pools / worm list and draw no RNG under the
 /// 4a single-shot scenario (self-skip, worms out of range), so they are omitted
-/// here and land in 4b/4c with the driver.
+/// here and land in 4b/4c with the driver. The `RemExp` early-explode block
+/// (`weapon.cpp:138-142`, gated on the `HRemExp` hack AND the weapon being the
+/// configurable `RemExpObject` LC slot) is likewise omitted: fan is not the
+/// `RemExpObject` weapon, so it is inert here (differential-proven over 93 ticks);
+/// port it when a slice exercises `RemExpObject`.
 pub fn wobject_process(
     obj: &mut WObject,
     level: &LevelSim,

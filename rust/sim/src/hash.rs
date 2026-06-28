@@ -219,6 +219,7 @@ mod tests {
                 width: 1,
                 height: 1,
                 material_id: vec![level_byte],
+                material_flags: [0u8; 256],
             },
             worms: vec![],
             bonuses: Pool::new(4),
@@ -419,6 +420,7 @@ mod tests {
             width: 2,
             height: 3,
             material_id: vec![1, 2, 3, 4, 5, 6], // 6 cells
+            material_flags: [0u8; 256],
         };
         let c = hash_components(&state);
 

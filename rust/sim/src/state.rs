@@ -294,11 +294,52 @@ pub struct BObject {
 /// The level material buffer the simulation/hash needs: dimensions plus the
 /// per-pixel material id map. `materials`/display are derived/render and omitted
 /// (design doc, *Datamodel*).
+///
+/// `material_flags` is the 256-entry flag table (`TcConfig.materials`); entry
+/// `m` is the flag byte for material index `m`, with `Background = 1 << 3`
+/// (`material.hpp:11`). It is what the C++ engine precomputes as
+/// `materials[idx] = common.materials[material_id[idx]]` — here we keep the flag
+/// table once and index it per probe (see [`LevelSim::checked_mat_background`]).
+/// Not hashed; the tick-0 level hash reads `material_id` only.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LevelSim {
     pub width: i32,
     pub height: i32,
     pub material_id: Vec<u8>,
+    pub material_flags: [u8; 256],
+}
+
+/// `Material::kBackground` (`material.hpp:11`): the flag bit a "background"
+/// (empty/walkable) material carries.
+pub const MAT_BACKGROUND: u8 = 1 << 3;
+
+impl LevelSim {
+    /// Port of `Level::CheckedMatWrap(x, y).Background()` (`level.hpp:124-130` +
+    /// `material.hpp:18`). Reproduced **bit-for-bit**, including two load-bearing
+    /// quirks the physics depends on:
+    ///
+    /// * The flattened index is `static_cast<unsigned int>(x + y * width)` — a
+    ///   two's-complement reinterpret of `x + y*width`. There is **no separate
+    ///   `x`-bounds check**, so a negative `x` paired with a `y` that keeps
+    ///   `x + y*width` inside `[0, w*h)` reads a *wrapped, wrong-row* pixel.
+    /// * The out-of-range fallback returns `zero_material = common.materials[0]`
+    ///   (`level.hpp:24`), i.e. flag-table entry **0** — **not**
+    ///   `material_flags[material_id[0]]`.
+    ///
+    /// In range it returns `material_flags[material_id[idx]]` (look up the
+    /// pixel's material id, then its flag byte) and tests the background bit.
+    pub fn checked_mat_background(&self, x: i32, y: i32) -> bool {
+        // Two's-complement unsigned reinterpret of the flattened coordinate,
+        // matching `static_cast<unsigned int>(x + y * width)`.
+        let idx = x.wrapping_add(y.wrapping_mul(self.width)) as u32 as usize;
+        let flags = if idx < self.material_id.len() {
+            self.material_flags[self.material_id[idx] as usize]
+        } else {
+            // OOB -> zero_material == common.materials[0] == flag-table entry 0.
+            self.material_flags[0]
+        };
+        (flags & MAT_BACKGROUND) != 0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +367,17 @@ impl SimState {
     /// Weapon resolution is done *before* this call (each [`WormInit`] carries
     /// already-resolved [`WeaponInit`]s); see [`WormInit::resolve_weapons`] for
     /// the `Objects`/`weap_order` path Task 7 uses against the real data.
-    pub fn new(level: &LevelData, worms_init: &[WormInit], seed: u32) -> SimState {
+    ///
+    /// `material_flags` is the loaded TC's 256-entry flag table
+    /// (`TcConfig.materials`); it feeds [`LevelSim::checked_mat_background`], the
+    /// collision-probe port. The caller passes the real table (the differential
+    /// dumper/test load it from `tc.cfg`).
+    pub fn new(
+        level: &LevelData,
+        worms_init: &[WormInit],
+        seed: u32,
+        material_flags: &[u8; 256],
+    ) -> SimState {
         let mut rand = Rand::new();
         rand.seed(seed);
         let worms = worms_init.iter().map(WormState::from_init).collect();
@@ -337,6 +388,7 @@ impl SimState {
                 width: level.width,
                 height: level.height,
                 material_id: level.material_id.clone(),
+                material_flags: *material_flags,
             },
             worms,
             bonuses: Pool::new(BONUS_CAPACITY),
@@ -406,7 +458,7 @@ mod tests {
     #[test]
     fn builds_tick0_global_state() {
         let level = synthetic_level();
-        let state = SimState::new(&level, &two_worms(), 0x1234);
+        let state = SimState::new(&level, &two_worms(), 0x1234, &[0u8; 256]);
         assert_eq!(state.cycles, 0, "cycles must be 0 at tick 0");
         assert_eq!(state.rand.last(), 0, "no RNG consumed -> last() == 0");
         assert_eq!(state.level.width, 4);
@@ -417,7 +469,7 @@ mod tests {
 
     #[test]
     fn pools_start_empty() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 1);
+        let state = SimState::new(&synthetic_level(), &two_worms(), 1, &[0u8; 256]);
         assert!(state.bonuses.is_empty());
         assert!(state.wobjects.is_empty());
         assert!(state.sobjects.is_empty());
@@ -435,7 +487,7 @@ mod tests {
 
     #[test]
     fn worm_tick0_scalar_values() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 7);
+        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256]);
         for w in &state.worms {
             assert_eq!(w.pos, Vec2::zero());
             assert_eq!(w.vel, Vec2::zero());
@@ -459,7 +511,7 @@ mod tests {
 
     #[test]
     fn worm_weapons_initialised() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 7);
+        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256]);
         let w0 = &state.worms[0];
         // Each slot has its type set, ammo from the init, and zero timers.
         for (j, ww) in w0.weapons.iter().enumerate() {
@@ -541,5 +593,102 @@ mod tests {
         assert_eq!(resolved[0].ammo, 40);
         assert_eq!(resolved[4].ty, Some(0));
         assert_eq!(resolved[4].ammo, 0);
+    }
+
+    // ---- checked_mat_background (CheckedMatWrap port) -------------------------
+
+    // A synthetic 4x4 LevelSim crafted to pin every branch of the port:
+    //
+    //  - flag table entry 0 has NO background bit (the OOB fallback);
+    //  - material_id[0] points at material 1, which DOES have it — so the OOB
+    //    test can tell `material_flags[0]` (correct) from
+    //    `material_flags[material_id[0]]` (the common mistake);
+    //  - idx 5 (1,1) is a background pixel, idx 10 (2,2) is a rock pixel;
+    //  - idx 3 (row 0, col 3) is a background pixel, used by the wrap test:
+    //    the probe (x=-1, y=1) flattens to -1 + 1*4 = 3, a wrapped wrong-row cell.
+    //
+    // material ids used: 0 (no flags), 1 (background), 2 (rock), 7 (background).
+    fn probe_level() -> LevelSim {
+        let mut material_flags = [0u8; 256];
+        material_flags[0] = 0x00; // zero_material: deliberately NOT background
+        material_flags[1] = MAT_BACKGROUND; // 0x08
+        material_flags[2] = 1 << 2; // kRock, no background bit
+        material_flags[7] = MAT_BACKGROUND; // 0x08
+
+        // 16 cells, row-major (width 4). Defaults to material 0 (no flags).
+        let mut material_id = vec![0u8; 16];
+        material_id[0] = 1; // (0,0): background-flagged material (OOB decoy)
+        material_id[3] = 7; // (3,0): background -> the wrapped cell (-1,1) lands here
+        material_id[5] = 1; // (1,1): background pixel
+        material_id[10] = 2; // (2,2): rock pixel
+
+        LevelSim {
+            width: 4,
+            height: 4,
+            material_id,
+            material_flags,
+        }
+    }
+
+    #[test]
+    fn checked_mat_background_in_bounds_reads_pixel_material() {
+        let lvl = probe_level();
+        // (1,1) -> idx 5 -> material 1 -> background bit set.
+        assert!(lvl.checked_mat_background(1, 1), "background pixel -> true");
+        // (2,2) -> idx 10 -> material 2 (rock) -> no background bit.
+        assert!(!lvl.checked_mat_background(2, 2), "rock pixel -> false");
+    }
+
+    #[test]
+    fn checked_mat_background_oob_uses_flag_table_index_0_not_material_id_0() {
+        let lvl = probe_level();
+        // (100,100) flattens to 100 + 100*4 = 500 >= 16 -> out of range.
+        // Correct C++ fallback: zero_material == common.materials[0] ==
+        // material_flags[0] == 0x00 -> false.
+        // The common mistake material_flags[material_id[0]] would read
+        // material_flags[1] == 0x08 -> true. Asserting false proves which is read.
+        assert!(
+            !lvl.checked_mat_background(100, 100),
+            "OOB must read flag-table entry 0 (not material_id[0]'s flags)"
+        );
+        // A large positive y is OOB the same way.
+        assert!(!lvl.checked_mat_background(0, 1000), "large y is OOB -> entry 0");
+    }
+
+    #[test]
+    fn checked_mat_background_negative_x_wraps_to_wrong_row() {
+        let lvl = probe_level();
+        // The trap: there is no separate x-range check. (x=-1, y=1) flattens to
+        // -1 + 1*4 = 3, which is in range [0,16) -> reads idx 3 (row 0, col 3),
+        // a WRAPPED wrong-row cell (material 7, background) rather than failing
+        // bounds. The wrapped cell differs from the OOB fallback (entry 0, false),
+        // so a true result can only come from reading idx 3.
+        assert!(
+            lvl.checked_mat_background(-1, 1),
+            "negative x wraps to in-range idx 3 and reads that pixel"
+        );
+        // Sanity: idx 3 is indeed the cell being read — flip it to rock and the
+        // same probe must now report not-background.
+        let mut lvl2 = probe_level();
+        lvl2.material_id[3] = 2; // rock at the wrapped cell
+        assert!(
+            !lvl2.checked_mat_background(-1, 1),
+            "probe reads idx 3 specifically (wrapped wrong-row cell)"
+        );
+    }
+
+    #[test]
+    fn sim_state_new_fills_material_flags_from_table() {
+        // SimState::new copies the caller-supplied flag table into the LevelSim,
+        // wiring checked_mat_background to the real TC data.
+        let mut flags = [0u8; 256];
+        flags[7] = MAT_BACKGROUND;
+        let level = synthetic_level(); // material_id[i] = i*3+1; idx 2 -> material 7
+        let state = SimState::new(&level, &two_worms(), 0, &flags);
+        assert_eq!(state.level.material_flags, flags, "flag table copied verbatim");
+        // synthetic_level idx 2 (x=2,y=0) = material 7 -> background.
+        assert!(state.level.checked_mat_background(2, 0));
+        // idx 0 = material 1 -> no flag set -> false.
+        assert!(!state.level.checked_mat_background(0, 0));
     }
 }

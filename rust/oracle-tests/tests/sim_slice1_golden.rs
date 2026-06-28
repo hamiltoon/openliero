@@ -122,7 +122,7 @@ fn sim_slice1_tick0_hash_matches_cpp_oracle() {
     ];
 
     // --- Build tick-0 state and hash it. -------------------------------------
-    let state = SimState::new(&level, &worms_init, seed);
+    let state = SimState::new(&level, &worms_init, seed, &tc.materials);
     let got_state = hash_game_state(&state);
     let c = hash_components(&state);
 

@@ -77,10 +77,14 @@ jobs:
             BEGIN { n = 0; total_pass = 0; total_fail = 0; overall_fail = 0 }
             # Track the current test binary / crate. The "Running" line names the
             # compiled artifact; derive a friendly label from its basename minus
-            # the trailing -<hash>. POSIX-only awk (Ubuntu ships mawk).
-            /^[ \t]*Running / {
+            # the trailing -<hash>. Detect by FIELD VALUE ($1=="Running"), NOT a
+            # leading-whitespace regex: the runner's mawk does not reliably honour
+            # /^[ \t]*Running / on cargo's indented lines, which silently left every
+            # name/Kind/golden-row empty. Default FS strips leading blanks, so $1 is
+            # robust across mawk/gawk/BSD awk. Do not revert to a whitespace regex.
+            $1 == "Running" {
               line = $0
-              kind = (line ~ /Running tests\//) ? "integration" : "unit"
+              kind = ($2 ~ /^tests\//) ? "integration" : "unit"
               idx = index(line, "(")
               path = ""
               if (idx > 0) {
@@ -92,7 +96,7 @@ jobs:
               current = path
               next
             }
-            /^[ \t]*Doc-tests / {
+            $1 == "Doc-tests" {
               current = "doctest: " $2
               kind = "doc"
               next

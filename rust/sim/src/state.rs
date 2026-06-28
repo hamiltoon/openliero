@@ -678,51 +678,58 @@ impl SimState {
             // 1. health = min(health, settings_health): inert (no healing this
             //    slice; health == settings_health == start), so skipped.
 
-            // 2. reaction orchestration -> reacts (shared by tasks + physics).
-            let reacts = worm_reactions(level, w, physics);
+            // The whole body of `Worm::Process` is gated `if (visible)`
+            // (worm.cpp:218): an invisible worm draws no RNG, never moves, fires,
+            // or counts down its weapon delays — its component hash stays CONSTANT.
+            // Slices 1-3 never exercised this (slice 3 had both worms visible); the
+            // slice-4a invisible/inert worm1 is the first to require the gate.
+            if w.visible {
+                // 2. reaction orchestration -> reacts (shared by tasks + physics).
+                let reacts = worm_reactions(level, w, physics);
 
-            // 3. process_steerables: no-op this slice (empty wobjects).
+                // 3. process_steerables: no-op this slice (empty wobjects).
 
-            // 4. movable reset (worm.cpp:330-333).
-            if !w.movable
-                && !w.control_states.get(ControlState::LEFT)
-                && !w.control_states.get(ControlState::RIGHT)
-            {
-                w.movable = true;
-            }
+                // 4. movable reset (worm.cpp:330-333).
+                if !w.movable
+                    && !w.control_states.get(ControlState::LEFT)
+                    && !w.control_states.get(ControlState::RIGHT)
+                {
+                    w.movable = true;
+                }
 
-            // 5. aiming.
-            process_aiming(w, control);
+                // 5. aiming.
+                process_aiming(w, control);
 
-            // 6. tasks (jump reads reacts[kRfUp], writes vel.y BEFORE physics).
-            process_tasks(w, &reacts, control);
+                // 6. tasks (jump reads reacts[kRfUp], writes vel.y BEFORE physics).
+                process_tasks(w, &reacts, control);
 
-            // 7. weapons (delay_left countdown).
-            process_weapons(w);
+                // 7. weapons (delay_left countdown).
+                process_weapons(w);
 
-            // 8. Fire gate (worm.cpp:336-339), ported verbatim: Fire held, Change
-            //    NOT held, the current slot Available() (loading_left == 0) and its
-            //    delay_left <= 0. (No `ammo > 0` term — the C++ has none here.)
-            let cw = w.current_weapon as usize;
-            if w.control_states.get(ControlState::FIRE)
-                && !w.control_states.get(ControlState::CHANGE)
-                && w.weapons[cw].available()
-                && w.weapons[cw].delay_left <= 0
-            {
-                worm_fire(w, weapons, cossin, h_signed_recoil, rand, wobjects);
-            }
+                // 8. Fire gate (worm.cpp:336-339), ported verbatim: Fire held,
+                //    Change NOT held, the current slot Available() (loading_left ==
+                //    0) and its delay_left <= 0. (No `ammo > 0` term — C++ has none.)
+                let cw = w.current_weapon as usize;
+                if w.control_states.get(ControlState::FIRE)
+                    && !w.control_states.get(ControlState::CHANGE)
+                    && w.weapons[cw].available()
+                    && w.weapons[cw].delay_left <= 0
+                {
+                    worm_fire(w, weapons, cossin, h_signed_recoil, rand, wobjects);
+                }
 
-            // 9. physics — reads the SAME reacts computed in step 2.
-            worm_process_physics(w, &reacts, physics);
+                // 9. physics — reads the SAME reacts computed in step 2.
+                worm_process_physics(w, &reacts, physics);
 
-            // 10. ProcessSight — omitted.
+                // 10. ProcessSight — omitted.
 
-            // 11. change/movement gate (worm.cpp:348-353).
-            if w.control_states.get(ControlState::CHANGE) {
-                process_weapon_change(w);
-            } else {
-                w.key_change_pressed = false;
-                process_movement(w, control);
+                // 11. change/movement gate (worm.cpp:348-353).
+                if w.control_states.get(ControlState::CHANGE) {
+                    process_weapon_change(w);
+                } else {
+                    w.key_change_pressed = false;
+                    process_movement(w, control);
+                }
             }
         }
     }

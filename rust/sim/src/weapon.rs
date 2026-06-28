@@ -24,7 +24,7 @@
 //! use **truncating** integer division ([`Vec2::div`], `wrapping_div`), never an
 //! arithmetic shift. `Ftoi(aiming_angle)` is the arithmetic `>> 16` ([`ftoi`]).
 
-use assets::object::Weapon;
+use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
 use assets::tc::Texture;
 use sim_core::fixed::{ftoi, itof};
@@ -33,7 +33,8 @@ use sim_core::vec::Vec2;
 
 use crate::blit::draw_dirt_effect;
 use crate::pool::Pool;
-use crate::state::{LevelSim, WObject, WormState};
+use crate::sobject::sobject_create;
+use crate::state::{LevelSim, NObject, SObject, WObject, WormState};
 
 // `Weapon::shot_type` enum values (`weapon.hpp:21`):
 // `enum { kStNormal, kStdType1, kStSteerable, kStdType2, kStLaser };`
@@ -346,8 +347,9 @@ pub fn wobject_process(
     }
 }
 
-/// Port of `WObject::BlowUpObject` (`weapon.cpp:78-125`) — the `dirt_effect`
-/// crater branch (`weapon.cpp:117-124`).
+/// Port of `WObject::BlowUpObject` (`weapon.cpp:78-125`) — the `create_on_exp`
+/// sobject spawn (`weapon.cpp:89-92`) followed by the `dirt_effect` crater branch
+/// (`weapon.cpp:117-124`).
 ///
 /// In C++ this frees the wobject, then (conditionally) spawns a `create_on_exp`
 /// sobject, plays the explosion sound, scatters `splinter_amount` nobjects, and
@@ -355,24 +357,35 @@ pub fn wobject_process(
 /// (it frees the slot after this returns), and the sound is a render-only side
 /// effect with no sim/RNG impact, so it is omitted.
 ///
-/// The **`dirt_effect` branch is now live** (Slice-4b): when `dirt_effect >= 0`
-/// it calls [`draw_dirt_effect`] to carve a 16x16 crater centred on the wobject,
-/// with the C++ `Ftoi(x) - 7, Ftoi(y) - 7` top-left offset ([`ftoi`] is the
-/// arithmetic `>> 16`). This is where greenball-style explosions (dirt_effect=6)
-/// destroy terrain and draw their `rand(rframe)`. **`CorrectShadow` is omitted
-/// (O4)** — the dumper sets `settings->shadow = false`, so it never runs.
+/// **`create_on_exp` is now live** (Slice-4c Task 4): when `create_on_exp >= 0`
+/// it calls [`sobject_create`] for `sobject_types[create_on_exp]` at
+/// `Ftoi(pos.x), Ftoi(pos.y)` (`weapon.cpp:90-91` `Create(game, Ftoi(kX),
+/// Ftoi(kY), cause_idx, fired_by, this)`; the `-8` centre→top-left offset is
+/// applied INSIDE `sobject_create`, NOT here). This runs **after** `Free(this)`
+/// (the driver's job) and **before** the dart's own `dirt_effect` branch — the
+/// C++ order is load-bearing because the sobject's own dirt-throw / crater draw
+/// their RNG between the two. `owner_idx` is the exploding wobject's `owner_idx`
+/// (C++ `cause_idx == fired_by`).
+///
+/// The **`dirt_effect` branch is live** (Slice-4b): when the DART's own
+/// `dirt_effect >= 0` it calls [`draw_dirt_effect`] to carve a 16x16 crater
+/// centred on the wobject, with the C++ `Ftoi(x) - 7, Ftoi(y) - 7` top-left
+/// offset ([`ftoi`] is the arithmetic `>> 16`). This is where greenball-style
+/// explosions (dirt_effect=6) destroy terrain and draw their `rand(rframe)`.
+/// **`CorrectShadow` is omitted (O4)** — the dumper sets `settings->shadow =
+/// false`, so it never runs.
 ///
 /// Branch behaviour by weapon:
-/// * **fan** (`dirt_effect = -1`) — branch skipped: inert, draws no RNG, writes
-///   no `material_id`. The 4a path is preserved, which is why slice-4a stays
-///   green even though this signature changed (the driver passes the new args
-///   but the branch never fires for fan).
-/// * **greenball** (`dirt_effect = 6`) — branch fires: a crater is stamped and
-///   exactly one `rand(rframe)` is drawn.
+/// * **fan** (`create_on_exp = -1`, `dirt_effect = -1`) — both branches skipped:
+///   inert, draws no RNG, writes no `material_id`. The 4a path is preserved.
+/// * **greenball** (`create_on_exp = -1`, `dirt_effect = 6`) — only the crater
+///   fires: a crater is stamped and exactly one `rand(rframe)` is drawn (4b).
+/// * **dart** (`create_on_exp = 2`) — the sobject spawn fires: `small_explosion`
+///   runs its full sound / dirt-throw / crater cluster via [`sobject_create`].
 ///
-/// The `create_on_exp` sobject spawn and the `splinter_amount` scatter (+ their
-/// RNG) are still `debug_assert`ed off (deferred to 4c) so a config that would
-/// take an un-ported branch trips loudly in debug builds.
+/// The `splinter_amount` scatter (+ its RNG) is still `debug_assert`ed off
+/// (deferred to O9) so a config that would take that un-ported branch trips
+/// loudly in debug builds.
 #[allow(clippy::too_many_arguments)]
 pub fn blow_up(
     weapon: &Weapon,
@@ -380,16 +393,45 @@ pub fn blow_up(
     large_sprites: &SpriteSet,
     textures: &[Texture],
     pos: Vec2,
+    owner_idx: i32,
+    sobject_types: &[SObjectType],
+    nobject_types: &[NObjectType],
+    cossin: &[Vec2; 128],
+    worms: &mut [WormState],
+    wobjects: &mut Pool<WObject>,
+    weapons: &[Weapon],
+    nobjects: &mut Pool<NObject>,
+    sobjects: &mut Pool<SObject>,
     rand: &mut Rand,
 ) {
     debug_assert!(
-        weapon.create_on_exp < 0,
-        "create_on_exp sobject spawn deferred (4c)"
-    );
-    debug_assert!(
         weapon.splinter_amount <= 0,
-        "splinter scatter (+ its rng) deferred (4c)"
+        "splinter scatter (+ its rng) deferred (O9)"
     );
+
+    // :89-92 create-on-explosion — BEFORE the dart's own dirt_effect (the order
+    // is load-bearing: the sobject's sound/dirt-throw/crater draw RNG between the
+    // sobject spawn and the dart crater). Pass `Ftoi(pos.x), Ftoi(pos.y)`; the
+    // `-8` centre→top-left offset is applied inside sobject_create.
+    if weapon.create_on_exp >= 0 {
+        sobject_create(
+            &sobject_types[weapon.create_on_exp as usize],
+            ftoi(pos.x),
+            ftoi(pos.y),
+            owner_idx,
+            worms,
+            wobjects,
+            weapons,
+            nobjects,
+            nobject_types,
+            level,
+            cossin,
+            large_sprites,
+            textures,
+            sobjects,
+            rand,
+        );
+    }
 
     if weapon.dirt_effect >= 0 {
         draw_dirt_effect(
@@ -1079,13 +1121,36 @@ mod tests {
         let fill_val = 200u8.wrapping_add(draw as u8);
 
         let mut rand = seeded();
-        blow_up(&weapon, &mut level, &sprites, &textures, pos, &mut rand);
+        let cossin = precompute_cossin();
+        let (mut worms, mut wobjects, mut nobjects, mut sobjects) = blow_up_pools();
+        blow_up(
+            &weapon,
+            &mut level,
+            &sprites,
+            &textures,
+            pos,
+            0,
+            &[],
+            &[],
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            &mut rand,
+        );
 
         // (a) exactly one rand(2): no create_on_exp / splinter draws.
         assert_eq!(
             rand.last(),
             expected_last,
             "only draw_dirt_effect's rand(2)"
+        );
+        assert_eq!(
+            sobjects.len(),
+            0,
+            "greenball create_on_exp = -1 -> no sobject spawned"
         );
 
         // (b) -7,-7 offset + Ftoi truncation: top-left written cell is (13,13);
@@ -1128,12 +1193,23 @@ mod tests {
         rand.bound(1000);
         let last_before = rand.last();
 
+        let cossin = precompute_cossin();
+        let (mut worms, mut wobjects, mut nobjects, mut sobjects) = blow_up_pools();
         blow_up(
             &fan,
             &mut level,
             &sprites,
             &textures,
             Vec2::new(itof(50), itof(50)),
+            0,
+            &[],
+            &[],
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
             &mut rand,
         );
 
@@ -1146,5 +1222,274 @@ mod tests {
             level.material_id, before,
             "fan blow_up writes no material (4a path preserved)"
         );
+        assert_eq!(sobjects.len(), 0, "fan create_on_exp = -1 -> no sobject");
+    }
+
+    // ====================================================================
+    // blow_up: create_on_exp branch (dart -> small_explosion) — Task 4
+    // ====================================================================
+
+    use assets::object::{NObjectType, SObjectType};
+
+    // Empty object pools + worm list for blow_up calls whose `create_on_exp < 0`
+    // never touch them (fan / greenball regression guards).
+    fn blow_up_pools() -> (Vec<WormState>, Pool<WObject>, Pool<NObject>, Pool<SObject>) {
+        (Vec::new(), Pool::new(1), Pool::new(1), Pool::new(1))
+    }
+
+    // The shipped small_explosion sobject (the dart's create_on_exp target):
+    // start_sound >= 0 (num_sounds 2), anim_delay 2, num_frames 5, detect_range 8
+    // (kWidth 4, a 9x9 dirt-throw box), damage > 0, blow_away set. `dirt_effect` is
+    // passed in: 2 to exercise the crater, -1 to isolate the dirt-throw.
+    fn small_explosion(dirt_effect: i32) -> SObjectType {
+        SObjectType {
+            id: 2,
+            start_sound: 0,
+            num_sounds: 2,
+            anim_delay: 2,
+            start_frame: 0,
+            num_frames: 5,
+            detect_range: 8,
+            damage: 5,
+            blow_away: 3000,
+            dirt_effect,
+            ..Default::default()
+        }
+    }
+
+    // The dirt particle nobject_types[2]: speed_v 40, distribution 10000, so its
+    // Create2 draws exactly rand(40), rand(20000), rand(20000) and Create resolves
+    // cur_frame = kPix with no draw.
+    fn dirt_nobject() -> NObjectType {
+        NObjectType {
+            id: 2,
+            speed: 100,
+            speed_v: 40,
+            distribution: 10000,
+            start_frame: 0,
+            num_frames: 0,
+            color_bullets: 0,
+            time_to_explo: 0,
+            time_to_explo_v: 0,
+            ..Default::default()
+        }
+    }
+
+    // The dart weapon shape relevant to blow_up: create_on_exp = 2 (-> the
+    // small_explosion sobject), splinter_amount = 0 (no wobject splinters), and
+    // its OWN dirt_effect = -1 (the explosion is wholly delegated to the sobject).
+    fn dart_weapon() -> Weapon {
+        Weapon {
+            id: 1,
+            create_on_exp: 2,
+            splinter_amount: 0,
+            dirt_effect: -1,
+            ..Default::default()
+        }
+    }
+
+    // A level whose entire 16x16 carve window (and the inner 9x9 dirt-throw box)
+    // around (cx, cy) is dirt material `dirt_mat`. Carved cells become `fill_mat`.
+    fn all_dirt_level(cx: i32, cy: i32, dirt_mat: u8, fill_mat: u8) -> LevelSim {
+        let mut material_flags = [0u8; 256];
+        material_flags[dirt_mat as usize] = MAT_DIRT;
+        material_flags[fill_mat as usize] = MAT_BACKGROUND;
+        let width = 80;
+        let height = 80;
+        let mut material_id = vec![0u8; (width * height) as usize];
+        for yy in (cy - 7)..(cy + 9) {
+            for xx in (cx - 7)..(cx + 9) {
+                material_id[(yy * width + xx) as usize] = dirt_mat;
+            }
+        }
+        LevelSim {
+            width,
+            height,
+            material_id,
+            material_flags,
+        }
+    }
+
+    #[test]
+    fn dart_blow_up_spawns_small_explosion_with_full_cluster() {
+        // A dart explodes over dirt: blow_up must (a) spawn sobject id=2 at
+        // (Ftoi(x)-8, Ftoi(y)-8) — the -8 applied INSIDE sobject_create, proving
+        // blow_up passed Ftoi(x),Ftoi(y) and NOT -7/-8; (b) spawn dirt debris from
+        // the dirt-throw; (c) carve the level; (d) advance rand by exactly the
+        // cluster (sound + per-fired-cell + crater rand(2)); the dart's
+        // splinter_amount=0 / dirt_effect=-1 add no draws of their own.
+        let cossin = precompute_cossin();
+        let weapon = dart_weapon();
+        let (cx, cy) = (40, 40);
+        let dirt_mat: u8 = 10;
+        let fill_mat: u8 = 7;
+        let mut level = all_dirt_level(cx, cy, dirt_mat, fill_mat);
+
+        // pos = (40.5, 40.5) in 16.16; Ftoi truncates to 40, so the sobject lands
+        // at (40-8, 40-8) and the carve window top-left at (40-7-... )—the -7/-8
+        // offsets are inside the called functions.
+        let pos = Vec2::new(itof(cx) + 0x8000, itof(cy) + 0x8000);
+        assert_eq!(ftoi(pos.x), cx, "Ftoi truncates 40.5 -> 40");
+
+        // Carve texture textures[2]: ndrawback, mframe all case-6, sframe const
+        // fill_mat (a Background material) so case-6 clears dirt to fill_mat.
+        let sprites = make_sprites(
+            84,
+            &[
+                (38, vec![6u8; SPRITE_SIZE]),
+                (82, vec![fill_mat; SPRITE_SIZE]),
+                (83, vec![fill_mat; SPRITE_SIZE]),
+            ],
+        );
+        let mut textures = vec![Texture::default(); 3];
+        textures[2] = Texture {
+            sframe: 82,
+            rframe: 2,
+            mframe: 38,
+            ndrawback: true,
+        };
+
+        let mut sobject_types = vec![SObjectType::default(); 3];
+        sobject_types[2] = small_explosion(2); // dirt_effect = 2 -> carve LIVE
+        let mut nobject_types = vec![NObjectType::default(); 3];
+        nobject_types[2] = dirt_nobject();
+
+        // Reference RNG stream: sound rand(2), then row-major over the all-dirt 9x9
+        // box (every cell fires rand(8); on 0 -> rand(128), rand(40), rand(20000)x2),
+        // then the crater rand(rframe) = rand(2) LAST.
+        let mut refr = seeded();
+        refr.bound(2); // sound
+        let mut fired = 0;
+        for _yy in (cy - 4)..(cy + 5) {
+            for _xx in (cx - 4)..(cx + 5) {
+                if refr.bound(8) == 0 {
+                    refr.bound(128);
+                    refr.bound(40);
+                    refr.bound(20000);
+                    refr.bound(20000);
+                    fired += 1;
+                }
+            }
+        }
+        refr.bound(2); // crater rand(rframe), LAST
+        let expected_last = refr.last();
+
+        let mut rand = seeded();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(8);
+        let mut nobjects: Pool<NObject> = Pool::new(600);
+        let mut sobjects: Pool<SObject> = Pool::new(700);
+
+        blow_up(
+            &weapon,
+            &mut level,
+            &sprites,
+            &textures,
+            pos,
+            3, // owner_idx (= cause_idx / fired_by)
+            &sobject_types,
+            &nobject_types,
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            &mut rand,
+        );
+
+        // (a) sobject spawned at (Ftoi(x)-8, Ftoi(y)-8): the -8 is inside Create,
+        // so x == 32 proves blow_up passed Ftoi(x)=40 (NOT 40-7 or 40-8).
+        assert_eq!(sobjects.len(), 1, "dart spawns exactly one sobject");
+        let so = *sobjects.get(0).expect("sobject in slot 0");
+        assert_eq!(so.id, 2, "sobject id = create_on_exp target id");
+        assert_eq!(so.x, cx - 8, "sobject.x = Ftoi(x) - 8 (offset inside Create)");
+        assert_eq!(so.y, cy - 8, "sobject.y = Ftoi(y) - 8 (offset inside Create)");
+
+        // (d) exact rand cluster: sound + dirt-throw + crater rand(2). A wrong
+        // Ftoi offset / a missing or extra draw shifts rand.last.
+        assert_eq!(
+            rand.last(),
+            expected_last,
+            "rand advanced by exactly the small_explosion cluster"
+        );
+
+        // (b) dirt debris: one nobject per fired cell, owner_idx carried through.
+        assert!(fired > 0, "seed must fire at least one dirt cell");
+        assert_eq!(nobjects.len(), fired, "one dirt nobject per fired cell");
+        assert_eq!(
+            nobjects.get(0).unwrap().owner_idx,
+            3,
+            "debris carries the dart's owner_idx"
+        );
+        // PRE-CARVE read: debris colour is the original dirt_mat.
+        assert_eq!(
+            nobjects.get(0).unwrap().cur_frame,
+            dirt_mat as i32,
+            "debris cur_frame = PRE-CARVE kPix (dirt_mat)"
+        );
+
+        // (c) the crater cleared the box dirt to the fill (Background) material.
+        assert_eq!(
+            level.material_id[(cy * level.width + cx) as usize],
+            fill_mat,
+            "crater cleared the box centre dirt to the fill material"
+        );
+    }
+
+    #[test]
+    fn dart_blow_up_with_no_dirt_draws_only_the_sound() {
+        // Over a background-only level the small_explosion's dirt-throw fires no
+        // rand(8) (short-circuit) and its dirt_effect = -1 draws no crater, so the
+        // ONLY draw is the sound rand(2). Proves the create_on_exp branch is wired
+        // straight through to sobject_create's sound, with nothing extra.
+        let cossin = precompute_cossin();
+        let weapon = dart_weapon();
+
+        let mut material_flags = [0u8; 256];
+        material_flags[0] = MAT_BACKGROUND;
+        let mut level = LevelSim {
+            width: 100,
+            height: 100,
+            material_id: vec![0u8; 100 * 100],
+            material_flags,
+        };
+
+        let mut sobject_types = vec![SObjectType::default(); 3];
+        sobject_types[2] = small_explosion(-1); // no crater -> sound is the only draw
+        let mut nobject_types = vec![NObjectType::default(); 3];
+        nobject_types[2] = dirt_nobject();
+
+        let mut refr = seeded();
+        refr.bound(2); // sound only
+        let expected_last = refr.last();
+
+        let mut rand = seeded();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(8);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut sobjects: Pool<SObject> = Pool::new(8);
+
+        blow_up(
+            &weapon,
+            &mut level,
+            &SpriteSet::default(),
+            &[],
+            Vec2::new(itof(50), itof(50)),
+            2,
+            &sobject_types,
+            &nobject_types,
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            &mut rand,
+        );
+
+        assert_eq!(sobjects.len(), 1, "sobject spawned");
+        assert_eq!(rand.last(), expected_last, "only the sound rand(2) drawn");
+        assert_eq!(nobjects.len(), 0, "background level -> no dirt debris");
     }
 }

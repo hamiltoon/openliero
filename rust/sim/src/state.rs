@@ -752,12 +752,16 @@ impl SimState {
             control,
             worms,
             wobjects,
+            sobjects,
+            nobjects,
             rand,
             weapons,
             cossin,
             h_signed_recoil,
             large_sprites,
             textures,
+            sobject_types,
+            nobject_types,
             ..
         } = self;
         let h_signed_recoil = *h_signed_recoil;
@@ -782,7 +786,23 @@ impl SimState {
                     *wobjects.get_mut(slot).expect("slot still live") = obj;
                 }
                 WObjectOutcome::Explode => {
-                    blow_up(weapon, level, large_sprites, textures, obj.pos, rand);
+                    blow_up(
+                        weapon,
+                        level,
+                        large_sprites,
+                        textures,
+                        obj.pos,
+                        obj.owner_idx,
+                        sobject_types,
+                        nobject_types,
+                        cossin,
+                        worms,
+                        wobjects,
+                        weapons,
+                        nobjects,
+                        sobjects,
+                        rand,
+                    );
                     wobjects.free(slot);
                 }
                 WObjectOutcome::Remove => {

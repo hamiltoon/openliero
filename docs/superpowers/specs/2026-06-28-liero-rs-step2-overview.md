@@ -205,7 +205,11 @@ Refines the breakdown's six-step ordering:
    reproduces C++ `ae317bb5` and every component hash bit-for-bit on real TC data).
 2. **One worm, physics only.** Port `Worm::ProcessPhysics` (gravity, terrain
    collision via material flags, fixed-point pos/vel); match the worm component hash
-   under scripted input.
+   under scripted input. **← DONE & bit-exact** (`sim::physics`: `CheckedMatWrap`
+   port, `calculate_reaction_force`, reaction orchestration + `process_physics` +
+   `process_worm_physics` driver; new per-tick `oracle_dump_sim_physics` time-series
+   oracle, golden `sim_slice2.txt`; Rust matches C++ worm component hash tick-for-tick
+   over 101 ticks incl. a floor bounce. Master hash carried un-asserted until slice 3.)
 3. **Worm control + aiming.** The rest of `Worm::Process` minus combat (movement,
    aim, jump/dig, direction, weapon-change); match the full worm hash.
 4. **One weapon, full lifecycle.** `Worm::Fire` → `WObject::Process` (move, collide,

@@ -839,7 +839,11 @@ mod tests {
 
         // Bottom edge: inew.y >= height -> pos.y = Itof(height-1).
         let b = run(Vec2::new(itof(5), itof(9)), Vec2::new(0, itof(5)));
-        assert_eq!(b.pos.y, itof(9), "bottom edge clamps pos.y to Itof(height-1)");
+        assert_eq!(
+            b.pos.y,
+            itof(9),
+            "bottom edge clamps pos.y to Itof(height-1)"
+        );
     }
 
     // ---- Step 3: ground collision explode vs air (weapon.cpp:249-258) -------
@@ -860,7 +864,11 @@ mod tests {
             ..WObject::default()
         };
         let out = wobject_process(&mut obj, &level, &w, &mut rand);
-        assert_eq!(out, WObjectOutcome::Explode, "DirtRock + expl_ground -> Explode");
+        assert_eq!(
+            out,
+            WObjectOutcome::Explode,
+            "DirtRock + expl_ground -> Explode"
+        );
     }
 
     #[test]
@@ -898,7 +906,11 @@ mod tests {
         };
         let out = wobject_process(&mut obj, &level, &w, &mut rand);
         assert_eq!(out, WObjectOutcome::Keep, "no expl_ground -> Keep");
-        assert_eq!(obj.vel, Vec2::zero(), "ground hit without expl_ground zeroes vel");
+        assert_eq!(
+            obj.vel,
+            Vec2::zero(),
+            "ground hit without expl_ground zeroes vel"
+        );
     }
 
     // ---- Step 4: timeout explode (weapon.cpp:281-285) -----------------------
@@ -906,7 +918,10 @@ mod tests {
     #[test]
     fn timeout_explodes_when_time_left_goes_negative() {
         let fan = fan_weapon(7);
-        assert!(fan.time_to_explo > 0, "fan time_to_explo gates the countdown");
+        assert!(
+            fan.time_to_explo > 0,
+            "fan time_to_explo gates the countdown"
+        );
         let level = air_level();
 
         // time_left 0 -> --time_left = -1 < 0 -> Explode this tick.
@@ -986,7 +1001,12 @@ mod tests {
             assert_eq!(bytes.len(), SPRITE_SIZE);
             data[idx * SPRITE_SIZE..idx * SPRITE_SIZE + SPRITE_SIZE].copy_from_slice(bytes);
         }
-        SpriteSet { width: 16, height: 16, count, data }
+        SpriteSet {
+            width: 16,
+            height: 16,
+            count,
+            data,
+        }
     }
 
     // The shipped greenball weapon shape relevant to blow_up: dirt_effect = 6
@@ -1020,7 +1040,12 @@ mod tests {
         );
         // dirt_effect (=6) indexes the texture table; textures[6] is greenball.
         let mut textures = vec![Texture::default(); 7];
-        textures[6] = Texture { sframe: 82, rframe: 2, mframe: 38, ndrawback: false };
+        textures[6] = Texture {
+            sframe: 82,
+            rframe: 2,
+            mframe: 38,
+            ndrawback: false,
+        };
 
         // Background-above-Dirt boundary: rows < 20 are Background (material 0),
         // rows >= 20 are Dirt (material 5).
@@ -1035,7 +1060,12 @@ mod tests {
                 material_id[(y * width + x) as usize] = 5;
             }
         }
-        let mut level = LevelSim { width, height, material_id, material_flags };
+        let mut level = LevelSim {
+            width,
+            height,
+            material_id,
+            material_flags,
+        };
 
         // pos = (20.5, 20.5) in 16.16. Ftoi TRUNCATES to 20 (not rounds to 21),
         // so the window top-left = (20-7, 20-7) = (13, 13).
@@ -1052,18 +1082,30 @@ mod tests {
         blow_up(&weapon, &mut level, &sprites, &textures, pos, &mut rand);
 
         // (a) exactly one rand(2): no create_on_exp / splinter draws.
-        assert_eq!(rand.last(), expected_last, "only draw_dirt_effect's rand(2)");
+        assert_eq!(
+            rand.last(),
+            expected_last,
+            "only draw_dirt_effect's rand(2)"
+        );
 
         // (b) -7,-7 offset + Ftoi truncation: top-left written cell is (13,13);
         // the cells just left/above the window are untouched.
         let at = |x: i32, y: i32| level.material_id[(y * width + x) as usize];
-        assert_eq!(at(13, 13), fill_val, "window top-left = (Ftoi-7, Ftoi-7) = (13,13)");
+        assert_eq!(
+            at(13, 13),
+            fill_val,
+            "window top-left = (Ftoi-7, Ftoi-7) = (13,13)"
+        );
         assert_eq!(at(12, 13), 0, "x=12 is left of the window -> untouched");
         assert_eq!(at(13, 12), 0, "y=12 is above the window -> untouched");
 
         // (c) Background cells in the window changed; Dirt cells did NOT (the
         // additive-over-Background path only writes Background cells).
-        assert_eq!(at(28, 19), fill_val, "last Background cell in-window written");
+        assert_eq!(
+            at(28, 19),
+            fill_val,
+            "last Background cell in-window written"
+        );
         assert_eq!(at(13, 20), 5, "first Dirt cell in-window untouched");
         assert_eq!(at(28, 28), 5, "last Dirt cell in-window untouched");
     }

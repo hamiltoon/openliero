@@ -1469,7 +1469,10 @@ mod tests {
         assert!(!lvl.dirt(1, 1));
         // Point it at material 1 (background): the background read flips true.
         lvl.set_material(5, 1);
-        assert!(lvl.background(1, 1), "set_material 1 -> background reads true");
+        assert!(
+            lvl.background(1, 1),
+            "set_material 1 -> background reads true"
+        );
         assert!(!lvl.dirt(1, 1));
         // Re-point at material 2 (dirt): the dirt read flips true, background off.
         lvl.set_material(5, 2);

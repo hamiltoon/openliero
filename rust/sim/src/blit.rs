@@ -165,7 +165,12 @@ mod tests {
             assert_eq!(bytes.len(), SIZE);
             data[idx * SIZE..idx * SIZE + SIZE].copy_from_slice(bytes);
         }
-        SpriteSet { width: 16, height: 16, count, data }
+        SpriteSet {
+            width: 16,
+            height: 16,
+            count,
+            data,
+        }
     }
 
     // A mask sprite (256 bytes) with the given (offset, value) cells set; the
@@ -210,7 +215,12 @@ mod tests {
 
     // The shipped greenball texture frames (tc.cfg greenball / brief).
     fn greenball() -> Texture {
-        Texture { sframe: 82, rframe: 2, mframe: 38, ndrawback: false }
+        Texture {
+            sframe: 82,
+            rframe: 2,
+            mframe: 38,
+            ndrawback: false,
+        }
     }
 
     // ---- Step 1: RNG drawn first + fill/mask selection ----------------------
@@ -253,14 +263,19 @@ mod tests {
     #[test]
     fn ndrawback_false_cases_over_background() {
         // rframe=1 => rand(1)==0 deterministically => fill frame = sframe (82).
-        let tex = Texture { sframe: 82, rframe: 1, mframe: 38, ndrawback: false };
+        let tex = Texture {
+            sframe: 82,
+            rframe: 1,
+            mframe: 38,
+            ndrawback: false,
+        };
         let mask = mask_cells(&[
-            (0, 6),   // (0,0): fill
-            (1, 10),  // (1,0): fill (case 10 aliases 6)
-            (2, 2),   // (2,0): -> material 2
-            (3, 1),   // (3,0): -> material 1
-            (4, 99),  // (4,0): other -> unchanged
-            (5, 6),   // (5,0): case 6 but level cell is NON-background -> untouched
+            (0, 6),  // (0,0): fill
+            (1, 10), // (1,0): fill (case 10 aliases 6)
+            (2, 2),  // (2,0): -> material 2
+            (3, 1),  // (3,0): -> material 1
+            (4, 99), // (4,0): other -> unchanged
+            (5, 6),  // (5,0): case 6 but level cell is NON-background -> untouched
         ]);
         // fill[i] = 100 + i, so case-6/10 writes are distinguishable from the 0
         // background and from the literal 1/2 writes.
@@ -279,13 +294,21 @@ mod tests {
         assert_eq!(level.material_id[2], 2, "case 2 -> material 2");
         assert_eq!(level.material_id[3], 1, "case 1 -> material 1");
         assert_eq!(level.material_id[4], 0, "other -> unchanged");
-        assert_eq!(level.material_id[5], 3, "non-Background cell left untouched");
+        assert_eq!(
+            level.material_id[5], 3,
+            "non-Background cell left untouched"
+        );
     }
 
     // ---- Step 3: ndrawback=true carving ------------------------------------
     #[test]
     fn ndrawback_true_carving_over_dirt() {
-        let tex = Texture { sframe: 82, rframe: 1, mframe: 38, ndrawback: true };
+        let tex = Texture {
+            sframe: 82,
+            rframe: 1,
+            mframe: 38,
+            ndrawback: true,
+        };
         let mask = mask_cells(&[
             (0, 6), // AnyDirt -> fill
             (1, 6), // background (not AnyDirt) -> unchanged
@@ -300,16 +323,19 @@ mod tests {
         level.material_flags[10] = MAT_DIRT;
         level.material_flags[11] = MAT_DIRT2;
         level.material_id[0] = 10; // dirt -> AnyDirt
-        // cell 1 stays background (0)
+                                   // cell 1 stays background (0)
         level.material_id[2] = 11; // dirt2
         level.material_id[3] = 10; // dirt
-        // cell 4 stays background (0) -> neither dirt
+                                   // cell 4 stays background (0) -> neither dirt
 
         let mut rand = seeded(1);
         draw_dirt_effect(&mut level, &sprites, &tex_slice(&tex), 0, 0, 0, &mut rand);
 
         assert_eq!(level.material_id[0], 100, "case 6 AnyDirt -> fill[wrap 0]");
-        assert_eq!(level.material_id[1], 0, "case 6 over background -> unchanged");
+        assert_eq!(
+            level.material_id[1], 0,
+            "case 6 over background -> unchanged"
+        );
         assert_eq!(level.material_id[2], 2, "case 1 dirt2 -> 2");
         assert_eq!(level.material_id[3], 1, "case 1 dirt -> 1");
         assert_eq!(level.material_id[4], 0, "case 1 neither -> unchanged");
@@ -321,7 +347,12 @@ mod tests {
         // Window at (x=5, y=3); a single case-6 mask cell at window offset
         // (x_=2, y_=1). Level coords: mx=7, my=4. wrap = (4<<4)+7 = 71.
         // fill[i] = i, so the written value is 71 (NOT (1<<4)+2 = 18).
-        let tex = Texture { sframe: 82, rframe: 1, mframe: 38, ndrawback: false };
+        let tex = Texture {
+            sframe: 82,
+            rframe: 1,
+            mframe: 38,
+            ndrawback: false,
+        };
         let mask = mask_cells(&[(1 * 16 + 2, 6)]); // y_=1, x_=2
         let sprites = make_sprites(83, &[(38, mask), (82, fill_indexed(0))]);
 
@@ -343,7 +374,12 @@ mod tests {
     fn clips_window_straddling_right_and_bottom_edges() {
         // width=20, height=10 => clip Rect(0,0,20,9): bottom row y=9 excluded.
         // Window at (18,8), 16x16: clamps to x in [18,20), y in [8,9) -> 2x1.
-        let tex = Texture { sframe: 82, rframe: 1, mframe: 38, ndrawback: false };
+        let tex = Texture {
+            sframe: 82,
+            rframe: 1,
+            mframe: 38,
+            ndrawback: false,
+        };
         let sprites = make_sprites(83, &[(38, vec![6u8; SIZE]), (82, fill_const(150))]);
 
         let width = 20;
@@ -377,7 +413,12 @@ mod tests {
     fn clips_window_past_top_left_corner() {
         // Window at (-3,-2), 16x16, level 20x10 (clip Rect(0,0,20,9)). Clamps to
         // x in [0,13), y in [0,9). Mask all case-6, fill const 175.
-        let tex = Texture { sframe: 82, rframe: 1, mframe: 38, ndrawback: false };
+        let tex = Texture {
+            sframe: 82,
+            rframe: 1,
+            mframe: 38,
+            ndrawback: false,
+        };
         let sprites = make_sprites(83, &[(38, vec![6u8; SIZE]), (82, fill_const(175))]);
 
         let width = 20;

@@ -8,7 +8,7 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-06-28 · **Current focus:** Step 2, Slice 4c (explosion objects — sobjects+nobjects), T1 done, T2 next
+> **Last updated:** 2026-06-28 · **Current focus:** Step 2, Slice 4c (explosion objects — sobjects+nobjects), T2 done, T3 (core port) next
 
 ---
 
@@ -44,7 +44,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 ├─ 🔄 Slice 4  one weapon, full lifecycle (4a–4d)              ~50%   ◀── HERE
 │   ├─ ✅ 4a  projectile lifecycle — fan (RNG goes live)         SHIPPED
 │   ├─ ✅ 4b  terrain destruction — greenball / DrawDirtEffect   SHIPPED (level hash live, 91 ticks bit-exact)
-│   ├─ 🔄 4c  explosion sobjects + nobjects — dart               ◀── HERE (T1/8 done — nobject_create*)
+│   ├─ 🔄 4c  explosion sobjects + nobjects — dart               ◀── HERE (T2/8 done — nobject_process)
 │   └─ ⬜ 4d  slice-3/4 deferrals (dig body, reload, shell, …)   (planned; executes last)
 ├─ ⬜ Slice 5  remaining object families (nobjects/sobjects/blood/bonuses)
 └─ ⬜ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match
@@ -55,7 +55,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 | Rewrite track (steps 0–5) | **~38–45%** |
 | Step 2 (current) | **~55–58%** |
 | Slice 4 (weapon lifecycle) | **~50%** (4a + 4b shipped; 4c + 4d planned) |
-| Slice 4c (current) | **~24%** (T0+T1 done + reviewed; T2 nobject_process next) |
+| Slice 4c (current) | **~36%** (T0–T2 done + reviewed; T3 sobject_create/process — core port next) |
 
 ---
 

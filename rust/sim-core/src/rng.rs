@@ -28,9 +28,8 @@ const LOWER_MASK: u32 = 0x7fff_ffff; // the lower 31 bits
 pub struct Rand {
     mt: [u32; N],
     idx: usize,
-    // Mirrors C++'s `last` (the most recently generated value). Not used in the
-    // port yet, but kept for future parity (serialization/equality in rand.hpp).
-    #[allow(dead_code)]
+    // Mirrors C++'s `last` (the most recently generated value). Exposed via
+    // `last()` for state hashing and serialization parity with rand.hpp.
     last: u32,
 }
 
@@ -112,10 +111,37 @@ impl Rand {
     pub fn bound_range(&mut self, min: u32, max: u32) -> u32 {
         self.bound(max - min) + min
     }
+
+    /// The most recently generated value (mirrors C++ `Rand::last`).
+    /// Returns `0` immediately after `seed()`, or the value returned by the
+    /// last `next_u32()` call.
+    pub fn last(&self) -> u32 {
+        self.last
+    }
 }
 
 impl Default for Rand {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_is_zero_after_seed() {
+        let mut r = Rand::new();
+        r.seed(42);
+        assert_eq!(r.last(), 0, "last() must be 0 immediately after seed");
+    }
+
+    #[test]
+    fn last_equals_most_recent_draw() {
+        let mut r = Rand::new();
+        r.seed(42);
+        let v = r.next_u32();
+        assert_eq!(r.last(), v, "last() must equal the value returned by next_u32()");
     }
 }

@@ -30,7 +30,7 @@ use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
 use crate::pool::Pool;
-use crate::state::{WObject, WormState};
+use crate::state::{LevelSim, WObject, WormState};
 
 // `Weapon::shot_type` enum values (`weapon.hpp:21`):
 // `enum { kStNormal, kStdType1, kStSteerable, kStdType2, kStLaser };`
@@ -195,10 +195,184 @@ pub fn worm_fire(
     worm.vel = worm.vel.sub(cossin[angle as usize].mul(recoil).div(100));
 }
 
+/// The verdict a single [`wobject_process`] pass returns to the driver
+/// (Task 3), mirroring the `do_explode` / `do_remove` flags at the tail of C++
+/// `WObject::Process` (`weapon.cpp:328-335`):
+///
+/// * [`Keep`](WObjectOutcome::Keep) — the projectile lives on (no flag set).
+/// * [`Explode`](WObjectOutcome::Explode) — `do_explode`: the driver calls
+///   [`blow_up`] then frees the slot.
+/// * [`Remove`](WObjectOutcome::Remove) — `do_remove`: the driver frees the
+///   slot **without** exploding (the `worm_collide` path). Never produced for
+///   fan in 4a — the worm-hit loop is deferred — but part of the contract Task
+///   3 consumes.
+///
+/// Splitting the verdict out (instead of freeing inside `Process`) keeps
+/// `wobject_process` free of the pool: the C++ frees `this` mid-iteration, which
+/// Rust's borrow checker forbids while the driver still holds the pool, so the
+/// free-during-iteration is the driver's job.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WObjectOutcome {
+    Keep,
+    Explode,
+    Remove,
+}
+
+/// Port of the single non-laser pass of `WObject::Process` (`weapon.cpp:127-338`)
+/// for the **fan** projectile shape.
+///
+/// Advances one wobject by one tick: integrate `pos += vel`, clamp `pos` at the
+/// level edges, test the next-step cell for a ground collision, apply gravity in
+/// free air, and run the explosion-timer countdown. Returns the
+/// [`WObjectOutcome`]; the driver (Task 3) performs the [`blow_up`] + `Pool::free`
+/// when it is [`Explode`](WObjectOutcome::Explode)/[`Remove`](WObjectOutcome::Remove).
+///
+/// **Collision uses `inside`/`dirt_rock`, NOT `checked_mat_background`.** The
+/// worm-physics probe wraps a negative `x` into a wrong-row in-range pixel; the
+/// projectile collision instead tests `Inside` *first* (a true range check) and
+/// only then reads `DirtRock`, so a projectile leaving the level never reads a
+/// wrapped cell (`weapon.cpp:249`).
+///
+/// **`inew` is computed once, before the clamp, and reused.** C++ computes
+/// `inew_pos = Ftoi(pos + vel)` at line 234, clamps `pos` against it (lines
+/// 236-247) **without recomputing**, then feeds the *same* `inew` into the
+/// collision test (line 249). The clamp mutates `pos`; `inew` is frozen — that
+/// ordering is load-bearing, so we mirror it exactly.
+///
+/// Deferred / inert branches (guarded by `debug_assert!` so a non-fan config
+/// trips loudly, or omitted because they need state the driver owns):
+/// steering (`shot_type` 2/3) and the laser do-loop, `bounce`, `mult_speed`,
+/// object/particle trails, and projectile animation are all `debug_assert`ed to
+/// their fan-shaped no-op values. The `collide_with_objects` impulse loop and
+/// the worm-hit loop need the object pools / worm list and draw no RNG under the
+/// 4a single-shot scenario (self-skip, worms out of range), so they are omitted
+/// here and land in 4b/4c with the driver.
+pub fn wobject_process(
+    obj: &mut WObject,
+    level: &LevelSim,
+    weapon: &Weapon,
+    _rand: &mut Rand,
+) -> WObjectOutcome {
+    // Deferred-branch guards (4b/4c). Fan satisfies every one; a config that
+    // would take an un-ported branch fails loudly in debug builds.
+    debug_assert!(
+        weapon.shot_type == ST_NORMAL,
+        "steerable/type2/laser Process branches deferred (4b/4c)"
+    );
+    debug_assert!(weapon.bounce == 0, "bounce Process branch deferred (4b/4c)");
+    debug_assert!(
+        weapon.mult_speed == 100,
+        "mult_speed Process branch deferred (4b/4c)"
+    );
+    debug_assert!(
+        weapon.obj_trail_type < 0,
+        "object-trail spawn deferred (4b/4c)"
+    );
+    debug_assert!(
+        weapon.part_trail_obj < 0,
+        "particle-trail spawn deferred (4b/4c)"
+    );
+    debug_assert!(
+        weapon.num_frames == 0,
+        "projectile animation deferred (4b/4c)"
+    );
+
+    let mut do_explode = false;
+
+    // do { ... } while (shot_type == kStLaser && ...): fan is not a laser, so the
+    // body runs exactly once.
+
+    // pos += vel.
+    obj.pos = obj.pos.add(obj.vel);
+
+    // The collide_with_objects impulse loop (weapon.cpp:212-232) and the worm-hit
+    // loop (287-326) go here in C++; omitted (driver-owned + inert for one shot;
+    // no RNG drawn under the scenario). See the doc-comment.
+
+    // Boundary clamp (weapon.cpp:234-247). inew = Ftoi(pos + vel), computed ONCE
+    // and reused by the collision test; the clamp below mutates pos, not inew.
+    // wrapping_add + arithmetic-shift Ftoi match C++'s two's-complement `pos+vel`
+    // and signed `>>`.
+    let inew_x = ftoi(obj.pos.x.wrapping_add(obj.vel.x));
+    let inew_y = ftoi(obj.pos.y.wrapping_add(obj.vel.y));
+    if inew_x < 0 {
+        obj.pos.x = 0;
+    }
+    if inew_y < 0 {
+        obj.pos.y = 0;
+    }
+    if inew_x >= level.width {
+        obj.pos.x = itof(level.width - 1);
+    }
+    if inew_y >= level.height {
+        obj.pos.y = itof(level.height - 1);
+    }
+
+    // Ground collision vs free air (weapon.cpp:249-279).
+    if !level.inside(inew_x, inew_y) || level.dirt_rock(inew_x, inew_y) {
+        if weapon.bounce == 0 {
+            if weapon.expl_ground {
+                do_explode = true;
+            } else {
+                obj.vel = Vec2::zero();
+            }
+        }
+    } else {
+        // Free air: apply gravity (fan gravity 0 -> no-op). The num_frames
+        // animation that follows in C++ is deferred (guarded above).
+        obj.vel.y = obj.vel.y.wrapping_add(weapon.gravity);
+    }
+
+    // Explosion timer (weapon.cpp:281-285): the decrement only happens when
+    // time_to_explo > 0, and an underflow past 0 explodes.
+    if weapon.time_to_explo > 0 {
+        obj.time_left -= 1;
+        if obj.time_left < 0 {
+            do_explode = true;
+        }
+    }
+
+    if do_explode {
+        WObjectOutcome::Explode
+    } else {
+        WObjectOutcome::Keep
+    }
+}
+
+/// Port of `WObject::BlowUpObject` (`weapon.cpp:78-125`) for **fan**.
+///
+/// In C++ this frees the wobject, then (conditionally) spawns a `create_on_exp`
+/// sobject, plays the explosion sound, scatters `splinter_amount` nobjects, and
+/// applies a `dirt_effect` crater. Fan has `create_on_exp = -1`,
+/// `splinter_amount = 0` and `dirt_effect = -1`, so **none** of those fire: the
+/// fan explosion is "explodes into nothing". The sound is a render-only side
+/// effect with no sim/RNG impact and is omitted. The actual `Pool::free` is the
+/// driver's job (it frees the slot after this returns).
+///
+/// So for fan this is a near-empty function: the deferred side-effect branches
+/// are `debug_assert`ed off (referencing 4b/4c) so a non-fan config trips loudly.
+/// `_rand` is unused for fan but kept in the signature for the splinter/dirt RNG
+/// the later slices draw here.
+pub fn blow_up(weapon: &Weapon, _rand: &mut Rand) {
+    debug_assert!(
+        weapon.create_on_exp < 0,
+        "create_on_exp sobject spawn deferred (4b/4c)"
+    );
+    debug_assert!(
+        weapon.splinter_amount <= 0,
+        "splinter scatter (+ its rng) deferred (4b/4c)"
+    );
+    debug_assert!(
+        weapon.dirt_effect < 0,
+        "DrawDirtEffect crater deferred (4b/4c)"
+    );
+    // Fan: nothing else. The driver frees the slot after this returns.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{WeaponInit, WormInit, WormWeapon, NUM_WEAPONS};
+    use crate::state::{LevelSim, WeaponInit, WormInit, MAT_ROCK, NUM_WEAPONS};
     use sim_core::tables::precompute_cossin;
 
     // The real fan weapon, loaded from the shipped TC config. Cross-ref lists are
@@ -501,5 +675,285 @@ mod tests {
             &mut pool,
         );
         assert_eq!(slot, Some(0), "spawn returns the slot index (Some in 4a)");
+    }
+
+    // ====================================================================
+    // wobject_process + blow_up (Task 2)
+    // ====================================================================
+
+    // A large, all-background level: every cell is material 0 with no flags, so
+    // `dirt_rock` is false everywhere in range and `inside` is true for the test
+    // positions. Lets a projectile fly free so only timeout/explicit collision
+    // pins an outcome.
+    fn air_level() -> LevelSim {
+        LevelSim {
+            width: 1000,
+            height: 1000,
+            material_id: vec![0u8; 1000 * 1000],
+            material_flags: [0u8; 256],
+        }
+    }
+
+    // A 20x20 level with a single rock cell at (10,10) (idx 10 + 10*20 = 210).
+    // Material 1 carries the kRock flag -> DirtRock; everything else is empty.
+    fn floor_level() -> LevelSim {
+        let mut material_flags = [0u8; 256];
+        material_flags[1] = MAT_ROCK;
+        let mut material_id = vec![0u8; 20 * 20];
+        material_id[10 + 10 * 20] = 1; // (10,10) is solid
+        LevelSim {
+            width: 20,
+            height: 20,
+            material_id,
+            material_flags,
+        }
+    }
+
+    // A synthetic projectile weapon shaped like fan's *Process* path (shot_type
+    // normal, no bounce, mult_speed 100, no trails, no animation) but with the
+    // collision knobs under test set explicitly. obj_trail_type / part_trail_obj
+    // are -1 (the "no trail" sentinel) so the deferred-branch debug_asserts in
+    // wobject_process are satisfied.
+    fn proc_weapon(expl_ground: bool, gravity: i32, time_to_explo: i32) -> Weapon {
+        Weapon {
+            id: 1,
+            shot_type: ST_NORMAL,
+            bounce: 0,
+            mult_speed: 100,
+            gravity,
+            expl_ground,
+            time_to_explo,
+            num_frames: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    // ---- Step 1: movement + gravity -----------------------------------------
+
+    #[test]
+    fn fan_free_flight_is_a_straight_line_with_constant_velocity() {
+        // Fan gravity = 0, so on a free-flight tick vel is unchanged and pos
+        // advances by exactly vel each tick: a straight line.
+        let fan = fan_weapon(7);
+        assert_eq!(fan.gravity, 0, "fan gravity is 0");
+        let level = air_level();
+        let mut rand = seeded();
+
+        let vel = Vec2::new(itof(3), itof(-1));
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(200)),
+            vel,
+            time_left: 100, // well above the tick count -> no timeout
+            ty: Some(fan.id),
+            ..WObject::default()
+        };
+
+        let mut expected = obj.pos;
+        for tick in 0..3 {
+            let out = wobject_process(&mut obj, &level, &fan, &mut rand);
+            assert_eq!(out, WObjectOutcome::Keep, "tick {tick} keeps the object");
+            expected = expected.add(vel);
+            assert_eq!(obj.pos, expected, "pos advanced by vel on tick {tick}");
+            assert_eq!(obj.vel, vel, "gravity 0 -> vel unchanged on tick {tick}");
+        }
+    }
+
+    // ---- Step 2: boundary clamp (weapon.cpp:234-247) ------------------------
+
+    #[test]
+    fn boundary_clamp_pins_pos_to_each_edge() {
+        // expl_ground false + bounce 0: an out-of-level inew zeroes vel (no
+        // explode), so we can read back the clamped pos. inew is computed from
+        // the already-moved pos PLUS vel again, so it overshoots the edge.
+        let w = proc_weapon(false, 0, 0); // 10x10 air level below
+        let level = LevelSim {
+            width: 10,
+            height: 10,
+            material_id: vec![0u8; 100],
+            material_flags: [0u8; 256],
+        };
+
+        let run = |pos: Vec2, vel: Vec2| -> WObject {
+            let mut obj = WObject {
+                pos,
+                vel,
+                time_left: 100,
+                ty: Some(w.id),
+                ..WObject::default()
+            };
+            let mut rand = seeded();
+            wobject_process(&mut obj, &level, &w, &mut rand);
+            obj
+        };
+
+        // Right edge: inew.x >= width -> pos.x = Itof(width-1).
+        let r = run(Vec2::new(itof(9), itof(5)), Vec2::new(itof(5), 0));
+        assert_eq!(r.pos.x, itof(9), "right edge clamps pos.x to Itof(width-1)");
+
+        // Left edge: inew.x < 0 -> pos.x = 0.
+        let l = run(Vec2::new(itof(1), itof(5)), Vec2::new(itof(-5), 0));
+        assert_eq!(l.pos.x, 0, "left edge clamps pos.x to 0");
+
+        // Top edge: inew.y < 0 -> pos.y = 0.
+        let t = run(Vec2::new(itof(5), itof(1)), Vec2::new(0, itof(-5)));
+        assert_eq!(t.pos.y, 0, "top edge clamps pos.y to 0");
+
+        // Bottom edge: inew.y >= height -> pos.y = Itof(height-1).
+        let b = run(Vec2::new(itof(5), itof(9)), Vec2::new(0, itof(5)));
+        assert_eq!(b.pos.y, itof(9), "bottom edge clamps pos.y to Itof(height-1)");
+    }
+
+    // ---- Step 3: ground collision explode vs air (weapon.cpp:249-258) -------
+
+    #[test]
+    fn dirt_rock_collision_with_expl_ground_returns_explode() {
+        // inew lands on the rock cell (10,10). bounce 0 + expl_ground -> Explode.
+        let w = proc_weapon(true, 0, 0);
+        let level = floor_level();
+        let mut rand = seeded();
+
+        // pos += vel -> (9,10); inew = Ftoi(pos+vel) = (10,10) = the rock cell.
+        let mut obj = WObject {
+            pos: Vec2::new(itof(8), itof(10)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        let out = wobject_process(&mut obj, &level, &w, &mut rand);
+        assert_eq!(out, WObjectOutcome::Explode, "DirtRock + expl_ground -> Explode");
+    }
+
+    #[test]
+    fn air_tick_adds_gravity_and_keeps() {
+        // inew lands on empty space -> air branch: vel.y += gravity, no explode.
+        let w = proc_weapon(true, 1000, 0);
+        let level = floor_level();
+        let mut rand = seeded();
+
+        let mut obj = WObject {
+            pos: Vec2::new(itof(2), itof(2)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        let out = wobject_process(&mut obj, &level, &w, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep, "free air -> Keep");
+        assert_eq!(obj.vel.y, 1000, "air branch adds gravity to vel.y");
+    }
+
+    #[test]
+    fn dirt_rock_collision_without_expl_ground_zeroes_velocity() {
+        // bounce 0, expl_ground false: a ground hit zeroes vel instead of exploding.
+        let w = proc_weapon(false, 0, 0);
+        let level = floor_level();
+        let mut rand = seeded();
+
+        let mut obj = WObject {
+            pos: Vec2::new(itof(8), itof(10)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        let out = wobject_process(&mut obj, &level, &w, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep, "no expl_ground -> Keep");
+        assert_eq!(obj.vel, Vec2::zero(), "ground hit without expl_ground zeroes vel");
+    }
+
+    // ---- Step 4: timeout explode (weapon.cpp:281-285) -----------------------
+
+    #[test]
+    fn timeout_explodes_when_time_left_goes_negative() {
+        let fan = fan_weapon(7);
+        assert!(fan.time_to_explo > 0, "fan time_to_explo gates the countdown");
+        let level = air_level();
+
+        // time_left 0 -> --time_left = -1 < 0 -> Explode this tick.
+        let mut at_zero = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 0,
+            ty: Some(fan.id),
+            ..WObject::default()
+        };
+        let mut rand = seeded();
+        assert_eq!(
+            wobject_process(&mut at_zero, &level, &fan, &mut rand),
+            WObjectOutcome::Explode,
+            "time_left 0 -> explodes on this tick"
+        );
+
+        // time_left 1 -> --time_left = 0, not < 0 -> Keep, counter now 0.
+        let mut at_one = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 1,
+            ty: Some(fan.id),
+            ..WObject::default()
+        };
+        let mut rand2 = seeded();
+        assert_eq!(
+            wobject_process(&mut at_one, &level, &fan, &mut rand2),
+            WObjectOutcome::Keep,
+            "time_left 1 -> survives this tick"
+        );
+        assert_eq!(at_one.time_left, 0, "time_left decremented to 0");
+    }
+
+    // ---- Step 5: inert guarded branches draw NO rng -------------------------
+
+    #[test]
+    fn fan_process_draws_no_rng() {
+        // A free-flight fan tick (no collision, no timeout) must not touch the
+        // RNG: the bounce branch (bounce 0), the collide-with-objects loop (no
+        // pool walk here) and the worm-hit loop (no worms) are all inert. We
+        // pre-advance the RNG, snapshot last(), and assert it is unchanged.
+        let fan = fan_weapon(7);
+        let level = air_level();
+        let mut rand = seeded();
+        rand.bound(1000);
+        rand.bound(1000);
+        let last_before = rand.last();
+
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(2), 0),
+            time_left: 100,
+            ty: Some(fan.id),
+            ..WObject::default()
+        };
+        let out = wobject_process(&mut obj, &level, &fan, &mut rand);
+
+        assert_eq!(out, WObjectOutcome::Keep, "free flight keeps");
+        assert_eq!(
+            rand.last(),
+            last_before,
+            "fan Process draws no rng (rand.last unchanged)"
+        );
+        assert_eq!(obj.vel, Vec2::new(itof(2), 0), "gravity 0 -> vel unchanged");
+    }
+
+    // ---- blow_up: fan path is a no-op (no rng, no panic) --------------------
+
+    #[test]
+    fn fan_blow_up_is_inert_and_draws_no_rng() {
+        // Fan has create_on_exp/dirt_effect = -1 and splinter_amount = 0, so
+        // blow_up does nothing for it: no sobject, no dirt, no splinters, no rng.
+        let fan = fan_weapon(7);
+        let mut rand = seeded();
+        rand.bound(1000);
+        let last_before = rand.last();
+
+        blow_up(&fan, &mut rand);
+
+        assert_eq!(
+            rand.last(),
+            last_before,
+            "fan blow_up draws no rng (rand.last unchanged)"
+        );
     }
 }

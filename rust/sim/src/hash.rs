@@ -245,7 +245,7 @@ mod tests {
         h = h.wrapping_mul(31).wrapping_add(0); // + rand.last
         h = h.wrapping_mul(31).wrapping_add(7u32); // + cycles
         h = h.wrapping_mul(33) ^ 200u32; // level byte
-        // h = ((1*31+0)*31+7) = 968; 968*33 = 31944; 31944 ^ 200 = 31744.
+                                         // h = ((1*31+0)*31+7) = 968; 968*33 = 31944; 31944 ^ 200 = 31744.
         assert_eq!(h, 31744, "by-hand intermediate sanity");
 
         assert_eq!(hash_game_state(&state), 31744);
@@ -458,7 +458,10 @@ mod tests {
         state.bobjects.spawn(BObject {
             pos: Vec2::new(-1, -2),
         });
-        state.sobjects.spawn(SObject { id: 7, cur_frame: 8 });
+        state.sobjects.spawn(SObject {
+            id: 7,
+            cur_frame: 8,
+        });
         state.nobjects.spawn(NObject {
             pos: Vec2::new(3, 4),
             vel: Vec2::new(5, 6),

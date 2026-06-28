@@ -517,7 +517,13 @@ impl SimState {
     pub fn process_worms(&mut self, inputs: &[ControlState]) {
         // Disjoint field borrows: the per-worm pass reads `level`/`physics`/
         // `control` while mutating each worm in turn.
-        let SimState { level, physics, control, worms, .. } = self;
+        let SimState {
+            level,
+            physics,
+            control,
+            worms,
+            ..
+        } = self;
         for (i, w) in worms.iter_mut().enumerate() {
             // Interleave: apply this worm's input (≈ `Unpack`), then Process it.
             if let Some(input) = inputs.get(i) {
@@ -587,18 +593,48 @@ mod tests {
     // (worm 0 at stats_x 0, worm 1 at stats_x 218).
     fn two_worms() -> Vec<WormInit> {
         let weapons0 = [
-            WeaponInit { ty: Some(0), ammo: 10 },
-            WeaponInit { ty: Some(1), ammo: 1 },
-            WeaponInit { ty: Some(2), ammo: 50 },
-            WeaponInit { ty: Some(3), ammo: 3 },
-            WeaponInit { ty: Some(4), ammo: 25 },
+            WeaponInit {
+                ty: Some(0),
+                ammo: 10,
+            },
+            WeaponInit {
+                ty: Some(1),
+                ammo: 1,
+            },
+            WeaponInit {
+                ty: Some(2),
+                ammo: 50,
+            },
+            WeaponInit {
+                ty: Some(3),
+                ammo: 3,
+            },
+            WeaponInit {
+                ty: Some(4),
+                ammo: 25,
+            },
         ];
         let weapons1 = [
-            WeaponInit { ty: Some(5), ammo: 2 },
-            WeaponInit { ty: Some(6), ammo: 8 },
-            WeaponInit { ty: Some(7), ammo: 100 },
-            WeaponInit { ty: Some(8), ammo: 4 },
-            WeaponInit { ty: Some(9), ammo: 1 },
+            WeaponInit {
+                ty: Some(5),
+                ammo: 2,
+            },
+            WeaponInit {
+                ty: Some(6),
+                ammo: 8,
+            },
+            WeaponInit {
+                ty: Some(7),
+                ammo: 100,
+            },
+            WeaponInit {
+                ty: Some(8),
+                ammo: 4,
+            },
+            WeaponInit {
+                ty: Some(9),
+                ammo: 1,
+            },
         ];
         vec![
             WormInit {
@@ -625,18 +661,35 @@ mod tests {
     #[test]
     fn builds_tick0_global_state() {
         let level = synthetic_level();
-        let state = SimState::new(&level, &two_worms(), 0x1234, &[0u8; 256], PhysicsConsts::default(), ControlConsts::default());
+        let state = SimState::new(
+            &level,
+            &two_worms(),
+            0x1234,
+            &[0u8; 256],
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+        );
         assert_eq!(state.cycles, 0, "cycles must be 0 at tick 0");
         assert_eq!(state.rand.last(), 0, "no RNG consumed -> last() == 0");
         assert_eq!(state.level.width, 4);
         assert_eq!(state.level.height, 4);
-        assert_eq!(state.level.material_id, level.material_id, "material map copied verbatim");
+        assert_eq!(
+            state.level.material_id, level.material_id,
+            "material map copied verbatim"
+        );
         assert_eq!(state.worms.len(), 2);
     }
 
     #[test]
     fn pools_start_empty() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 1, &[0u8; 256], PhysicsConsts::default(), ControlConsts::default());
+        let state = SimState::new(
+            &synthetic_level(),
+            &two_worms(),
+            1,
+            &[0u8; 256],
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+        );
         assert!(state.bonuses.is_empty());
         assert!(state.wobjects.is_empty());
         assert!(state.sobjects.is_empty());
@@ -654,7 +707,14 @@ mod tests {
 
     #[test]
     fn worm_tick0_scalar_values() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256], PhysicsConsts::default(), ControlConsts::default());
+        let state = SimState::new(
+            &synthetic_level(),
+            &two_worms(),
+            7,
+            &[0u8; 256],
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+        );
         for w in &state.worms {
             assert_eq!(w.pos, Vec2::zero());
             assert_eq!(w.vel, Vec2::zero());
@@ -678,7 +738,14 @@ mod tests {
 
     #[test]
     fn worm_weapons_initialised() {
-        let state = SimState::new(&synthetic_level(), &two_worms(), 7, &[0u8; 256], PhysicsConsts::default(), ControlConsts::default());
+        let state = SimState::new(
+            &synthetic_level(),
+            &two_worms(),
+            7,
+            &[0u8; 256],
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+        );
         let w0 = &state.worms[0];
         // Each slot has its type set, ammo from the init, and zero timers.
         for (j, ww) in w0.weapons.iter().enumerate() {
@@ -801,7 +868,10 @@ mod tests {
         assert!(!cs.pressed_once(ControlState::LEFT), "clear bit -> false");
         assert_eq!(cs.pack(), 1 << 3, "RIGHT still set, LEFT stays clear");
         // RIGHT is independent and still consumable.
-        assert!(cs.pressed_once(ControlState::RIGHT), "RIGHT still set -> true");
+        assert!(
+            cs.pressed_once(ControlState::RIGHT),
+            "RIGHT still set -> true"
+        );
         assert_eq!(cs.pack(), 0, "both bits now cleared");
     }
 
@@ -811,9 +881,16 @@ mod tests {
         // through a non-identity weap_order to prove the indirection is applied.
         use assets::object::{Objects, Weapon};
         let weapons: Vec<Weapon> = (0..5)
-            .map(|i| Weapon { id: i, ammo: i * 10, ..Default::default() })
+            .map(|i| Weapon {
+                id: i,
+                ammo: i * 10,
+                ..Default::default()
+            })
             .collect();
-        let objects = Objects { weapons, ..Default::default() };
+        let objects = Objects {
+            weapons,
+            ..Default::default()
+        };
         // weap_order reverses: order index 0 -> weapon 4, etc.
         let weap_order = [4usize, 3, 2, 1, 0];
         // settings.weapons are 1-based menu choices selecting order slots 1,2,3,4,5.
@@ -883,7 +960,10 @@ mod tests {
             "OOB must read flag-table entry 0 (not material_id[0]'s flags)"
         );
         // A large positive y is OOB the same way.
-        assert!(!lvl.checked_mat_background(0, 1000), "large y is OOB -> entry 0");
+        assert!(
+            !lvl.checked_mat_background(0, 1000),
+            "large y is OOB -> entry 0"
+        );
     }
 
     #[test]
@@ -915,8 +995,18 @@ mod tests {
         let mut flags = [0u8; 256];
         flags[7] = MAT_BACKGROUND;
         let level = synthetic_level(); // material_id[i] = i*3+1; idx 2 -> material 7
-        let state = SimState::new(&level, &two_worms(), 0, &flags, PhysicsConsts::default(), ControlConsts::default());
-        assert_eq!(state.level.material_flags, flags, "flag table copied verbatim");
+        let state = SimState::new(
+            &level,
+            &two_worms(),
+            0,
+            &flags,
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+        );
+        assert_eq!(
+            state.level.material_flags, flags,
+            "flag table copied verbatim"
+        );
         // synthetic_level idx 2 (x=2,y=0) = material 7 -> background.
         assert!(state.level.checked_mat_background(2, 0));
         // idx 0 = material 1 -> no flag set -> false.

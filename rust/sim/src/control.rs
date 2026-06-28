@@ -1004,7 +1004,10 @@ MultiJump = true
             !w.control_states.get(ControlState::JUMP),
             "throw clears the Jump bit"
         );
-        assert!(w.control_states.get(ControlState::CHANGE), "Change untouched");
+        assert!(
+            w.control_states.get(ControlState::CHANGE),
+            "Change untouched"
+        );
         assert_eq!(
             w.control_states.pack(),
             1 << ControlState::CHANGE,
@@ -1072,7 +1075,10 @@ MultiJump = true
             health: 100,
             lives: 5,
             stats_x: 0,
-            weapons: [WeaponInit { ty: Some(0), ammo: 10 }; NUM_WEAPONS],
+            weapons: [WeaponInit {
+                ty: Some(0),
+                ammo: 10,
+            }; NUM_WEAPONS],
             start_pos: Vec2::zero(),
             visible: true,
         });
@@ -1095,7 +1101,11 @@ MultiJump = true
         process_weapons(&mut w);
         let after2: Vec<i32> = w.weapons.iter().map(|s| s.delay_left).collect();
         // slot1 hit the floor (0 -> -1), slot2 already at -1 stays, slots 0/4 keep ticking.
-        assert_eq!(after2, vec![1, -1, -1, -1, 3], "tick 2: stops at the -1 floor");
+        assert_eq!(
+            after2,
+            vec![1, -1, -1, -1, 3],
+            "tick 2: stops at the -1 floor"
+        );
     }
 
     #[test]
@@ -1103,9 +1113,15 @@ MultiJump = true
         // The exact >= 0 boundary on a single slot across three ticks: 0 -> -1 -> -1.
         let mut w = weapon_worm([0, 0, 0, 0, 0]);
         process_weapons(&mut w);
-        assert_eq!(w.weapons[0].delay_left, -1, "0 -> -1 (decrement ran at the boundary)");
+        assert_eq!(
+            w.weapons[0].delay_left, -1,
+            "0 -> -1 (decrement ran at the boundary)"
+        );
         process_weapons(&mut w);
-        assert_eq!(w.weapons[0].delay_left, -1, "-1 stays -1 (guard blocks further decrement)");
+        assert_eq!(
+            w.weapons[0].delay_left, -1,
+            "-1 stays -1 (guard blocks further decrement)"
+        );
     }
 
     #[test]
@@ -1116,7 +1132,10 @@ MultiJump = true
         let mut w = weapon_worm([5, 5, 5, 5, 5]);
         w.weapons[0].loading_left = 0;
         process_weapons(&mut w);
-        assert_eq!(w.weapons[0].loading_left, 0, "ammo>0 -> reload skipped -> loading_left stays 0");
+        assert_eq!(
+            w.weapons[0].loading_left, 0,
+            "ammo>0 -> reload skipped -> loading_left stays 0"
+        );
         assert_eq!(w.weapons[0].ammo, 10, "ammo untouched without a reload");
     }
 
@@ -1170,7 +1189,10 @@ MultiJump = true
         let mut w = weapon_worm([5, 5, 5, 5, 5]);
         assert_eq!(w.leave_shell_timer, 0);
         process_weapons(&mut w);
-        assert_eq!(w.leave_shell_timer, 0, "shell branch skipped, timer untouched");
+        assert_eq!(
+            w.leave_shell_timer, 0,
+            "shell branch skipped, timer untouched"
+        );
     }
 
     // ---- process_weapon_change (ProcessWeaponChange port) --------------------
@@ -1189,7 +1211,10 @@ MultiJump = true
             health: 100,
             lives: 5,
             stats_x: 0,
-            weapons: [WeaponInit { ty: Some(0), ammo: 10 }; NUM_WEAPONS],
+            weapons: [WeaponInit {
+                ty: Some(0),
+                ammo: 10,
+            }; NUM_WEAPONS],
             start_pos: Vec2::zero(),
             visible: true,
         })
@@ -1207,7 +1232,10 @@ MultiJump = true
 
         process_weapon_change(&mut w);
 
-        assert!(w.key_change_pressed, "first tick latches key_change_pressed");
+        assert!(
+            w.key_change_pressed,
+            "first tick latches key_change_pressed"
+        );
         assert!(!w.control_states.get(ControlState::LEFT), "Left released");
         assert!(!w.control_states.get(ControlState::RIGHT), "Right released");
         assert_eq!(w.current_weapon, 0, "first tick eats the press -> no cycle");
@@ -1230,7 +1258,10 @@ MultiJump = true
         process_weapon_change(&mut w);
 
         assert_eq!(w.current_weapon, 1, "Right: current_weapon 0 -> 1");
-        assert!(!w.control_states.get(ControlState::RIGHT), "Right bit cleared");
+        assert!(
+            !w.control_states.get(ControlState::RIGHT),
+            "Right bit cleared"
+        );
         assert_eq!(
             w.control_states.pack(),
             1 << ControlState::CHANGE,
@@ -1265,7 +1296,10 @@ MultiJump = true
         process_weapon_change(&mut w);
 
         assert_eq!(w.current_weapon, 1, "Left: current_weapon 2 -> 1");
-        assert!(!w.control_states.get(ControlState::LEFT), "Left bit cleared");
+        assert!(
+            !w.control_states.get(ControlState::LEFT),
+            "Left bit cleared"
+        );
         assert_eq!(w.control_states.pack(), 1 << ControlState::CHANGE);
     }
 
@@ -1323,7 +1357,11 @@ MultiJump = true
                 ControlState::unpack((1 << ControlState::CHANGE) | (1 << ControlState::RIGHT));
             process_weapon_change(&mut w);
         }
-        assert_eq!(w.current_weapon, 7 % NUM_WEAPONS as i32, "7 cycles from 0 -> 2");
+        assert_eq!(
+            w.current_weapon,
+            7 % NUM_WEAPONS as i32,
+            "7 cycles from 0 -> 2"
+        );
     }
 
     #[test]
@@ -1337,7 +1375,10 @@ MultiJump = true
                 ControlState::unpack((1 << ControlState::CHANGE) | (1 << ControlState::RIGHT));
             process_weapon_change(&mut w);
         }
-        assert_eq!(w.current_weapon, 2, "first tick eats one: 3 ticks -> 2 cycles");
+        assert_eq!(
+            w.current_weapon, 2,
+            "first tick eats one: 3 ticks -> 2 cycles"
+        );
     }
 
     // ---- process_movement (ProcessMovement port) ----------------------------
@@ -1386,7 +1427,10 @@ MultiJump = true
         w2.vel = Vec2::new(29000, 0); // < MaxVelRight
         w2.control_states.press(ControlState::RIGHT);
         process_movement(&mut w2, &c);
-        assert_eq!(w2.vel.x, 32000, "below cap -> one add overshoots (no clamp)");
+        assert_eq!(
+            w2.vel.x, 32000,
+            "below cap -> one add overshoots (no clamp)"
+        );
     }
 
     #[test]
@@ -1453,7 +1497,10 @@ MultiJump = true
         w.control_states.press(ControlState::RIGHT);
         process_movement(&mut w, &c);
         assert_eq!(w.direction, 1);
-        assert_eq!(w.aiming_speed, 0, "speed still zeroed on a direction change");
+        assert_eq!(
+            w.aiming_speed, 0,
+            "speed still zeroed on a direction change"
+        );
         assert_eq!(w.aiming_angle, itof(100), "angle untouched (100 > 64)");
     }
 
@@ -1533,6 +1580,9 @@ MultiJump = true
         w.control_states.press(ControlState::LEFT);
         w.control_states.press(ControlState::RIGHT);
         process_movement(&mut w, &c); // must not panic
-        assert!(!w.able_to_dig, "L+R with able_to_dig false stays false (no re-arm)");
+        assert!(
+            !w.able_to_dig,
+            "L+R with able_to_dig false stays false (no re-arm)"
+        );
     }
 }

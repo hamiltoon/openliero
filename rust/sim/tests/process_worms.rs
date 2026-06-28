@@ -16,9 +16,7 @@
 use assets::level::LevelData;
 use sim::control::ControlConsts;
 use sim::physics::PhysicsConsts;
-use sim::state::{
-    ControlState, SimState, WeaponInit, WormInit, MAT_BACKGROUND, NUM_WEAPONS,
-};
+use sim::state::{ControlState, SimState, WeaponInit, WormInit, MAT_BACKGROUND, NUM_WEAPONS};
 use sim_core::fixed::{ftoi, itof};
 use sim_core::vec::Vec2;
 
@@ -47,7 +45,10 @@ fn worm_init(pos: Vec2) -> WormInit {
         health: 100,
         lives: 5,
         stats_x: 0,
-        weapons: [WeaponInit { ty: Some(0), ammo: 10 }; NUM_WEAPONS],
+        weapons: [WeaponInit {
+            ty: Some(0),
+            ammo: 10,
+        }; NUM_WEAPONS],
         start_pos: pos,
         visible: true,
     }
@@ -80,7 +81,10 @@ fn grounded_worm_is_actually_grounded() {
     // moves it), which only holds if the UP edge add fired.
     let mut s = grounded_state();
     s.process_worms(&[ControlState::new()]);
-    assert_eq!(s.worms[0].vel.y, 0, "grounded -> gravity skipped -> vel.y stays 0");
+    assert_eq!(
+        s.worms[0].vel.y, 0,
+        "grounded -> gravity skipped -> vel.y stays 0"
+    );
     assert_eq!(s.worms[0].vel.x, 0);
 }
 
@@ -108,7 +112,10 @@ fn jump_writes_vel_y_before_physics_using_shared_grounded_reacts() {
 
     // Tick 1 (empty): arms able_to_jump.
     s.process_worms(&[ControlState::new()]);
-    assert!(s.worms[0].able_to_jump, "Jump released -> able_to_jump armed");
+    assert!(
+        s.worms[0].able_to_jump,
+        "Jump released -> able_to_jump armed"
+    );
     assert_eq!(s.worms[0].vel.y, 0);
 
     // Tick 2 (Jump): impulse applied in step 6, physics (step 9) skips gravity.
@@ -116,8 +123,7 @@ fn jump_writes_vel_y_before_physics_using_shared_grounded_reacts() {
     jump.press(ControlState::JUMP);
     s.process_worms(&[jump]);
     assert_eq!(
-        s.worms[0].vel.y,
-        -c.jump_force,
+        s.worms[0].vel.y, -c.jump_force,
         "vel.y == -JumpForce: jump fired (tasks saw grounded) and gravity skipped \
          (physics saw the SAME grounded reacts)"
     );
@@ -152,8 +158,14 @@ fn jump_impulse_precedes_physics_on_downward_velocity() {
 
     // Tick 1 (empty): arm able_to_jump; worm stays grounded with vel == 0.
     s.process_worms(&[ControlState::new()]);
-    assert!(s.worms[0].able_to_jump, "Jump released -> able_to_jump armed");
-    assert_eq!(s.worms[0].vel.y, 0, "grounded -> still at rest before the injection");
+    assert!(
+        s.worms[0].able_to_jump,
+        "Jump released -> able_to_jump armed"
+    );
+    assert_eq!(
+        s.worms[0].vel.y, 0,
+        "grounded -> still at rest before the injection"
+    );
 
     // Inject a downward velocity that is at/below MinBounceDown, so the
     // physics-first vertical branch would STOP it (vel.y -> 0) rather than bounce.
@@ -230,14 +242,20 @@ fn aiming_up_raises_angle_monotonically_until_clamp() {
     for _ in 0..200 {
         s.process_worms(&[up]);
         let a = s.worms[0].aiming_angle;
-        assert!(a >= prev, "aiming_angle is monotonically non-decreasing under Up");
+        assert!(
+            a >= prev,
+            "aiming_angle is monotonically non-decreasing under Up"
+        );
         if ftoi(a) >= 64 {
             hit_clamp = true;
             break;
         }
         prev = a;
     }
-    assert!(hit_clamp, "aiming_angle reaches the AimMinLeft clamp (Ftoi == 64)");
+    assert!(
+        hit_clamp,
+        "aiming_angle reaches the AimMinLeft clamp (Ftoi == 64)"
+    );
 }
 
 #[test]
@@ -257,12 +275,18 @@ fn weapon_change_cycles_current_weapon_and_clears_direction_bit() {
 
     // Tick 1: first Change tick — latches, Right consumed, no cycle yet.
     s.process_worms(&[cr]);
-    assert_eq!(s.worms[0].current_weapon, 0, "first Change tick consumes Right, no cycle");
+    assert_eq!(
+        s.worms[0].current_weapon, 0,
+        "first Change tick consumes Right, no cycle"
+    );
     assert!(s.worms[0].key_change_pressed, "key_change_pressed latched");
 
     // Tick 2: Right re-set by Unpack, PressedOnce(Right) -> cycle up to slot 1.
     s.process_worms(&[cr]);
-    assert_eq!(s.worms[0].current_weapon, 1, "second Change tick cycles to weapon 1");
+    assert_eq!(
+        s.worms[0].current_weapon, 1,
+        "second Change tick cycles to weapon 1"
+    );
     assert!(
         !s.worms[0].control_states.get(ControlState::RIGHT),
         "Right bit cleared in control_states after the cycle"
@@ -296,8 +320,14 @@ fn empty_input_matches_slice2_reactions_then_physics() {
         let reacts = worm_reactions(&driven.level, &mut ref_worm, &phys);
         worm_process_physics(&mut ref_worm, &reacts, &phys);
 
-        assert_eq!(driven.worms[0].pos, ref_worm.pos, "pos matches Slice-2 path");
-        assert_eq!(driven.worms[0].vel, ref_worm.vel, "vel matches Slice-2 path");
+        assert_eq!(
+            driven.worms[0].pos, ref_worm.pos,
+            "pos matches Slice-2 path"
+        );
+        assert_eq!(
+            driven.worms[0].vel, ref_worm.vel,
+            "vel matches Slice-2 path"
+        );
         assert_eq!(driven.worms[0].health, ref_worm.health, "health unchanged");
     }
 }

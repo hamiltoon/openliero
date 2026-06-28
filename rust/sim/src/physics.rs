@@ -240,10 +240,7 @@ pub fn worm_reactions(level: &LevelSim, worm: &mut WormState, c: &PhysicsConsts)
 
     // Nudge correction A (worm.cpp:250-265): pushed up, low/no push down,
     // and pushed left or right -> nudge pos.y up one pixel and re-probe L/R.
-    if reacts[RF_DOWN] < 2
-        && reacts[RF_UP] > 0
-        && (reacts[RF_LEFT] > 0 || reacts[RF_RIGHT] > 0)
-    {
+    if reacts[RF_DOWN] < 2 && reacts[RF_UP] > 0 && (reacts[RF_LEFT] > 0 || reacts[RF_RIGHT] > 0) {
         worm.pos.y = worm.pos.y.wrapping_sub(itof(1));
         next.y = worm.pos.y.wrapping_add(worm.vel.y);
         i_next_y = ftoi(next.y);
@@ -253,10 +250,7 @@ pub fn worm_reactions(level: &LevelSim, worm: &mut WormState, c: &PhysicsConsts)
 
     // Nudge correction B (worm.cpp:267-282): pushed down, low/no push up,
     // and pushed left or right -> nudge pos.y down one pixel and re-probe L/R.
-    if reacts[RF_UP] < 2
-        && reacts[RF_DOWN] > 0
-        && (reacts[RF_LEFT] > 0 || reacts[RF_RIGHT] > 0)
-    {
+    if reacts[RF_UP] < 2 && reacts[RF_DOWN] > 0 && (reacts[RF_LEFT] > 0 || reacts[RF_RIGHT] > 0) {
         worm.pos.y = worm.pos.y.wrapping_add(itof(1));
         next.y = worm.pos.y.wrapping_add(worm.vel.y);
         i_next_y = ftoi(next.y);
@@ -484,7 +478,7 @@ mod tests {
         let (cx, cy) = (32, 32);
         let mut level = background_level(64, 64);
         set_solid(&mut level, cx, cy + 4); // probe 1 -> hit
-        // A solid at y-4 (the DOWN row) must not count for UP.
+                                           // A solid at y-4 (the DOWN row) must not count for UP.
         set_solid(&mut level, cx, cy - 4);
         let mut reacts = [0; 4];
         calculate_reaction_force(&level, cx, cy, RF_UP, &mut reacts);
@@ -652,7 +646,11 @@ mod tests {
         let c = PhysicsConsts::default();
         let mut w = worm_at(Vec2::new(itof(100), itof(2)), Vec2::zero());
         let r = worm_reactions(&level, &mut w, &c);
-        assert_eq!(r, [20, 0, 0, 0], "low-y edge add accumulates 4x into kRfDown");
+        assert_eq!(
+            r,
+            [20, 0, 0, 0],
+            "low-y edge add accumulates 4x into kRfDown"
+        );
     }
 
     #[test]

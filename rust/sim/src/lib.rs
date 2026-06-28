@@ -9,8 +9,8 @@
 //! [`assets`] (data parsers); rendering, audio, input, and networking live in
 //! other crates layered on top.
 
-pub mod state;
-pub mod pool;
+pub mod control;
 pub mod hash;
 pub mod physics;
-pub mod control;
+pub mod pool;
+pub mod state;

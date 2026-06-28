@@ -9,17 +9,21 @@
 //! Grammar (one directive per line; `#` starts a comment; blank lines ignored):
 //!
 //! ```text
-//! seed  <u32>
-//! level <path>                                  # relative to the TC root
-//! ticks <u32>
-//! worm  <index> <pos_x> <pos_y> <health> <lives> <stats_x> <visible>
-//! input <tick> <worm0_7bit> <worm1_7bit>        # sparse; absent => 0
+//! seed   <u32>
+//! level  <path>                                  # relative to the TC root
+//! ticks  <u32>
+//! worm   <index> <pos_x> <pos_y> <health> <lives> <stats_x> <visible>
+//! input  <tick> <worm0_7bit> <worm1_7bit>        # sparse; absent => 0
+//! weapon <slot> <name>                           # override worm weapon slot (0..NUM_WEAPONS)
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
 //! at a tick is `0` unless an `input` line overrides it — see [`Scenario::input`].
 
 use std::collections::HashMap;
+
+/// Number of weapon slots per worm — mirrors C++ `NUM_WEAPONS` (worm.hpp:13).
+const NUM_WEAPONS: usize = 5;
 
 /// One worm's start conditions from a `worm` line.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -45,6 +49,8 @@ pub struct Scenario {
     pub worms: Vec<ScenarioWorm>,
     /// Sparse per-tick input overrides: `tick -> (worm0_7bit, worm1_7bit)`.
     inputs: HashMap<u32, (u32, u32)>,
+    /// Per-slot weapon overrides: `slot -> weapon_name`.
+    weapons: HashMap<usize, String>,
 }
 
 impl Scenario {
@@ -56,6 +62,7 @@ impl Scenario {
         let mut ticks: Option<u32> = None;
         let mut worms = Vec::new();
         let mut inputs = HashMap::new();
+        let mut weapons: HashMap<usize, String> = HashMap::new();
 
         for (lineno, raw) in text.lines().enumerate() {
             let n = lineno + 1;
@@ -114,6 +121,19 @@ impl Scenario {
                         return Err(format!("line {n}: duplicate input for tick {tick}"));
                     }
                 }
+                "weapon" => {
+                    expect_args(n, key, &nums, 2)?;
+                    let slot = parse_at(0)? as usize;
+                    if slot >= NUM_WEAPONS {
+                        return Err(format!(
+                            "line {n}: weapon slot {slot} out of range (0..{NUM_WEAPONS})"
+                        ));
+                    }
+                    let name = nums[1].to_string();
+                    if weapons.insert(slot, name).is_some() {
+                        return Err(format!("line {n}: duplicate weapon for slot {slot}"));
+                    }
+                }
                 other => return Err(format!("line {n}: unknown directive {other:?}")),
             }
         }
@@ -124,6 +144,7 @@ impl Scenario {
             ticks: ticks.ok_or("missing `ticks`")?,
             worms,
             inputs,
+            weapons,
         })
     }
 
@@ -136,6 +157,11 @@ impl Scenario {
             1 => w1,
             _ => 0,
         }
+    }
+
+    /// The weapon name overriding `slot`, or `None` if no `weapon` directive set it.
+    pub fn weapon(&self, slot: usize) -> Option<&str> {
+        self.weapons.get(&slot).map(String::as_str)
     }
 }
 
@@ -238,5 +264,37 @@ input 5 16 0
         let err =
             Scenario::parse("seed 1\nlevel a\nticks 1\nworm 0 0 0 100 10 0 2\n").unwrap_err();
         assert!(err.contains("visible must be 0 or 1"), "got: {err}");
+    }
+
+    #[test]
+    fn weapon_directive_parses() {
+        let s = Scenario::parse("seed 1\nlevel a.lev\nticks 1\nweapon 0 fan\n")
+            .expect("parses");
+        assert_eq!(s.weapon(0), Some("fan"));
+        assert_eq!(s.weapon(1), None);
+    }
+
+    #[test]
+    fn weapon_out_of_range_errors() {
+        // slot 5 is >= NUM_WEAPONS (5); line 4 is the offending line.
+        let err = Scenario::parse("seed 1\nlevel a.lev\nticks 1\nweapon 5 fan\n").unwrap_err();
+        assert!(err.contains("line 4"), "error must mention line number: {err}");
+    }
+
+    #[test]
+    fn weapon_duplicate_slot_errors() {
+        // Second `weapon 0` is line 5.
+        let err = Scenario::parse(
+            "seed 1\nlevel a.lev\nticks 1\nweapon 0 fan\nweapon 0 dart\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("line 5"), "error must mention line number: {err}");
+    }
+
+    #[test]
+    fn weapon_no_directive_back_compat() {
+        // SAMPLE has no `weapon` lines — existing scenarios must parse unchanged.
+        let s = Scenario::parse(SAMPLE).expect("parses");
+        assert_eq!(s.weapon(0), None);
     }
 }

@@ -217,7 +217,7 @@ fn fire_drops_a_shell_next_tick_then_the_nobjects_loop_advances_it() {
     // --- Fire tick: worm_fire arms leave_shell_timer; process_weapons (which
     //     ran BEFORE the Fire gate) saw the timer at 0, so NO shell yet. --------
     s.process_frame(&[fire(), idle()]);
-    assert_eq!(s.cycles, 0, "process_frame never bumps cycles");
+    assert_eq!(s.cycles, 1, "process_frame increments cycles once (game.cpp:357)");
     assert_eq!(s.worms[0].weapons[0].ammo, handgun.ammo - 1, "ammo decremented");
     assert_eq!(s.worms[0].weapons[0].delay_left, handgun.delay, "delay_left = 20");
     assert_eq!(s.wobjects.len(), 1, "one handgun projectile spawned");
@@ -228,7 +228,7 @@ fn fire_drops_a_shell_next_tick_then_the_nobjects_loop_advances_it() {
     //     (nobjects[7]). The nobjects loop ran BEFORE process_weapons, so the
     //     brand-new shell is NOT walked on its birth tick. ---------------------
     s.process_frame(&[idle(), idle()]);
-    assert_eq!(s.cycles, 0, "cycles stays 0");
+    assert_eq!(s.cycles, 2, "second process_frame -> cycles == 2");
     assert_eq!(s.worms[0].leave_shell_timer, 0, "shell timer expired");
     let shell = find_shell(&s).expect("a shell dropped the tick after firing");
     assert_eq!(shell.ty, Some(7), "the dropped nobject is the shell type (7)");
@@ -240,7 +240,8 @@ fn fire_drops_a_shell_next_tick_then_the_nobjects_loop_advances_it() {
     let mut advanced = false;
     for tick in 0..12 {
         s.process_frame(&[idle(), idle()]);
-        assert_eq!(s.cycles, 0, "cycles stays 0 (advance tick {tick})");
+        // 2 prior process_frame calls + (tick + 1) here => cycles == tick + 3.
+        assert_eq!(s.cycles, tick + 3, "cycles advances once per tick (advance tick {tick})");
         let cur = find_shell(&s).expect("shell persists (no ground in open sky)");
         if cur.pos != birth_pos {
             advanced = true;
@@ -277,7 +278,7 @@ fn firing_to_empty_arms_the_reload_and_refills_ammo() {
     let mut reloaded = false;
     for tick in 0..80 {
         s.process_frame(&[fire(), idle()]);
-        assert_eq!(s.cycles, 0, "cycles stays 0 (tick {tick})");
+        assert_eq!(s.cycles, tick + 1, "cycles advances once per tick (tick {tick})");
         let w = s.worms[0].weapons[0];
         if !empty_seen {
             if w.ammo == 0 {
@@ -391,7 +392,7 @@ fn dig_carves_the_level_advances_rng_and_rearms_on_single_direction() {
     // --- Dig tick: Change NOT held, L+R both held, able_to_dig set -> two
     //     draw_dirt_effect carves (texture 7, rframe 2 -> one rand each). -------
     s.process_frame(&[left_right()]);
-    assert_eq!(s.cycles, 0, "cycles stays 0");
+    assert_eq!(s.cycles, 1, "process_frame increments cycles once (game.cpp:357)");
     assert!(!s.worms[0].able_to_dig, "the dig spent the able_to_dig edge");
     assert_ne!(hash_components(&s).level, level_before, "the dig carved the level");
     assert_eq!(
@@ -473,5 +474,5 @@ fn change_during_reload_cycles_current_weapon() {
         s.worms[0].current_weapon, 1,
         "Change held mid-reload cycled current_weapon (load_change)"
     );
-    assert_eq!(s.cycles, 0, "cycles stays 0 throughout");
+    assert_eq!(s.cycles, 3, "cycles advanced once per process_frame call (3 ticks)");
 }

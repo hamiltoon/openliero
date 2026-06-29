@@ -306,6 +306,25 @@ fn weapon_change_cycles_current_weapon_and_clears_direction_bit() {
 }
 
 #[test]
+fn process_frame_increments_cycles_once_per_tick() {
+    // `cycles` starts at 0 and advances by exactly one per `process_frame` call
+    // (mirroring the C++ `++game.cycles` at game.cpp:357). This was frozen at 0 in
+    // the ProcessFrame subset before Slice 5b; the master hash folds `cycles`
+    // (hash.rs:50), so an off-by-one here would diverge the regenerated goldens'
+    // master column. Non-tautological: it would fail if the increment were dropped,
+    // doubled, or moved to a branch that the empty-input path skips.
+    let mut s = grounded_state();
+    assert_eq!(s.cycles, 0, "cycles starts at 0 (tick-0 contract)");
+    for expected in 1..=5 {
+        s.process_frame(&[ControlState::new()]);
+        assert_eq!(
+            s.cycles, expected,
+            "cycles advances exactly once per process_frame call"
+        );
+    }
+}
+
+#[test]
 fn empty_input_matches_slice2_reactions_then_physics() {
     // Equivalence guard: under empty input the full per-worm pass must leave
     // pos/vel/health identical to the Slice-2 path (worm_reactions then

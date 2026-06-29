@@ -723,10 +723,13 @@ impl SimState {
     }
 
     /// Advance one tick: a **subset** of `Game::ProcessFrame` (`game.cpp:333-355`
-    /// object loops, then `worm.cpp:210-353` per worm) — *not* yet the whole frame
-    /// (no `cycles++`, no bonus-drop RNG roll, no ninjarope `Process`, no
-    /// `ProcessSight`; those land in a later slice). Renamed from the Slice-3
-    /// `process_worms` now that it runs the object-Process loops too.
+    /// object loops, then `++cycles` at `game.cpp:357`, then `worm.cpp:210-353` per
+    /// worm) — *not* yet the whole frame (no bonus-drop RNG roll, no ninjarope
+    /// `Process`, no `ProcessSight`; those land in a later slice). `cycles` advances
+    /// once per tick at the exact game.cpp:357 point (after the object loops, before
+    /// the worm loop); it folds into the master hash only (hash.rs:50), not the
+    /// components. Renamed from the Slice-3 `process_worms` now that it runs the
+    /// object-Process loops too.
     ///
     /// **Object loops run BEFORE the worm loop**, mirroring `Game::ProcessFrame`'s
     /// order (`game.cpp:334-355`): `sobjects` (no-op this slice), then the
@@ -802,10 +805,12 @@ impl SimState {
         let h_signed_recoil = *h_signed_recoil;
         let settings_loading_time = *settings_loading_time;
         let load_change = *load_change;
-        // `cycles` is 0 in 4c (no `++cycles` yet); the nobjects loop needs it for
-        // the `cycles % delay` / `cycles & 7` gates inside `nobject_process`. Read
-        // it as a value; the loop must NOT mutate it.
-        let cycles = *cycles;
+        // The object loops read `cycles` as a value for the `cycles % delay` /
+        // `cycles & 7` gates inside `nobject_process`. They must see the value left by
+        // the PREVIOUS tick's increment (cycles=k-1 on tick k) — exactly as the C++
+        // object loops run BEFORE `++cycles` (game.cpp:357). So snapshot the value
+        // here, run the loops with it, then `++cycles` after the loops (see below).
+        let cycles_now = *cycles;
 
         // ----- Object Process loops (game.cpp:334-355), BEFORE the worm loop. --
         // sobjects: the ported SObject::Process (animation + free), FIRST. Walk
@@ -904,7 +909,7 @@ impl SimState {
                 weapons,
                 nobjects,
                 sobjects,
-                cycles,
+                cycles_now,
                 rand,
             ) {
                 NObjectOutcome::Keep => {
@@ -916,6 +921,16 @@ impl SimState {
             }
         }
         // bobjects: no-op this slice (empty pool; BObject::Process not ported).
+
+        // `++cycles` at the exact `game.cpp:357` point — AFTER the four object loops,
+        // BEFORE the worm loop. The object loops above ran with `cycles_now` (the
+        // value left by tick k-1's increment); after this the worm loop and the
+        // tick-end master hash see cycles=k. `cycles` folds into the master
+        // `HashGameState` only (hash.rs:50), NOT into any component hash, so advancing
+        // it perturbs only the master column of the goldens. Must match the C++ dumper
+        // exactly — the off-by-one is load-bearing for the `cycles % delay` gates read
+        // DURING the object loop.
+        *cycles = cycles.wrapping_add(1);
 
         for (i, w) in worms.iter_mut().enumerate() {
             // Interleave: apply this worm's input (≈ `Unpack`), then Process it.

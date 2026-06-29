@@ -209,7 +209,7 @@ fn greenball_fire_fly_explode_writes_terrain_and_moves_level_hash() {
     // --- Fire tick: the Fire gate trips, worm_fire spawns one greenball. -------
     s.process_frame(&[fire_input(), ControlState::new()]);
 
-    assert_eq!(s.cycles, 0, "process_frame must NOT increment cycles");
+    assert_eq!(s.cycles, 1, "process_frame increments cycles once (game.cpp:357)");
     assert_eq!(
         s.worms[0].weapons[0].ammo,
         greenball.ammo - 1,
@@ -264,7 +264,9 @@ fn greenball_fire_fly_explode_writes_terrain_and_moves_level_hash() {
     for tick in 1..2000 {
         let level_before = hash_components(&s).level;
         s.process_frame(&[ControlState::new(), ControlState::new()]);
-        assert_eq!(s.cycles, 0, "cycles stays 0 (tick {tick})");
+        // cycles advances once per process_frame: the fire tick (call 1) plus this
+        // many fly ticks => cycles == tick + 1.
+        assert_eq!(s.cycles, tick + 1, "cycles advances once per tick (tick {tick})");
 
         if s.wobjects.is_empty() {
             // The pool went 1 -> 0: this is the explode tick (greenball has no
@@ -342,7 +344,13 @@ fn greenball_fire_fly_explode_writes_terrain_and_moves_level_hash() {
         "explode tick drew exactly one more rand (the dirt-effect draw, no other)"
     );
 
-    assert_eq!(s.cycles, 0, "cycles still 0 after the whole sequence");
+    // cycles advanced exactly once per process_frame: 1 fire tick + explode_tick
+    // fly/explode ticks.
+    assert_eq!(
+        s.cycles,
+        explode_tick + 1,
+        "cycles advanced once per process_frame call across the whole sequence"
+    );
     assert!(s.wobjects.is_empty(), "pool empty after the explosion");
 }
 
@@ -357,7 +365,7 @@ fn no_fire_keeps_level_pristine() {
     for tick in 0..60 {
         s.process_frame(&[ControlState::new(), ControlState::new()]);
         assert!(s.wobjects.is_empty(), "wobjects empty (tick {tick})");
-        assert_eq!(s.cycles, 0, "cycles stays 0 (tick {tick})");
+        assert_eq!(s.cycles, tick + 1, "cycles advances once per tick (tick {tick})");
         assert_eq!(s.rand.last(), 0, "no Fire -> no rand drawn (tick {tick})");
         assert_eq!(
             hash_components(&s).level,

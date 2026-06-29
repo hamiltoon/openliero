@@ -120,7 +120,7 @@ fn fire_birth_tick_does_not_move_the_new_shot_then_it_flies_and_explodes() {
     // --- Fire tick: Fire gate trips, worm_fire spawns one wobject. -----------
     s.process_frame(&[fire_input()]);
 
-    assert_eq!(s.cycles, 0, "process_frame must NOT increment cycles");
+    assert_eq!(s.cycles, 1, "process_frame increments cycles once (game.cpp:357)");
     assert_eq!(s.worms[0].weapons[0].ammo, 9, "ammo decremented by Fire");
     assert_eq!(
         s.worms[0].weapons[0].delay_left, 0,
@@ -156,9 +156,11 @@ fn fire_birth_tick_does_not_move_the_new_shot_then_it_flies_and_explodes() {
     let rng_after_fire = s.rand.last();
     let mut prev = birth;
     let mut exploded = false;
+    let mut explode_tick = 0;
     for tick in 0..200 {
         s.process_frame(&[ControlState::new()]);
-        assert_eq!(s.cycles, 0, "cycles stays 0 on fly tick {tick}");
+        // 1 fire tick + (tick + 1) fly ticks => cycles == tick + 2.
+        assert_eq!(s.cycles, tick + 2, "cycles advances once per tick (fly tick {tick})");
         assert_eq!(
             s.rand.last(),
             rng_after_fire,
@@ -169,6 +171,7 @@ fn fire_birth_tick_does_not_move_the_new_shot_then_it_flies_and_explodes() {
         if s.wobjects.is_empty() {
             // The explosion tick: timer underflowed, driver freed the slot.
             exploded = true;
+            explode_tick = tick;
             break;
         }
         let cur = *s.wobjects.iter().next().expect("alive wobject");
@@ -187,14 +190,18 @@ fn fire_birth_tick_does_not_move_the_new_shot_then_it_flies_and_explodes() {
     }
     assert!(exploded, "the fan shot eventually times out and explodes");
     assert!(s.wobjects.is_empty(), "pool empty after the explosion");
-    assert_eq!(s.cycles, 0, "cycles still 0 after the whole sequence");
+    assert_eq!(
+        s.cycles,
+        explode_tick + 2,
+        "cycles advanced once per process_frame call (1 fire + fly/explode ticks)"
+    );
 }
 
 #[test]
 fn empty_input_keeps_pools_empty_and_draws_no_rng() {
     // Step 2 guard: with a fan loaded but Fire NEVER pressed, the new object
-    // loops are no-ops on the empty pools, the Fire gate never trips, cycles stays
-    // 0 and no RNG is drawn — proving the object loops + Fire gate did not perturb
+    // loops are no-ops on the empty pools, the Fire gate never trips, and no RNG is
+    // drawn (cycles still advances once per tick) — proving the object loops + Fire gate did not perturb
     // the worms-only behaviour. (The worms-only equivalence itself is pinned by
     // the still-green slice-2/3 oracle goldens, which now call process_frame.)
     let mut s = fire_state();
@@ -205,7 +212,7 @@ fn empty_input_keeps_pools_empty_and_draws_no_rng() {
         assert!(s.nobjects.is_empty(), "nobjects empty (tick {tick})");
         assert!(s.bonuses.is_empty(), "bonuses empty (tick {tick})");
         assert!(s.bobjects.is_empty(), "bobjects empty (tick {tick})");
-        assert_eq!(s.cycles, 0, "cycles stays 0 (tick {tick})");
+        assert_eq!(s.cycles, tick + 1, "cycles advances once per tick (tick {tick})");
         assert_eq!(s.rand.last(), 0, "no Fire -> no rand drawn (tick {tick})");
         assert_eq!(s.worms[0].weapons[0].ammo, 10, "no Fire -> ammo untouched");
     }

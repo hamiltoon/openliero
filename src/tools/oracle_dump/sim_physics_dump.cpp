@@ -11,15 +11,19 @@
 // (tick decimal; every hash as %08x). See stateHash.hpp for the hashes.
 //
 // Why a ProcessFrame *subset* and NOT the full `Game::ProcessFrame`: ProcessFrame
-// draws RNG every tick (the bonus-drop roll), increments `cycles`, and runs the
-// ninjarope / game-mode logic — all Slice-6 ProcessFrame-integration concerns, not
-// the object+worm physics this oracle exercises. We DO run the object loops (so a
-// fired projectile advances), but EXCLUDE `++cycles`, the bonus-drop roll, the
+// draws RNG every tick (the bonus-drop roll) and runs the ninjarope / game-mode
+// logic — Slice-6 ProcessFrame-integration concerns, not the object+worm physics
+// this oracle exercises. We DO run the object loops (so a fired projectile advances)
+// and we DO `++game.cycles` at the exact `game.cpp:357` point (after the four object
+// loops, before the worm loop) so the blood-trail / animation gates that key on
+// `cycles` are faithful (Slice 5b); but we still EXCLUDE the bonus-drop roll, the
 // bonuses loop, ninjarope, and the game-mode switch. Under empty input and full
 // health, with no projectiles in flight, every RNG-drawing / pool-spawning branch of
 // `Process` is skipped and the object pools are empty, so the loops are no-ops:
-// `rand.last` stays 0 (the `rng` column is a constant 0), `cycles` stays 0, and the
-// level is never dug. The dumper must NOT call ProcessFrame, ++cycles, or
+// `rand.last` stays 0 (the `rng` column is a constant 0) and the level is never dug.
+// `cycles` ADVANCES once per tick: it folds into the master `HashGameState`
+// (stateHash.hpp:19) but NOT into any component hash, so it perturbs only the master
+// column. The dumper must NOT call ProcessFrame, the bonus-drop roll, or
 // GenerateFromSettings.
 //
 // Why a LOADED level, not GenerateFromSettings: random generation consumes RNG and
@@ -62,6 +66,7 @@
 #include "mixer/player.hpp"
 #include "settings.hpp"
 #include "stateHash.hpp"
+#include "stats_recorder.hpp"
 #include "weapon.hpp"
 #include "worm.hpp"
 
@@ -200,6 +205,12 @@ int main(int argc, char** argv) {
 
   auto sound_player = std::make_shared<NullSoundPlayer>();
   Game game(common, settings, sound_player);
+  // O15: install the base no-op StatsRecorder. A default-constructed Game has a null
+  // `stats_recorder`; once Slice 5b's worm-damage path runs, `DamageDealt` would
+  // dereference it and crash headless. The base `StatsRecorder` (stats_recorder.cpp:8-29)
+  // is a pure no-op (the crashing subclass is `NormalStatsRecorder`, :44-77), so this is
+  // inert for slices 1-5a — they never hit a worm.
+  game.stats_recorder = std::make_shared<StatsRecorder>();
   game.rand.Seed(seed);
 
   // Load a FIXED level (NOT GenerateFromSettings, which would consume RNG). The
@@ -289,9 +300,10 @@ int main(int argc, char** argv) {
   // then dump. The input for the pass advancing tick t -> t+1 is keyed on t.
   for (int t = 0; t < scn.ticks; ++t) {
     // Object loops, in `Game::ProcessFrame` order (game.cpp:333-355), BEFORE the
-    // worm loop. EXCLUDES ++cycles, the bonus-drop roll, the bonuses loop, ninjarope,
-    // and the game-mode switch. On the empty pools of non-firing scenarios these are
-    // no-ops; once a worm Fires, the spawned projectile advances here next tick.
+    // worm loop. EXCLUDES the bonus-drop roll, the bonuses loop, ninjarope, and the
+    // game-mode switch (still Slice-6 concerns). On the empty pools of non-firing
+    // scenarios these are no-ops; once a worm Fires, the spawned projectile advances
+    // here next tick.
     {
       auto sr = game.sobjects.All();
       for (SObject* i = nullptr; (i = sr.Next());) {
@@ -313,6 +325,15 @@ int main(int argc, char** argv) {
         }
       }
     }
+
+    // O17: `++cycles` at the exact `game.cpp:357` point — AFTER the four object loops
+    // (sobjects -> wobjects -> nobjects -> bobjects) and BEFORE the worm loop. The
+    // object loops above ran with the value left by the previous tick (cycles=k-1 on
+    // tick k); the worm loop below sees the post-increment cycles=k. It folds into the
+    // master `HashGameState` only (not the components). The Rust `process_frame` must
+    // increment at this SAME point — the off-by-one is load-bearing for the
+    // `cycles % delay` / blood-trail gates read DURING the object loop.
+    ++game.cycles;
 
     std::array<uint32_t, 2> in{0, 0};
     auto it = scn.inputs.find(t);

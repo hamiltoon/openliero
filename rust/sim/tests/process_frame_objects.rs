@@ -253,7 +253,7 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
 
     // ---- Fire tick: dart spawns, draws ZERO rand. -------------------------
     s.process_frame(&[fire_input(), ControlState::new()]);
-    assert_eq!(s.cycles, 0, "process_frame never bumps cycles");
+    assert_eq!(s.cycles, 1, "process_frame increments cycles once (game.cpp:357)");
     assert_eq!(s.rand.last(), 0, "dart Fire draws no rand");
     assert_eq!(s.worms[0].weapons[0].ammo, dart.ammo - 1, "ammo decremented");
     assert_eq!(s.worms[0].weapons[0].delay_left, dart.delay, "delay_left = 30");
@@ -278,7 +278,8 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
         let lvl_snapshot = s.level.clone();
         let wobj_snapshot = *s.wobjects.iter().next().expect("alive wobject");
         s.process_frame(&no_fire());
-        assert_eq!(s.cycles, 0, "cycles stays 0 (tick {tick})");
+        // 1 fire tick + tick fly ticks => cycles == tick + 1.
+        assert_eq!(s.cycles, tick + 1, "cycles advances once per tick (tick {tick})");
         assert!(s.bobjects.is_empty(), "no blood (tick {tick})");
 
         if s.wobjects.is_empty() {
@@ -333,7 +334,11 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
         level_hash_const,
         "explosion carved terrain"
     );
-    assert_eq!(s.cycles, 0, "cycles still 0");
+    assert_eq!(
+        s.cycles,
+        explode_tick + 1,
+        "cycles advanced once per process_frame call (1 fire + flight/explode)"
+    );
     assert!(s.bobjects.is_empty(), "still no blood objects");
 
     // ---- Differential proof of the cross-pool ordering. -------------------
@@ -406,7 +411,11 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
     let mut debris_gone_at = None;
     for extra in 1..400 {
         s.process_frame(&no_fire());
-        assert_eq!(s.cycles, 0, "cycles stays 0 (post-explode {extra})");
+        assert_eq!(
+            s.cycles,
+            explode_tick + 1 + extra,
+            "cycles advances once per tick (post-explode {extra})"
+        );
         assert!(s.bobjects.is_empty(), "still no blood (post-explode {extra})");
         assert_eq!(
             s.rand.last(),
@@ -455,7 +464,7 @@ fn no_fire_keeps_object_pools_and_level_pristine() {
         assert!(s.sobjects.is_empty(), "sobjects empty (tick {tick})");
         assert!(s.nobjects.is_empty(), "nobjects empty (tick {tick})");
         assert!(s.bobjects.is_empty(), "bobjects empty (tick {tick})");
-        assert_eq!(s.cycles, 0, "cycles stays 0 (tick {tick})");
+        assert_eq!(s.cycles, tick + 1, "cycles advances once per tick (tick {tick})");
         assert_eq!(s.rand.last(), 0, "no rand drawn (tick {tick})");
         assert_eq!(
             hash_components(&s).level,

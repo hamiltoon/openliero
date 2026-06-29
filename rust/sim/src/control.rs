@@ -11,6 +11,7 @@
 //! Slice 3, Task 0 adds only the data; the control *logic* that reads these
 //! lands in later tasks (design doc, *`ControlConsts`*).
 
+use assets::object::NObjectType;
 use assets::sprite::SpriteSet;
 use assets::tc::Texture;
 use sim_core::fixed::{ftoi, itof};
@@ -18,7 +19,9 @@ use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
 use crate::blit::draw_dirt_effect;
-use crate::state::{ControlState, LevelSim, WormState, NUM_WEAPONS};
+use crate::nobject::nobject_create1;
+use crate::pool::Pool;
+use crate::state::{ControlState, LevelSim, NObject, WormState, NUM_WEAPONS};
 
 /// The TC constants/hacks the worm control + aiming paths read. Field groups
 /// mirror the design-doc table (Aiming / Movement / Jump / Ninjarope); each
@@ -336,16 +339,27 @@ pub fn process_tasks(worm: &mut WormState, reacts: &[i32; 4], c: &ControlConsts)
 ///    no-op here.
 /// 4. **`fire_cone` countdown** (`worm.cpp:837-839`): decrement while `> 0`
 ///    (non-hashed).
-/// 5. **Shell drop** (`worm.cpp:841-847`) — **DEFERRED to Slice 4**: when
-///    `leave_shell_timer > 0`, C++ decrements it and on reaching `0` draws RNG
-///    twice (`game.rand`) and spawns `nobject_types[7]`. Only `Worm::Fire` arms
-///    `leave_shell_timer`, so it is `0` every tick this slice (keeping the RNG
-///    pristine — design doc, *RNG decision*). Guarded with a `debug_assert!`; the
-///    body is `unreachable!` since it is never armed without Fire.
+/// 5. **Shell drop** (`worm.cpp:841-847`) — ported here (Slice 4d, Task 2): when
+///    `leave_shell_timer > 0`, decrement it; on reaching `0` draw `vel_y =
+///    -rand(20000)` then `vel_x = rand(16000) - 8000` and spawn `nobject_types[7]`
+///    (the shell) via [`nobject_create1`] with `color = 0`, `owner_idx =
+///    worm_index`. The two manual draws happen **before** `Create1`, which then
+///    draws its own `distribution` scatter (two `rand(16000)`) and `Create`'s
+///    `cur_frame` (`rand(num_frames + 1)`) — **5 draws total, in order**:
+///    `rand(20000), rand(16000), rand(16000), rand(16000), rand(4)`. Only
+///    `Worm::Fire` arms `leave_shell_timer`, so on scenarios that never fire this
+///    branch never runs and the RNG stays pristine; arming it is what makes the
+///    shell appear two ticks after the muzzle flash.
 ///
-/// Takes no `Rand`: the only RNG-drawing path (the shell drop) is unreachable
-/// this slice, which is what keeps `rand.last == 0` every tick.
-pub fn process_weapons(worm: &mut WormState) {
+/// Takes `&mut Rand` + `&mut Pool<NObject>` + `&[NObjectType]` + `worm_index` only
+/// for the shell-drop spawn; the timer-countdown paths above touch none of them.
+pub fn process_weapons(
+    worm: &mut WormState,
+    rand: &mut Rand,
+    nobjects: &mut Pool<NObject>,
+    nobject_types: &[NObjectType],
+    worm_index: i32,
+) {
     // worm.cpp:814-818 — per-slot delay_left countdown (the MASTER-hash linchpin).
     // The `>= 0` guard is bounded, so a plain `- 1` cannot overflow.
     for weapon in worm.weapons.iter_mut() {
@@ -377,18 +391,31 @@ pub fn process_weapons(worm: &mut WormState) {
         worm.fire_cone -= 1;
     }
 
-    // worm.cpp:841-847 — shell drop. DEFERRED to Slice 4 (Fire): only Worm::Fire
-    // arms leave_shell_timer, and the timer-expiry body draws RNG twice and spawns
-    // nobject_types[7]. It is 0 every tick this slice (RNG stays pristine).
-    debug_assert!(
-        worm.leave_shell_timer == 0,
-        "ProcessWeapons shell-drop (leave_shell_timer>0) is Slice-4 (Fire) \
-         territory; only Worm::Fire arms it and it draws RNG"
-    );
+    // worm.cpp:841-847 — shell drop. Only Worm::Fire arms leave_shell_timer; once
+    // armed, it counts down and on reaching 0 drops a spent shell. The RNG order is
+    // load-bearing: the two manual draws (vel_y then vel_x) precede Create1, so the
+    // five draws are rand(20000), rand(16000), rand(16000), rand(16000), rand(4).
     if worm.leave_shell_timer > 0 {
-        // worm.cpp:842-846: --leave_shell_timer; on reaching 0, game.rand() twice +
-        // nobject_types[7].Create1(...). Unimplemented: never armed without Fire.
-        unreachable!("leave_shell_timer is always 0 this slice (no Fire path arms it)");
+        worm.leave_shell_timer -= 1;
+        if worm.leave_shell_timer <= 0 {
+            // worm.cpp:843-844: vel_y FIRST, then vel_x. The C++ `-static_cast<int>`
+            // negates the unsigned draw; the `- 8000` recentres rand(16000) to
+            // [-8000, 7999].
+            let vel_y = -(rand.bound(20000) as i32);
+            let vel_x = rand.bound(16000) as i32 - 8000;
+            // worm.cpp:845: nobject_types[7].Create1(fixedvec(vel_x, vel_y), pos, 0,
+            // index, nullptr). Create1 draws the distribution scatter + Create's
+            // cur_frame (draws 3-5) — do NOT re-draw them here.
+            nobject_create1(
+                &nobject_types[7],
+                Vec2::new(vel_x, vel_y),
+                worm.pos,
+                0,
+                worm_index,
+                rand,
+                nobjects,
+            );
+        }
     }
 }
 
@@ -1138,17 +1165,43 @@ MultiJump = true
         w
     }
 
+    // Drive process_weapons for the timer-countdown tests, which never arm the
+    // shell drop (leave_shell_timer == 0). The throwaway Rand/Pool/types make the
+    // shell-spawn args inert: with no shell branch they are untouched.
+    fn run_weapons(w: &mut WormState) {
+        let mut rand = Rand::new();
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let nobject_types: Vec<NObjectType> = Vec::new();
+        process_weapons(w, &mut rand, &mut nobjects, &nobject_types, 0);
+    }
+
+    // A synthetic `nobject_types` table whose slot 7 is the shell (tc.cfg:5):
+    // distribution=8000, start_frame=45, num_frames=3, time_to_explo_v=0. Only the
+    // RNG-relevant fields matter; the rest stay at their defaults.
+    fn shell_nobject_types() -> Vec<NObjectType> {
+        let mut types = vec![NObjectType::default(); 8];
+        types[7] = NObjectType {
+            distribution: 8000,
+            start_frame: 45,
+            num_frames: 3,
+            time_to_explo_v: 0,
+            id: 7,
+            ..NObjectType::default()
+        };
+        types
+    }
+
     #[test]
     fn delay_left_decrements_all_slots_and_stops_at_floor() {
         // worm.cpp:814-818: every slot with delay_left >= 0 decrements by 1.
         // Boundary: 1 -> 0 -> stays -1; 0 -> -1 -> stays -1; -1 stays -1 (>= 0 guard).
         let mut w = weapon_worm([3, 1, 0, -1, 5]);
 
-        process_weapons(&mut w);
+        run_weapons(&mut w);
         let after1: Vec<i32> = w.weapons.iter().map(|s| s.delay_left).collect();
         assert_eq!(after1, vec![2, 0, -1, -1, 4], "tick 1: each >= 0 slot -= 1");
 
-        process_weapons(&mut w);
+        run_weapons(&mut w);
         let after2: Vec<i32> = w.weapons.iter().map(|s| s.delay_left).collect();
         // slot1 hit the floor (0 -> -1), slot2 already at -1 stays, slots 0/4 keep ticking.
         assert_eq!(
@@ -1162,12 +1215,12 @@ MultiJump = true
     fn delay_left_zero_goes_to_minus_one_then_holds() {
         // The exact >= 0 boundary on a single slot across three ticks: 0 -> -1 -> -1.
         let mut w = weapon_worm([0, 0, 0, 0, 0]);
-        process_weapons(&mut w);
+        run_weapons(&mut w);
         assert_eq!(
             w.weapons[0].delay_left, -1,
             "0 -> -1 (decrement ran at the boundary)"
         );
-        process_weapons(&mut w);
+        run_weapons(&mut w);
         assert_eq!(
             w.weapons[0].delay_left, -1,
             "-1 stays -1 (guard blocks further decrement)"
@@ -1181,7 +1234,7 @@ MultiJump = true
         // hashed invariant: no Fire -> ammo never depletes -> no reload).
         let mut w = weapon_worm([5, 5, 5, 5, 5]);
         w.weapons[0].loading_left = 0;
-        process_weapons(&mut w);
+        run_weapons(&mut w);
         assert_eq!(
             w.weapons[0].loading_left, 0,
             "ammo>0 -> reload skipped -> loading_left stays 0"
@@ -1196,10 +1249,10 @@ MultiJump = true
         // The reload SOUND at <= 0 (832-834) is not simulated (not hashed).
         let mut w = weapon_worm([5, 5, 5, 5, 5]);
         w.weapons[0].loading_left = 3;
-        process_weapons(&mut w);
+        run_weapons(&mut w);
         assert_eq!(w.weapons[0].loading_left, 2, "loading_left -= 1");
         assert_eq!(w.weapons[0].ammo, 10, "ammo unchanged while reloading");
-        process_weapons(&mut w);
+        run_weapons(&mut w);
         assert_eq!(w.weapons[0].loading_left, 1);
     }
 
@@ -1211,7 +1264,7 @@ MultiJump = true
         w.current_weapon = 2;
         w.weapons[2].loading_left = 4;
         w.weapons[0].loading_left = 9; // non-current; must not move
-        process_weapons(&mut w);
+        run_weapons(&mut w);
         assert_eq!(w.weapons[2].loading_left, 3, "current weapon counts down");
         assert_eq!(w.weapons[0].loading_left, 9, "non-current weapon untouched");
     }
@@ -1222,26 +1275,104 @@ MultiJump = true
         // faithful per-tick countdown).
         let mut w = weapon_worm([5, 5, 5, 5, 5]);
         w.fire_cone = 2;
-        process_weapons(&mut w);
+        run_weapons(&mut w);
         assert_eq!(w.fire_cone, 1);
-        process_weapons(&mut w);
+        run_weapons(&mut w);
         assert_eq!(w.fire_cone, 0);
-        process_weapons(&mut w);
+        run_weapons(&mut w);
         assert_eq!(w.fire_cone, 0, "fire_cone holds at 0 (> 0 guard)");
     }
 
     #[test]
     fn leave_shell_timer_zero_skips_shell_branch_without_panic() {
         // worm.cpp:841-847: the shell-drop branch is gated on leave_shell_timer > 0
-        // and draws RNG. It is Slice-4 (Fire) territory; leave_shell_timer == 0
-        // every tick this slice, so process_weapons must skip it cleanly (no panic,
-        // timer stays 0, RNG untouched — process_weapons takes no Rand).
+        // and draws RNG. With the timer at 0 (every tick on a scenario that never
+        // fires) process_weapons must skip it cleanly: timer stays 0, no nobject
+        // spawns, and the RNG is untouched.
         let mut w = weapon_worm([5, 5, 5, 5, 5]);
         assert_eq!(w.leave_shell_timer, 0);
-        process_weapons(&mut w);
+        let mut rand = Rand::new();
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let nobject_types = shell_nobject_types();
+        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 0);
         assert_eq!(
             w.leave_shell_timer, 0,
             "shell branch skipped, timer untouched"
+        );
+        assert_eq!(nobjects.len(), 0, "no shell spawned with timer 0");
+        assert_eq!(rand.last(), 0, "RNG untouched with timer 0");
+    }
+
+    #[test]
+    fn leave_shell_timer_decrements_and_spawns_only_on_expiry() {
+        // worm.cpp:842: --leave_shell_timer happens every tick the branch is taken,
+        // but the spawn (and its 5 RNG draws) only fires when the timer reaches 0.
+        // Timer 2 -> 1 (no spawn, no RNG), then 1 -> 0 (spawn + RNG).
+        let mut w = weapon_worm([5, 5, 5, 5, 5]);
+        w.leave_shell_timer = 2;
+        let mut rand = Rand::new();
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let nobject_types = shell_nobject_types();
+
+        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 0);
+        assert_eq!(w.leave_shell_timer, 1, "timer 2 -> 1");
+        assert_eq!(nobjects.len(), 0, "no shell while timer still > 0");
+        assert_eq!(rand.last(), 0, "no RNG drawn while timer still > 0");
+
+        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 0);
+        assert_eq!(w.leave_shell_timer, 0, "timer 1 -> 0 (expiry)");
+        assert_eq!(nobjects.len(), 1, "shell spawned on expiry");
+        assert_ne!(rand.last(), 0, "RNG drawn on expiry");
+    }
+
+    #[test]
+    fn leave_shell_timer_expiry_rng_order_and_spawn() {
+        // worm.cpp:841-847 + nobject.cpp:24,41-49: the shell drop draws EXACTLY 5
+        // values in order rand(20000), rand(16000), rand(16000), rand(16000),
+        // rand(num_frames+1=4), and spawns one nobject_types[7] at worm.pos with
+        // vel = (vel_x, vel_y) per the manual draws + the Create1 distribution
+        // adjust. A reference Rand seeded identically, hand-stepped in that order,
+        // pins both the draw count/order and the resulting velocity.
+        let mut w = weapon_worm([5, 5, 5, 5, 5]);
+        w.pos = Vec2::new(itof(50), itof(60));
+        w.leave_shell_timer = 1;
+
+        let mut rand = seeded(0x1337);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let nobject_types = shell_nobject_types();
+
+        // Hand-stepped reference: the SAME 5 draws, in order, against a twin Rand.
+        let mut refr = seeded(0x1337);
+        let vel_y = -(refr.bound(20000) as i32); // draw 1 (worm.cpp:843)
+        let vel_x = refr.bound(16000) as i32 - 8000; // draw 2 (worm.cpp:844)
+        // Create1 distribution scatter (nobject.cpp:44-45), sign `distribution - rand`.
+        let exp_vel_x = vel_x + (8000 - refr.bound(16000) as i32); // draw 3
+        let exp_vel_y = vel_y + (8000 - refr.bound(16000) as i32); // draw 4
+        let _cur_frame = refr.bound(4); // draw 5 (nobject.cpp:25, num_frames+1)
+
+        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 3);
+
+        assert_eq!(w.leave_shell_timer, 0, "timer expired");
+        assert_eq!(nobjects.len(), 1, "exactly one shell spawned");
+        let shell = nobjects
+            .iter()
+            .next()
+            .copied()
+            .expect("one shell present");
+        assert_eq!(shell.ty, Some(7), "spawned nobject is the shell type (id 7)");
+        assert_eq!(shell.pos, w.pos, "shell spawns at the worm's pos");
+        assert_eq!(
+            shell.vel,
+            Vec2::new(exp_vel_x, exp_vel_y),
+            "shell vel = manual draws + Create1 distribution adjust"
+        );
+        assert_eq!(shell.owner_idx, 3, "owner_idx is the worm index");
+
+        // Exactly 5 draws, in the exact order, against the twin Rand.
+        assert_eq!(
+            rand.last(),
+            refr.last(),
+            "exactly 5 draws in order: rand(20000), rand(16000), rand(16000), rand(16000), rand(4)"
         );
     }
 

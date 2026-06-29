@@ -933,8 +933,8 @@ impl SimState {
                 // 6. tasks (jump reads reacts[kRfUp], writes vel.y BEFORE physics).
                 process_tasks(w, &reacts, control);
 
-                // 7. weapons (delay_left countdown).
-                process_weapons(w);
+                // 7. weapons (delay_left countdown + shell drop on timer expiry).
+                process_weapons(w, rand, nobjects, nobject_types, i as i32);
 
                 // 8. Fire gate (worm.cpp:336-339), ported verbatim: Fire held,
                 //    Change NOT held, the current slot Available() (loading_left ==

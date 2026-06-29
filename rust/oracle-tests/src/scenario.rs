@@ -9,12 +9,13 @@
 //! Grammar (one directive per line; `#` starts a comment; blank lines ignored):
 //!
 //! ```text
-//! seed   <u32>
-//! level  <path>                                  # relative to the TC root
-//! ticks  <u32>
-//! worm   <index> <pos_x> <pos_y> <health> <lives> <stats_x> <visible>
-//! input  <tick> <worm0_7bit> <worm1_7bit>        # sparse; absent => 0
-//! weapon <slot> <name> [ammo]                    # override worm weapon slot (0..NUM_WEAPONS);
+//! seed        <u32>
+//! level       <path>                             # relative to the TC root
+//! ticks       <u32>
+//! max_bonuses <i32>                              # Settings::max_bonuses; absent => 0
+//! worm        <index> <pos_x> <pos_y> <health> <lives> <stats_x> <visible>
+//! input       <tick> <worm0_7bit> <worm1_7bit>   # sparse; absent => 0
+//! weapon      <slot> <name> [ammo]               # override worm weapon slot (0..NUM_WEAPONS);
 //!                                                 # optional 3rd token overrides starting ammo
 //! ```
 //!
@@ -47,6 +48,10 @@ pub struct Scenario {
     /// Level path relative to the TC root (`data/TC/openliero`).
     pub level: String,
     pub ticks: u32,
+    /// C++ `Settings::max_bonuses` — the cap the per-tick bonus-drop roll gates on
+    /// (`game.cpp:359`). Absent => `0` (the roll short-circuits, drawing no rand, so
+    /// scenarios without the directive stay byte-identical). Slice 5c sets it `> 0`.
+    pub max_bonuses: i32,
     pub worms: Vec<ScenarioWorm>,
     /// Sparse per-tick input overrides: `tick -> (worm0_7bit, worm1_7bit)`.
     inputs: HashMap<u32, (u32, u32)>,
@@ -64,6 +69,7 @@ impl Scenario {
         let mut seed: Option<u32> = None;
         let mut level: Option<String> = None;
         let mut ticks: Option<u32> = None;
+        let mut max_bonuses: i32 = 0;
         let mut worms = Vec::new();
         let mut inputs = HashMap::new();
         let mut weapons: HashMap<usize, String> = HashMap::new();
@@ -99,6 +105,10 @@ impl Scenario {
                 "ticks" => {
                     expect_args(n, key, &nums, 1)?;
                     ticks = Some(parse_at(0)? as u32);
+                }
+                "max_bonuses" => {
+                    expect_args(n, key, &nums, 1)?;
+                    max_bonuses = parse_at(0)? as i32;
                 }
                 "worm" => {
                     expect_args(n, key, &nums, 7)?;
@@ -158,6 +168,7 @@ impl Scenario {
             seed: seed.ok_or("missing `seed`")?,
             level: level.ok_or("missing `level`")?,
             ticks: ticks.ok_or("missing `ticks`")?,
+            max_bonuses,
             worms,
             inputs,
             weapons,
@@ -342,5 +353,23 @@ input 5 16 0
         // SAMPLE has no `weapon` lines — existing scenarios must parse unchanged.
         let s = Scenario::parse(SAMPLE).expect("parses");
         assert_eq!(s.weapon(0), None);
+    }
+
+    #[test]
+    fn max_bonuses_defaults_to_zero_and_parses() {
+        // Absent `max_bonuses` => 0 (the roll short-circuits; prior scenarios unchanged).
+        let s = Scenario::parse(SAMPLE).expect("parses");
+        assert_eq!(s.max_bonuses, 0, "absent max_bonuses defaults to 0");
+        // The Slice-5c directive sets it explicitly.
+        let s = Scenario::parse("seed 1\nlevel a.lev\nticks 1\nmax_bonuses 4\n")
+            .expect("parses");
+        assert_eq!(s.max_bonuses, 4);
+    }
+
+    #[test]
+    fn max_bonuses_wrong_arity_errors() {
+        let err =
+            Scenario::parse("seed 1\nlevel a.lev\nticks 1\nmax_bonuses\n").unwrap_err();
+        assert!(err.contains("expects 1 args"), "got: {err}");
     }
 }

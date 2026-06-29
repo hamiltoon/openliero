@@ -728,6 +728,34 @@ pub struct SimState {
     /// hash over time (gravity -> vel -> future pos). Defaulted to 0; harness-assigned
     /// after `new`. Inert for slices 1-5a (no bobjects).
     pub bobj_gravity: i32,
+    /// C++ `Settings::max_bonuses` (`settings.hpp:69`, in-game default 4): the cap the
+    /// per-tick **bonus-drop roll** gates on (`game.cpp:359`). The roll `if (max_bonuses
+    /// > 0 && rand(CBonusDropChance) == 0) CreateBonus()` fires in [`process_frame`]
+    /// only when this is `> 0`; the `&&` short-circuits so `max_bonuses == 0` draws NO
+    /// rand. **Defaulted to 0** here (NOT in the `new` arg list — set post-`new` by the
+    /// difftest, like the blood consts) so every slice 1-5b scenario keeps it 0 and the
+    /// roll never fires => those goldens stay byte-identical (no regen). T6's 5c
+    /// scenario threads a `max_bonuses > 0` to make the pool go live. **Not** hashed.
+    pub settings_max_bonuses: i32,
+    /// C++ `common.c[CBonusDropChance]` (`constants.hpp`): the bound the per-tick
+    /// bonus-drop roll draws `rand(CBonusDropChance)` against (`game.cpp:360`). Read
+    /// only when `settings_max_bonuses > 0` (the `&&` short-circuits before it
+    /// otherwise), so it is inert while `max_bonuses == 0` (slices 1-5b). Defaulted to
+    /// 0 here; the difftest assigns the real TC value (`tc.constants.BonusDropChance`)
+    /// after `new`, the same post-`new` pattern as the blood consts. **Not** hashed
+    /// (TC scalar; the resulting bonus position would hash, but spawning is deferred).
+    pub bonus_drop_chance: i32,
+}
+
+/// `Game::CreateBonus` (`game.cpp:216`) tripwire — DEFERRED to Slice-5c Task 2. The
+/// per-tick bonus-drop roll in [`SimState::process_frame`] only reaches here when
+/// `settings_max_bonuses > 0 && rand(CBonusDropChance) == 0`, which never holds for the
+/// slice 1-5b scenarios (no `max_bonuses` directive -> default 0 -> the roll
+/// short-circuits before this). T2 replaces this with the real spawn (the
+/// `rand(BonusSpawnRectW/H)` placement loop). Panicking here makes any premature
+/// reach during T0 testing loud rather than silently spawning nothing.
+fn create_bonus() {
+    unimplemented!("CreateBonus is deferred to Slice-5c Task 2 (T0 adds only the gated roll)");
 }
 
 impl SimState {
@@ -813,6 +841,12 @@ impl SimState {
             num_blood_colours: 0,
             first_blood_colour: 0,
             bobj_gravity: 0,
+            // Bonus-drop roll inputs: defaulted (0). Left at 0 the roll short-circuits
+            // (NO rand) so slices 1-5b stay byte-identical; the difftest assigns the
+            // real `max_bonuses`/`BonusDropChance` after `new` (post-`new` pattern, like
+            // the blood consts) for the 5c scenario that makes the bonus pool live.
+            settings_max_bonuses: 0,
+            bonus_drop_chance: 0,
         }
     }
 
@@ -898,6 +932,8 @@ impl SimState {
             num_blood_colours,
             first_blood_colour,
             bobj_gravity,
+            settings_max_bonuses,
+            bonus_drop_chance,
             cycles,
             ..
         } = self;
@@ -908,6 +944,8 @@ impl SimState {
         let num_blood_colours = *num_blood_colours;
         let first_blood_colour = *first_blood_colour;
         let bobj_gravity = *bobj_gravity;
+        let settings_max_bonuses = *settings_max_bonuses;
+        let bonus_drop_chance = *bonus_drop_chance;
         // The object loops read `cycles` as a value for the `cycles % delay` /
         // `cycles & 7` gates inside `nobject_process`. They must see the value left by
         // the PREVIOUS tick's increment (cycles=k-1 on tick k) — exactly as the C++
@@ -1049,6 +1087,20 @@ impl SimState {
         // exactly — the off-by-one is load-bearing for the `cycles % delay` gates read
         // DURING the object loop.
         *cycles = cycles.wrapping_add(1);
+
+        // Bonus-drop roll (`game.cpp:359-362`), at the exact game.cpp:359 point — AFTER
+        // `++cycles`, BEFORE the worm loop. Gated on `settings_max_bonuses > 0` (C++
+        // `settings->max_bonuses`): the `&&` short-circuits left-to-right, so
+        // `max_bonuses == 0` draws NO rand. THE WIN vs 5b: every prior scenario sets no
+        // `max_bonuses` directive (-> default 0), so the roll never fires and slices
+        // 1-5b stay byte-identical (no golden regen). `HBonusDisable` is false in the
+        // openliero TC, so it does not gate here (omitted). The `rand(CBonusDropChance)`
+        // draw uses the SAME shared RNG at this load-bearing position. On a 0 roll it
+        // would `CreateBonus` — DEFERRED to Slice-5c Task 2 (the tripwire below); it is
+        // unreachable until a scenario sets `max_bonuses > 0` (5c's, threaded by T6).
+        if settings_max_bonuses > 0 && rand.bound(bonus_drop_chance as u32) == 0 {
+            create_bonus();
+        }
 
         for (i, w) in worms.iter_mut().enumerate() {
             // Interleave: apply this worm's input (≈ `Unpack`), then Process it.
@@ -2063,5 +2115,91 @@ mod tests {
             "C++ default loading_time = 100 (settings.hpp:75)"
         );
         assert!(state.load_change, "C++ default load_change = true (settings.hpp:79)");
+    }
+
+    // Build an idle tick-0 state (two invisible worms, empty pools): nothing inside
+    // process_frame draws rand EXCEPT the bonus-drop roll, so rand.last() isolates it.
+    fn idle_state(seed: u32) -> SimState {
+        SimState::new(
+            &synthetic_level(),
+            &two_worms(),
+            seed,
+            &[0u8; 256],
+            Vec::new(),
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            SpriteSet::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            100,
+            true,
+            100,
+        )
+    }
+
+    #[test]
+    fn bonus_drop_roll_defaults_off_and_draws_no_rand() {
+        // `settings_max_bonuses` defaults to 0 (the in-game default is 4, but the
+        // dumper/difftest set it explicitly; priors leave it 0). With it 0 the
+        // `max_bonuses > 0 && rand(...)` gate SHORT-CIRCUITS before the rand draw — so
+        // the per-tick roll consumes NO randomness. With two invisible worms and empty
+        // pools, nothing else in process_frame draws either, so rand.last() must stay
+        // pinned at the post-seed 0 across the whole tick. THIS is why slices 1-5b stay
+        // byte-identical: no rand drawn => no perturbation.
+        let mut state = idle_state(42);
+        assert_eq!(state.settings_max_bonuses, 0, "max_bonuses defaults to 0");
+        // Set the chance NONZERO to prove it is the `max_bonuses == 0` gate, not a zero
+        // chance, that suppresses the draw (sharp non-tautology).
+        state.bonus_drop_chance = 11;
+        assert_eq!(state.rand.last(), 0, "no RNG consumed at tick 0");
+
+        state.process_frame(&[]);
+
+        assert_eq!(
+            state.rand.last(),
+            0,
+            "max_bonuses == 0 short-circuits: the bonus-drop roll draws NO rand"
+        );
+        assert_eq!(state.cycles, 1, "cycles still advances once per tick");
+    }
+
+    #[test]
+    fn bonus_drop_roll_draws_once_when_max_bonuses_positive() {
+        // With max_bonuses > 0 the gate opens and the roll draws `rand(CBonusDropChance)`
+        // EXACTLY once per tick. A reference Rand seeded identically, advanced by ONE
+        // bound() call, must match the driven state's rand — proving the single draw at
+        // the load-bearing position (after ++cycles, before the worm loop).
+        let mut state = idle_state(42);
+        state.settings_max_bonuses = 4;
+        state.bonus_drop_chance = 11;
+
+        let mut reference = Rand::new();
+        reference.seed(42);
+        let bounded = reference.bound(11);
+        // The roll calls the (deferred) create_bonus tripwire iff the bounded draw is 0.
+        // Guard the seed/chance so it is NOT 0 — otherwise process_frame would panic in
+        // the T0 tripwire. If a future RNG change makes this 0, the assert fails loudly.
+        assert_ne!(
+            bounded, 0,
+            "test seed/chance must avoid the deferred create_bonus tripwire (roll != 0)"
+        );
+
+        state.process_frame(&[]);
+
+        // Exactly one next_u32 was consumed, and it was the bonus-drop roll's
+        // rand.bound(bonus_drop_chance): last() matches the reference's single draw.
+        assert_eq!(
+            state.rand.last(),
+            reference.last(),
+            "the bonus-drop roll draws rand(CBonusDropChance) exactly once per tick"
+        );
+        assert_ne!(
+            state.rand.last(),
+            0,
+            "a draw genuinely occurred (rand advanced off the post-seed 0)"
+        );
+        assert_eq!(state.cycles, 1, "cycles advances once per tick");
     }
 }

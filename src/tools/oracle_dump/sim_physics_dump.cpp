@@ -10,21 +10,24 @@
 //    <sobjects> <nobjects> <wobjects>`
 // (tick decimal; every hash as %08x). See stateHash.hpp for the hashes.
 //
-// Why a ProcessFrame *subset* and NOT the full `Game::ProcessFrame`: ProcessFrame
-// draws RNG every tick (the bonus-drop roll) and runs the ninjarope / game-mode
-// logic — Slice-6 ProcessFrame-integration concerns, not the object+worm physics
-// this oracle exercises. We DO run the object loops (so a fired projectile advances)
-// and we DO `++game.cycles` at the exact `game.cpp:357` point (after the four object
-// loops, before the worm loop) so the blood-trail / animation gates that key on
-// `cycles` are faithful (Slice 5b); but we still EXCLUDE the bonus-drop roll, the
-// bonuses loop, ninjarope, and the game-mode switch. Under empty input and full
-// health, with no projectiles in flight, every RNG-drawing / pool-spawning branch of
-// `Process` is skipped and the object pools are empty, so the loops are no-ops:
-// `rand.last` stays 0 (the `rng` column is a constant 0) and the level is never dug.
-// `cycles` ADVANCES once per tick: it folds into the master `HashGameState`
-// (stateHash.hpp:19) but NOT into any component hash, so it perturbs only the master
-// column. The dumper must NOT call ProcessFrame, the bonus-drop roll, or
-// GenerateFromSettings.
+// Why a ProcessFrame *subset* and NOT the full `Game::ProcessFrame`: ProcessFrame runs
+// the ninjarope / game-mode logic — Slice-6 ProcessFrame-integration concerns, not the
+// object+worm physics this oracle exercises. We DO run the object loops (so a fired
+// projectile advances) and we DO `++game.cycles` at the exact `game.cpp:357` point
+// (after the four object loops, before the worm loop) so the blood-trail / animation
+// gates that key on `cycles` are faithful (Slice 5b); we ALSO run the per-tick
+// bonus-drop roll (`game.cpp:359-362`) at that same point (Slice 5c), but GATED on the
+// scenario's `max_bonuses` directive (default 0). With `max_bonuses == 0` the roll
+// short-circuits (`max_bonuses > 0` is false) and draws NO rand, so scenarios without
+// the directive stay byte-identical; a scenario that sets `max_bonuses > 0` opens the
+// roll (and `Game::CreateBonus`). We still EXCLUDE the bonuses Process loop, ninjarope,
+// and the game-mode switch. Under empty input, full health, max_bonuses 0 and no
+// projectiles in flight, every RNG-drawing / pool-spawning branch is skipped and the
+// object pools are empty, so the loops are no-ops: `rand.last` stays 0 (the `rng`
+// column is a constant 0) and the level is never dug. `cycles` ADVANCES once per tick:
+// it folds into the master `HashGameState` (stateHash.hpp:19) but NOT into any
+// component hash, so it perturbs only the master column. The dumper must NOT call
+// ProcessFrame or GenerateFromSettings.
 //
 // Why a LOADED level, not GenerateFromSettings: random generation consumes RNG and
 // would move `rand.last` off 0; loading a fixed `.lev` keeps the run reproducible.
@@ -33,6 +36,8 @@
 //   seed <u32>
 //   level <path relative to data/TC/openliero>
 //   ticks <N>
+//   max_bonuses <n>   (Settings::max_bonuses; default 0 => the bonus-drop roll
+//                      short-circuits and draws no rand; > 0 opens the roll, Slice 5c)
 //   worm <idx> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
 //   input <tick> <worm0_7bit> <worm1_7bit>   (sparse; absent => 0; applied on the
 //                                              Process pass advancing <tick>-><tick>+1)
@@ -93,6 +98,10 @@ struct Scenario {
   std::map<int, std::string> weapon_overrides;
   // slot -> opt-in ammo override (only set when the `weapon` directive has a 3rd token).
   std::map<int, int> weapon_ammo_overrides;
+  // Settings::max_bonuses for the per-tick bonus-drop roll. Default 0 => the roll
+  // short-circuits (no rand drawn), so scenarios without a `max_bonuses` directive stay
+  // byte-identical. A scenario sets it > 0 to make the bonus pool live (Slice 5c).
+  int max_bonuses = 0;
 };
 
 std::vector<uint8_t> SlurpFile(std::string const& path) {
@@ -128,6 +137,8 @@ Scenario ParseScenario(char const* path) {
       ls >> s.level;
     } else if (key == "ticks") {
       ls >> s.ticks;
+    } else if (key == "max_bonuses") {
+      ls >> s.max_bonuses;
     } else if (key == "worm") {
       WormSpec w;
       ls >> w.index >> w.pos_x >> w.pos_y >> w.health >> w.lives >> w.stats_x >> w.visible;
@@ -202,6 +213,12 @@ int main(int argc, char** argv) {
   // the empty re-diff confirms that. (MakeShadow, the other shadow material_id writer,
   // runs only via GenerateFromSettings, which this load()-based dumper never calls.)
   settings->shadow = false;
+  // Bonus-drop roll gate. The in-game default is 4 (settings.hpp:69); this dumper
+  // overrides it from the scenario (default 0) so that scenarios WITHOUT a
+  // `max_bonuses` directive leave it 0 — the per-tick roll then short-circuits
+  // (`max_bonuses > 0` is false => no rand drawn), keeping their goldens byte-identical.
+  // A scenario that sets `max_bonuses > 0` opens the roll (Slice 5c).
+  settings->max_bonuses = scn.max_bonuses;
 
   auto sound_player = std::make_shared<NullSoundPlayer>();
   Game game(common, settings, sound_player);
@@ -344,6 +361,19 @@ int main(int argc, char** argv) {
     // increment at this SAME point — the off-by-one is load-bearing for the
     // `cycles % delay` / blood-trail gates read DURING the object loop.
     ++game.cycles;
+
+    // Bonus-drop roll (game.cpp:359-362), AFTER `++cycles` and BEFORE the worm loop —
+    // the exact game.cpp:359 point. Gated on `settings->max_bonuses > 0`: the `&&`
+    // short-circuits left-to-right, so `max_bonuses == 0` (the default for scenarios
+    // with no `max_bonuses` directive) draws NO rand, keeping those goldens
+    // byte-identical. `h[HBonusDisable]` is false in the openliero TC. When the gate
+    // opens, `rand(c[CBonusDropChance])` is drawn from the SAME RNG at this load-bearing
+    // position; a 0 roll calls `Game::CreateBonus` (real C++ — the bonus then sits in
+    // the pool until the bonuses Process loop, a later slice).
+    if (!common->h[HBonusDisable] && settings->max_bonuses > 0 &&
+        game.rand(common->c[CBonusDropChance]) == 0) {
+      game.CreateBonus();
+    }
 
     std::array<uint32_t, 2> in{0, 0};
     auto it = scn.inputs.find(t);

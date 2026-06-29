@@ -243,6 +243,8 @@ mod tests {
             num_blood_colours: 0,
             first_blood_colour: 0,
             bobj_gravity: 0,
+            settings_max_bonuses: 0,
+            bonus_drop_chance: 0,
         }
     }
 

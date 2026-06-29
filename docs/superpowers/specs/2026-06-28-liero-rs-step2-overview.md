@@ -218,7 +218,7 @@ Refines the breakdown's six-step ordering:
    tick-for-tick over 146 ticks incl. aim/jump/weapon-change/ninjarope phases.)
 4. **One weapon, full lifecycle.** `Worm::Fire` → `WObject::Process` (move, collide,
    explode) → terrain destruction → resulting `SObject`/`NObject`. Simplest
-   projectile first; the roadmap's headline milestone. **← 4a + 4b + 4c DONE & bit-exact**
+   projectile first; the roadmap's headline milestone. **← 4a + 4b + 4c + 4d DONE & bit-exact — SLICE 4 COMPLETE**
    (**4a = fan**, the explodes-into-nothing projectile: `worm_fire`/`weapon_fire`/
    `wobject_process`/`blow_up`, the driver promoted to a ProcessFrame subset
    `process_frame` (object loops before worms + Fire gate), C++ dumper extended with
@@ -236,8 +236,14 @@ Refines the breakdown's six-step ordering:
    real; golden `sim_slice4c.txt` matches C++ master+components over 91 ticks (rng flat
    at the dart fire tick, the whole sound→dirt-throw→`Create2`→crater cluster at the
    explode tick; a small `shot_type=1` enablement in `wobject_process` was needed; O5
-   confirmed, O9/O10/O11 recorded). 4d Slice-3 deferrals planned next. 4a's milestone
-   also surfaced + fixed a latent `if(visible)` worm-gate bug.)
+   confirmed, O9/O10/O11 recorded). **4d = handgun** closes the Slice-3/4 deferrals
+   (dig carve, `leave_shell_timer` shell-drop + its landing `BlitImageOnMap`, the
+   `ammo<=0` reload, the weapon-change `load_change` gate; `ProcessSight` stays
+   omitted — proven correct because handgun `laserSight=true` yet golden
+   `sim_slice4d.txt` matches master+components over 126 ticks). 4d also surfaced the
+   dumper's `loading_time=0` (instant reload) and an unlisted shell-landing
+   `BlitImageOnMap`. 4a's milestone also surfaced + fixed a latent `if(visible)`
+   worm-gate bug. **Slice 4 (the headline weapon-lifecycle milestone) is COMPLETE.**)
 5. **Remaining object families.** nobjects (incl. splinters), sobjects (blast →
    terrain + worm damage), bobjects (blood), bonuses (spawn/pickup). Each vs its
    component hash.

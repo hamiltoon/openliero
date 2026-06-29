@@ -44,7 +44,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 ├─ 🔄 Slice 4  one weapon, full lifecycle (4a–4d)              ~50%   ◀── HERE
 │   ├─ ✅ 4a  projectile lifecycle — fan (RNG goes live)         SHIPPED
 │   ├─ ✅ 4b  terrain destruction — greenball / DrawDirtEffect   SHIPPED (level hash live, 91 ticks bit-exact)
-│   ├─ 🔄 4c  explosion sobjects + nobjects — dart               ◀── HERE (T5/8 done — object loops live)
+│   ├─ 🔄 4c  explosion sobjects + nobjects — dart               ◀── HERE (T5b done — shot_type=1 enabled; T6 next)
 │   └─ ⬜ 4d  slice-3/4 deferrals (dig body, reload, shell, …)   (planned; executes last)
 ├─ ⬜ Slice 5  remaining object families (nobjects/sobjects/blood/bonuses)
 └─ ⬜ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match
@@ -55,7 +55,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 | Rewrite track (steps 0–5) | **~38–45%** |
 | Step 2 (current) | **~55–58%** |
 | Slice 4 (weapon lifecycle) | **~50%** (4a + 4b shipped; 4c + 4d planned) |
-| Slice 4c (current) | **~70%** (T0–T5 done + reviewed; shot_type=1 enablement + T6 scenario/golden next) |
+| Slice 4c (current) | **~73%** (T0–T5 + shot_type=1 enablement done + reviewed; T6 scenario/golden next) |
 
 ---
 

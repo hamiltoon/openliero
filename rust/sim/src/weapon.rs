@@ -32,6 +32,7 @@ use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
 use crate::blit::draw_dirt_effect;
+use crate::nobject::nobject_create2;
 use crate::pool::Pool;
 use crate::sobject::sobject_create;
 use crate::state::{LevelSim, NObject, SObject, WObject, WormState};
@@ -390,9 +391,18 @@ pub fn wobject_process(
 /// * **dart** (`create_on_exp = 2`) — the sobject spawn fires: `small_explosion`
 ///   runs its full sound / dirt-throw / crater cluster via [`sobject_create`].
 ///
-/// The `splinter_amount` scatter (+ its RNG) is still `debug_assert`ed off
-/// (deferred to O9) so a config that would take that un-ported branch trips
-/// loudly in debug builds.
+/// **The `splinter_amount` scatter is now live** (Slice-5a T0,
+/// `weapon.cpp:96-115`): when `splinter_amount > 0` and `splinter_scatter == 0`
+/// (the cannon path) it spawns `splinter_amount` nobjects of `splinter_type` via
+/// [`nobject_create2`], drawing per splinter `rand(128)` (`kAngle`) **then**
+/// `rand(2)` (`kColorSub`) **then** `Create2`'s own draws, at the wobject's
+/// **fixed** `pos` (`fixedvec(kX, kY)` — NO `Ftoi`) with zero velocity and colour
+/// `splinter_colour - kColorSub`. It runs **after** `create_on_exp` and **before**
+/// the dart's own `dirt_effect` — the C++ order is load-bearing because each
+/// `Create2` draws its RNG between the two. The `scatter != 0` sub-branch (the
+/// C++ `Create1` path) is **guarded** (O18): no weapon in this TC takes it (only
+/// `mini_nuke` has `scatter=1`, out of scope) and `blow_up` has no access to the
+/// wobject velocity `Create1` needs, so a config that would hit it trips loudly.
 #[allow(clippy::too_many_arguments)]
 pub fn blow_up(
     weapon: &Weapon,
@@ -411,11 +421,6 @@ pub fn blow_up(
     sobjects: &mut Pool<SObject>,
     rand: &mut Rand,
 ) {
-    debug_assert!(
-        weapon.splinter_amount <= 0,
-        "splinter scatter (+ its rng) deferred (O9)"
-    );
-
     // :89-92 create-on-explosion — BEFORE the dart's own dirt_effect (the order
     // is load-bearing: the sobject's sound/dirt-throw/crater draw RNG between the
     // sobject spawn and the dart crater). Pass `Ftoi(pos.x), Ftoi(pos.y)`; the
@@ -438,6 +443,46 @@ pub fn blow_up(
             sobjects,
             rand,
         );
+    }
+
+    // :94 explo sound (render-only, no sim/RNG) — omitted.
+
+    // :96-115 splinter scatter — AFTER create_on_exp, BEFORE the dart's own
+    // dirt_effect. The C++ order is load-bearing: each Create2 draws its RNG
+    // between the sobject spawn and the crater.
+    if weapon.splinter_amount > 0 {
+        if weapon.splinter_scatter == 0 {
+            // :99-106 scatter == 0 (cannon path). Per splinter: rand(128) [kAngle]
+            // THEN rand(2) [kColorSub], THEN nobject_types[splinter_type].Create2
+            // with zero vel, the FIXED pos (`fixedvec(kX, kY)` — NO Ftoi), and
+            // colour `splinter_colour - kColorSub`. cause_idx == fired_by ==
+            // owner_idx (the exploding wobject's owner).
+            for _ in 0..weapon.splinter_amount {
+                let angle = rand.bound(128) as i32;
+                let color_sub = rand.bound(2) as i32;
+                nobject_create2(
+                    &nobject_types[weapon.splinter_type as usize],
+                    angle,
+                    Vec2::zero(),
+                    pos,
+                    weapon.splinter_colour - color_sub,
+                    owner_idx,
+                    cossin,
+                    rand,
+                    nobjects,
+                );
+            }
+        } else {
+            // :107-114 scatter != 0 -> the C++ Create1 splinter branch. GUARDED
+            // (O18): no weapon in this TC takes it (only mini_nuke has scatter=1,
+            // with the special small_nukes type, out of scope), AND blow_up has no
+            // access to the wobject velocity that C++ Create1 needs (`fixedvec(
+            // kVelX, kVelY)`). A config that would hit it trips loudly here.
+            debug_assert!(
+                false,
+                "splinter_scatter != 0 (Create1 branch) deferred (O18): needs wobject vel"
+            );
+        }
     }
 
     if weapon.dirt_effect >= 0 {
@@ -1613,5 +1658,186 @@ mod tests {
         assert_eq!(sobjects.len(), 1, "sobject spawned");
         assert_eq!(rand.last(), expected_last, "only the sound rand(2) drawn");
         assert_eq!(nobjects.len(), 0, "background level -> no dirt debris");
+    }
+
+    // ====================================================================
+    // blow_up: splinter scatter arm (BlowUpObject weapon.cpp:96-115) — 5a T0
+    // ====================================================================
+
+    // A weapon shaped to ISOLATE the splinter arm: create_on_exp = -1 and the
+    // weapon's own dirt_effect = -1, so the ONLY rng blow_up draws is the
+    // splinter loop's. splinter_type = 0 indexes nobject_types; splinter_colour
+    // = 80. `scatter` selects the Create2 (==0) vs guarded Create1 (!=0) path.
+    fn splinter_weapon(amount: i32, scatter: i32) -> Weapon {
+        Weapon {
+            id: 9,
+            create_on_exp: -1,
+            dirt_effect: -1,
+            splinter_amount: amount,
+            splinter_scatter: scatter,
+            splinter_type: 0,
+            splinter_colour: 80,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn splinter_scatter_zero_spawns_n_and_draws_angle_colorsub_then_create2() {
+        // scatter == 0 (cannon path): splinter_amount=3 spawns 3 nobjects of
+        // splinter_type, drawing per splinter rand(128) [kAngle], rand(2)
+        // [kColorSub], then Create2's rand(40) + 2x rand(20000) (dirt-like type),
+        // in that exact order. Asserts the spawned count, each colour
+        // (splinter_colour - kColorSub), and the post-loop rand.last.
+        let cossin = precompute_cossin();
+        let weapon = splinter_weapon(3, 0);
+        // nobject_types[0] = dirt-like (speed_v 40, dist 10000): each Create2
+        // draws rand(40), rand(20000), rand(20000); Create resolves cur_frame =
+        // color (start_frame<=0 & color!=0) with NO draw, so the per-splinter
+        // draw shape is exactly [rand(128), rand(2), rand(40), rand(20000)x2].
+        let nobject_types = vec![dirt_nobject()];
+        let pos = Vec2::new(itof(50), itof(60));
+
+        // Reference rng stream: the three splinters' draws, in order. Capture each
+        // color_sub so the spawned colours are a real (non-tautological) assertion.
+        let mut refr = seeded();
+        let mut subs = [0i32; 3];
+        for s in subs.iter_mut() {
+            refr.bound(128); // kAngle
+            *s = refr.bound(2) as i32; // kColorSub
+            refr.bound(40); // Create2 speed_v
+            refr.bound(20000); // dist x
+            refr.bound(20000); // dist y
+        }
+        let expected_last = refr.last();
+        assert!(
+            subs.iter().any(|&s| s != 0),
+            "seed must give a non-zero color_sub so the `- kColorSub` is exercised"
+        );
+
+        let mut rand = seeded();
+        let mut level = air_level();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(8);
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut sobjects: Pool<SObject> = Pool::new(8);
+
+        blow_up(
+            &weapon,
+            &mut level,
+            &SpriteSet::default(),
+            &[],
+            pos,
+            4, // owner_idx (= C++ cause_idx == fired_by)
+            &[],
+            &nobject_types,
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            &mut rand,
+        );
+
+        // N nobjects spawned, none diverted to sobjects.
+        assert_eq!(nobjects.len(), 3, "splinter_amount=3 -> three nobjects");
+        assert_eq!(sobjects.len(), 0, "create_on_exp = -1 -> no sobject");
+
+        // Exact rng order/count: matching rand.last pins both.
+        assert_eq!(
+            rand.last(),
+            expected_last,
+            "3x [rand(128), rand(2), rand(40), rand(20000), rand(20000)] in order"
+        );
+
+        // Each splinter: colour = splinter_colour - kColorSub, owner carried,
+        // ty = nobject_types[splinter_type].
+        for (i, sub) in subs.iter().enumerate() {
+            let obj = *nobjects.get(i).expect("splinter spawned");
+            assert_eq!(
+                obj.cur_frame,
+                80 - sub,
+                "splinter {i} cur_frame = splinter_colour - rand(2)"
+            );
+            assert_eq!(obj.owner_idx, 4, "splinter {i} inherits owner_idx");
+            assert_eq!(obj.ty, Some(2), "splinter {i} is nobject_types[splinter_type]");
+        }
+    }
+
+    #[test]
+    fn splinter_amount_zero_spawns_none_and_draws_nothing() {
+        // splinter_amount = 0: the whole arm is skipped — no nobject, no rng. (The
+        // dormant-for-prior-weapons invariant: fan/dart all have amount 0.)
+        let cossin = precompute_cossin();
+        let weapon = splinter_weapon(0, 0);
+        let nobject_types = vec![dirt_nobject()];
+
+        let mut rand = seeded();
+        rand.bound(777); // pre-advance so "unchanged" is a real assertion
+        let last_before = rand.last();
+
+        let mut level = air_level();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(8);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut sobjects: Pool<SObject> = Pool::new(8);
+
+        blow_up(
+            &weapon,
+            &mut level,
+            &SpriteSet::default(),
+            &[],
+            Vec2::new(itof(50), itof(50)),
+            1,
+            &[],
+            &nobject_types,
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            &mut rand,
+        );
+
+        assert_eq!(nobjects.len(), 0, "splinter_amount=0 -> no splinters");
+        assert_eq!(rand.last(), last_before, "splinter arm skipped -> no rng drawn");
+    }
+
+    #[test]
+    #[should_panic(expected = "Create1 branch")]
+    fn splinter_scatter_nonzero_trips_the_guarded_create1_branch() {
+        // scatter != 0 -> the C++ Create1 splinter branch. It is GUARDED (O18): no
+        // weapon in this TC takes it (only mini_nuke has scatter=1, out of scope),
+        // and blow_up has no access to the wobject velocity Create1 needs. A config
+        // that would hit it must trip loudly.
+        let cossin = precompute_cossin();
+        let weapon = splinter_weapon(2, 1);
+        let nobject_types = vec![dirt_nobject()];
+
+        let mut rand = seeded();
+        let mut level = air_level();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(8);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut sobjects: Pool<SObject> = Pool::new(8);
+
+        blow_up(
+            &weapon,
+            &mut level,
+            &SpriteSet::default(),
+            &[],
+            Vec2::new(itof(50), itof(50)),
+            1,
+            &[],
+            &nobject_types,
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            &mut rand,
+        );
     }
 }

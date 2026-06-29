@@ -59,9 +59,10 @@ use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
 use crate::blit::{blit_image_on_map, draw_dirt_effect};
-use crate::pool::Pool;
+use crate::bobject::create_bobject;
+use crate::pool::{BloodPool, Pool};
 use crate::sobject::sobject_create;
-use crate::state::{LevelSim, NObject, SObject, WObject, WormState};
+use crate::state::{BObject, LevelSim, NObject, SObject, WObject, WormState};
 
 /// Port of `NObjectType::Create` (`nobject.cpp:7-39`) — the shared spawn core.
 ///
@@ -273,10 +274,12 @@ fn check_for_spec_worm_hit(worm: &WormState, x: i32, y: i32, dist: i32) -> bool 
 ///
 /// * **bounce** (`:81-93`) — `if ty.bounce > 0`, the natural C++ guard; fully
 ///   ported (reflects `vel`, no rand). Skipped for the dirt particle (`bounce=0`).
-/// * **blood_trail** (`:95-97`) — `debug_assert!`ed off (O10). *cycles=0 trap:* the
-///   gate is `cycles % blood_trail_delay == 0`, which is **true at `cycles == 0`**,
-///   so a `blood_trail` type would spawn a `BObject` (via `CreateBObject`, no rand)
-///   every frozen/warm-up tick. Needs the bobjects pool — deferred.
+/// * **blood_trail** (`:95-97`) — LIVE (T3). Gate `blood_trail && blood_trail_delay
+///   > 0 && cycles % blood_trail_delay == 0` spawns a `BObject` via
+///   [`create_bobject`] (one `rand(NumBloodColours)` draw) at the nobject's current
+///   `pos` with `vel / 4`. `cycles` is the pre-`++cycles` snapshot (the same value
+///   the `cycles & 7` animation gate reads), so now that `cycles` advances (T0) the
+///   trail fires at the faithful 1/10 cadence — no warm-up storm.
 /// * **boundary clamp** (`:100-113`) — fully ported. **Clamps to `Itof(width)` /
 ///   `Itof(height)`, NOT `width-1`** — the load-bearing difference from
 ///   [`crate::weapon::wobject_process`], which clamps to `width-1`.
@@ -324,8 +327,11 @@ pub fn nobject_process(
     weapons: &[Weapon],
     nobjects: &mut Pool<NObject>,
     sobjects: &mut Pool<SObject>,
+    bobjects: &mut BloodPool<BObject>,
     cycles: i32,
     blood: i32,
+    num_blood_colours: i32,
+    first_blood_colour: i32,
     rand: &mut Rand,
 ) -> NObjectOutcome {
     let mut bounced = false;
@@ -370,11 +376,24 @@ pub fn nobject_process(
         }
     }
 
-    // :95-97 blood_trail BObject spawn — deferred (O10). cycles=0 trap, see doc.
-    debug_assert!(
-        !ty.blood_trail,
-        "blood_trail BObject spawn deferred (O10); cycles=0 trap (cycles % delay == 0 fires at cycles 0)"
-    );
+    // :95-97 blood_trail BObject spawn (LIVE). Gate: blood_trail set, delay > 0, and
+    // `cycles % delay == 0` — `cycles` is the SAME pre-`++cycles` snapshot the
+    // animation `cycles & 7` gate reads (game.cpp object loops precede :357), so the
+    // faithful 1/10 cadence holds now that cycles advances. Spawns at the nobject's
+    // CURRENT pos with `vel / 4` (truncating fixed-vector divide), AFTER the bounce
+    // block mutated `vel` — exactly the C++ position. `create_bobject` draws one
+    // `rand(NumBloodColours)`.
+    if ty.blood_trail && ty.blood_trail_delay > 0 && cycles.wrapping_rem(ty.blood_trail_delay) == 0
+    {
+        create_bobject(
+            bobjects,
+            obj.pos,
+            obj.vel.div(4),
+            num_blood_colours,
+            first_blood_colour,
+            rand,
+        );
+    }
 
     // :100 recompute inew = Ftoi(pos + vel) (uses the post-bounce vel).
     inew_x = ftoi(obj.pos.x.wrapping_add(obj.vel.x));
@@ -941,6 +960,7 @@ mod tests {
         let mut worms: Vec<WormState> = Vec::new();
         let mut wobjects: Pool<WObject> = Pool::new(1);
         let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bobjects: BloodPool<BObject> = BloodPool::new(700);
         nobject_process(
             obj,
             ty,
@@ -956,8 +976,11 @@ mod tests {
             &[],
             nobjects,
             &mut sobjects,
+            &mut bobjects,
             cycles,
             100,
+            0,
+            0,
             rand,
         )
     }
@@ -1322,6 +1345,7 @@ mod tests {
         let mut worms: Vec<WormState> = Vec::new();
         let mut wobjects: Pool<WObject> = Pool::new(1);
         let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bobjects: BloodPool<BObject> = BloodPool::new(700);
         nobject_process(
             obj,
             ty,
@@ -1337,8 +1361,11 @@ mod tests {
             &[],
             nobjects,
             &mut sobjects,
+            &mut bobjects,
             cycles,
             100,
+            0,
+            0,
             rand,
         )
     }
@@ -1416,6 +1443,7 @@ mod tests {
         let sprites = no_sprites();
         let mut nobjects: Pool<NObject> = Pool::new(8);
         let mut sobjects: Pool<SObject> = Pool::new(8);
+        let mut bobjects: BloodPool<BObject> = BloodPool::new(700);
         let mut wobjects: Pool<WObject> = Pool::new(1);
         let mut worms: Vec<WormState> = Vec::new();
         let mut rand = seeded();
@@ -1449,8 +1477,11 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut bobjects,
             0,
             100,
+            0,
+            0,
             &mut rand,
         );
 
@@ -1494,6 +1525,7 @@ mod tests {
         let sprites = no_sprites();
         let mut nobjects: Pool<NObject> = Pool::new(8);
         let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bobjects: BloodPool<BObject> = BloodPool::new(700);
         let mut wobjects: Pool<WObject> = Pool::new(1);
         // A VISIBLE worm 100px away (well outside detect_distance=2) + an invisible
         // worm right on top (invisible -> never a hit).
@@ -1525,8 +1557,11 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut bobjects,
             0,
             100,
+            0,
+            0,
             &mut rand,
         );
 
@@ -1558,5 +1593,171 @@ mod tests {
             check_for_spec_worm_hit(&visible_far, 57, 55, 2),
             "visible worm whose sprite box overlaps the +/-dist box is hit"
         );
+    }
+
+    // ---- Step 7: blood_trail arm (T3) ----------------------------------------
+
+    // A blood-nobject shaped like TC type 6: blood_trail with delay 10, flies in air
+    // (expl_ground=false, gravity), no bounce/anim/timeout/hit. Its ONLY rand-drawing
+    // behaviour is the blood-trail's CreateBObject when the cycles gate opens.
+    fn blood_nobject(id: i32, delay: i32) -> NObjectType {
+        NObjectType {
+            id,
+            blood_trail: true,
+            blood_trail_delay: delay,
+            expl_ground: false,
+            bounce: 0,
+            num_frames: 0,
+            hit_damage: 0,
+            time_to_explo: 0,
+            create_on_exp: -1,
+            dirt_effect: -1,
+            splinter_amount: 0,
+            leave_obj: -1,
+            gravity: 700,
+            ..Default::default()
+        }
+    }
+
+    // Run nobject_process with a real bobjects pool + blood-colour constants, so the
+    // blood-trail arm is exercised. Returns the verdict; the caller inspects bobjects.
+    #[allow(clippy::too_many_arguments)]
+    fn run_process_blood(
+        obj: &mut NObject,
+        ty: &NObjectType,
+        level: &mut LevelSim,
+        cossin: &[Vec2; 128],
+        bobjects: &mut BloodPool<BObject>,
+        cycles: i32,
+        num_blood_colours: i32,
+        first_blood_colour: i32,
+        rand: &mut Rand,
+    ) -> NObjectOutcome {
+        let sprites = no_sprites();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        nobject_process(
+            obj,
+            ty,
+            &[],
+            &[],
+            level,
+            cossin,
+            &sprites,
+            &sprites,
+            &[],
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            bobjects,
+            cycles,
+            100,
+            num_blood_colours,
+            first_blood_colour,
+            rand,
+        )
+    }
+
+    #[test]
+    fn blood_trail_fires_only_when_cycles_mod_delay_is_zero() {
+        let cossin = precompute_cossin();
+        let ty = blood_nobject(6, 10);
+
+        // cycles=10 -> 10 % 10 == 0 -> fires exactly one CreateBObject.
+        {
+            let mut level = bg_level(200, 200);
+            let mut bobjects: BloodPool<BObject> = BloodPool::new(700);
+            let mut rand = seeded();
+            // Reference: one rand(NumBloodColours) draw (the only draw this tick).
+            let mut refr = seeded();
+            let _ = refr.bound(9);
+
+            let mut obj = NObject {
+                pos: Vec2::new(itof(50), itof(50)),
+                vel: Vec2::new(itof(4), itof(8)),
+                ty: Some(6),
+                ..Default::default()
+            };
+            let out = run_process_blood(
+                &mut obj, &ty, &mut level, &cossin, &mut bobjects, 10, 9, 64, &mut rand,
+            );
+
+            assert_eq!(out, NObjectOutcome::Keep, "blood nobject flies on (no explode)");
+            assert_eq!(bobjects.len(), 1, "cycles=10, delay=10 -> one bobject spawned");
+            let b = *bobjects.iter().next().unwrap();
+            // pos is the nobject's pos AFTER `pos += vel` (no bounce): 50+4, 50+8.
+            assert_eq!(
+                b.pos,
+                Vec2::new(itof(54), itof(58)),
+                "bobject.pos = nobject pos (post pos+=vel)"
+            );
+            // vel = nobject vel / 4 (truncating). Gravity is added to the NOBJECT's
+            // vel later, after the trail arm, so the captured vel is the pre-gravity
+            // post-bounce value / 4.
+            assert_eq!(
+                b.vel,
+                Vec2::new(itof(4), itof(8)).div(4),
+                "bobject.vel = nobject vel / 4"
+            );
+            assert_eq!(
+                rand.last(),
+                refr.last(),
+                "CreateBObject drew exactly one rand(NumBloodColours)"
+            );
+        }
+
+        // cycles=5 and cycles=3 -> non-zero remainder -> NO spawn, NO rand.
+        for c in [5, 3] {
+            let mut level = bg_level(200, 200);
+            let mut bobjects: BloodPool<BObject> = BloodPool::new(700);
+            let mut rand = seeded();
+            rand.bound(55); // pre-advance: "no rand" is a real assertion
+            let rng_before = rand.last();
+
+            let mut obj = NObject {
+                pos: Vec2::new(itof(50), itof(50)),
+                vel: Vec2::new(itof(4), itof(8)),
+                ty: Some(6),
+                ..Default::default()
+            };
+            run_process_blood(
+                &mut obj, &ty, &mut level, &cossin, &mut bobjects, c, 9, 64, &mut rand,
+            );
+
+            assert_eq!(bobjects.len(), 0, "cycles={c}, delay=10 -> no bobject");
+            assert_eq!(rand.last(), rng_before, "cycles={c}: blood-trail drew no rand");
+        }
+    }
+
+    #[test]
+    fn blood_trail_dormant_when_delay_zero() {
+        // blood_trail_delay == 0 -> the `delay > 0` guard short-circuits, so no spawn
+        // and (crucially) no `% 0` divide. Pins the guard's load-bearing order.
+        let cossin = precompute_cossin();
+        let ty = blood_nobject(6, 0);
+        let mut level = bg_level(200, 200);
+        let mut bobjects: BloodPool<BObject> = BloodPool::new(700);
+        let mut rand = seeded();
+        rand.bound(11);
+        let rng_before = rand.last();
+
+        let mut obj = NObject {
+            pos: Vec2::new(itof(50), itof(50)),
+            vel: Vec2::new(itof(4), itof(8)),
+            ty: Some(6),
+            ..Default::default()
+        };
+        // cycles=0 would satisfy `% delay == 0` if delay were non-zero; delay=0 must
+        // still suppress it without panicking.
+        run_process_blood(
+            &mut obj, &ty, &mut level, &cossin, &mut bobjects, 0, 9, 64, &mut rand,
+        );
+
+        assert_eq!(bobjects.len(), 0, "delay==0 -> no spawn (and no %0 panic)");
+        assert_eq!(rand.last(), rng_before, "delay==0 drew no rand");
     }
 }

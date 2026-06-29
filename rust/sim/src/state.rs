@@ -437,10 +437,22 @@ pub struct NObject {
     pub time_left: i32,
 }
 
-/// A blood particle. Hash reads `pos`.
+/// A blood particle (C++ `BObject`, `bobject.hpp`). Hash reads `pos` only.
+///
+/// `vel` mirrors C++ `BObject::vel`: read by [`crate::bobject::bobject_process`]
+/// (`pos += vel`, and gravity adds to `vel.y` in background air). `color` mirrors
+/// C++ `BObject::color = rand(NumBloodColours) + FirstBloodColour`: the spawn DRAW
+/// is load-bearing (advances the shared RNG), but the value is never read by
+/// Process and is render-only. **Neither is hashed** (the C++ `stateHash` /
+/// `hash.rs` BObject fold reads `pos.x`/`pos.y` only), so adding them leaves the
+/// bobject hash and slices 1-5a goldens unchanged.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct BObject {
     pub pos: Vec2,
+    /// C++ `BObject::vel`. Default `(0,0)`. Not hashed.
+    pub vel: Vec2,
+    /// C++ `BObject::color`. Default 0. Not hashed (render-only).
+    pub color: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +605,22 @@ impl LevelSim {
     pub fn set_material(&mut self, idx: usize, v: u8) {
         self.material_id[idx] = v;
     }
+
+    /// Port of `Level::Pixel(x, y)` (`level.hpp:66`): the raw palette index
+    /// `material_id[x + y*width]` of the **in-bounds** pixel `(x, y)`. In this port
+    /// `material_id` *is* the C++ pixel buffer (per-pixel palette colour), so this
+    /// returns the colour value `BObject::Process` bands on (`1..=2`, `77..=79`).
+    /// In-bounds only (the caller gates `inside`, matching `bobject.cpp:24-27`).
+    pub fn pixel(&self, x: i32, y: i32) -> i32 {
+        self.material_id[(x + y * self.width) as usize] as i32
+    }
+
+    /// Rock bit ([`MAT_ROCK`], `material.hpp:17`) of the in-bounds pixel `(x, y)`.
+    /// The `BObject::Process` rock-landing probe (`bobject.cpp:43`). In-bounds only.
+    pub fn rock(&self, x: i32, y: i32) -> bool {
+        let idx = (x + y * self.width) as usize;
+        (self.material_flags[self.material_id[idx] as usize] & MAT_ROCK) != 0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +711,23 @@ pub struct SimState {
     /// goldens use 100. **Not** hashed (settings scalar); slices 1-5a never enter
     /// the damage arm (worms out of range), so the value is inert for them.
     pub blood: i32,
+    /// C++ `common.c[CNumBloodColours]` (`constants`, `bobject.cpp:12`): the count
+    /// the blood-trail's `CreateBObject` rolls `rand(NumBloodColours)` against. The
+    /// DRAW advances the shared RNG (load-bearing) even though the resulting colour
+    /// is never hashed. **Not** hashed (TC scalar). Defaulted to 0 here and assigned
+    /// the real TC value by the differential harness AFTER `new` (mirrors
+    /// [`small_sprites`](Self::small_sprites)); slices 1-5a never spawn a bobject
+    /// (blood-trail dormant), so the value is inert and the goldens stay identical.
+    pub num_blood_colours: i32,
+    /// C++ `common.c[CFirstBloodColour]` (`bobject.cpp:12`): the base added to the
+    /// blood-colour roll. Render-only (the colour is never hashed). Defaulted to 0;
+    /// harness-assigned after `new`. Inert for slices 1-5a.
+    pub first_blood_colour: i32,
+    /// C++ `common.c[CBObjGravity]` (`bobject.cpp:31`): the per-tick `vel.y` add a
+    /// blood particle gets in background air. Load-bearing for the bobject `pos`
+    /// hash over time (gravity -> vel -> future pos). Defaulted to 0; harness-assigned
+    /// after `new`. Inert for slices 1-5a (no bobjects).
+    pub bobj_gravity: i32,
 }
 
 impl SimState {
@@ -762,6 +807,12 @@ impl SimState {
             settings_loading_time,
             load_change,
             blood,
+            // TC blood constants: defaulted (0); the differential harness assigns the
+            // real values (`common.c[...]`) after `new`, the same post-`new` pattern
+            // as `small_sprites`. Inert for slices 1-5a (no bobjects spawn there).
+            num_blood_colours: 0,
+            first_blood_colour: 0,
+            bobj_gravity: 0,
         }
     }
 
@@ -831,6 +882,7 @@ impl SimState {
             wobjects,
             sobjects,
             nobjects,
+            bobjects,
             rand,
             weapons,
             cossin,
@@ -843,6 +895,9 @@ impl SimState {
             settings_loading_time,
             load_change,
             blood,
+            num_blood_colours,
+            first_blood_colour,
+            bobj_gravity,
             cycles,
             ..
         } = self;
@@ -850,6 +905,9 @@ impl SimState {
         let settings_loading_time = *settings_loading_time;
         let load_change = *load_change;
         let blood = *blood;
+        let num_blood_colours = *num_blood_colours;
+        let first_blood_colour = *first_blood_colour;
+        let bobj_gravity = *bobj_gravity;
         // The object loops read `cycles` as a value for the `cycles % delay` /
         // `cycles & 7` gates inside `nobject_process`. They must see the value left by
         // the PREVIOUS tick's increment (cycles=k-1 on tick k) — exactly as the C++
@@ -955,8 +1013,11 @@ impl SimState {
                 weapons,
                 nobjects,
                 sobjects,
+                bobjects,
                 cycles_now,
                 blood,
+                num_blood_colours,
+                first_blood_colour,
                 rand,
             ) {
                 NObjectOutcome::Keep => {
@@ -967,7 +1028,17 @@ impl SimState {
                 }
             }
         }
-        // bobjects: no-op this slice (empty pool; BObject::Process not ported).
+        // bobjects: the ported BObject::Process, FOURTH (game.cpp:349-354). The
+        // `FastObjectList` swap-remove-during-iteration loop — `if Process() ++i else
+        // Free(i)` — is reproduced by `BloodPool::retain_processing` (keep == Process
+        // returned true). Freeing a non-final slot moves the last live particle into
+        // it and re-examines that slot WITHOUT advancing, so the surviving-slot order
+        // (the entire bobject hash contract — pos-only fold) matches C++ exactly. Runs
+        // AFTER the nobjects loop (so a bobject the blood-trail spawned THIS tick is
+        // visited next tick, not this one) and BEFORE `++cycles`.
+        bobjects.retain_processing(|obj| {
+            crate::bobject::bobject_process(obj, level, bobj_gravity, rand)
+        });
 
         // `++cycles` at the exact `game.cpp:357` point — AFTER the four object loops,
         // BEFORE the worm loop. The object loops above ran with `cycles_now` (the

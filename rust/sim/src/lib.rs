@@ -10,6 +10,7 @@
 //! other crates layered on top.
 
 pub mod blit;
+pub mod bobject;
 pub mod control;
 pub mod hash;
 pub mod nobject;

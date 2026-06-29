@@ -240,6 +240,9 @@ mod tests {
             settings_loading_time: 100,
             load_change: true,
             blood: 100,
+            num_blood_colours: 0,
+            first_blood_colour: 0,
+            bobj_gravity: 0,
         }
     }
 
@@ -469,6 +472,8 @@ mod tests {
         });
         state.bobjects.spawn(BObject {
             pos: Vec2::new(-1, -2),
+            vel: Vec2::new(33, 44), // decoy: vel is NOT hashed
+            color: 55,              // decoy: color is NOT hashed
         });
         state.sobjects.spawn(SObject {
             id: 7,

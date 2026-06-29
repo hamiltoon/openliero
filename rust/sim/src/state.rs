@@ -958,7 +958,15 @@ impl SimState {
                     process_weapon_change(w);
                 } else {
                     w.key_change_pressed = false;
-                    process_movement(w, control);
+                    process_movement(
+                        w,
+                        control,
+                        level,
+                        large_sprites,
+                        textures,
+                        cossin,
+                        rand,
+                    );
                 }
             }
         }

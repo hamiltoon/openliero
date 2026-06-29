@@ -11,9 +11,14 @@
 //! Slice 3, Task 0 adds only the data; the control *logic* that reads these
 //! lands in later tasks (design doc, *`ControlConsts`*).
 
+use assets::sprite::SpriteSet;
+use assets::tc::Texture;
 use sim_core::fixed::{ftoi, itof};
+use sim_core::rng::Rand;
+use sim_core::vec::Vec2;
 
-use crate::state::{ControlState, WormState, NUM_WEAPONS};
+use crate::blit::draw_dirt_effect;
+use crate::state::{ControlState, LevelSim, WormState, NUM_WEAPONS};
 
 /// The TC constants/hacks the worm control + aiming paths read. Field groups
 /// mirror the design-doc table (Aiming / Movement / Jump / Ninjarope); each
@@ -491,18 +496,30 @@ pub fn process_weapon_change(worm: &mut WormState) {
 /// * **Walk right** (`worm.cpp:873-887`, `!kLeft && kRight`): the mirror with
 ///   `WalkVelRight`/`MaxVelRight`, the `aiming_angle <= Itof(64)` flip, and
 ///   `direction = 1`.
-/// * **Dig** (`worm.cpp:889-951`, `kLeft && kRight`): if `able_to_dig`, clear it
-///   and run `DrawDirtEffect` — which draws `rand()` **and** writes the level.
-///   That body is **DEFERRED to Slice 4**; only the `able_to_dig` toggle and the
-///   Left+Right condition are ported, with the deferred call site guarded by a
-///   `debug_assert!`. The slice-3 scenario never holds Left+Right, so this is
-///   unreachable in the real run (design doc, *RNG decision* / *The hard 10%*).
-///   The `else` (not both held) re-arms `able_to_dig = true`.
+/// * **Dig** (`worm.cpp:889-951`, `kLeft && kRight`): if `able_to_dig`, clear it,
+///   then carve two craters via [`draw_dirt_effect`] (texture `7`, the carving
+///   `ndrawback=true` half). `kDir = cossin[Ftoi(aiming_angle)]`;
+///   `dig_pos = kDir*2 + pos`, then `-Itof(7)` per axis → first crater at
+///   `Ftoi(dig_pos)`; `dig_pos += kDir*2` → second crater. Each `draw_dirt_effect`
+///   consumes one `rand(rframe)` (texture 7 `rframe=2`), so the dig advances the
+///   RNG by exactly two draws. `CorrectShadow` is **OMITTED** (shadow=false,
+///   render-only). The `else` (not both held) re-arms `able_to_dig = true`.
 /// * Idle `animate = false` (`worm.cpp:953-955`) — render-only, skipped.
 ///
 /// `vel.x` arithmetic is `wrapping_*` to match C++ `int` semantics; the angle
-/// flip uses `itof`/`wrapping_sub` (same discipline as the aiming port).
-pub fn process_movement(worm: &mut WormState, c: &ControlConsts) {
+/// flip uses `itof`/`wrapping_sub` (same discipline as the aiming port). The dig
+/// geometry uses [`Vec2`] `mul`/`add` (also `wrapping_*`) and `wrapping_sub` for
+/// the per-axis `Itof(7)` offset.
+#[allow(clippy::too_many_arguments)]
+pub fn process_movement(
+    worm: &mut WormState,
+    c: &ControlConsts,
+    level: &mut LevelSim,
+    large_sprites: &SpriteSet,
+    textures: &[Texture],
+    cossin: &[Vec2; 128],
+    rand: &mut Rand,
+) {
     if !worm.movable {
         return;
     }
@@ -539,19 +556,50 @@ pub fn process_movement(worm: &mut WormState, c: &ControlConsts) {
         }
     }
 
-    // worm.cpp:889-951 — dig detection. The DrawDirtEffect body is DEFERRED.
+    // worm.cpp:889-951 — dig. Edge-triggered by `able_to_dig`.
     if k_left && k_right {
         if worm.able_to_dig {
             worm.able_to_dig = false;
-            // worm.cpp:893-948: DrawDirtEffect draws rand() AND writes material_id.
-            // DEFERRED to Slice 4; the scenario never holds Left+Right, so this is
-            // unreachable. A debug build trips this guard if it ever does.
-            debug_assert!(
-                false,
-                "dig DrawDirtEffect deferred to Slice 4; scenario must not hold Left+Right"
+
+            // worm.cpp:893 — kDir = cossin_table[Ftoi(aiming_angle)].
+            let k_dir = cossin[ftoi(worm.aiming_angle) as usize];
+
+            // worm.cpp:895 — dig_pos = kDir*2 + pos.
+            let mut dig_pos = k_dir.mul(2).add(worm.pos);
+
+            // worm.cpp:927-928 — dig_pos.x/.y -= Itof(7) (the crater offset,
+            // applied BEFORE the Ftoi).
+            dig_pos.x = dig_pos.x.wrapping_sub(itof(7));
+            dig_pos.y = dig_pos.y.wrapping_sub(itof(7));
+
+            // worm.cpp:930-931 — first crater at Ftoi(dig_pos), texture 7.
+            // CorrectShadow (worm.cpp:932-935) OMITTED: shadow off, render-only.
+            draw_dirt_effect(
+                level,
+                large_sprites,
+                textures,
+                7,
+                ftoi(dig_pos.x),
+                ftoi(dig_pos.y),
+                rand,
+            );
+
+            // worm.cpp:937 — dig_pos += kDir*2 (the -Itof(7) stays applied).
+            dig_pos = dig_pos.add(k_dir.mul(2));
+
+            // worm.cpp:940-941 — second crater at the advanced Ftoi(dig_pos).
+            draw_dirt_effect(
+                level,
+                large_sprites,
+                textures,
+                7,
+                ftoi(dig_pos.x),
+                ftoi(dig_pos.y),
+                rand,
             );
         }
     } else {
+        // worm.cpp:949-951 — not both held re-arms the dig edge.
         worm.able_to_dig = true;
     }
 
@@ -561,7 +609,9 @@ pub fn process_movement(worm: &mut WormState, c: &ControlConsts) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{MAT_DIRT, MAT_DIRT2};
     use assets::tc::TcConfig;
+    use sim_core::tables::precompute_cossin;
 
     // tc.cfg fragment carrying every ControlConsts source key, with the real
     // data/TC/openliero values for a few spot-checks plus the two jump hacks.
@@ -1399,6 +1449,89 @@ MultiJump = true
         w
     }
 
+    // ---- dig env (Slice-4d): the assets process_movement now needs ----------
+    // The dig path calls `draw_dirt_effect(.., 7, ..)`, so dig tests need a level,
+    // a 16x16 sprite bank, a texture table with index 7, the cossin table, and a
+    // Rand. Non-dig tests pass an INERT env (degenerate level/sprites): the dig
+    // branch never fires for single-direction / idle / !movable inputs, so
+    // `draw_dirt_effect` is never called and the assets are unused.
+
+    const DSIZE: usize = 256; // 16 x 16
+
+    fn make_sprites(count: i32, overrides: &[(usize, Vec<u8>)]) -> SpriteSet {
+        let mut data = vec![0u8; count as usize * DSIZE];
+        for (idx, bytes) in overrides {
+            assert_eq!(bytes.len(), DSIZE);
+            data[idx * DSIZE..idx * DSIZE + DSIZE].copy_from_slice(bytes);
+        }
+        SpriteSet {
+            width: 16,
+            height: 16,
+            count,
+            data,
+        }
+    }
+
+    // A 16x16 mask with a single cell set at row-major offset `off`; everything
+    // else is 0 ("other" / no-op), so a draw touches exactly one level pixel.
+    fn mask_one(off: usize, v: u8) -> Vec<u8> {
+        let mut m = vec![0u8; DSIZE];
+        m[off] = v;
+        m
+    }
+
+    fn fill_const(v: u8) -> Vec<u8> {
+        vec![v; DSIZE]
+    }
+
+    // Texture 7: the dig texture. ndrawback=true (carving half), rframe=2 so each
+    // draw consumes one rand(2). mframe=38 mask, sframe=82 fill base.
+    fn dig_texture() -> Texture {
+        Texture {
+            mframe: 38,
+            rframe: 2,
+            sframe: 82,
+            ndrawback: true,
+        }
+    }
+
+    // A texture table whose index 7 is the dig texture (the others are inert).
+    fn dig_textures() -> Vec<Texture> {
+        let mut v = vec![Texture::default(); 8];
+        v[7] = dig_texture();
+        v
+    }
+
+    // A level of size w*h filled with material `mat`. material 1 -> Dirt,
+    // 2 -> Dirt2 (matching blit's carving cases), everything else background-ish.
+    fn dirt_level(w: i32, h: i32, mat: u8) -> LevelSim {
+        let mut material_flags = [0u8; 256];
+        material_flags[1] = MAT_DIRT;
+        material_flags[2] = MAT_DIRT2;
+        LevelSim {
+            width: w,
+            height: h,
+            material_id: vec![mat; (w * h) as usize],
+            material_flags,
+        }
+    }
+
+    fn seeded(seed: u32) -> Rand {
+        let mut r = Rand::new();
+        r.seed(seed);
+        r
+    }
+
+    // Drive process_movement with an INERT dig env (no dig expected to fire).
+    fn run_movement(w: &mut WormState, c: &ControlConsts) {
+        let mut level = dirt_level(1, 1, 0);
+        let sprites = make_sprites(1, &[]);
+        let textures = dig_textures();
+        let cossin = precompute_cossin();
+        let mut rand = Rand::new();
+        process_movement(w, c, &mut level, &sprites, &textures, &cossin, &mut rand);
+    }
+
     #[test]
     fn walk_right_accelerates_vel_x() {
         // direction already 1 (no flip): vel.x += WalkVelRight while < MaxVelRight.
@@ -1406,7 +1539,7 @@ MultiJump = true
         let mut w = move_worm(1);
         w.vel = Vec2::new(0, 0);
         w.control_states.press(ControlState::RIGHT);
-        process_movement(&mut w, &c);
+        run_movement(&mut w, &c);
         assert_eq!(w.vel.x, 3000, "vel.x += WalkVelRight");
         assert_eq!(w.direction, 1, "already facing right -> no flip");
     }
@@ -1418,7 +1551,7 @@ MultiJump = true
         let mut w = move_worm(1);
         w.vel = Vec2::new(29184, 0); // == MaxVelRight
         w.control_states.press(ControlState::RIGHT);
-        process_movement(&mut w, &c);
+        run_movement(&mut w, &c);
         assert_eq!(w.vel.x, 29184, "at the cap -> no further accel");
 
         // Just below the cap: a single guarded add overshoots it (C++ adds once,
@@ -1426,7 +1559,7 @@ MultiJump = true
         let mut w2 = move_worm(1);
         w2.vel = Vec2::new(29000, 0); // < MaxVelRight
         w2.control_states.press(ControlState::RIGHT);
-        process_movement(&mut w2, &c);
+        run_movement(&mut w2, &c);
         assert_eq!(
             w2.vel.x, 32000,
             "below cap -> one add overshoots (no clamp)"
@@ -1440,7 +1573,7 @@ MultiJump = true
         let mut w = move_worm(0);
         w.vel = Vec2::new(0, 0);
         w.control_states.press(ControlState::LEFT);
-        process_movement(&mut w, &c);
+        run_movement(&mut w, &c);
         assert_eq!(w.vel.x, -3000, "vel.x -= WalkVelLeft");
         assert_eq!(w.direction, 0, "already facing left -> no flip");
     }
@@ -1452,7 +1585,7 @@ MultiJump = true
         let mut w = move_worm(0);
         w.vel = Vec2::new(-29184, 0); // == MaxVelLeft
         w.control_states.press(ControlState::LEFT);
-        process_movement(&mut w, &c);
+        run_movement(&mut w, &c);
         assert_eq!(w.vel.x, -29184, "at the cap -> no further accel");
     }
 
@@ -1465,7 +1598,7 @@ MultiJump = true
         w.aiming_speed = 5000;
         w.aiming_angle = itof(30);
         w.control_states.press(ControlState::RIGHT);
-        process_movement(&mut w, &c);
+        run_movement(&mut w, &c);
         assert_eq!(w.direction, 1, "direction flips to right");
         assert_eq!(w.aiming_speed, 0, "aiming_speed zeroed on flip");
         assert_eq!(w.aiming_angle, itof(98), "Itof(128) - Itof(30) = Itof(98)");
@@ -1480,7 +1613,7 @@ MultiJump = true
         w.aiming_speed = -5000;
         w.aiming_angle = itof(100);
         w.control_states.press(ControlState::LEFT);
-        process_movement(&mut w, &c);
+        run_movement(&mut w, &c);
         assert_eq!(w.direction, 0, "direction flips to left");
         assert_eq!(w.aiming_speed, 0, "aiming_speed zeroed on flip");
         assert_eq!(w.aiming_angle, itof(28), "Itof(128) - Itof(100) = Itof(28)");
@@ -1495,7 +1628,7 @@ MultiJump = true
         w.aiming_speed = 7;
         w.aiming_angle = itof(100); // > 64 -> no flip
         w.control_states.press(ControlState::RIGHT);
-        process_movement(&mut w, &c);
+        run_movement(&mut w, &c);
         assert_eq!(w.direction, 1);
         assert_eq!(
             w.aiming_speed, 0,
@@ -1513,7 +1646,7 @@ MultiJump = true
         w.able_to_dig = false;
         w.vel = Vec2::new(0, 0);
         w.control_states.press(ControlState::RIGHT);
-        process_movement(&mut w, &c);
+        run_movement(&mut w, &c);
         assert_eq!(w.vel.x, 0, "no walk when !movable");
         assert_eq!(w.direction, 0, "no flip when !movable");
         assert!(!w.able_to_dig, "able_to_dig untouched when !movable");
@@ -1527,7 +1660,7 @@ MultiJump = true
         let mut w = move_worm(1);
         w.able_to_dig = false;
         w.control_states.press(ControlState::RIGHT);
-        process_movement(&mut w, &c);
+        run_movement(&mut w, &c);
         assert!(w.able_to_dig, "single-direction input re-arms able_to_dig");
     }
 
@@ -1537,52 +1670,141 @@ MultiJump = true
         let c = ControlConsts::default();
         let mut w = move_worm(0);
         w.able_to_dig = false;
-        process_movement(&mut w, &c);
+        run_movement(&mut w, &c);
         assert!(w.able_to_dig, "idle re-arms able_to_dig");
     }
 
     #[test]
-    fn single_direction_does_not_trigger_dig_assert() {
+    fn single_direction_does_not_dig() {
         // The slice-3 scenario only ever holds a single direction; with able_to_dig
-        // true, a single-direction walk must NOT reach the deferred dig assert.
+        // true, a single-direction walk must NOT take the dig branch.
         let c = ControlConsts::default();
         let mut w = move_worm(1);
         w.able_to_dig = true;
         w.vel = Vec2::new(0, 0);
         w.control_states.press(ControlState::RIGHT);
-        process_movement(&mut w, &c); // must not panic
+        run_movement(&mut w, &c);
         assert_eq!(w.vel.x, 3000, "single-direction walk still accelerates");
         assert!(w.able_to_dig, "single direction leaves able_to_dig set");
     }
 
+    // ---- Slice-4d: the live dig carve ---------------------------------------
+
+    // Step 1 — dig geometry + offset. aiming_angle = Itof(32) -> cossin[32] =
+    // (-Itof(1), 0), so kDir*2 = (-2px, 0). With a single case-6 mask cell at
+    // offset 0, each draw_dirt_effect carves exactly ONE level pixel at the window
+    // origin Ftoi(dig_pos). Origins: first = Ftoi(kDir*2 + pos - Itof(7)),
+    // second = Ftoi(kDir*4 + pos - Itof(7)). pos = Itof(20),Itof(20):
+    //   first  = Ftoi(-131072 + 1310720 - 458752) = (11, 13)
+    //   second = Ftoi(-262144 + 1310720 - 458752) = (9,  13)
+    // The carved fill value reveals each origin.
     #[test]
-    #[should_panic(expected = "dig DrawDirtEffect deferred to Slice 4")]
-    fn dig_branch_with_able_to_dig_trips_deferred_assert() {
-        // worm.cpp:889-948: Left && Right && able_to_dig reaches the DrawDirtEffect
-        // body, which is DEFERRED. In debug it trips the guard. The scenario never
-        // holds Left+Right, so this is unreachable in the real run.
+    fn dig_geometry_and_offset() {
         let c = ControlConsts::default();
+        let cossin = precompute_cossin();
+
         let mut w = move_worm(0);
         w.able_to_dig = true;
+        w.aiming_angle = itof(32);
+        w.pos = Vec2::new(itof(20), itof(20));
         w.control_states.press(ControlState::LEFT);
         w.control_states.press(ControlState::RIGHT);
-        process_movement(&mut w, &c);
+
+        // Hand-derived expected origins (discriminating against a missing -Itof(7)
+        // or a wrong *2/*4): cossin[32] = (-65536, 0).
+        let k = cossin[32];
+        assert_eq!((k.x, k.y), (-65536, 0), "cossin[32] = (-Itof(1), 0)");
+        let (x1, y1) = (11i32, 13i32); // Ftoi(-2*65536 + 20<<16 - 7<<16)
+        let (x2, y2) = (9i32, 13i32); // Ftoi(-4*65536 + 20<<16 - 7<<16)
+
+        // 32x32 Dirt level; mask cell 0 = case 6 (AnyDirt -> texel); fill is the
+        // constant 50 (non-dirt), so a carved pixel reads 50.
+        let mut level = dirt_level(32, 32, 1);
+        let sprites = make_sprites(84, &[(38, mask_one(0, 6)), (82, fill_const(50)), (83, fill_const(50))]);
+        let textures = dig_textures();
+        let mut rand = seeded(0x1234_5678);
+
+        process_movement(&mut w, &c, &mut level, &sprites, &textures, &cossin, &mut rand);
+
+        assert!(!w.able_to_dig, "dig clears able_to_dig");
+        assert_eq!(level.material_id[(y1 * 32 + x1) as usize], 50, "first crater origin");
+        assert_eq!(level.material_id[(y2 * 32 + x2) as usize], 50, "second crater origin");
+        // No OTHER pixel changed (single-cell mask -> exactly two writes).
+        let carved = (y1 * 32 + x1) as usize;
+        let carved2 = (y2 * 32 + x2) as usize;
+        for (i, &m) in level.material_id.iter().enumerate() {
+            if i != carved && i != carved2 {
+                assert_eq!(m, 1, "pixel {i} untouched (still Dirt)");
+            }
+        }
     }
 
+    // Step 2 — level carve + RNG. The dig advances the RNG by EXACTLY two rand(2)
+    // draws (texture 7 rframe=2, one draw per crater), and writes material_id on
+    // the carving cases (case 6 over Dirt -> the fill texel).
     #[test]
-    fn dig_branch_without_able_to_dig_does_not_panic() {
-        // Left && Right but able_to_dig false: the inner `if able_to_dig` is
-        // skipped, so the deferred body is never reached (no panic). able_to_dig
-        // stays false (the else re-arm is not taken when both are held).
+    fn dig_carves_level_and_advances_rng_by_two() {
+        const SEED: u32 = 0x9e37_79b9;
+
+        // Oracle: the same seed, two rand(2) draws -> the expected `last`.
+        let mut oracle = seeded(SEED);
+        oracle.bound(2);
+        oracle.bound(2);
+        let expected_last = oracle.last();
+
         let c = ControlConsts::default();
+        let cossin = precompute_cossin();
         let mut w = move_worm(0);
-        w.able_to_dig = false;
+        w.able_to_dig = true;
+        w.aiming_angle = itof(32);
+        w.pos = Vec2::new(itof(20), itof(20));
         w.control_states.press(ControlState::LEFT);
         w.control_states.press(ControlState::RIGHT);
-        process_movement(&mut w, &c); // must not panic
-        assert!(
-            !w.able_to_dig,
-            "L+R with able_to_dig false stays false (no re-arm)"
-        );
+
+        let mut level = dirt_level(32, 32, 1);
+        let sprites = make_sprites(84, &[(38, mask_one(0, 6)), (82, fill_const(50)), (83, fill_const(51))]);
+        let textures = dig_textures();
+        let mut rand = seeded(SEED);
+
+        process_movement(&mut w, &c, &mut level, &sprites, &textures, &cossin, &mut rand);
+
+        assert_eq!(rand.last(), expected_last, "exactly two rand(2) draws consumed");
+        // A pixel was carved (Dirt -> fill texel, value 50 or 51 depending on the
+        // per-call frame draw); whatever it is, it is no longer Dirt(1).
+        assert_ne!(level.material_id[(13 * 32 + 11) as usize], 1, "first crater carved");
+        assert_ne!(level.material_id[(13 * 32 + 9) as usize], 1, "second crater carved");
+    }
+
+    // Step 3 — edge-trigger. L+R with able_to_dig=false does NOT dig (no level
+    // write, no RNG draw); a not-both-held tick re-arms able_to_dig.
+    #[test]
+    fn dig_is_edge_triggered() {
+        let c = ControlConsts::default();
+        let cossin = precompute_cossin();
+
+        let mut w = move_worm(0);
+        w.able_to_dig = false; // already spent
+        w.aiming_angle = itof(32);
+        w.pos = Vec2::new(itof(20), itof(20));
+        w.control_states.press(ControlState::LEFT);
+        w.control_states.press(ControlState::RIGHT);
+
+        let mut level = dirt_level(32, 32, 1);
+        let sprites = make_sprites(84, &[(38, mask_one(0, 6)), (82, fill_const(50)), (83, fill_const(50))]);
+        let textures = dig_textures();
+        let mut rand = seeded(0xdead_beef);
+        let before = rand.last();
+
+        process_movement(&mut w, &c, &mut level, &sprites, &textures, &cossin, &mut rand);
+
+        assert!(!w.able_to_dig, "L+R with able_to_dig false stays false (no re-arm)");
+        assert_eq!(rand.last(), before, "no RNG draw when the dig edge is spent");
+        assert!(level.material_id.iter().all(|&m| m == 1), "no level write when spent");
+
+        // Releasing both re-arms the edge for next tick.
+        let mut w2 = move_worm(0);
+        w2.able_to_dig = false;
+        run_movement(&mut w2, &c); // no keys held
+        assert!(w2.able_to_dig, "not-both-held re-arms able_to_dig");
     }
 }

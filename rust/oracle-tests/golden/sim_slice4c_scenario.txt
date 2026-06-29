@@ -1,0 +1,128 @@
+# Step 2 Slice 4c scenario — worm0 FIRES the DART; it arcs UP and comes back DOWN
+# onto the dirt floor well clear of both worms, where it EXPLODES into a
+# `small_explosion` sobject (createOnExp), throwing dirt-debris nobjects and CARVING
+# the terrain. worm1 invisible & inert. Read by BOTH the C++ dumper
+# (oracle_dump_sim_physics, slice-4a/4b build = object loops + `weapon` directive +
+# settings->shadow=false) and the Rust N-tick test. Same grammar as slice 3/4a/4b
+# plus the `weapon <slot> <name>` directive.
+#
+# Control bits (7-bit ControlState, see worm.hpp Control enum):
+#   Up=1  Down=2  Left=4  Right=8  Fire=16  Change=32  Jump=64
+#
+# Aiming: worm0's settled/resting aim points DOWN into the dirt it stands on, so a
+# shot fired at rest explodes 1 tick later AT THE WORM'S FEET (the gun muzzle spawns
+# pos + cossin*5, which at the down-aim is already on the floor) — that would put the
+# worm INSIDE the explosion's +/-detect_range box and trigger DoDamage (FORBIDDEN —
+# see O10). To throw the impact CLEAR of the worm we ARC the shot: hold Up(1) to
+# raise the gun toward the sky, Fire, and let gravity (dart gravity=200, a weak pull)
+# parabola the dart back DOWN onto the floor a good horizontal distance downrange.
+# ProcessAiming accelerates slowly (AimAccLeft/Right 4000, friction 83/100, range
+# bounded for direction 0), so ~25 held Up ticks are needed for a usable arc. (This
+# is the SAME proven up-arc the slice-4b scenario used for its first shot.)
+#
+# THE DART (weapons/dart.cfg, name=DART): distribution=0 (no spread rand),
+# startFrame=113 + shotType=1 (kStdType1 => deterministic cur_frame from angle, NO
+# rand), timeToExplo=0/timeToExploV=0 (no timeout, no time-var rand), leaveShells=0,
+# recoil=0, splinterAmount=0 (the WOBJECT spawns no splinters), dirtEffect=-1 (the
+# wobject itself digs nothing), wormCollide=false, collideWithObjects=false,
+# affectByExplosions=false. So **DART Fire = 0 rands AND DART WObject::Process = 0
+# rands**: every new rand() in 4c is inside the EXPLOSION. gravity=200 +
+# explGround=true + bounce=0 + timeToExplo=0 => it arcs and explodes on the FIRST
+# dirt/rock cell it touches. createOnExp="small_explosion".
+#
+# THE EXPLOSION (sobjects/small_explosion.cfg): startSound=exp3a + numSounds=2 =>
+# a rand(2) (sound; hashing no-op but the DRAW is load-bearing); damage=5,
+# detectRange=8, blowAway=3000; dirtEffect=2 (texture 2, n_draw_back=true =>
+# CARVING crater); numFrames=5, animDelay=2 (the sobject lives ~12 ticks => the
+# `sobjects` hash moves over several ticks). This is the WHOLE POINT of 4c: the
+# explosion spawns the `sobjects` (id=2) and dirt-debris `nobjects`
+# (particle__disappearing, nobject 2) pools NON-EMPTY for the first time, and the
+# carving DrawDirtEffect moves the `level` hash for the first time LIVE.
+#
+# RNG at the explode tick (the cluster, SObject::Create order): sound rand(2);
+# then the dirt-throw over the 9x9 box Rect(x-4,y-4,x+5,y+5): per AnyDirt cell
+# (row-major, short-circuited) rand(8); on ==0 -> rand(128) + nobject_types[2].
+# Create2 (rand(speed_v=40) FIRST, then distribution rand(20000) x2); then the
+# crater DrawDirtEffect rand(2). The `rng` column is FLAT at the dart fire tick
+# (DART Fire = 0 rand) and JUMPS at the explode tick.
+#
+# HARD CONSTRAINTS (every input line below obeys these — verified in the golden):
+#   * NEVER set Left(4) and Right(8) together on the same worm/tick. worm0 only
+#     ever sets Up / Fire, so it never walks and never digs via the L+R path.
+#   * worm1 starts visible 0 -> Worm::Process is gated `if (visible)` (worm.cpp),
+#     so worm1 NEVER moves, fires, or draws RNG: its component hash is CONSTANT.
+#   * ALL worms stay OUTSIDE every explosion's +/-detect_range=8 px box (O10):
+#     the up-arc lands the dart well downrange of worm0 and far from worm1, so the
+#     SObject::Create per-worm DoDamage/blow-away/blood loop draws NOTHING and
+#     mutates NO worm. Therefore: `bobjects` stays EMPTY throughout (no blood, no
+#     cycles=0 blood-trail storm) and the worm columns DO NOT deviate at the explode
+#     tick. (This is also REQUIRED for the headless dumper not to crash: its
+#     StatsRecorder::DamageDealt path is only safe when no worm is hit.) If
+#     `bobjects` moves or a worm column deviates at explode, a worm was in range ->
+#     re-tune the arc.
+#   * The IMPACT ENTERS DIRT (the dart explodes on dirt contact AND the 9x9
+#     dirt-throw box overlaps AnyDirt cells), so `nobjects` actually spawn and the
+#     `level` carves. If `nobjects` never moves, the impact missed dirt -> fix aim.
+#   * One shot keeps `nobjects` well under the 600 cap (O3 out of scope).
+#   * worm0 stays health 100, in-bounds, grounded.
+seed 42
+# physics_fall_test.lev: open sky band (Background mat 130) over a solid floor at
+# y=200px (Dirt mat 12), level 504x350. worm0 falls, lands grounded (~y=196px)
+# within ~13 ticks. Reused unchanged from slices 2/3/4a/4b.
+level Levels/physics_fall_test.lev
+ticks 90
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# pos_*: 16.16 fixed-point (Itof(px) = px<<16). worm0 reuses the grounded start
+# (x=150, y=195). worm1 is INVISIBLE (visible 0), far at x=350, frozen forever.
+worm 0  9830400 12779520 100 10 0   1
+worm 1 22937600 12648448 100 10 218 0
+# `weapon <slot> <name>`: override BOTH worms' slot <slot> with the named weapon,
+# full ammo, ready to fire. Slot 0 == the dumper's current_weapon. dart.cfg name=DART.
+weapon 0 DART
+#
+# === Phase layout (tick : worm0 action) — VERIFIED against the golden ==========
+# 0-12   settle (empty)        : worm0 falls, lands grounded (~tick 13)
+# 13-37  Up(1)                  : raise the gun ~25 ticks for an arcing shot
+# 38     Fire(16)  -> SHOT      : dart arcs UP, gravity parabolas it back DOWN onto
+#                                 the dirt floor downrange of worm0. wobjects
+#                                 non-empty ticks 39..50 (real flight); `rng` stays
+#                                 FLAT (DART Fire = 0 rand).
+# 51     EXPLODE               : dart hits dirt -> BlowUpObject -> small_explosion.
+#                                 `rng` JUMPS (sound + dirt-throw + Create2 + crater
+#                                 cluster); `level` CHANGES 95f63601 -> eb37858c
+#                                 (first live carve); `sobjects` non-empty (id=2)
+#                                 ticks 51..62 (anim cur_frame 0->5 @ anim_delay=2,
+#                                 frees tick 63); `nobjects` non-empty from tick 51
+#                                 (dirt debris flies + falls); `wobjects` -> empty;
+#                                 `bobjects` EMPTY and worm columns UNCHANGED (out
+#                                 of range).
+# 63-90  trailing              : sobject freed; dirt debris still in flight; the
+#                                 carved terrain persists, so `level` stays constant.
+#
+# input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0; it is invisible/inert)
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 21 1 0
+input 22 1 0
+input 23 1 0
+input 24 1 0
+input 25 1 0
+input 26 1 0
+input 27 1 0
+input 28 1 0
+input 29 1 0
+input 30 1 0
+input 31 1 0
+input 32 1 0
+input 33 1 0
+input 34 1 0
+input 35 1 0
+input 36 1 0
+input 37 1 0
+input 38 16 0

@@ -51,7 +51,7 @@
 //! calls and the `has_hit` field (none hashed) are no-ops and are omitted, exactly
 //! as [`crate::weapon`] omits them.
 
-use assets::object::NObjectType;
+use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
 use assets::tc::Texture;
 use sim_core::fixed::{ftoi, itof};
@@ -60,7 +60,8 @@ use sim_core::vec::Vec2;
 
 use crate::blit::{blit_image_on_map, draw_dirt_effect};
 use crate::pool::Pool;
-use crate::state::{LevelSim, NObject};
+use crate::sobject::sobject_create;
+use crate::state::{LevelSim, NObject, SObject, WObject, WormState};
 
 /// Port of `NObjectType::Create` (`nobject.cpp:7-39`) — the shared spawn core.
 ///
@@ -223,6 +224,40 @@ pub enum NObjectOutcome {
     Remove,
 }
 
+/// Port of `CheckForSpecWormHit` (`worm.cpp:1162-1188`) reduced to its **rand-free
+/// geometry**: the worm must be `visible`, and the `±dist` box around the impact
+/// point `(x, y)` must overlap the worm's 16x16 sprite box (offset `(+7, +5)` from
+/// `Ftoi(w.pos)`, exactly as C++). The per-pixel
+/// `materials[worm_sprite[...]].Worm()` test — which decides a *solid* hit and
+/// needs the worm sprite bank + the `Worm` material flag (neither lives in the
+/// sim yet) — is the part of the predicate that belongs to the DEFERRED
+/// DoDamage/blood body (O10/5b), so it is approximated here by treating the whole
+/// 16x16 sprite box as solid.
+///
+/// This reduction **over-approximates** (it can only return `true` where C++
+/// returns `true`-or-`false`, never `false` where C++ returns `true` within the
+/// box), which is safe for 5a: every worm is far out of range, so both the full
+/// C++ test and this reduction return `false`, the loop draws nothing, and the
+/// deferred body guard is never reached. The `Rect::Intersect` is the same
+/// `max(x1)/max(y1)/min(x2)/min(y2)` clamp [`crate::sobject`] uses; a non-empty
+/// intersection is the hit.
+fn check_for_spec_worm_hit(worm: &WormState, x: i32, y: i32, dist: i32) -> bool {
+    // :1165-1167 invisible worms are never hit.
+    if !worm.visible {
+        return false;
+    }
+    // :1171-1172 deltas relative to the worm sprite's top-left (offset +7,+5).
+    let delta_x = x - ftoi(worm.pos.x) + 7;
+    let delta_y = y - ftoi(worm.pos.y) + 5;
+    // :1174-1176 Rect(delta-dist, delta-dist, delta+dist+1, delta+dist+1)
+    // intersected with the 16x16 sprite rect; a non-empty result is a hit.
+    let x1 = (delta_x - dist).max(0);
+    let y1 = (delta_y - dist).max(0);
+    let x2 = (delta_x + dist + 1).min(16);
+    let y2 = (delta_y + dist + 1).min(16);
+    x1 < x2 && y1 < y2
+}
+
 /// Port of `NObject::Process` (`nobject.cpp:68-234`) — advance one nobject by one
 /// tick.
 ///
@@ -254,11 +289,16 @@ pub enum NObjectOutcome {
 ///   ported (no rand). Inert for the dirt particle (`num_frames=0`).
 /// * **timeout** (`:160-164`) — `if ty.time_to_explo > 0` natural guard; fully
 ///   ported (no rand). Inert for the dirt particle (`time_to_explo=0`).
-/// * **worm-hit** (`:166-203`) — `debug_assert!`ed off (O10): the live loop draws
-///   `rand(3)` + a `rand(128)` blood fan and needs the worm list / `DoDamage`.
-///   Inert for the dirt particle (`hit_damage=0`).
-/// * **explode arms** (`:205-233`, `if do_explode`) — `create_on_exp`
-///   `debug_assert!`ed off (needs SObject Create); `dirt_effect` fully ported via
+/// * **worm-hit** (`:166-203`) — the per-worm loop SKELETON + the rand-free
+///   in-range test ([`check_for_spec_worm_hit`]) are ported; the vel-kick /
+///   `DoDamage` / hit-sound `rand(3)` / `rand(128)` blood fan / worm_explode /
+///   worm_destroy BODY stays DEFERRED (O10/5b) behind a guard INSIDE the in-range
+///   branch (per-worm, mirroring `sobject.rs`). The loop draws NOTHING on a no-hit,
+///   so a `hit_damage > 0` type with no worm in range is a no-op (no panic) —
+///   exactly what the 5a splinters need every flight tick.
+/// * **explode arms** (`:205-233`, `if do_explode`) — `create_on_exp` fully ported
+///   via [`sobject_create`] (BEFORE `dirt_effect`, the C++ order; this is the
+///   splinter's secondary `small_explosion`); `dirt_effect` fully ported via
 ///   [`draw_dirt_effect`] (`CorrectShadow` omitted, O4); splinter scatter fully
 ///   ported via [`nobject_create2`] (`rand(128)` + `rand(2)` per splinter, then
 ///   Create2's draws). All three are skipped for the dirt particle.
@@ -273,12 +313,17 @@ pub fn nobject_process(
     obj: &mut NObject,
     ty: &NObjectType,
     nobject_types: &[NObjectType],
+    sobject_types: &[SObjectType],
     level: &mut LevelSim,
     cossin: &[Vec2; 128],
     large_sprites: &SpriteSet,
     small_sprites: &SpriteSet,
     textures: &[Texture],
+    worms: &mut [WormState],
+    wobjects: &mut Pool<WObject>,
+    weapons: &[Weapon],
     nobjects: &mut Pool<NObject>,
+    sobjects: &mut Pool<SObject>,
     cycles: i32,
     rand: &mut Rand,
 ) -> NObjectOutcome {
@@ -412,25 +457,61 @@ pub fn nobject_process(
         }
     }
 
-    // :166-203 worm-hit — deferred (O10). The live loop draws rand(3) + a
-    // rand(128) blood fan and needs the worm list / DoDamage; it can set
-    // do_explode (worm_explode) or free without exploding (worm_destroy ->
-    // Remove). Inert for the dirt particle (hit_damage=0).
-    if !do_explode {
-        debug_assert!(
-            ty.hit_damage <= 0,
-            "worm-hit loop (rand(3) + rand(128) blood fan) deferred (O10)"
-        );
+    // :166-203 worm-hit loop SKELETON. The C++ `if (t.hit_damage > 0)` per-worm
+    // loop runs the rand-free in-range test [`check_for_spec_worm_hit`]; the
+    // vel-kick / DoDamage / hit-sound `rand(3)` / `rand(128)` blood fan /
+    // worm_explode / worm_destroy BODY (`:172-199`) stays DEFERRED (O10/5b) behind
+    // a guard INSIDE the in-range branch — mirroring how `sobject.rs` defers its
+    // in-box DoDamage per-worm rather than type-level. For 5a every worm is out of
+    // range, so the loop iterates, finds NO hit, draws NOTHING, and never trips the
+    // guard — bit-exact with C++ (which also draws nothing on a no-hit). The
+    // `particle__small_damage` splinter has `hit_damage = 2`, so the OLD type-level
+    // `debug_assert!(hit_damage <= 0)` panicked every flight tick; the per-worm
+    // structure is the fix.
+    if !do_explode && ty.hit_damage > 0 {
+        for w in worms.iter() {
+            if check_for_spec_worm_hit(w, ftoi(obj.pos.x), ftoi(obj.pos.y), ty.detect_distance) {
+                // :172-199 DEFERRED body (O10/5b): w.vel += vel*blow_away/100,
+                // DoDamage, the hit-sound rand(3), the rand(128) blood fan, and
+                // worm_explode/worm_destroy. They DRAW RAND and need DoDamage / the
+                // blood nobject, so a worm actually in range trips loudly here.
+                debug_assert!(
+                    false,
+                    "nobject worm-hit DoDamage/blood/vel-kick body deferred (O10/5b)"
+                );
+            }
+        }
     }
 
     // :205-233 explode arms.
     if do_explode {
-        // :206-209 create_on_exp sobject — deferred (needs SObject Create). Inert
-        // for the dirt particle (create_on_exp=-1).
-        debug_assert!(
-            ty.create_on_exp < 0,
-            "create_on_exp sobject spawn deferred (needs SObject Create)"
-        );
+        // :206-209 create_on_exp sobject — BEFORE dirt_effect and the splinter arm
+        // (C++ order: create_on_exp -> dirt_effect -> splinter; load-bearing because
+        // the sobject's own sound/dirt-throw/crater draw RNG between this spawn and
+        // the dart crater). Pass `Ftoi(pos.x), Ftoi(pos.y)`; the `-8` centre→top-left
+        // offset is applied inside sobject_create. owner_idx == cause_idx == fired_by
+        // (the exploding nobject's owner). This is the splinter's secondary explosion
+        // (`particle__small_damage` -> small_explosion). Inert for the dirt particle
+        // (create_on_exp=-1).
+        if ty.create_on_exp >= 0 {
+            sobject_create(
+                &sobject_types[ty.create_on_exp as usize],
+                ftoi(obj.pos.x),
+                ftoi(obj.pos.y),
+                obj.owner_idx,
+                worms,
+                wobjects,
+                weapons,
+                nobjects,
+                nobject_types,
+                level,
+                cossin,
+                large_sprites,
+                textures,
+                sobjects,
+                rand,
+            );
+        }
 
         // :211-219 dirt_effect crater. Fully ported; CorrectShadow omitted (O4).
         // Inert for the dirt particle (dirt_effect=-1).
@@ -840,7 +921,9 @@ mod tests {
         }
     }
 
-    // Run nobject_process with throwaway sprite/texture args (dirt_effect<0 cases).
+    // Run nobject_process with throwaway sprite/texture args (dirt_effect<0 cases)
+    // and empty worm list / cross pools / weapon + sobject tables (the new explode
+    // / worm-hit arms are inert for these callers: create_on_exp<0, no worms).
     #[allow(clippy::too_many_arguments)]
     fn run_process(
         obj: &mut NObject,
@@ -853,16 +936,24 @@ mod tests {
         rand: &mut Rand,
     ) -> NObjectOutcome {
         let sprites = no_sprites();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut sobjects: Pool<SObject> = Pool::new(1);
         nobject_process(
             obj,
             ty,
             nobject_types,
+            &[],
             level,
             cossin,
             &sprites,
             &sprites,
             &[],
+            &mut worms,
+            &mut wobjects,
+            &[],
             nobjects,
+            &mut sobjects,
             cycles,
             rand,
         )
@@ -1211,6 +1302,8 @@ mod tests {
     }
 
     // run_process variant that takes a real nobject_types table (splinter arm).
+    // Empty worms / cross pools / weapon + sobject tables (create_on_exp<0, no
+    // worms in these callers).
     #[allow(clippy::too_many_arguments)]
     fn run_process_with(
         obj: &mut NObject,
@@ -1223,18 +1316,241 @@ mod tests {
         rand: &mut Rand,
     ) -> NObjectOutcome {
         let sprites = no_sprites();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut sobjects: Pool<SObject> = Pool::new(1);
         nobject_process(
             obj,
             ty,
             nobject_types,
+            &[],
             level,
             cossin,
             &sprites,
             &sprites,
             &[],
+            &mut worms,
+            &mut wobjects,
+            &[],
             nobjects,
+            &mut sobjects,
             cycles,
             rand,
         )
+    }
+
+    // ---- Step 6: the new explode/worm-hit arms (T2a) -------------------------
+
+    use crate::state::{WeaponInit, WormInit};
+
+    // A worm at a pixel position, visible or not, for the worm-hit in-range test.
+    fn worm_at(px: i32, py: i32, visible: bool) -> WormState {
+        let mut w = WormState::from_init(&WormInit {
+            index: 0,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit::default(); crate::state::NUM_WEAPONS],
+            start_pos: Vec2::new(itof(px), itof(py)),
+            visible,
+        });
+        w.vel = Vec2::zero();
+        w
+    }
+
+    // A synthetic exploding type whose create_on_exp spawns sobject_types[idx] on a
+    // ground explode. No dirt_effect / splinters, so the ONLY explode side effect is
+    // the create_on_exp sobject (isolates the new arm).
+    fn create_on_exp_nobject(create_on_exp: i32) -> NObjectType {
+        NObjectType {
+            id: 8,
+            expl_ground: true,
+            draw_on_map: false,
+            start_frame: 0,
+            bounce: 0,
+            blood_trail: false,
+            num_frames: 0,
+            hit_damage: 0,
+            time_to_explo: 0,
+            create_on_exp,
+            dirt_effect: -1,
+            splinter_amount: 0,
+            leave_obj: -1,
+            gravity: 0,
+            ..Default::default()
+        }
+    }
+
+    // An sobject type with NO side effects that draw rand: start_sound < 0 (no sound
+    // rand), damage 0 (no worm/dirt-throw block), dirt_effect < 0 (no carve). So
+    // sobject_create spawns exactly one sobject and draws ZERO rand — making the
+    // spawn itself the assertion, not an rng count.
+    fn inert_sobject(id: i32) -> SObjectType {
+        SObjectType {
+            id,
+            start_sound: -1,
+            num_sounds: 0,
+            anim_delay: 3,
+            start_frame: 0,
+            num_frames: 4,
+            detect_range: 0,
+            damage: 0,
+            blow_away: 0,
+            dirt_effect: -1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn explode_create_on_exp_spawns_one_sobject() {
+        // A create_on_exp >= 0 type that ground-explodes must spawn the secondary
+        // sobject via sobject_create — the splinter's small_explosion path.
+        let cossin = precompute_cossin();
+        let ty = create_on_exp_nobject(1); // -> sobject_types[1]
+        let sobject_types = vec![inert_sobject(0), inert_sobject(1)];
+        let mut level = level_with_floor(100, 100, 60);
+        let sprites = no_sprites();
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut sobjects: Pool<SObject> = Pool::new(8);
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+        // Pre-advance so "no rand drawn" is a real assertion, not == 0.
+        rand.bound(77);
+        let rng_before = rand.last();
+
+        // Zero vel so pos is unchanged by the `pos += vel` step and the impact
+        // coordinates are exactly (50, 60): inew = Ftoi(pos+vel) = (50,60) is the
+        // rock floor (rows >= 60), so it ground-explodes this tick.
+        let mut obj = NObject {
+            pos: Vec2::new(itof(50), itof(60)),
+            vel: Vec2::zero(),
+            ty: Some(8),
+            owner_idx: 2,
+            ..Default::default()
+        };
+
+        let out = nobject_process(
+            &mut obj,
+            &ty,
+            &[],
+            &sobject_types,
+            &mut level,
+            &cossin,
+            &sprites,
+            &sprites,
+            &[],
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            0,
+            &mut rand,
+        );
+
+        assert_eq!(out, NObjectOutcome::Explode, "ground explode -> Explode");
+        assert_eq!(sobjects.len(), 1, "create_on_exp spawned exactly one sobject");
+        let s = *sobjects.get(0).expect("sobject in slot 0");
+        assert_eq!(s.id, 1, "spawned sobject is sobject_types[create_on_exp]");
+        // x/y = Ftoi(pos) - 8 (the centre->top-left offset inside sobject_create).
+        assert_eq!(s.x, 50 - 8, "sobject x = Ftoi(pos.x) - 8");
+        assert_eq!(s.y, 60 - 8, "sobject y = Ftoi(pos.y) - 8");
+        assert_eq!(
+            rand.last(),
+            rng_before,
+            "inert sobject draws no rand (start_sound<0, damage 0, dirt_effect<0)"
+        );
+        assert_eq!(nobjects.len(), 0, "no splinters: create_on_exp only");
+    }
+
+    #[test]
+    fn worm_hit_loop_no_worm_in_range_draws_nothing_and_no_panic() {
+        // A hit_damage > 0 type that does NOT explode (in free air) runs the worm-hit
+        // loop. With the only worm far out of detect_distance range, the loop finds no
+        // hit: it draws NOTHING and never trips the deferred-body guard (no panic in a
+        // debug build). This is the exact 5a splinter-in-flight case the old
+        // type-level assert wrongly panicked on.
+        let cossin = precompute_cossin();
+        let ty = NObjectType {
+            id: 9,
+            hit_damage: 2, // > 0 -> the worm-hit loop runs
+            detect_distance: 2,
+            expl_ground: false,
+            gravity: 0,
+            time_to_explo: 0,
+            create_on_exp: -1,
+            dirt_effect: -1,
+            splinter_amount: 0,
+            leave_obj: -1,
+            ..Default::default()
+        };
+        let mut level = bg_level(200, 200);
+        let sprites = no_sprites();
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        // A VISIBLE worm 100px away (well outside detect_distance=2) + an invisible
+        // worm right on top (invisible -> never a hit).
+        let mut worms = vec![worm_at(150, 50, true), worm_at(50, 50, false)];
+        let mut rand = seeded();
+        rand.bound(33);
+        let rng_before = rand.last();
+
+        let mut obj = NObject {
+            pos: Vec2::new(itof(50), itof(50)),
+            vel: Vec2::new(itof(1), 0),
+            ty: Some(9),
+            owner_idx: 0,
+            ..Default::default()
+        };
+
+        let out = nobject_process(
+            &mut obj,
+            &ty,
+            &[],
+            &[],
+            &mut level,
+            &cossin,
+            &sprites,
+            &sprites,
+            &[],
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            0,
+            &mut rand,
+        );
+
+        assert_eq!(out, NObjectOutcome::Keep, "free air, no explode");
+        assert_eq!(
+            rand.last(),
+            rng_before,
+            "no worm in range -> worm-hit loop draws nothing"
+        );
+        assert_eq!(sobjects.len(), 0, "no explode -> no create_on_exp");
+        assert_eq!(nobjects.len(), 0, "no spawns");
+    }
+
+    #[test]
+    fn worm_hit_in_range_check_is_visibility_and_box_gated() {
+        // Directly pin check_for_spec_worm_hit's reduced geometry: invisible -> false
+        // regardless of distance; visible + far -> false; visible + on-point -> true.
+        let invisible = worm_at(50, 50, false);
+        assert!(
+            !check_for_spec_worm_hit(&invisible, 50, 50, 4),
+            "invisible worm is never hit even on-point"
+        );
+        let visible_far = worm_at(50, 50, true);
+        assert!(
+            !check_for_spec_worm_hit(&visible_far, 200, 200, 2),
+            "visible worm far outside the box is not hit"
+        );
+        assert!(
+            check_for_spec_worm_hit(&visible_far, 57, 55, 2),
+            "visible worm whose sprite box overlaps the +/-dist box is hit"
+        );
     }
 }

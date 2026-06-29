@@ -52,32 +52,20 @@
 //! The scenario is the single source of truth (parsed via `oracle_tests::scenario`)
 //! and the expected values are PARSED from the golden file, never hard-coded.
 //!
-//! ## ⚠️ BLOCKED — `#[ignore]`d pending an unported splinter-explosion sim path
+//! ## UNBLOCKED (T2a) — the splinter-explosion sim path is ported
 //!
-//! This milestone test is COMPLETE and CORRECT but currently `#[ignore]`d because the
-//! sim cannot yet reproduce the golden — a genuine gap surfaced by this very test
-//! (TDD working as intended; the golden is NOT wrong and NO assertion is weakened):
-//!
-//!   * Through **tick 102** the driven `SimState` matches the C++ golden BIT-EXACT on
-//!     all 11 columns (master + 9 components) — so T0's splinter SPAWN + flight is
-//!     proven: the 5 splinters spawn at tick 99 (nobjects jump +5, master matches) and
-//!     fly correctly.
-//!   * First divergence is **tick 103, `rng` column** (release: got `70785b7b`,
-//!     expected `5308467f`). Root cause: the splinter type `particle__small_damage`
-//!     has `expl_ground = true` + `create_on_exp = "small_explosion"`, so each splinter
-//!     EXPLODES into a secondary `small_explosion` sobject when it lands (golden carves
-//!     at ticks 99/103/109). `NObject::Process`'s `create_on_exp` arm is still DEFERRED
-//!     (`sim/src/nobject.rs:~430`), so the Rust splinter draws no RNG / spawns no
-//!     sobject on explGround → the `rng`/`level`/`sobjects` columns diverge at 103.
-//!   * In a DEBUG build it panics even earlier, at the deferred O10 worm-hit assert
-//!     (`sim/src/nobject.rs:~419`, `debug_assert!(hit_damage <= 0)`): the splinter has
-//!     `hit_damage = 2`, so processing it before it explodes trips the assert — even
-//!     though it hits no worm (the C++ worm-hit loop draws ZERO rand on a no-hit, so
-//!     the correct port is a no-op here, not a panic).
-//!
-//! Closing this needs a SIM task (out of scope for this test-only task, which must not
-//! touch sim files): port `NObject::Process`'s `create_on_exp` spawn and relax the O10
-//! worm-hit assert to allow the no-hit path. Once landed, remove the `#[ignore]`.
+//! This milestone matched the C++ golden BIT-EXACT through tick 102 from the start,
+//! then diverged at **tick 103, `rng`** because the splinter type
+//! `particle__small_damage` (`expl_ground = true`, `create_on_exp = "small_explosion"`)
+//! explodes SECONDARILY on landing, but `NObject::Process`'s `create_on_exp` arm was
+//! deferred and its worm-hit deferral was type-level (so the `hit_damage = 2` splinter
+//! panicked in a debug build before it even exploded). Task T2a ported both arms
+//! bit-exact (`sim/src/nobject.rs`): the worm-hit loop SKELETON + the rand-free
+//! in-range test (`check_for_spec_worm_hit`) with the DoDamage/blood/vel-kick BODY
+//! still deferred (O10/5b) behind a per-worm guard, and the `create_on_exp`
+//! `sobject_create` spawn (BEFORE `dirt_effect`, the C++ order). With those live the
+//! whole 131-tick run (0..=130, master + 9 components) matches in BOTH debug and
+//! release, so the `#[ignore]` is gone.
 
 use assets::object::Objects;
 use assets::tc::TcConfig;
@@ -136,10 +124,6 @@ fn parse_golden(text: &str) -> Vec<GoldenTick> {
 }
 
 #[test]
-#[ignore = "BLOCKED: sim diverges at tick 103 rng — splinter `create_on_exp` \
-            (small_explosion secondary) unported (sim/src/nobject.rs:~430) + O10 \
-            worm-hit assert (nobject.rs:~419) panics on hit_damage>0 splinter. \
-            Needs a sim task; un-ignore once NObject::Process create_on_exp lands."]
 fn sim_slice5a_splinter_objects_match_cpp_oracle() {
     // --- Parse the scenario (single source of truth, shared with the C++ dumper).
     let scenario_text = std::fs::read_to_string(concat!(

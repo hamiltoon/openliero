@@ -471,11 +471,12 @@ pub fn process_weapons(
 /// 3. Loop-sound stop (`worm.cpp:1075-1077`) — SKIPPED (sound not hashed).
 /// 4. **Cycle gate** (`worm.cpp:1079`): `weapons[current_weapon].Available() ||
 ///    settings->load_change`. `Available()` is `loading_left == 0`
-///    (`worm.hpp:35`), which holds every tick this slice (no reload arms
-///    `loading_left` — see [`process_weapons`]); `load_change` defaults `true`
-///    (`settings.hpp:75`). So the gate is unconditionally true here and cycling
-///    always runs; the `loading_left == 0` invariant is pinned with a
-///    `debug_assert!`.
+///    (`worm.hpp:35`); `load_change` is the `SimState` setting (defaults `true`,
+///    `settings.hpp:79`). The two `PressedOnce` cycle blocks (steps 5-6) run
+///    *only* when this gate passes — i.e. either the current weapon has finished
+///    reloading, or `load_change` permits changing mid-reload. Steps 1-3 (the
+///    first-tick Release latch and `fire_cone = 0`) run *unconditionally, before*
+///    the gate (`worm.cpp:1065-1072`).
 /// 5. **`PressedOnce(kLeft)`** (`worm.cpp:1080-1087`): decrement `current_weapon`,
 ///    wrapping below 0 to `kSelectableWeapons - 1` (== `NUM_WEAPONS - 1`), and
 ///    clear the Left bit. `hotspot_x/y` are render-only (skipped).
@@ -487,8 +488,9 @@ pub fn process_weapons(
 /// so once `key_change_pressed` is latched a held Change+Right re-sets the Right
 /// bit each tick and `PressedOnce` fires every tick — holding for *k* steady
 /// ticks cycles *k* times.
-pub fn process_weapon_change(worm: &mut WormState) {
+pub fn process_weapon_change(worm: &mut WormState, load_change: bool) {
     // worm.cpp:1065-1070 — first change-tick: clear Left/Right, latch.
+    // Runs UNCONDITIONALLY, before the cycle gate.
     if !worm.key_change_pressed {
         worm.control_states.release(ControlState::LEFT);
         worm.control_states.release(ControlState::RIGHT);
@@ -496,33 +498,30 @@ pub fn process_weapon_change(worm: &mut WormState) {
     }
 
     // worm.cpp:1072 — fire_cone = 0. (animate = false at :1073 is render-only.)
+    // Also unconditional, before the gate.
     worm.fire_cone = 0;
 
     // worm.cpp:1075-1077 — loop-sound stop: SKIPPED (sound not hashed).
 
-    // worm.cpp:1079 gate — Available() || load_change. Available() == loading_left
-    // == 0 holds every tick this slice (no reload), and load_change defaults true,
-    // so the gate is always entered. Pin the Available() invariant.
-    debug_assert!(
-        worm.weapons[worm.current_weapon as usize].loading_left == 0,
-        "ProcessWeaponChange gate: Available() (loading_left==0) holds this slice; \
-         reload is Slice-4 (Fire) territory"
-    );
-
-    // worm.cpp:1080-1087 — PressedOnce(Left): cycle down, wrap to NUM_WEAPONS-1.
-    if worm.control_states.pressed_once(ControlState::LEFT) {
-        worm.current_weapon -= 1;
-        if worm.current_weapon < 0 {
-            worm.current_weapon = NUM_WEAPONS as i32 - 1;
+    // worm.cpp:1079 gate — Available() || load_change. The two PressedOnce cycle
+    // blocks run only when the current weapon has finished reloading
+    // (Available() == loading_left == 0) OR load_change permits mid-reload change.
+    if worm.weapons[worm.current_weapon as usize].available() || load_change {
+        // worm.cpp:1080-1087 — PressedOnce(Left): cycle down, wrap to NUM_WEAPONS-1.
+        if worm.control_states.pressed_once(ControlState::LEFT) {
+            worm.current_weapon -= 1;
+            if worm.current_weapon < 0 {
+                worm.current_weapon = NUM_WEAPONS as i32 - 1;
+            }
+            // hotspot_x/y = Ftoi(pos) — render-only, not hashed; skipped.
         }
-        // hotspot_x/y = Ftoi(pos) — render-only, not hashed; skipped.
-    }
 
-    // worm.cpp:1089-1096 — PressedOnce(Right): cycle up, wrap to 0.
-    if worm.control_states.pressed_once(ControlState::RIGHT) {
-        worm.current_weapon += 1;
-        if worm.current_weapon >= NUM_WEAPONS as i32 {
-            worm.current_weapon = 0;
+        // worm.cpp:1089-1096 — PressedOnce(Right): cycle up, wrap to 0.
+        if worm.control_states.pressed_once(ControlState::RIGHT) {
+            worm.current_weapon += 1;
+            if worm.current_weapon >= NUM_WEAPONS as i32 {
+                worm.current_weapon = 0;
+            }
         }
     }
 }
@@ -1533,7 +1532,7 @@ MultiJump = true
         w.control_states.press(ControlState::LEFT);
         w.control_states.press(ControlState::RIGHT);
 
-        process_weapon_change(&mut w);
+        process_weapon_change(&mut w, true);
 
         assert!(
             w.key_change_pressed,
@@ -1558,7 +1557,7 @@ MultiJump = true
         w.control_states.press(ControlState::CHANGE);
         w.control_states.press(ControlState::RIGHT);
 
-        process_weapon_change(&mut w);
+        process_weapon_change(&mut w, true);
 
         assert_eq!(w.current_weapon, 1, "Right: current_weapon 0 -> 1");
         assert!(
@@ -1581,7 +1580,7 @@ MultiJump = true
         w.control_states.press(ControlState::CHANGE);
         w.control_states.press(ControlState::RIGHT);
 
-        process_weapon_change(&mut w);
+        process_weapon_change(&mut w, true);
 
         assert_eq!(w.current_weapon, 0, "Right at slot 4 wraps to 0");
     }
@@ -1596,7 +1595,7 @@ MultiJump = true
         w.control_states.press(ControlState::CHANGE);
         w.control_states.press(ControlState::LEFT);
 
-        process_weapon_change(&mut w);
+        process_weapon_change(&mut w, true);
 
         assert_eq!(w.current_weapon, 1, "Left: current_weapon 2 -> 1");
         assert!(
@@ -1615,7 +1614,7 @@ MultiJump = true
         w.control_states.press(ControlState::CHANGE);
         w.control_states.press(ControlState::LEFT);
 
-        process_weapon_change(&mut w);
+        process_weapon_change(&mut w, true);
 
         assert_eq!(
             w.current_weapon,
@@ -1636,7 +1635,7 @@ MultiJump = true
         w.control_states.press(ControlState::LEFT);
         w.control_states.press(ControlState::RIGHT);
 
-        process_weapon_change(&mut w);
+        process_weapon_change(&mut w, true);
 
         assert_eq!(w.current_weapon, 3, "Left then Right: -1 then +1 -> net 0");
         assert_eq!(
@@ -1658,7 +1657,7 @@ MultiJump = true
             // Mimic the driver's per-tick Unpack of the scripted input.
             w.control_states =
                 ControlState::unpack((1 << ControlState::CHANGE) | (1 << ControlState::RIGHT));
-            process_weapon_change(&mut w);
+            process_weapon_change(&mut w, true);
         }
         assert_eq!(
             w.current_weapon,
@@ -1676,12 +1675,99 @@ MultiJump = true
         for _ in 0..3 {
             w.control_states =
                 ControlState::unpack((1 << ControlState::CHANGE) | (1 << ControlState::RIGHT));
-            process_weapon_change(&mut w);
+            process_weapon_change(&mut w, true);
         }
         assert_eq!(
             w.current_weapon, 2,
             "first tick eats one: 3 ticks -> 2 cycles"
         );
+    }
+
+    // ---- load_change gate (worm.cpp:1079) -----------------------------------
+    //
+    // The cycle gate is `weapons[current_weapon].Available() || load_change`.
+    // Available() == loading_left == 0. These three tests exercise the gate's
+    // two terms independently; the first-tick Release latch + fire_cone clear
+    // (worm.cpp:1065-1072) run OUTSIDE the gate, so they fire regardless.
+
+    #[test]
+    fn weapon_change_cycles_while_loading_when_load_change_true() {
+        // Step 1: loading_left > 0 (Available() == false) but load_change = true
+        // -> the gate's second term passes, so PressedOnce(Right) still cycles.
+        let mut w = change_worm();
+        w.key_change_pressed = true; // steady hold (skip first-tick eat)
+        w.weapons[0].loading_left = 5; // current weapon mid-reload
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::RIGHT);
+
+        process_weapon_change(&mut w, true);
+
+        assert_eq!(
+            w.current_weapon, 1,
+            "load_change=true: gate entered despite loading_left>0 -> cycles"
+        );
+        assert!(
+            !w.control_states.get(ControlState::RIGHT),
+            "Right bit cleared inside the gate"
+        );
+    }
+
+    #[test]
+    fn weapon_change_blocked_while_loading_when_load_change_false() {
+        // Step 2: loading_left > 0 (Available() == false) AND load_change = false
+        // -> the gate is skipped: current_weapon UNCHANGED even with L/R held.
+        // BUT the first-tick Release (worm.cpp:1065-1070, OUTSIDE the gate) still
+        // clears the Left/Right bits and latches key_change_pressed.
+        let mut w = change_worm(); // key_change_pressed = false
+        w.weapons[0].loading_left = 5; // current weapon mid-reload
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::LEFT);
+        w.control_states.press(ControlState::RIGHT);
+
+        process_weapon_change(&mut w, false);
+
+        assert_eq!(
+            w.current_weapon, 0,
+            "load_change=false + loading: gate skipped -> no cycle"
+        );
+        assert!(
+            w.key_change_pressed,
+            "first-tick latch happens before the gate"
+        );
+        assert!(
+            !w.control_states.get(ControlState::LEFT),
+            "Left bit cleared by the pre-gate Release"
+        );
+        assert!(
+            !w.control_states.get(ControlState::RIGHT),
+            "Right bit cleared by the pre-gate Release"
+        );
+        assert_eq!(
+            w.control_states.pack(),
+            1 << ControlState::CHANGE,
+            "only Change remains (Left/Right cleared outside the gate)"
+        );
+    }
+
+    #[test]
+    fn weapon_change_cycles_when_available_regardless_of_load_change() {
+        // Step 3: loading_left == 0 (Available() == true) -> the gate's first term
+        // passes, so cycling happens whether load_change is true or false. This is
+        // the Slice-3 behaviour, preserved. Run both load_change values.
+        for load_change in [true, false] {
+            let mut w = change_worm();
+            w.key_change_pressed = true;
+            w.weapons[0].loading_left = 0; // Available()
+            w.control_states.press(ControlState::CHANGE);
+            w.control_states.press(ControlState::RIGHT);
+
+            process_weapon_change(&mut w, load_change);
+
+            assert_eq!(
+                w.current_weapon, 1,
+                "Available()==true: cycles regardless of load_change ({load_change})"
+            );
+        }
     }
 
     // ---- process_movement (ProcessMovement port) ----------------------------

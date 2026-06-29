@@ -777,11 +777,13 @@ impl SimState {
             sobject_types,
             nobject_types,
             settings_loading_time,
+            load_change,
             cycles,
             ..
         } = self;
         let h_signed_recoil = *h_signed_recoil;
         let settings_loading_time = *settings_loading_time;
+        let load_change = *load_change;
         // `cycles` is 0 in 4c (no `++cycles` yet); the nobjects loop needs it for
         // the `cycles % delay` / `cycles & 7` gates inside `nobject_process`. Read
         // it as a value; the loop must NOT mutate it.
@@ -965,7 +967,7 @@ impl SimState {
 
                 // 11. change/movement gate (worm.cpp:348-353).
                 if w.control_states.get(ControlState::CHANGE) {
-                    process_weapon_change(w);
+                    process_weapon_change(w, load_change);
                 } else {
                     w.key_change_pressed = false;
                     process_movement(

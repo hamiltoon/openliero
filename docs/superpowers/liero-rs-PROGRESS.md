@@ -9,12 +9,16 @@
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
 > **Last updated:** 2026-06-29 · **Current focus:** Step 2, Slice 5 (remaining object
-> families) — decomposed **5a splinters → 5b damage+blood → 5c bonuses → 5d
-> death+respawn**. **5a MILESTONE difftest GREEN** (`sim_slice5a_golden` matches the C++
-> master + all 9 components tick-for-tick, all 131 ticks, debug + release); the
-> `BlowUpObject` splinter arm + the `NObject::Process` `create_on_exp`/explode arms are
-> now live (cannon → `medium_explosion` + 5 splinters that secondarily explode). 5a in
-> final review; 5b–5d not started.
+> families) — **5a splinters SHIPPED** (PR #3) and **5b damage+blood MILESTONE difftest
+> GREEN** (`sim_slice5b_golden` matches the C++ master + all 9 components, all 121 ticks;
+> a worm is **wounded by an explosion** (health 100→82, survives) and **bleeds** — the
+> `bobjects` blood pool goes live for the first time, fed by the blood-trail at the
+> faithful `cycles%10` cadence). 5b also turned `cycles` live (dumper + Rust `++cycles`,
+> regenerating the prior goldens' master columns) and ported the wobject bounce+animation
+> flight branches. **Deferred to a follow-up slice:** the per-pixel `CheckForSpecWormHit`
+> + the wobject/nobject *in-flight* worm-hit arms (5b wounds only via the explosion's
+> sobject AABB, using the closed-gate weapon `explosives`). Next: 5c bonuses, 5d
+> death+respawn.
 
 ---
 
@@ -53,18 +57,20 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 │   ├─ ✅ 4c  explosion sobjects + nobjects — dart               SHIPPED (sobjects/nobjects live + carving, 91 ticks bit-exact)
 │   └─ ✅ 4d  slice-3/4 deferrals (dig, reload, shell-drop+land, load_change)  SHIPPED (handgun, master+9 components bit-exact 126 ticks vs C++)
 ├─ 🔄 Slice 5  remaining object families — decomposed 5a–5d
-│   ├─ 🔄 5a  splinters (cannon → medium_explosion + 5 splinters)  difftest GREEN + reviewed; await push
-│   ├─ ⬜ 5b  worm damage + blood (O10; stats-fix + cycles advancement)
+│   ├─ ✅ 5a  splinters (cannon → medium_explosion + 5 splinters)  SHIPPED (PR #3, 131 ticks bit-exact)
+│   ├─ ✅ 5b  worm damage + blood (O10)  MILESTONE GREEN (explosives wound → blood → live bobjects, 121 ticks; cycles live; await broad review + push)
 │   ├─ ⬜ 5c  bonuses (CreateBonus + bonus-drop roll + chain-loop)
 │   └─ ⬜ 5d  death + respawn (BeginRespawn RNG-search; fuzzed)
+├─ ⬜ Slice 5′ (deferred follow-up)  per-pixel CheckForSpecWormHit + wobject/nobject in-flight worm-hit arms
 └─ ⬜ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match
 ```
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~40–47%** |
-| Step 2 (current) | **~64–67%** |
-| Slice 5a (splinters) | **✅ difftest GREEN + reviewed** (`sim_slice5a_golden` master+9 components 131 ticks, debug+release; `BlowUpObject` splinter arm + `NObject::Process` `create_on_exp`/explode arms live; await broad review + push) |
+| Rewrite track (steps 0–5) | **~43–50%** |
+| Step 2 (current) | **~70–73%** |
+| Slice 5b (worm damage + blood) | **✅ MILESTONE GREEN** (`sim_slice5b_golden` master+9 components 121 ticks; worm wounded 100→82 + bleeds, **`bobjects` pool live**; `cycles` now advances; wobject bounce+animation flight branches ported; per-pixel worm-hit deferred → follow-up; await broad review + push) |
+| Slice 5a (splinters) | **✅ SHIPPED** (`sim_slice5a_golden` master+9 components 131 ticks, debug+release; `BlowUpObject` splinter arm + `NObject::Process` `create_on_exp`/explode arms live; on PR #3) |
 | Slice 4 (weapon lifecycle) | **✅ SHIPPED** (4a + 4b + 4c + 4d all bit-exact vs C++) |
 | Slice 4c | **✅ SHIPPED** (sobjects/nobjects pools live + carving DrawDirtEffect, master+9 components bit-exact 91 ticks vs C++, on PR #3) |
 | Slice 4d | **✅ SHIPPED** (dig + shell-drop/landing-blit + reload + load_change; HANDGUN, master+9 components bit-exact 126 ticks vs C++; `BlitImageOnMap` + small-sprite bank added) |

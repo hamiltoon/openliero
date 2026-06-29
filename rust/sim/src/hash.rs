@@ -255,6 +255,10 @@ mod tests {
             h_bonus_disable: false,
             bonus_rand_timer: [[0, 0], [0, 0]],
             weap_table: Vec::new(),
+            bonus_gravity: 0,
+            bonus_bounce_mul: 0,
+            bonus_bounce_div: 0,
+            bonus_s_objects: [0, 0],
         }
     }
 

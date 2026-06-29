@@ -326,11 +326,22 @@ int main(int argc, char** argv) {
   // Drive N ticks: apply scripted input, Process each worm in game.worms order,
   // then dump. The input for the pass advancing tick t -> t+1 is keyed on t.
   for (int t = 0; t < scn.ticks; ++t) {
+    // Bonuses Process loop (game.cpp:287-290), at the TOP of ProcessFrame, BEFORE
+    // the object loops AND before `++cycles`. `bonuses` is an ExactObjectList (slot
+    // order; All() skips free slots); `Bonus::Process` (fall/bounce/expire) may
+    // Free(this) on the expire path. For non-5c scenarios the pool is empty ⇒ a
+    // no-op ⇒ byte-identical. Made live by a `max_bonuses > 0` scenario (Slice 5c).
+    {
+      auto br = game.bonuses.All();
+      for (Bonus* i = nullptr; (i = br.Next());) {
+        i->Process(game);
+      }
+    }
+
     // Object loops, in `Game::ProcessFrame` order (game.cpp:333-355), BEFORE the
-    // worm loop. EXCLUDES the bonus-drop roll, the bonuses loop, ninjarope, and the
-    // game-mode switch (still Slice-6 concerns). On the empty pools of non-firing
-    // scenarios these are no-ops; once a worm Fires, the spawned projectile advances
-    // here next tick.
+    // worm loop. EXCLUDES the bonus-drop roll, ninjarope, and the game-mode switch
+    // (still Slice-6 concerns). On the empty pools of non-firing scenarios these are
+    // no-ops; once a worm Fires, the spawned projectile advances here next tick.
     {
       auto sr = game.sobjects.All();
       for (SObject* i = nullptr; (i = sr.Next());) {

@@ -32,7 +32,7 @@
 use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
 use assets::tc::Texture;
-use sim_core::fixed::itof;
+use sim_core::fixed::{ftoi, itof};
 use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
@@ -190,6 +190,197 @@ pub fn create_bonus(
                 rand,
             );
             return;
+        }
+    }
+}
+
+/// The driver's verdict for a processed bonus: whether the slot should be freed.
+/// Returned by [`bonus_process`] so the slot-walk in [`process_bonuses`] (and the
+/// `process_frame` bonuses loop) can free-during-iteration the C++ way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BonusOutcome {
+    /// Keep the bonus in its slot (write the mutated copy back).
+    Keep,
+    /// Free the slot (the `--timer<=0 && used` expire path).
+    Free,
+}
+
+/// Port of `Bonus::Process` (`bonus.cpp:6-35`). The fall/bounce path draws **NO
+/// rand**; only the expiry sobject (`sobject_create`, reached on `--timer<=0`)
+/// draws. Returns [`BonusOutcome::Free`] when the bonus expired AND `used` (so the
+/// driver frees the slot), else [`BonusOutcome::Keep`].
+///
+/// The arithmetic is the bit-exact contract:
+/// * `:9` `y += vel_y` (16.16 fixed, wrapping).
+/// * `:16-18` standing over air (`Inside(kIx,kIy+1) && Mat(kIx,kIy+1).Background()`)
+///   → `vel_y += BonusGravity`. The `Inside` gate is replicated before the
+///   (unchecked) [`LevelSim::background`] probe so a negative/OOB cell never reads
+///   a wrapped pixel — matching the C++ short-circuit.
+/// * `:20-27` bounce: if the *next* row `kInewY` is above the top, at/below
+///   `height-1`, or DirtRock, reflect `vel_y = -(vel_y*BounceMul)/BounceDiv`
+///   (multiply, negate, then truncating divide), zeroed when `|vel_y| < 100` (a
+///   literal, not a const). The `||` short-circuits the bounds terms before the
+///   `dirt_rock` probe, so `dirt_rock` is only reached with `0 <= kInewY <
+///   height-1` (in bounds) — its `inside` gate is then always satisfied,
+///   equivalent to the C++ unchecked `Mat(kIx, kInewY).DirtRock()`.
+/// * `:29-34` EXPIRE: `--timer<=0` → spawn `sobject_types[bonus_s_objects[frame]]`
+///   at `(kIx, kIy)` via the already-ported [`sobject_create`] (which draws its own
+///   sound/dirt RNG), then free the bonus **iff** `used`.
+///
+/// `used` mirrors the C++ `ExactObjectListBase::used` flag (`exactObjectList.hpp`):
+/// the live/free marker. The pool's slot-walk only visits live slots (C++ `All()`
+/// skips `!used`), so the driver passes `used = true`; the gate is kept faithful so
+/// the **spawn** at expiry is unconditional while the **free** is `used`-gated
+/// (passing `used = false` keeps the slot but still spawns the sobject).
+#[allow(clippy::too_many_arguments)]
+pub fn bonus_process(
+    bonus: &mut Bonus,
+    used: bool,
+    level: &mut LevelSim,
+    worms: &mut [WormState],
+    wobjects: &mut Pool<WObject>,
+    nobjects: &mut Pool<NObject>,
+    sobjects: &mut Pool<SObject>,
+    weapons: &[Weapon],
+    nobject_types: &[NObjectType],
+    sobject_types: &[SObjectType],
+    cossin: &[Vec2; 128],
+    large_sprites: &SpriteSet,
+    textures: &[Texture],
+    blood: i32,
+    bonus_gravity: i32,
+    bonus_bounce_mul: i32,
+    bonus_bounce_div: i32,
+    bonus_s_objects: &[i32; 2],
+    rand: &mut Rand,
+) -> BonusOutcome {
+    // :9 y += vel_y.
+    bonus.y = bonus.y.wrapping_add(bonus.vel_y);
+
+    // :11-12 kIx, kIy (Ftoi == >>16). :14 asserts kIx in [0,width) — debug only.
+    let k_ix = ftoi(bonus.x);
+    let k_iy = ftoi(bonus.y);
+
+    // :16-18 standing over air → fall. Inside-gated, then the unchecked Background()
+    // probe (the gate guarantees the cell is in bounds).
+    if level.inside(k_ix, k_iy + 1) && level.background(k_ix, k_iy + 1) {
+        bonus.vel_y = bonus.vel_y.wrapping_add(bonus_gravity);
+    }
+
+    // :20-27 bounce off terrain / top / bottom bound.
+    let k_inew_y = ftoi(bonus.y.wrapping_add(bonus.vel_y));
+    if k_inew_y < 0 || k_inew_y >= level.height - 1 || level.dirt_rock(k_ix, k_inew_y) {
+        // -(vel_y * BounceMul) / BounceDiv: multiply, negate, then truncating divide.
+        bonus.vel_y = bonus
+            .vel_y
+            .wrapping_mul(bonus_bounce_mul)
+            .wrapping_neg()
+            .wrapping_div(bonus_bounce_div);
+        // :24-26 `if (abs(vel_y) < 100) vel_y = 0;` — 100 is a literal, not a const.
+        if bonus.vel_y.abs() < 100 {
+            bonus.vel_y = 0;
+        }
+    }
+
+    // :29-34 EXPIRE: --timer<=0.
+    bonus.timer = bonus.timer.wrapping_sub(1);
+    if bonus.timer <= 0 {
+        // :30 spawn sobject_types[bonus_s_objects[frame]] at (kIx, kIy). Draws its
+        // own sound/dirt RNG cluster inside sobject_create. ALWAYS runs at expiry,
+        // regardless of `used`.
+        sobject_create(
+            &sobject_types[bonus_s_objects[bonus.frame as usize] as usize],
+            k_ix,
+            k_iy,
+            0,
+            worms,
+            wobjects,
+            weapons,
+            nobjects,
+            nobject_types,
+            level,
+            cossin,
+            large_sprites,
+            textures,
+            sobjects,
+            blood,
+            rand,
+        );
+        // :31-33 free the bonus iff used.
+        if used {
+            return BonusOutcome::Free;
+        }
+    }
+    BonusOutcome::Keep
+}
+
+/// The bonuses Process loop (`game.cpp:287-290`): walks the `bonuses` pool in slot
+/// (index) order — matching `ExactObjectList::All()`, which skips free slots — and
+/// runs [`bonus_process`] on each live bonus, freeing the slot on
+/// [`BonusOutcome::Free`].
+///
+/// Free-during-iteration is the C++ contract: `Bonus::Process` may `Free(this)` on
+/// the expire path. Walking by index and copying each bonus out by value lets us
+/// hand `&mut` of the *other* pools to `bonus_process` (its expiry `sobject_create`)
+/// and free the current slot without disturbing the walk — exactly as the C++
+/// `Range` already advanced its cursor past the returned object before `Process`
+/// runs, so freeing the just-returned slot is safe. The same shape as the
+/// `process_frame` sobjects/wobjects/nobjects slot-walks.
+#[allow(clippy::too_many_arguments)]
+pub fn process_bonuses(
+    bonuses: &mut Pool<Bonus>,
+    level: &mut LevelSim,
+    worms: &mut [WormState],
+    wobjects: &mut Pool<WObject>,
+    nobjects: &mut Pool<NObject>,
+    sobjects: &mut Pool<SObject>,
+    weapons: &[Weapon],
+    nobject_types: &[NObjectType],
+    sobject_types: &[SObjectType],
+    cossin: &[Vec2; 128],
+    large_sprites: &SpriteSet,
+    textures: &[Texture],
+    blood: i32,
+    bonus_gravity: i32,
+    bonus_bounce_mul: i32,
+    bonus_bounce_div: i32,
+    bonus_s_objects: &[i32; 2],
+    rand: &mut Rand,
+) {
+    for slot in 0..bonuses.capacity() {
+        let obj_ref = match bonuses.get(slot) {
+            Some(o) => o,
+            None => continue,
+        };
+        let mut obj = *obj_ref;
+        // A live slot ⇒ `used == true` (C++ `All()` only yields used bonuses).
+        match bonus_process(
+            &mut obj,
+            true,
+            level,
+            worms,
+            wobjects,
+            nobjects,
+            sobjects,
+            weapons,
+            nobject_types,
+            sobject_types,
+            cossin,
+            large_sprites,
+            textures,
+            blood,
+            bonus_gravity,
+            bonus_bounce_mul,
+            bonus_bounce_div,
+            bonus_s_objects,
+            rand,
+        ) {
+            BonusOutcome::Keep => {
+                *bonuses.get_mut(slot).expect("slot still live") = obj;
+            }
+            BonusOutcome::Free => {
+                bonuses.free(slot);
+            }
         }
     }
 }
@@ -679,5 +870,244 @@ mod tests {
             check_bonus_spawn_position(&level, 0, 0),
             "corner box clamped to bounds, all clear -> accepted"
         );
+    }
+
+    // ---- Bonus::Process (bonus.cpp:6-35) ------------------------------------
+
+    // Run `bonus_process` with the common test plumbing. Returns the outcome plus
+    // the sobjects pool so the caller can assert the expiry spawn. `bonus_s_objects`
+    // maps both frames to index 7 (the flash) so an expiry spawns the flash.
+    #[allow(clippy::too_many_arguments)]
+    fn run_bonus_process(
+        bonus: &mut Bonus,
+        used: bool,
+        level: &mut LevelSim,
+        rand: &mut Rand,
+        gravity: i32,
+        mul: i32,
+        div: i32,
+    ) -> (BonusOutcome, Pool<SObject>) {
+        let cossin = precompute_cossin();
+        let nts: Vec<NObjectType> = Vec::new();
+        let sts = sobject_types();
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let weps = weapons(5);
+        let outcome = bonus_process(
+            bonus,
+            used,
+            level,
+            &mut worms,
+            &mut wobjects,
+            &mut nobjects,
+            &mut sobjects,
+            &weps,
+            &nts,
+            &sts,
+            &cossin,
+            &SpriteSet::default(),
+            &[],
+            100,
+            gravity,
+            mul,
+            div,
+            &[7, 7],
+            rand,
+        );
+        (outcome, sobjects)
+    }
+
+    // ---- (a) over air: falls (vel_y += gravity, y += vel_y), no bounce, no rand --
+
+    #[test]
+    fn over_air_falls_with_gravity_and_draws_no_rand() {
+        let mut level = clear_level(100, 100); // all background
+        let mut rand = seeded();
+        // y=Itof(50), vel_y=5000 (sub-pixel). Over air -> gravity adds; far from any
+        // floor/bound -> no bounce; timer high -> no expiry, so NO rand is drawn.
+        let mut bonus = Bonus {
+            x: itof(50),
+            y: itof(50),
+            vel_y: 5000,
+            frame: 0,
+            timer: 1000,
+            weapon: 0,
+        };
+        let (outcome, sobjects) = run_bonus_process(&mut bonus, true, &mut level, &mut rand, 1000, 2, 3);
+
+        assert_eq!(outcome, BonusOutcome::Keep, "no expiry -> Keep");
+        assert_eq!(bonus.y, itof(50) + 5000, "y += vel_y (initial 5000)");
+        assert_eq!(bonus.vel_y, 6000, "vel_y += BonusGravity (5000 + 1000)");
+        assert_eq!(bonus.timer, 999, "--timer");
+        assert_eq!(rand.last(), 0, "the fall path draws NO rand");
+        assert_eq!(sobjects.len(), 0, "no expiry sobject (timer not expired)");
+    }
+
+    // ---- (b) bounce off floor: vel_y = -(vel_y*Mul)/Div, zeroed if |.|<100 -------
+
+    #[test]
+    fn bounce_off_bottom_bound_reflects_velocity() {
+        let mut level = clear_level(100, 100);
+        let mut rand = seeded();
+        // y=Itof(97), vel_y=Itof(1): y -> Itof(98) (kIy=98), over air -> gravity makes
+        // vel_y = 65536+1000 = 66536; kInewY = Ftoi(Itof(98)+66536) = 99 = height-1 ->
+        // bounce. vel_y = -(66536*2)/3 = -44357 (|.|>=100 -> kept).
+        let mut bonus = Bonus {
+            x: itof(50),
+            y: itof(97),
+            vel_y: itof(1),
+            frame: 0,
+            timer: 1000,
+            weapon: 0,
+        };
+        let (outcome, sobjects) = run_bonus_process(&mut bonus, true, &mut level, &mut rand, 1000, 2, 3);
+
+        assert_eq!(outcome, BonusOutcome::Keep);
+        assert_eq!(bonus.y, itof(98), "y += vel_y");
+        assert_eq!(bonus.vel_y, -44357, "vel_y = -(post-gravity vel_y * Mul) / Div (truncating)");
+        assert_eq!(rand.last(), 0, "the bounce path draws NO rand");
+        assert_eq!(sobjects.len(), 0);
+    }
+
+    #[test]
+    fn bounce_with_small_velocity_is_zeroed() {
+        let mut level = clear_level(100, 100);
+        let mut rand = seeded();
+        // At the bottom row: kIy=99 so kIy+1 is OOB -> no gravity (vel_y stays 99);
+        // kInewY = 99 = height-1 -> bounce. -(99*2)/3 = -66 -> |66| < 100 -> zeroed.
+        let mut bonus = Bonus {
+            x: itof(50),
+            y: itof(99),
+            vel_y: 99,
+            frame: 0,
+            timer: 1000,
+            weapon: 0,
+        };
+        let (outcome, sobjects) = run_bonus_process(&mut bonus, true, &mut level, &mut rand, 1000, 2, 3);
+
+        assert_eq!(outcome, BonusOutcome::Keep);
+        assert_eq!(bonus.vel_y, 0, "|reflected| < 100 -> vel_y zeroed");
+        assert_eq!(rand.last(), 0);
+        assert_eq!(sobjects.len(), 0);
+    }
+
+    // ---- (c) expire: spawn sobject_types[bonus_s_objects[frame]] + free iff used --
+
+    #[test]
+    fn expire_spawns_sobject_and_frees_iff_used() {
+        let mut level = clear_level(100, 100);
+
+        // used = true -> Free; the flash sobject (index 7) spawns at (kIx-8, kIy-8)
+        // and draws exactly one rand(3) (its sound).
+        let mut rand = seeded();
+        let mut bonus = Bonus {
+            x: itof(50),
+            y: itof(50),
+            vel_y: 0,
+            frame: 0,
+            timer: 1,
+            weapon: 0,
+        };
+        let (outcome, sobjects) = run_bonus_process(&mut bonus, true, &mut level, &mut rand, 1000, 2, 3);
+
+        assert_eq!(outcome, BonusOutcome::Free, "--timer<=0 && used -> Free");
+        assert_eq!(bonus.timer, 0, "--timer");
+        assert_eq!(sobjects.len(), 1, "expiry spawned sobject_types[bonus_s_objects[0] == 7]");
+        let s = *sobjects.get(0).expect("flash sobject in slot 0");
+        assert_eq!(s.id, 7, "the flash sobject (id 7)");
+        assert_eq!(s.x, 50 - 8, "sobject x = kIx - 8");
+        assert_eq!(s.y, 50 - 8, "sobject y = kIy - 8");
+        let mut refr = seeded();
+        refr.bound(3); // the flash's single sound rand
+        assert_eq!(rand.last(), refr.last(), "expiry drew exactly the flash sound rand(3)");
+
+        // used = false -> Keep (slot NOT freed), but the sobject STILL spawns and the
+        // SAME single rand is drawn: the `used` gate is on the FREE, not the spawn.
+        let mut rand2 = seeded();
+        let mut bonus2 = Bonus {
+            x: itof(50),
+            y: itof(50),
+            vel_y: 0,
+            frame: 0,
+            timer: 1,
+            weapon: 0,
+        };
+        let (outcome2, sobjects2) =
+            run_bonus_process(&mut bonus2, false, &mut level, &mut rand2, 1000, 2, 3);
+
+        assert_eq!(outcome2, BonusOutcome::Keep, "--timer<=0 but !used -> Keep (slot kept)");
+        assert_eq!(sobjects2.len(), 1, "the expiry sobject spawns regardless of `used`");
+        assert_eq!(rand2.last(), refr.last(), "same single flash rand whether or not used");
+    }
+
+    // ---- (d) free-during-iteration over the bonuses pool --------------------
+
+    #[test]
+    fn process_bonuses_frees_middle_slot_and_keeps_iterating() {
+        // Slots 0,1,2. The MIDDLE (slot 1) expires this tick (timer=1) and is freed;
+        // the outer two (timer high) survive AND must still be visited (timers
+        // decrement) -> proves the slot-walk keeps iterating past a freed middle slot.
+        let mut level = clear_level(100, 100);
+        let mut rand = seeded();
+        let mut bonuses: Pool<Bonus> = Pool::new(99);
+        bonuses.spawn(Bonus {
+            x: itof(50),
+            y: itof(50),
+            vel_y: 0,
+            frame: 0,
+            timer: 1000,
+            weapon: 0,
+        });
+        bonuses.spawn(Bonus {
+            x: itof(50),
+            y: itof(50),
+            vel_y: 0,
+            frame: 0,
+            timer: 1, // expires
+            weapon: 0,
+        });
+        bonuses.spawn(Bonus {
+            x: itof(50),
+            y: itof(50),
+            vel_y: 0,
+            frame: 0,
+            timer: 1000,
+            weapon: 0,
+        });
+
+        let cossin = precompute_cossin();
+        let nts: Vec<NObjectType> = Vec::new();
+        let sts = sobject_types();
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let weps = weapons(5);
+        process_bonuses(
+            &mut bonuses,
+            &mut level,
+            &mut worms,
+            &mut wobjects,
+            &mut nobjects,
+            &mut sobjects,
+            &weps,
+            &nts,
+            &sts,
+            &cossin,
+            &SpriteSet::default(),
+            &[],
+            100,
+            1000,
+            2,
+            3,
+            &[7, 7],
+            &mut rand,
+        );
+
+        assert_eq!(bonuses.len(), 2, "the middle (expired) bonus was freed");
+        assert!(bonuses.get(1).is_none(), "slot 1 freed");
+        let b0 = *bonuses.get(0).expect("slot 0 survives");
+        let b2 = *bonuses.get(2).expect("slot 2 survives");
+        assert_eq!(b0.timer, 999, "slot 0 was processed (--timer)");
+        assert_eq!(b2.timer, 999, "slot 2 still iterated AFTER the freed middle slot (--timer)");
+        assert_eq!(sobjects.len(), 1, "only the expired middle bonus spawned its expiry sobject");
     }
 }

@@ -801,6 +801,29 @@ pub struct SimState {
     /// Defaulted empty; the difftest assigns the real per-weapon table. Read only
     /// for a `frame == 0` bonus (when `max_bonuses > 0`).
     pub weap_table: Vec<i32>,
+
+    // --- Slice 5c T3: `Bonus::Process` constants (bonus.cpp:6-35) -------------
+    // The fall/bounce/expire inputs the per-tick bonuses Process loop reads. Like
+    // the T2 bonus constants they are **defaulted (0)** here and assigned the real
+    // TC values by the difftest AFTER `new` (NO `SimState::new` signature change);
+    // left at the defaults the bonuses pool is empty (slices 1-5b never spawn a
+    // bonus), so the bonuses loop is a no-op and those goldens stay byte-identical.
+    // **None are hashed.**
+    /// C++ `LC(BonusGravity)` (`common.c[CBonusGravity]`, `bonus.cpp:17`): the
+    /// per-tick `vel_y` add a bonus gets while standing over air.
+    pub bonus_gravity: i32,
+    /// C++ `LC(BonusBounceMul)` (`bonus.cpp:22`): the numerator of the bounce
+    /// reflection `vel_y = -(vel_y * BounceMul) / BounceDiv`.
+    pub bonus_bounce_mul: i32,
+    /// C++ `LC(BonusBounceDiv)` (`bonus.cpp:22`): the (truncating) divisor of the
+    /// bounce reflection.
+    pub bonus_bounce_div: i32,
+    /// C++ `common.bonus_s_objects[NUM_BONUS_SOBJECTS]` (`common.hpp:170`): the
+    /// per-`frame` expiry-sobject index. On `--timer<=0` the bonus spawns
+    /// `sobject_types[bonus_s_objects[frame]]` (`bonus.cpp:30`). `NUM_BONUS_SOBJECTS
+    /// == 2` (frames 0=weapon, 1=health). Defaulted to zeros; the difftest assigns
+    /// the TC's `constants.bonuses[i].sound`-equivalent expiry-object index.
+    pub bonus_s_objects: [i32; 2],
 }
 
 impl SimState {
@@ -906,6 +929,14 @@ impl SimState {
             h_bonus_disable: false,
             bonus_rand_timer: [[0, 0], [0, 0]],
             weap_table: Vec::new(),
+            // Bonus::Process constants: defaulted (0). Left at 0 the bonuses pool is
+            // empty (the drop roll never fires for slices 1-5b), so the bonuses loop
+            // is a no-op and the priors stay byte-identical; the difftest assigns the
+            // real TC values after `new` (post-`new` pattern, like the blood consts).
+            bonus_gravity: 0,
+            bonus_bounce_mul: 0,
+            bonus_bounce_div: 0,
+            bonus_s_objects: [0, 0],
         }
     }
 
@@ -1003,6 +1034,10 @@ impl SimState {
             h_bonus_disable,
             bonus_rand_timer,
             weap_table,
+            bonus_gravity,
+            bonus_bounce_mul,
+            bonus_bounce_div,
+            bonus_s_objects,
             bonuses,
             cycles,
             ..
@@ -1024,12 +1059,47 @@ impl SimState {
         let h_bonus_only_health = *h_bonus_only_health;
         let h_bonus_only_weapon = *h_bonus_only_weapon;
         let h_bonus_disable = *h_bonus_disable;
+        let bonus_gravity = *bonus_gravity;
+        let bonus_bounce_mul = *bonus_bounce_mul;
+        let bonus_bounce_div = *bonus_bounce_div;
         // The object loops read `cycles` as a value for the `cycles % delay` /
         // `cycles & 7` gates inside `nobject_process`. They must see the value left by
         // the PREVIOUS tick's increment (cycles=k-1 on tick k) — exactly as the C++
         // object loops run BEFORE `++cycles` (game.cpp:357). So snapshot the value
         // here, run the loops with it, then `++cycles` after the loops (see below).
         let cycles_now = *cycles;
+
+        // ----- Bonuses Process loop (game.cpp:287-290), at the TOP of the tick,
+        // BEFORE the object loops AND before `++cycles`. `bonuses` is an
+        // ExactObjectList (slot order; All() skips free slots); `Bonus::Process`
+        // (the fall/bounce/expire port) may Free(this) on the expire path. The
+        // slot-walk in [`crate::bonus::process_bonuses`] copies each live bonus out
+        // by value, runs it, then writes back (Keep) or frees the slot (Free, the
+        // used-gated expire) — mirroring the existing object slot-walks. The expiry
+        // sobject_create draws RNG; the fall/bounce path draws none. For slices 1-5b
+        // the pool is EMPTY (no bonus ever spawns), so this loop is a NO-OP ⇒ those
+        // goldens stay byte-identical. The constants default to 0 (unhashed) and are
+        // inert until a 5c scenario makes the pool live.
+        crate::bonus::process_bonuses(
+            bonuses,
+            level,
+            worms,
+            wobjects,
+            nobjects,
+            sobjects,
+            weapons,
+            nobject_types,
+            sobject_types,
+            cossin,
+            large_sprites,
+            textures,
+            blood,
+            bonus_gravity,
+            bonus_bounce_mul,
+            bonus_bounce_div,
+            bonus_s_objects,
+            rand,
+        );
 
         // ----- Object Process loops (game.cpp:334-355), BEFORE the worm loop. --
         // sobjects: the ported SObject::Process (animation + free), FIRST. Walk

@@ -32,8 +32,10 @@
 //   worm <idx> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
 //   input <tick> <worm0_7bit> <worm1_7bit>   (sparse; absent => 0; applied on the
 //                                              Process pass advancing <tick>-><tick>+1)
-//   weapon <slot> <name>   (override BOTH worms' weapon slot <slot> with the named
-//                           weapon from `common->weapons`, full ammo, ready to fire)
+//   weapon <slot> <name> [ammo]   (override BOTH worms' weapon slot <slot> with the
+//                                  named weapon from `common->weapons`, full ammo,
+//                                  ready to fire; optional 3rd token is an opt-in
+//                                  low-ammo override to reach the reload branch quickly)
 //
 // Diagnostic: set env OL_PHYS_TRACE=1 to also print per-tick pos/vel for both worms
 // to stderr (does not affect the golden output). Built via the
@@ -84,6 +86,8 @@ struct Scenario {
   std::map<int, std::array<uint32_t, 2>> inputs;
   // slot -> weapon name override (applied to BOTH worms after ResetWorms).
   std::map<int, std::string> weapon_overrides;
+  // slot -> opt-in ammo override (only set when the `weapon` directive has a 3rd token).
+  std::map<int, int> weapon_ammo_overrides;
 };
 
 std::vector<uint8_t> SlurpFile(std::string const& path) {
@@ -137,6 +141,11 @@ Scenario ParseScenario(char const* path) {
         std::exit(1);
       }
       s.weapon_overrides[slot] = name;
+      // Optional 3rd token: opt-in low-ammo override to reach the reload branch quickly.
+      int ammo = 0;
+      if (ls >> ammo) {
+        s.weapon_ammo_overrides[slot] = ammo;
+      }
     } else {
       std::fprintf(stderr, "unknown scenario key: %s\n", key.c_str());
       std::exit(1);
@@ -239,6 +248,11 @@ int main(int argc, char** argv) {
       WormWeapon& ww = w->weapons[slot];
       ww.type = &common->weapons[ResolveWeapon(*common, name)];
       ww.ammo = ww.type->ammo;
+      // Opt-in low-ammo override (only when the `weapon` directive had a 3rd token).
+      auto ammo_it = scn.weapon_ammo_overrides.find(slot);
+      if (ammo_it != scn.weapon_ammo_overrides.end()) {
+        ww.ammo = ammo_it->second;
+      }
       ww.delay_left = 0;
       ww.loading_left = 0;
     }

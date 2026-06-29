@@ -236,6 +236,8 @@ mod tests {
             textures: Vec::new(),
             sobject_types: Vec::new(),
             nobject_types: Vec::new(),
+            settings_loading_time: 100,
+            load_change: true,
         }
     }
 

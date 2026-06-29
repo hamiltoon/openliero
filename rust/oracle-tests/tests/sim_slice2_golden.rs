@@ -155,6 +155,8 @@ fn sim_slice2_physics_matches_cpp_oracle() {
         tc.textures.clone(),
         Vec::new(),
         Vec::new(),
+        100,
+        true,
     );
 
     // Assert tick-0 components against the freshly-built state FIRST. Then drive

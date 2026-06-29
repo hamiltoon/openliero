@@ -92,6 +92,8 @@ fn fire_state() -> SimState {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        100,
+        true,
     );
     // Aim up-right at cossin index 12 (inside the default left-facing band
     // [aim_max_left=12 .. aim_min_left=64]); process_aiming leaves it untouched

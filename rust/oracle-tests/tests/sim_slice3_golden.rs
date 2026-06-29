@@ -158,6 +158,8 @@ fn sim_slice3_control_matches_cpp_oracle() {
         tc.textures.clone(),
         Vec::new(),
         Vec::new(),
+        100,
+        true,
     );
 
     let check = |tick: u32, name: &str, got: u32, want: u32| {

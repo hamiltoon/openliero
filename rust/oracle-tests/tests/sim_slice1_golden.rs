@@ -152,6 +152,8 @@ fn sim_slice1_tick0_hash_matches_cpp_oracle() {
         tc.textures.clone(),
         Vec::new(),
         Vec::new(),
+        100,
+        true,
     );
     let got_state = hash_game_state(&state);
     let c = hash_components(&state);

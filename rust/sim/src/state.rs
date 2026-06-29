@@ -621,6 +621,14 @@ pub struct SimState {
     /// `Vec` and stay byte-identical. Carried now so Slice-4c's behaviour tasks
     /// have the table in place.
     pub nobject_types: Vec<NObjectType>,
+    /// C++ `Settings::loading_time` (`settings.hpp:75`): the reload countdown
+    /// written into `loading_left` when a weapon is selected (Slice-4d Task 1,
+    /// weapon-change gate). Default 100. **Not** hashed (settings scalar).
+    pub settings_loading_time: i32,
+    /// C++ `Settings::load_change` (`settings.hpp:79`): whether selecting a
+    /// weapon triggers a reload cycle (Slice-4d Task 1 gate). Default `true`.
+    /// **Not** hashed (settings scalar).
+    pub load_change: bool,
 }
 
 impl SimState {
@@ -660,6 +668,8 @@ impl SimState {
         textures: Vec<Texture>,
         sobject_types: Vec<SObjectType>,
         nobject_types: Vec<NObjectType>,
+        settings_loading_time: i32,
+        load_change: bool,
     ) -> SimState {
         let mut rand = Rand::new();
         rand.seed(seed);
@@ -690,6 +700,8 @@ impl SimState {
             textures,
             sobject_types,
             nobject_types,
+            settings_loading_time,
+            load_change,
         }
     }
 
@@ -1054,6 +1066,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            100,
+            true,
         );
         assert_eq!(state.cycles, 0, "cycles must be 0 at tick 0");
         assert_eq!(state.rand.last(), 0, "no RNG consumed -> last() == 0");
@@ -1081,6 +1095,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            100,
+            true,
         );
         assert!(state.bonuses.is_empty());
         assert!(state.wobjects.is_empty());
@@ -1112,6 +1128,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            100,
+            true,
         );
         for w in &state.worms {
             assert_eq!(w.pos, Vec2::zero());
@@ -1149,6 +1167,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            100,
+            true,
         );
         let w0 = &state.worms[0];
         // Each slot has its type set, ammo from the init, and zero timers.
@@ -1412,6 +1432,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            100,
+            true,
         );
         assert_eq!(
             state.level.material_flags, flags,
@@ -1452,6 +1474,8 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                100,
+                true,
             );
             s.wobjects.spawn(WObject {
                 pos: Vec2::new(1, 2),
@@ -1650,6 +1674,8 @@ mod tests {
             textures,
             Vec::new(),
             Vec::new(),
+            100,
+            true,
         );
         let t = &state.textures[6];
         assert_eq!(t.mframe, 38, "greenball mframe");
@@ -1693,6 +1719,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            100,
+            true,
         );
         assert_eq!(
             state.cossin,
@@ -1805,6 +1833,8 @@ mod tests {
             Vec::new(),
             sobject_types.clone(),
             nobject_types.clone(),
+            100,
+            true,
         );
         assert_eq!(
             state.sobject_types, sobject_types,
@@ -1819,5 +1849,32 @@ mod tests {
         assert_eq!(state.sobject_types[2].damage, 5);
         assert_eq!(state.nobject_types[2].id_str, "particle__disappearing");
         assert!(state.nobject_types[2].expl_ground);
+    }
+
+    #[test]
+    fn settings_loading_time_and_load_change_defaults() {
+        // C++ defaults: loading_time = 100 (settings.hpp:75), load_change = true
+        // (settings.hpp:79). These are settings scalars; they are NOT hashed.
+        let state = SimState::new(
+            &synthetic_level(),
+            &two_worms(),
+            0,
+            &[0u8; 256],
+            Vec::new(),
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            SpriteSet::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            100,
+            true,
+        );
+        assert_eq!(
+            state.settings_loading_time, 100,
+            "C++ default loading_time = 100 (settings.hpp:75)"
+        );
+        assert!(state.load_change, "C++ default load_change = true (settings.hpp:79)");
     }
 }

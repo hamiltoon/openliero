@@ -204,6 +204,8 @@ fn fire_state() -> (SimState, Weapon, Vec2) {
         tc.textures.clone(),
         objects.sobject_types.clone(),
         objects.nobject_types.clone(),
+        100,
+        true,
     );
 
     // Aim flat-right at cossin index 32; in the default left-facing band so

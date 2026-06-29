@@ -68,6 +68,8 @@ fn build(level: &LevelData, flags: &[u8; 256], pos: Vec2) -> SimState {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        100,
+        true,
     )
 }
 

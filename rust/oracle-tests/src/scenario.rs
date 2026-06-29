@@ -14,7 +14,8 @@
 //! ticks  <u32>
 //! worm   <index> <pos_x> <pos_y> <health> <lives> <stats_x> <visible>
 //! input  <tick> <worm0_7bit> <worm1_7bit>        # sparse; absent => 0
-//! weapon <slot> <name>                           # override worm weapon slot (0..NUM_WEAPONS)
+//! weapon <slot> <name> [ammo]                    # override worm weapon slot (0..NUM_WEAPONS);
+//!                                                 # optional 3rd token overrides starting ammo
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
@@ -51,6 +52,9 @@ pub struct Scenario {
     inputs: HashMap<u32, (u32, u32)>,
     /// Per-slot weapon overrides: `slot -> weapon_name`.
     weapons: HashMap<usize, String>,
+    /// Per-slot starting-ammo overrides: `slot -> ammo` (the optional 3rd token of
+    /// a `weapon` directive). Absent => use the weapon type's default ammo.
+    weapon_ammo: HashMap<usize, i32>,
 }
 
 impl Scenario {
@@ -63,6 +67,7 @@ impl Scenario {
         let mut worms = Vec::new();
         let mut inputs = HashMap::new();
         let mut weapons: HashMap<usize, String> = HashMap::new();
+        let mut weapon_ammo: HashMap<usize, i32> = HashMap::new();
 
         for (lineno, raw) in text.lines().enumerate() {
             let n = lineno + 1;
@@ -122,7 +127,15 @@ impl Scenario {
                     }
                 }
                 "weapon" => {
-                    expect_args(n, key, &nums, 2)?;
+                    // 2 args (slot, name) OR 3 args (slot, name, ammo). The optional
+                    // 3rd token overrides the weapon type's default starting ammo —
+                    // mirrors the C++ dumper's slice-4d `weapon <slot> <name> [ammo]`.
+                    if nums.len() != 2 && nums.len() != 3 {
+                        return Err(format!(
+                            "line {n}: `weapon` expects 2 or 3 args, got {}",
+                            nums.len()
+                        ));
+                    }
                     let slot = parse_at(0)? as usize;
                     if slot >= NUM_WEAPONS {
                         return Err(format!(
@@ -132,6 +145,9 @@ impl Scenario {
                     let name = nums[1].to_string();
                     if weapons.insert(slot, name).is_some() {
                         return Err(format!("line {n}: duplicate weapon for slot {slot}"));
+                    }
+                    if nums.len() == 3 {
+                        weapon_ammo.insert(slot, parse_at(2)? as i32);
                     }
                 }
                 other => return Err(format!("line {n}: unknown directive {other:?}")),
@@ -145,6 +161,7 @@ impl Scenario {
             worms,
             inputs,
             weapons,
+            weapon_ammo,
         })
     }
 
@@ -162,6 +179,12 @@ impl Scenario {
     /// The weapon name overriding `slot`, or `None` if no `weapon` directive set it.
     pub fn weapon(&self, slot: usize) -> Option<&str> {
         self.weapons.get(&slot).map(String::as_str)
+    }
+
+    /// The starting-ammo override for `slot` (the optional 3rd `weapon` token), or
+    /// `None` if absent — in which case the caller uses the weapon type's default ammo.
+    pub fn weapon_ammo(&self, slot: usize) -> Option<i32> {
+        self.weapon_ammo.get(&slot).copied()
     }
 }
 
@@ -272,6 +295,29 @@ input 5 16 0
             .expect("parses");
         assert_eq!(s.weapon(0), Some("fan"));
         assert_eq!(s.weapon(1), None);
+        // No 3rd token => no ammo override (caller uses the weapon's default ammo).
+        assert_eq!(s.weapon_ammo(0), None);
+    }
+
+    #[test]
+    fn weapon_directive_with_ammo_token_parses() {
+        // The optional 3rd token overrides starting ammo (slice-4d `weapon 0 HANDGUN 2`).
+        let s = Scenario::parse("seed 1\nlevel a.lev\nticks 1\nweapon 0 HANDGUN 2\n")
+            .expect("parses");
+        assert_eq!(s.weapon(0), Some("HANDGUN"));
+        assert_eq!(s.weapon_ammo(0), Some(2));
+        assert_eq!(s.weapon_ammo(1), None);
+    }
+
+    #[test]
+    fn weapon_wrong_arity_errors() {
+        // 1 arg (slot only) and 4 args are both rejected; the 3-arg form is valid.
+        let err =
+            Scenario::parse("seed 1\nlevel a.lev\nticks 1\nweapon 0\n").unwrap_err();
+        assert!(err.contains("expects 2 or 3 args"), "got: {err}");
+        let err4 =
+            Scenario::parse("seed 1\nlevel a.lev\nticks 1\nweapon 0 fan 2 3\n").unwrap_err();
+        assert!(err4.contains("expects 2 or 3 args"), "got: {err4}");
     }
 
     #[test]

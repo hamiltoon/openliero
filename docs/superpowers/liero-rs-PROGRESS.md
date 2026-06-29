@@ -8,7 +8,7 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-06-29 · **Current focus:** Step 2, Slice 4d (Slice-3 deferrals), T7/9 done (golden generated); T8 milestone difftest next
+> **Last updated:** 2026-06-29 · **Current focus:** Step 2, Slice 4d (Slice-3 deferrals) — **T8 MILESTONE difftest GREEN** (`sim_slice4d_golden` matches the C++ golden tick-for-tick, all 126 ticks); Slice 4 done
 
 ---
 
@@ -41,11 +41,11 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 ├─ ✅ Slice 1  Level → sim-state + state-hash harness (tick 0)
 ├─ ✅ Slice 2  one worm, physics only
 ├─ ✅ Slice 3  worm control + aiming (master hash turns on)
-├─ 🔄 Slice 4  one weapon, full lifecycle (4a–4d)              ~75%   ◀── HERE
+├─ ✅ Slice 4  one weapon, full lifecycle (4a–4d)              SHIPPED
 │   ├─ ✅ 4a  projectile lifecycle — fan (RNG goes live)         SHIPPED
 │   ├─ ✅ 4b  terrain destruction — greenball / DrawDirtEffect   SHIPPED (level hash live, 91 ticks bit-exact)
 │   ├─ ✅ 4c  explosion sobjects + nobjects — dart               SHIPPED (sobjects/nobjects live + carving, 91 ticks bit-exact)
-│   └─ 🔄 4d  slice-3/4 deferrals (dig body, reload, shell, …)   ◀── HERE (T7/9 done — golden generated; T8 milestone)
+│   └─ ✅ 4d  slice-3/4 deferrals (dig, reload, shell-drop+land, load_change)  SHIPPED (handgun, master+9 components bit-exact 126 ticks vs C++)
 ├─ ⬜ Slice 5  remaining object families (nobjects/sobjects/blood/bonuses)
 └─ ⬜ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match
 ```
@@ -54,8 +54,9 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 |---|---|
 | Rewrite track (steps 0–5) | **~38–45%** |
 | Step 2 (current) | **~60–63%** |
-| Slice 4 (weapon lifecycle) | **~75%** (4a + 4b + 4c shipped; 4d remains) |
+| Slice 4 (weapon lifecycle) | **✅ SHIPPED** (4a + 4b + 4c + 4d all bit-exact vs C++) |
 | Slice 4c | **✅ SHIPPED** (sobjects/nobjects pools live + carving DrawDirtEffect, master+9 components bit-exact 91 ticks vs C++, on PR #3) |
+| Slice 4d | **✅ SHIPPED** (dig + shell-drop/landing-blit + reload + load_change; HANDGUN, master+9 components bit-exact 126 ticks vs C++; `BlitImageOnMap` + small-sprite bank added) |
 
 ---
 

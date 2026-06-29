@@ -58,7 +58,7 @@ use sim_core::fixed::{ftoi, itof};
 use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
-use crate::blit::draw_dirt_effect;
+use crate::blit::{blit_image_on_map, draw_dirt_effect};
 use crate::pool::Pool;
 use crate::state::{LevelSim, NObject};
 
@@ -276,6 +276,7 @@ pub fn nobject_process(
     level: &mut LevelSim,
     cossin: &[Vec2; 128],
     large_sprites: &SpriteSet,
+    small_sprites: &SpriteSet,
     textures: &[Texture],
     nobjects: &mut Pool<NObject>,
     cycles: i32,
@@ -355,12 +356,20 @@ pub fn nobject_process(
         obj.vel = Vec2::zero();
 
         if ty.expl_ground {
-            // :119-128 BlitImageOnMap-on-ground arm — deferred (needs sprite
-            // blit). Inert for the dirt particle (draw_on_map=false).
-            debug_assert!(
-                !(ty.start_frame > 0 && ty.draw_on_map),
-                "BlitImageOnMap-on-ground-explode deferred (needs small-sprite blit)"
-            );
+            // :119-128 BlitImageOnMap-on-ground arm (Slice-4d): a `draw_on_map`
+            // object with `start_frame > 0` (the spent SHELL) paints its 7x7 image
+            // into `material_id` at `(ipos - 3)` before exploding. `CorrectShadow`
+            // (:123-127, behind settings->shadow) is OMITTED (shadow off, render-
+            // only). Inert for the dirt particle (draw_on_map=false).
+            if ty.start_frame > 0 && ty.draw_on_map {
+                blit_image_on_map(
+                    level,
+                    small_sprites,
+                    (ty.start_frame + obj.cur_frame) as usize,
+                    ipos_x - 3,
+                    ipos_y - 3,
+                );
+            }
             // :130
             do_explode = true;
         }
@@ -851,6 +860,7 @@ mod tests {
             level,
             cossin,
             &sprites,
+            &sprites,
             &[],
             nobjects,
             cycles,
@@ -1219,6 +1229,7 @@ mod tests {
             nobject_types,
             level,
             cossin,
+            &sprites,
             &sprites,
             &[],
             nobjects,

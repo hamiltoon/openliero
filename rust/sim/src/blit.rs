@@ -33,7 +33,7 @@ use assets::sprite::SpriteSet;
 use assets::tc::Texture;
 use sim_core::rng::Rand;
 
-use crate::state::LevelSim;
+use crate::state::{LevelSim, MAT_BACKGROUND, MAT_DIRT, MAT_DIRT2};
 
 /// Port of `DrawDirtEffect` (`gfx/blit.cpp:534-622`). Stamps the 16x16 dirt
 /// effect `dirt_effect` (an index into `textures`) at level coords `(x, y)`,
@@ -150,10 +150,80 @@ pub fn draw_dirt_effect(
     }
 }
 
+/// Port of `BlitImageOnMap` (`gfx/blit.cpp:409-431`) for the hashed `material_id`
+/// write only. Stamps the 7x7 `small_sprites` frame `sprite_index` into the level
+/// at top-left `(x, y)`, mirroring `NObject::Process`'s ground-explode arm
+/// (`nobject.cpp:119-128`): a spent SHELL paints its image onto the terrain when it
+/// lands.
+///
+/// Per non-zero sprite pixel `c`, the destination color becomes `n = c` if the
+/// CURRENT pixel's material is `DirtBack()` (`material.hpp:24`,
+/// `flags & (kDirt | kDirt2 | kBackground)`), else `n = c + 3` (wrapping the
+/// `PalIdx`). `material_id` is the hashed color buffer, so we write `n` straight
+/// into it. The C++ also updates the derived `materials` flag cache, `display_valid`
+/// and a dirty-rect — all render/derived state the hash never reads, so they are
+/// omitted. The 7x7 window visits each cell at most once, so the live DirtBack read
+/// never sees a just-written cell (same invariant as [`draw_dirt_effect`]).
+///
+/// Clip is `Rect(0, 0, width, height)` — the FULL height (unlike `draw_dirt_effect`'s
+/// `height - 1`), matching `blit.cpp:412`. No RNG.
+pub fn blit_image_on_map(level: &mut LevelSim, small_sprites: &SpriteSet, sprite_index: usize, x: i32, y: i32) {
+    const DIRT_BACK: u8 = MAT_DIRT | MAT_DIRT2 | MAT_BACKGROUND;
+    let sprite = small_sprites.sprite(sprite_index);
+
+    // CLIP_IMAGE(Rect(0, 0, width, height)) — gfx/macros.hpp + blit.cpp:412.
+    let pitch: i32 = 7;
+    let mut w: i32 = 7;
+    let mut h: i32 = 7;
+    let mut mem: i32 = 0;
+    let mut x = x;
+    let mut y = y;
+    let (cx1, cy1, cx2, cy2) = (0i32, 0i32, level.width, level.height);
+
+    let top = y - cy1;
+    if top < 0 {
+        mem += -top * pitch;
+        h += top;
+        y = cy1;
+    }
+    let bottom = y + h - cy2;
+    if bottom > 0 {
+        h -= bottom;
+    }
+    let left = x - cx1;
+    if left < 0 {
+        mem -= left;
+        w += left;
+        x = cx1;
+    }
+    let right = x + w - cx2;
+    if right > 0 {
+        w -= right;
+    }
+    if w <= 0 || h <= 0 {
+        return;
+    }
+
+    let level_width = level.width;
+    for y_ in 0..h {
+        for x_ in 0..w {
+            let c = sprite[(mem + y_ * pitch + x_) as usize];
+            if c != 0 {
+                let mx = x + x_;
+                let my = y + y_;
+                let idx = (my * level_width + mx) as usize;
+                let dirt_back = (level.material_flags[level.material_id[idx] as usize] & DIRT_BACK) != 0;
+                let n = if dirt_back { c } else { c.wrapping_add(3) };
+                level.set_material(idx, n);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{MAT_BACKGROUND, MAT_DIRT, MAT_DIRT2, MAT_ROCK};
+    use crate::state::MAT_ROCK;
 
     const SIZE: usize = 256; // 16 x 16
 

@@ -601,6 +601,17 @@ pub struct SimState {
     /// hash reads the material map). Slices 1-4a never index it (no dig runs), so
     /// they pass an empty bank and stay byte-identical.
     pub large_sprites: SpriteSet,
+    /// The 7x7 small-sprite bank (C++ `common.small_sprites`,
+    /// `small_sprites.Allocate(7, 7, 130)`). `NObject::Process`'s ground-explode
+    /// arm reads `small_sprites.SpritePtr(start_frame + cur_frame)` to
+    /// `BlitImageOnMap` an object's image into the level (the spent SHELL paints a
+    /// 7x7 stamp onto `material_id` when it lands; Slice-4d). **Not** hashed (the
+    /// level hash reads the painted `material_id`). Defaults to an empty bank;
+    /// slices that never land a `draw_on_map` nobject never index it, so they stay
+    /// byte-identical. The differential harness sets this field after `new`
+    /// (loaded from `sprites/small.tga`) — kept out of the `new` arg list so the
+    /// existing slice call sites are unchanged.
+    pub small_sprites: SpriteSet,
     /// The TC texture table (C++ `common.textures`, `TcConfig.textures`).
     /// `DrawDirtEffect` looks up `textures[dirt_effect]` for its `mframe`/`sframe`
     /// frames + `ndrawback`. **Not** hashed; slices 1-4a never index it (the fan's
@@ -697,6 +708,10 @@ impl SimState {
             cossin: precompute_cossin(),
             h_signed_recoil,
             large_sprites,
+            // Defaulted (empty); the differential harness assigns the real 7x7 bank
+            // after `new`. Kept out of the arg list so existing call sites are
+            // unchanged (only Slice-4d's shell-landing blit indexes it).
+            small_sprites: SpriteSet::default(),
             textures,
             sobject_types,
             nobject_types,
@@ -773,6 +788,7 @@ impl SimState {
             cossin,
             h_signed_recoil,
             large_sprites,
+            small_sprites,
             textures,
             sobject_types,
             nobject_types,
@@ -878,6 +894,7 @@ impl SimState {
                 level,
                 cossin,
                 large_sprites,
+                small_sprites,
                 textures,
                 nobjects,
                 cycles,

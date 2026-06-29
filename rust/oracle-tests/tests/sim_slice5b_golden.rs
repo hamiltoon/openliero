@@ -59,45 +59,48 @@
 //! The scenario is the single source of truth (parsed via `oracle_tests::scenario`)
 //! and the expected values are PARSED from the golden file, never hard-coded.
 //!
-//! ## BLOCKED (milestone fails) — the dart's IN-FLIGHT worm-hit blood arm is unported
+//! ## BLOCKED (deeper than T5b) — the in-flight arm is ported, but the 5a worm-hit
+//! ##                              BOX over-approximation OVER-FIRES during descent
 //!
-//! This milestone is `#[ignore]`d because it exposes a genuine T2-scope SIM GAP, not
-//! a test defect. The state matches the C++ oracle BIT-EXACT through tick 50 (`rng`
-//! flat at 0 — DART Fire draws nothing), then DIVERGES at **tick 51, the `rng`
-//! column** (the first asserted component). Root cause, established by tracing the
-//! draw stream on BOTH sides (the seed-42 MT stream is purely positional, so a wrong
-//! `rand.last()` ⟺ a wrong cumulative draw count):
+//! Slice 5b T5b **ported the wobject in-flight worm-hit arm** (`weapon.cpp:287-326`)
+//! in `sim::weapon::wobject_process` — the per-worm gate `(hit_damage || blow_away ||
+//! blood_on_hit || worm_collide) && check_for_spec_worm_hit`, then `DoDamage` + the
+//! `kBloodAmount × [rand(128) + Create2]` blood fan + the `hit_damage>0 && health>0`
+//! `rand(3)` hit-sound gate (the load-bearing difference from the sobject arm, which
+//! draws `rand(3)` unconditionally) — and its unit tests passed in isolation. But the
+//! port was **REVERTED** (see below) because it diverges **EARLIER, at tick 49 (the
+//! `rng` column)** AND regresses 4a/4b/5a:
 //!
-//!   * The Rust `sim::weapon::wobject_process` **OMITS the wobject in-flight worm-hit
-//!     loop** (C++ `weapon.cpp:287-326`) — see the `// ... worm-hit loop (287-326) ...
-//!     omitted` comment there, whose "no RNG drawn under the scenario" assumption is
-//!     FALSE for 5b.
-//!   * The C++ oracle's draw trace at tick 51 begins with `[rand(128) rand(40)
-//!     rand(40000) rand(40000)] × 10` + `rand(3)` — the DART hitting **worm1 in
-//!     flight** (`blood_on_hit = 10` ⇒ `kBloodAmount = 10`), drawn BEFORE the ground
-//!     explosion. At impact the dart sits at x≈116 and worm1 at x=115 — within
-//!     `CheckForSpecWormHit`'s box — so the in-flight hit fires the SAME tick as the
-//!     ground explosion (the scenario header's "outside the flight corridor" premise
-//!     is off by ~1px). The Rust sim skips this entire 10-blood spray.
-//!   * Per-bound histograms confirm it: at tick 51 C++ draws **136** rands, Rust
-//!     **97**. Blood Create2 distribution draws `rand(40000)`: C++ 30 (= 15 blood: 10
-//!     in-flight + 5 explosion) vs Rust 10 (= 5 explosion only). The dirt-throw cell
-//!     count (`rand(8)` = 36) is IDENTICAL on both sides (so the impact position and
-//!     `power_sum` match) — the dirt-SPAWN delta (Rust 8 vs C++ 5) is a pure
-//!     downstream RNG-stream-offset artifact of the missing 41 in-flight draws.
+//!   * The gate's in-range test reuses 5a's `check_for_spec_worm_hit`, a **16x16
+//!     sprite-BOX over-approximation**, NOT C++'s per-pixel `CheckForSpecWormHit`
+//!     (`worm.cpp:1162-1188`), which tests `materials[worm_sprite[...]].Worm()` —
+//!     needing the worm sprite bank + the `Worm` material flag, NEITHER of which
+//!     lives in the sim yet.
+//!   * Diagnostic (DIAG instrumentation, since removed): at the tick producing
+//!     golden line 49 the descending dart sits at pixel **(123,199)** and worm1 at
+//!     **(115,196)** → box offset **col=15, row=8**, the extreme bottom-right corner
+//!     of worm1's sprite box (8px right, 3px below centre). That corner pixel is
+//!     **transparent** in the real worm sprite, so C++ `CheckForSpecWormHit` returns
+//!     `false` (the golden's `rng` stays flat 0 through tick 50 and worm1's column is
+//!     flat `fbae6f96`, first firing at tick 51). The box over-approximation returns
+//!     `true` and **OVER-FIRES at tick 49** — spraying blood + drawing `rand` three
+//!     ticks before the real hit, so `rng` goes nonzero at 49 vs the golden's 0.
+//!   * WIDER BLAST RADIUS: the box also over-fires for the **firing worm near the
+//!     muzzle**, regressing the already-green 4a/4b/5a goldens. The **fan** has
+//!     `wormCollide = true` + `blowAway = 30` (gate opens with `hitDamage =
+//!     bloodOnHit = 0`), and its projectile spawns `detect_distance + 5 ≈ 6px` from
+//!     worm0 — inside worm0's box, over the transparent sprite halo. So the brief's
+//!     premise ("the arm is inert for 1–5a") is false; the box check is unusable for
+//!     the wobject arm in general, not just 5b's grazing dart.
 //!
-//! Consequence: worm1 takes the dart's in-flight DoDamage(5) AND the explosion's
-//! DoDamage(~3) in C++ (health ~92), but only the explosion in Rust (health 97). The
-//! divergence cascades from `rng` into `worm1`/`bobjects`/`nobjects`/`level` at tick
-//! 51 and the every-10-tick blood-drip cadence (ticks 61/71/81) never goes live in
-//! Rust (the in-flight blood nobjects that survive to re-drip are absent).
-//!
-//! Per the task constraints (no sim/golden/scenario change), the fix is OUT OF SCOPE
-//! here. It is one of: (a) port the wobject in-flight worm-hit damage+blood arm
-//! (`weapon.cpp:287-326`) in `sim::weapon::wobject_process` [the T2-scope gap], or
-//! (b) move worm1 far enough LEFT that the dart genuinely misses it in flight and
-//! regenerate the golden. The assertions below are kept STRICT (master + all 9
-//! components, every tick) — once the sim arm lands, drop the `#[ignore]`.
+//! Per the task constraints (no geometry hack, no golden/scenario/C++ change, no
+//! `SimState::new` change), the fix is OUT OF SCOPE here: it needs the **per-pixel
+//! `CheckForSpecWormHit`** (the worm sprite bank + `Worm` material flag + worm
+//! current_frame/direction — a larger sim addition that also touches `SimState`). The
+//! arm port was therefore reverted to keep `cargo test --workspace` green; the impl
+//! is documented in `.superpowers/sdd/step2-slice5b-task-5b-report.md`, ready to
+//! re-apply once the per-pixel oracle lands. The assertions below stay STRICT (master
+//! + all 9 components, every tick); drop the `#[ignore]` then.
 
 use assets::object::Objects;
 use assets::tc::TcConfig;
@@ -156,11 +159,25 @@ fn parse_golden(text: &str) -> Vec<GoldenTick> {
 }
 
 #[test]
-#[ignore = "BLOCKED: T2-scope sim gap — sim::weapon::wobject_process omits the dart's \
-            in-flight worm-hit blood arm (weapon.cpp:287-326), so the DART's 10 in-flight \
-            blood nobjects (blood_on_hit=10) at tick 51 are never sprayed. Diverges at \
-            tick 51, rng column (Rust draws 97 rands, C++ 136). See the module doc \
-            'BLOCKED' section. Fix is out of scope for the test-only task T5."]
+#[ignore = "BLOCKED (deeper than T5b): the wobject in-flight worm-hit arm \
+            (weapon.cpp:287-326) was ported & unit-tested in T5b (DoDamage + the \
+            rand(128) blood fan + the hit_damage>0 && health>0 rand(3) gate), but \
+            REVERTED — it cannot land against the 5a `check_for_spec_worm_hit`, a \
+            16x16 sprite-BOX over-approximation, vs C++'s per-pixel \
+            `CheckForSpecWormHit` (needs the worm sprite bank + Worm material \
+            flag, absent from the sim). With the arm live this milestone diverges \
+            EARLIER, at tick 49 (rng column): at the tick producing golden line \
+            49 the descending dart sits at pixel (123,199) and worm1 at (115,196) \
+            — box offset col=15,row=8, the extreme bottom-right corner of worm1's \
+            sprite box. That corner pixel is TRANSPARENT in the real worm sprite, \
+            so C++ returns false (rng flat 0 through tick 50, first fires at 51); \
+            the box returns true and OVER-FIRES. WORSE: the box also over-fires \
+            for the FIRING worm near the muzzle, regressing 4a/4b/5a (the fan has \
+            wormCollide=true + blowAway=30, so its gate opens 6px from worm0). \
+            Closing this needs the per-pixel CheckForSpecWormHit (larger scope: \
+            worm sprite bank — and a SimState change this task forbids). See \
+            .superpowers/sdd/step2-slice5b-task-5b-report.md; the arm impl is \
+            ready to re-apply once the per-pixel oracle lands."]
 fn sim_slice5b_blood_bobjects_match_cpp_oracle() {
     // --- Parse the scenario (single source of truth, shared with the C++ dumper).
     let scenario_text = std::fs::read_to_string(concat!(

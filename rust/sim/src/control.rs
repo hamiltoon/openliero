@@ -12,6 +12,7 @@
 //! lands in later tasks (design doc, *`ControlConsts`*).
 
 use assets::object::NObjectType;
+use assets::object::Weapon;
 use assets::sprite::SpriteSet;
 use assets::tc::Texture;
 use sim_core::fixed::{ftoi, itof};
@@ -325,18 +326,17 @@ pub fn process_tasks(worm: &mut WormState, reacts: &[i32; 4], c: &ControlConsts)
 ///    `delay_left >= 0` decrements by 1. The `>= 0` guard means `0 -> -1` and then
 ///    holds at `-1` (off-by-one here is exactly what desynced the master in
 ///    Slice 2).
-/// 2. **Current-weapon reload** (`worm.cpp:823-827`) — **DEFERRED to Slice 4**:
-///    when `ammo <= 0`, C++ sets `loading_left = w.ComputedLoadingTime(...)` and
-///    `ammo = w.ammo`. That needs the [`Weapon`](assets::object::Weapon)
-///    definition (`ComputedLoadingTime`/`ammo`), which `WormState` does not carry,
-///    and is only reached once `Worm::Fire` depletes ammo. This slice never sets
-///    Fire, so `ammo > 0` on every slot and the branch never runs — guarded with a
-///    `debug_assert!`.
+/// 2. **Current-weapon reload** (`worm.cpp:823-827`) — ported in Slice 4d (Task 3):
+///    when `ww.ammo <= 0`, C++ sets `loading_left = w.ComputedLoadingTime(...)` and
+///    `ammo = w.ammo`, where `w` is the CURRENT weapon's
+///    [`Weapon`](assets::object::Weapon) def (`weapons[ww.ty]`). Operates on
+///    `weapons[current_weapon]` ONLY — non-current slots are untouched. See
+///    [`computed_loading_time`] for the `(s * loading_time) / 100`-clamped-to-1
+///    timer (`weapon.cpp:8-14`).
 /// 3. **Current-weapon loading countdown** (`worm.cpp:829-835`): while
 ///    `loading_left > 0`, decrement it. (The reload SOUND at `<= 0` is not
-///    simulated — sound is not hashed.) `loading_left` only becomes `> 0` via the
-///    deferred reload, so it stays `0` this slice; the decrement is a faithful
-///    no-op here.
+///    simulated — sound is not hashed.) Now that the reload above can arm
+///    `loading_left`, this decrement is live.
 /// 4. **`fire_cone` countdown** (`worm.cpp:837-839`): decrement while `> 0`
 ///    (non-hashed).
 /// 5. **Shell drop** (`worm.cpp:841-847`) — ported here (Slice 4d, Task 2): when
@@ -351,14 +351,33 @@ pub fn process_tasks(worm: &mut WormState, reacts: &[i32; 4], c: &ControlConsts)
 ///    branch never runs and the RNG stays pristine; arming it is what makes the
 ///    shell appear two ticks after the muzzle flash.
 ///
-/// Takes `&mut Rand` + `&mut Pool<NObject>` + `&[NObjectType]` + `worm_index` only
-/// for the shell-drop spawn; the timer-countdown paths above touch none of them.
+/// Takes `&mut Rand` + `&mut Pool<NObject>` + `&[NObjectType]` + `worm_index` for
+/// the shell-drop spawn, and `&[Weapon]` + `settings_loading_time` for the reload
+/// (resolving the current weapon's def + its `ComputedLoadingTime`).
+///
+/// Port of `Weapon::ComputedLoadingTime` (`src/game/weapon.cpp:8-14`):
+/// `max((settings_loading_time * w.loading_time) / 100, 1)`. The division is
+/// integer (truncating) and the result is clamped to a minimum of `1` — a `0`
+/// would break the `loading_left > 0` countdown guard (`worm.cpp:829`), so C++
+/// bumps it. Pin: handgun `loading_time = 220`, `s = 100` ⇒ `220`; a tiny product
+/// (`s * lt = 50`, `/ 100 = 0`) ⇒ clamps to `1`.
+pub fn computed_loading_time(w: &Weapon, settings_loading_time: i32) -> i32 {
+    let ret = (settings_loading_time * w.loading_time) / 100;
+    if ret == 0 {
+        1
+    } else {
+        ret
+    }
+}
+
 pub fn process_weapons(
     worm: &mut WormState,
     rand: &mut Rand,
     nobjects: &mut Pool<NObject>,
     nobject_types: &[NObjectType],
     worm_index: i32,
+    weapons: &[Weapon],
+    settings_loading_time: i32,
 ) {
     // worm.cpp:814-818 — per-slot delay_left countdown (the MASTER-hash linchpin).
     // The `>= 0` guard is bounded, so a plain `- 1` cannot overflow.
@@ -370,18 +389,26 @@ pub fn process_weapons(
 
     let ww = &mut worm.weapons[worm.current_weapon as usize];
 
-    // worm.cpp:823-827 — reload when depleted. DEFERRED to Slice 4 (Fire): needs
-    // the Weapon definition (ComputedLoadingTime/ammo) not carried in WormState and
-    // is only reached once Fire depletes ammo. ammo > 0 on every slot this slice.
-    debug_assert!(
-        ww.ammo > 0,
-        "ProcessWeapons reload branch (ammo<=0) is Slice-4 (Fire) territory; \
-         needs Weapon data and is unreached while ammo>0"
-    );
+    // worm.cpp:820-827 — reload the CURRENT weapon when depleted. On `ammo <= 0` C++
+    // rearms the loading timer (ComputedLoadingTime) and refills `ammo = w.ammo`,
+    // where `w` is the current slot's Weapon def (`weapons[ww.type]`). Non-current
+    // slots are untouched (this reads/writes weapons[current_weapon] only). C++ binds
+    // `w = *ww.type` unconditionally at worm.cpp:821, but `w` is read nowhere outside
+    // this reload branch (the loading countdown's only other use is the non-hashed
+    // reload SOUND), so binding it lazily here is observationally identical and
+    // avoids indexing the weapons table for slots that never deplete.
+    if ww.ammo <= 0 {
+        let ty = ww
+            .ty
+            .expect("current weapon slot has no resolved type; InitWeapons always sets one");
+        let w = &weapons[ty as usize];
+        ww.loading_left = computed_loading_time(w, settings_loading_time);
+        ww.ammo = w.ammo;
+    }
 
-    // worm.cpp:829-835 — loading countdown. loading_left only becomes > 0 via the
-    // deferred reload, so this is a faithful no-op this slice; the SoundReloaded
-    // play at <= 0 is not simulated (not hashed).
+    // worm.cpp:829-835 — loading countdown. Now that the reload above can arm
+    // loading_left, this decrement is live; the SoundReloaded play at <= 0 is not
+    // simulated (not hashed).
     if ww.loading_left > 0 {
         ww.loading_left -= 1;
     }
@@ -1139,9 +1166,9 @@ MultiJump = true
     // slot's `delay_left` (the per-tick countdown — the Slice-2 MASTER-hash
     // linchpin), plus the current weapon's `loading_left`/`ammo`. Non-hashed
     // `fire_cone`/`leave_shell_timer` countdowns are also checked. The `ammo<=0`
-    // reload and `leave_shell_timer>0` shell-drop branches are Slice-4 (Fire)
-    // territory and never run this slice (`ammo>0`, `leave_shell_timer==0`); see
-    // `process_weapons` for the deferral.
+    // reload branch (Slice 4d, Task 3) arms `loading_left = ComputedLoadingTime`
+    // and refills `ammo = w.ammo` for the CURRENT weapon only; the
+    // `leave_shell_timer>0` shell-drop branch (Task 2) draws RNG on expiry.
 
     // A bare worm whose every weapon slot carries ammo (so the current-weapon
     // `ammo<=0` reload branch — which needs Weapon data we don't carry — is never
@@ -1165,14 +1192,29 @@ MultiJump = true
         w
     }
 
+    // Weapon defs for the reload branch. Slot 0 is the only def the `weapon_worm`
+    // resolves (all its slots carry `ty = Some(0)`): a handgun-like loading_time of
+    // 220, and a DEF ammo of 7 that is deliberately distinct from the init's 10 so
+    // reload tests can prove the refill reads `w.ammo` (the def) not the slot.
+    fn weapon_defs() -> Vec<Weapon> {
+        vec![Weapon {
+            loading_time: 220,
+            ammo: 7,
+            ..Weapon::default()
+        }]
+    }
+
     // Drive process_weapons for the timer-countdown tests, which never arm the
     // shell drop (leave_shell_timer == 0). The throwaway Rand/Pool/types make the
-    // shell-spawn args inert: with no shell branch they are untouched.
+    // shell-spawn args inert: with no shell branch they are untouched. settings
+    // loading_time = 100 (C++ default); the reload branch stays inert here because
+    // every `weapon_worm` slot carries ammo > 0.
     fn run_weapons(w: &mut WormState) {
         let mut rand = Rand::new();
         let mut nobjects: Pool<NObject> = Pool::new(8);
         let nobject_types: Vec<NObjectType> = Vec::new();
-        process_weapons(w, &mut rand, &mut nobjects, &nobject_types, 0);
+        let weapons = weapon_defs();
+        process_weapons(w, &mut rand, &mut nobjects, &nobject_types, 0, &weapons, 100);
     }
 
     // A synthetic `nobject_types` table whose slot 7 is the shell (tc.cfg:5):
@@ -1270,6 +1312,83 @@ MultiJump = true
     }
 
     #[test]
+    fn computed_loading_time_pins_and_clamps() {
+        // weapon.cpp:8-14: (settings_loading_time * loading_time) / 100, min 1.
+        // Pin: handgun loading_time=220, s=100 => exactly 220 (no truncation).
+        let handgun = Weapon {
+            loading_time: 220,
+            ..Weapon::default()
+        };
+        assert_eq!(computed_loading_time(&handgun, 100), 220);
+
+        // Tiny product truncates to 0 then clamps to 1: 50 * 1 = 50, /100 = 0 -> 1.
+        // A 0 would break the `loading_left > 0` countdown guard (worm.cpp:829).
+        let tiny = Weapon {
+            loading_time: 1,
+            ..Weapon::default()
+        };
+        assert_eq!(computed_loading_time(&tiny, 50), 1);
+
+        // Integer truncation, NOT rounding: (99 * 220) / 100 = 21780/100 = 217.
+        assert_eq!(
+            computed_loading_time(&handgun, 99),
+            217,
+            "truncating division, not rounding (217.8 -> 217)"
+        );
+    }
+
+    #[test]
+    fn reload_arms_loading_and_refills_ammo_on_depletion() {
+        // worm.cpp:823-827: current slot ammo<=0 -> loading_left =
+        // ComputedLoadingTime, ammo = w.ammo (the DEF's ammo, distinct from the
+        // init's 10). The SAME-tick countdown (worm.cpp:829-831) then decrements
+        // the freshly-armed loading_left once, so 220 -> 219 in one call.
+        let mut w = weapon_worm([5, 5, 5, 5, 5]);
+        w.weapons[0].ammo = 0;
+        w.weapons[0].loading_left = 0;
+        let mut rand = Rand::new();
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let nobject_types: Vec<NObjectType> = Vec::new();
+        let weapons = weapon_defs(); // slot 0: loading_time=220, ammo=7
+        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 0, &weapons, 100);
+        assert_eq!(
+            w.weapons[0].loading_left, 219,
+            "armed to ComputedLoadingTime=220, then counted down once this tick"
+        );
+        assert_eq!(
+            w.weapons[0].ammo, 7,
+            "ammo refilled from the weapon def (w.ammo), not the init"
+        );
+    }
+
+    #[test]
+    fn reload_only_touches_current_weapon() {
+        // worm.cpp:820-827 operates on weapons[current_weapon] only: a depleted
+        // NON-current slot is left untouched (reuses the Slice-3 posture).
+        let mut w = weapon_worm([5, 5, 5, 5, 5]);
+        w.current_weapon = 2;
+        w.weapons[2].ammo = 0; // current: reloads
+        w.weapons[2].loading_left = 0;
+        w.weapons[0].ammo = 0; // non-current: must stay depleted
+        w.weapons[0].loading_left = 0;
+        let mut rand = Rand::new();
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let nobject_types: Vec<NObjectType> = Vec::new();
+        let weapons = weapon_defs();
+        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 2, &weapons, 100);
+        assert_eq!(w.weapons[2].ammo, 7, "current slot reloaded from the def");
+        assert_eq!(
+            w.weapons[2].loading_left, 219,
+            "current slot armed (220) then counted down once"
+        );
+        assert_eq!(w.weapons[0].ammo, 0, "non-current depleted slot NOT reloaded");
+        assert_eq!(
+            w.weapons[0].loading_left, 0,
+            "non-current slot loading_left untouched"
+        );
+    }
+
+    #[test]
     fn fire_cone_decrements_while_positive_and_stops_at_zero() {
         // worm.cpp:837-839: fire_cone-- while > 0, holds at 0 (not hashed, but a
         // faithful per-tick countdown).
@@ -1294,7 +1413,8 @@ MultiJump = true
         let mut rand = Rand::new();
         let mut nobjects: Pool<NObject> = Pool::new(8);
         let nobject_types = shell_nobject_types();
-        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 0);
+        let weapons = weapon_defs();
+        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 0, &weapons, 100);
         assert_eq!(
             w.leave_shell_timer, 0,
             "shell branch skipped, timer untouched"
@@ -1313,13 +1433,14 @@ MultiJump = true
         let mut rand = Rand::new();
         let mut nobjects: Pool<NObject> = Pool::new(8);
         let nobject_types = shell_nobject_types();
+        let weapons = weapon_defs();
 
-        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 0);
+        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 0, &weapons, 100);
         assert_eq!(w.leave_shell_timer, 1, "timer 2 -> 1");
         assert_eq!(nobjects.len(), 0, "no shell while timer still > 0");
         assert_eq!(rand.last(), 0, "no RNG drawn while timer still > 0");
 
-        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 0);
+        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 0, &weapons, 100);
         assert_eq!(w.leave_shell_timer, 0, "timer 1 -> 0 (expiry)");
         assert_eq!(nobjects.len(), 1, "shell spawned on expiry");
         assert_ne!(rand.last(), 0, "RNG drawn on expiry");
@@ -1350,7 +1471,8 @@ MultiJump = true
         let exp_vel_y = vel_y + (8000 - refr.bound(16000) as i32); // draw 4
         let _cur_frame = refr.bound(4); // draw 5 (nobject.cpp:25, num_frames+1)
 
-        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 3);
+        let weapons = weapon_defs();
+        process_weapons(&mut w, &mut rand, &mut nobjects, &nobject_types, 3, &weapons, 100);
 
         assert_eq!(w.leave_shell_timer, 0, "timer expired");
         assert_eq!(nobjects.len(), 1, "exactly one shell spawned");

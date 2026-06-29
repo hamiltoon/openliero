@@ -776,10 +776,12 @@ impl SimState {
             textures,
             sobject_types,
             nobject_types,
+            settings_loading_time,
             cycles,
             ..
         } = self;
         let h_signed_recoil = *h_signed_recoil;
+        let settings_loading_time = *settings_loading_time;
         // `cycles` is 0 in 4c (no `++cycles` yet); the nobjects loop needs it for
         // the `cycles % delay` / `cycles & 7` gates inside `nobject_process`. Read
         // it as a value; the loop must NOT mutate it.
@@ -934,7 +936,15 @@ impl SimState {
                 process_tasks(w, &reacts, control);
 
                 // 7. weapons (delay_left countdown + shell drop on timer expiry).
-                process_weapons(w, rand, nobjects, nobject_types, i as i32);
+                process_weapons(
+                    w,
+                    rand,
+                    nobjects,
+                    nobject_types,
+                    i as i32,
+                    weapons,
+                    settings_loading_time,
+                );
 
                 // 8. Fire gate (worm.cpp:336-339), ported verbatim: Fire held,
                 //    Change NOT held, the current slot Available() (loading_left ==

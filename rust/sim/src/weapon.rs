@@ -419,6 +419,7 @@ pub fn blow_up(
     weapons: &[Weapon],
     nobjects: &mut Pool<NObject>,
     sobjects: &mut Pool<SObject>,
+    blood: i32,
     rand: &mut Rand,
 ) {
     // :89-92 create-on-explosion — BEFORE the dart's own dirt_effect (the order
@@ -441,6 +442,7 @@ pub fn blow_up(
             large_sprites,
             textures,
             sobjects,
+            blood,
             rand,
         );
     }
@@ -1305,6 +1307,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            100,
             &mut rand,
         );
 
@@ -1377,6 +1380,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            100,
             &mut rand,
         );
 
@@ -1562,6 +1566,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            100,
             &mut rand,
         );
 
@@ -1652,6 +1657,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            100,
             &mut rand,
         );
 
@@ -1736,6 +1742,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            100,
             &mut rand,
         );
 
@@ -1797,6 +1804,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            100,
             &mut rand,
         );
 
@@ -1837,6 +1845,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            100,
             &mut rand,
         );
     }

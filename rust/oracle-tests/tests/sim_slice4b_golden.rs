@@ -213,6 +213,7 @@ fn sim_slice4b_greenball_terrain_matches_cpp_oracle() {
         objects.nobject_types.clone(),
         100,
         true,
+        100,
     );
 
     let check = |tick: u32, name: &str, got: u32, want: u32| {

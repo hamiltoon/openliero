@@ -523,6 +523,7 @@ mod tests {
             ninjarope: Ninjarope::default(),
             index: 0,
             stats_x: 0,
+            last_killed_by_idx: -1,
             // Slice-3 control fields are not read by the physics pass; tick-0
             // defaults.
             aiming_speed: 0,

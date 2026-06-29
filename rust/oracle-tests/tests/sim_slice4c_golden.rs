@@ -239,6 +239,7 @@ fn sim_slice4c_explosion_objects_match_cpp_oracle() {
         objects.nobject_types.clone(),
         100,
         true,
+        100,
     );
 
     let check = |tick: u32, name: &str, got: u32, want: u32| {

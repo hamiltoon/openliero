@@ -251,6 +251,11 @@ pub struct WormState {
     pub index: i32,
     /// Stats-panel X. Scenario field; not hashed.
     pub stats_x: i32,
+    /// `Worm::last_killed_by_idx` (`worm.hpp:251`, default `-1`): the worm that
+    /// last killed this one. Set by [`do_damage_direct`](WormState::do_damage_direct)
+    /// when `health` falls to `<= 0`; feeds death attribution only (`worm.cpp:397`).
+    /// **Not hashed** — adding it leaves every slice golden unchanged.
+    pub last_killed_by_idx: i32,
 
     // --- Slice 3 control state (NOT hashed) -------------------------------
     // The non-hashed worm state the ported control/aiming paths read/write
@@ -317,6 +322,8 @@ impl WormState {
             ninjarope: Ninjarope::default(),
             index: init.index,
             stats_x: init.stats_x,
+            last_killed_by_idx: -1, // worm.hpp:251 default
+
             // Post-`ResetWorms`/ctor control defaults (design doc, *Datamodel
             // additions*; verified against worm.hpp + game.cpp ResetWorms).
             aiming_speed: 0,
@@ -329,6 +336,34 @@ impl WormState {
             fire_cone: 0,
             leave_shell_timer: 0,
         }
+    }
+
+    /// Port of `Game::DoDamageDirect` (`game.cpp:546-553`). RNG-free. Subtracts
+    /// `amount` (only when positive) from `health`; if that drops `health` to
+    /// `<= 0`, records `by_idx` as the killer in [`last_killed_by_idx`]
+    /// (`WormState::last_killed_by_idx`, not hashed — death attribution only).
+    pub fn do_damage_direct(&mut self, amount: i32, by_idx: i32) {
+        if amount > 0 {
+            self.health -= amount;
+            if self.health <= 0 {
+                self.last_killed_by_idx = by_idx;
+            }
+        }
+    }
+
+    /// Port of `Game::DoDamage` (`game.cpp:567-589`) — the **normal-mode**
+    /// (`kGmKillEmAll`) path. In every mode the function first runs
+    /// [`do_damage_direct`](WormState::do_damage_direct); the additional
+    /// `kGmScalesOfJustice` redistribution branch (`:570-587`, which heals the
+    /// other worms via `DoHealingDirect`) is **DEFERRED** — Slice 5b is normal
+    /// mode, so it is unreached. Bringing in game-mode plumbing 5b never needs
+    /// would be premature; when a SoJ slice lands it ports the redistribution
+    /// here. RNG-free.
+    pub fn do_damage(&mut self, amount: i32, by_idx: i32) {
+        self.do_damage_direct(amount, by_idx);
+        // kGmScalesOfJustice redistribution (game.cpp:570-587) DEFERRED — normal
+        // mode does nothing further. (No `DoHealingDirect` port: it is reachable
+        // only through that branch.)
     }
 }
 
@@ -642,6 +677,12 @@ pub struct SimState {
     /// changed while still loading (Slice-4d weapon-change gate). Default `true`.
     /// **Not** hashed (settings scalar).
     pub load_change: bool,
+    /// C++ `Settings::blood` (`settings.hpp:70`): the blood-amount scaler. The
+    /// sobject worm-damage arm spawns `blood * power_sum / 100` blood nobjects
+    /// (`sobject.cpp:96`). The dumper default is 100 (never overridden), so the
+    /// goldens use 100. **Not** hashed (settings scalar); slices 1-5a never enter
+    /// the damage arm (worms out of range), so the value is inert for them.
+    pub blood: i32,
 }
 
 impl SimState {
@@ -683,6 +724,7 @@ impl SimState {
         nobject_types: Vec<NObjectType>,
         settings_loading_time: i32,
         load_change: bool,
+        blood: i32,
     ) -> SimState {
         let mut rand = Rand::new();
         rand.seed(seed);
@@ -719,6 +761,7 @@ impl SimState {
             nobject_types,
             settings_loading_time,
             load_change,
+            blood,
         }
     }
 
@@ -799,12 +842,14 @@ impl SimState {
             nobject_types,
             settings_loading_time,
             load_change,
+            blood,
             cycles,
             ..
         } = self;
         let h_signed_recoil = *h_signed_recoil;
         let settings_loading_time = *settings_loading_time;
         let load_change = *load_change;
+        let blood = *blood;
         // The object loops read `cycles` as a value for the `cycles % delay` /
         // `cycles & 7` gates inside `nobject_process`. They must see the value left by
         // the PREVIOUS tick's increment (cycles=k-1 on tick k) — exactly as the C++
@@ -867,6 +912,7 @@ impl SimState {
                         weapons,
                         nobjects,
                         sobjects,
+                        blood,
                         rand,
                     );
                     wobjects.free(slot);
@@ -910,6 +956,7 @@ impl SimState {
                 nobjects,
                 sobjects,
                 cycles_now,
+                blood,
                 rand,
             ) {
                 NObjectOutcome::Keep => {
@@ -1127,6 +1174,7 @@ mod tests {
             Vec::new(),
             100,
             true,
+            100,
         );
         assert_eq!(state.cycles, 0, "cycles must be 0 at tick 0");
         assert_eq!(state.rand.last(), 0, "no RNG consumed -> last() == 0");
@@ -1156,6 +1204,7 @@ mod tests {
             Vec::new(),
             100,
             true,
+            100,
         );
         assert!(state.bonuses.is_empty());
         assert!(state.wobjects.is_empty());
@@ -1189,6 +1238,7 @@ mod tests {
             Vec::new(),
             100,
             true,
+            100,
         );
         for w in &state.worms {
             assert_eq!(w.pos, Vec2::zero());
@@ -1228,6 +1278,7 @@ mod tests {
             Vec::new(),
             100,
             true,
+            100,
         );
         let w0 = &state.worms[0];
         // Each slot has its type set, ammo from the init, and zero timers.
@@ -1493,6 +1544,7 @@ mod tests {
             Vec::new(),
             100,
             true,
+            100,
         );
         assert_eq!(
             state.level.material_flags, flags,
@@ -1535,6 +1587,7 @@ mod tests {
                 Vec::new(),
                 100,
                 true,
+                100,
             );
             s.wobjects.spawn(WObject {
                 pos: Vec2::new(1, 2),
@@ -1735,6 +1788,7 @@ mod tests {
             Vec::new(),
             100,
             true,
+            100,
         );
         let t = &state.textures[6];
         assert_eq!(t.mframe, 38, "greenball mframe");
@@ -1780,6 +1834,7 @@ mod tests {
             Vec::new(),
             100,
             true,
+            100,
         );
         assert_eq!(
             state.cossin,
@@ -1894,6 +1949,7 @@ mod tests {
             nobject_types.clone(),
             100,
             true,
+            100,
         );
         assert_eq!(
             state.sobject_types, sobject_types,
@@ -1929,6 +1985,7 @@ mod tests {
             Vec::new(),
             100,
             true,
+            100,
         );
         assert_eq!(
             state.settings_loading_time, 100,

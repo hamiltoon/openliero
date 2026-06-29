@@ -160,6 +160,7 @@ fn sim_slice3_control_matches_cpp_oracle() {
         Vec::new(),
         100,
         true,
+        100,
     );
 
     let check = |tick: u32, name: &str, got: u32, want: u32| {

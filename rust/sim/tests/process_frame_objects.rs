@@ -206,6 +206,7 @@ fn fire_state() -> (SimState, Weapon, Vec2) {
         objects.nobject_types.clone(),
         100,
         true,
+        100,
     );
 
     // Aim flat-right at cossin index 32; in the default left-facing band so
@@ -377,6 +378,7 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
         std::slice::from_ref(&dart),
         &mut nobjects2,
         &mut sobjects2,
+        100,
         &mut r2,
     );
 

@@ -325,6 +325,7 @@ pub fn nobject_process(
     nobjects: &mut Pool<NObject>,
     sobjects: &mut Pool<SObject>,
     cycles: i32,
+    blood: i32,
     rand: &mut Rand,
 ) -> NObjectOutcome {
     let mut bounced = false;
@@ -509,6 +510,7 @@ pub fn nobject_process(
                 large_sprites,
                 textures,
                 sobjects,
+                blood,
                 rand,
             );
         }
@@ -955,6 +957,7 @@ mod tests {
             nobjects,
             &mut sobjects,
             cycles,
+            100,
             rand,
         )
     }
@@ -1335,6 +1338,7 @@ mod tests {
             nobjects,
             &mut sobjects,
             cycles,
+            100,
             rand,
         )
     }
@@ -1446,6 +1450,7 @@ mod tests {
             &mut nobjects,
             &mut sobjects,
             0,
+            100,
             &mut rand,
         );
 
@@ -1521,6 +1526,7 @@ mod tests {
             &mut nobjects,
             &mut sobjects,
             0,
+            100,
             &mut rand,
         );
 

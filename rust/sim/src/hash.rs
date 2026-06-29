@@ -239,6 +239,7 @@ mod tests {
             nobject_types: Vec::new(),
             settings_loading_time: 100,
             load_change: true,
+            blood: 100,
         }
     }
 
@@ -347,6 +348,7 @@ mod tests {
             },
             index: 0,
             stats_x: 0,
+            last_killed_by_idx: -1,
             // Slice-3 control fields are not hashed; defaults suffice here.
             aiming_speed: 0,
             direction: 0,

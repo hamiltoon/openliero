@@ -15,11 +15,13 @@
 //! 1. **Sound** (`:24`): `rand(num_sounds)` iff `start_sound >= 0`. The sound
 //!    `Play` is a hashing no-op, but **the `rand` is consumed** — skipping it
 //!    shifts every later draw.
-//! 2. **Worm-damage block** (`:47-114`): in the 4c fixture every worm is kept
-//!    OUTSIDE the `±detect_range` box (O10), so the per-worm loop draws nothing.
-//!    The box test + the blow-away nudges (no rand) are ported; the
-//!    `w.health > 0` damage arm (DoDamage + `rand(128)` blood fan +
-//!    `rand(3)` hit-sound) is **deferred (O10)** behind a `debug_assert!`.
+//! 2. **Worm-damage block** (`:47-114`): the box test + blow-away nudges (no rand)
+//!    plus the LIVE `w.health > 0` damage arm (Slice 5b): `DoDamage` (RNG-free
+//!    wound) then the `kBloodAmount × [rand(128) + Create2(rand(speed_v) +
+//!    rand(distribution*2)×2)]` blood fan, then the `rand(3)` hit-sound gate
+//!    (always drawn; a 2nd `rand(3)` iff the gate hits 0). The spawned blood
+//!    nobjects (type 6, `blood_trail=true`) are NOT Process'd here — their
+//!    blood-trail arm is still deferred (T3).
 //! 3. **wobjects / nobjects blow-away loops** (`:118-186`): nudge `vel` of pooled
 //!    objects with `affect_by_explosions`; **draw NO rand**. The
 //!    `chain_explosion -> BlowUpObject` recursion is **deferred (O9)**.
@@ -91,7 +93,9 @@ pub enum SObjectOutcome {
 /// function is ported in C++ statement order; see the module docs for the exact
 /// `rand()` cluster. Branches the 4c fixture cannot exercise are guarded:
 ///
-/// * worm-in-range **damage arm** (`w.health > 0`) — `debug_assert!`ed off (O10);
+/// * worm-in-range **damage arm** (`w.health > 0`) — LIVE (Slice 5b): DoDamage +
+///   the `rand(128)` blood fan (`nobject_types[6].Create2`) + the `rand(3)`
+///   hit-sound gate. ScalesOfJustice redistribution stays mode-gated/deferred;
 /// * **chain_explosion** recursion in the wobjects loop — `debug_assert!`ed off (O9);
 /// * the **bonus loop** (`:217-227`) — omitted (needs the bonus pool + recursive
 ///   `Create`); rand-neutral when no bonus sits in range, which the 4c fixture
@@ -112,6 +116,7 @@ pub fn sobject_create(
     large_sprites: &SpriteSet,
     textures: &[Texture],
     sobjects: &mut Pool<SObject>,
+    blood: i32,
     rand: &mut Rand,
 ) {
     // :19 NewObjectReuse + :35-39 field init. Allocated first; the field writes
@@ -171,18 +176,64 @@ pub fn sobject_create(
                     }
                 }
 
-                // :82-112 power_sum -> z -> DoDamage, the blood fan
-                // (`rand(128)` + `nobject_types[6].Create2`), and the hit-sound
-                // (`rand(3)`, then a conditional `rand(3)`) are all gated on
-                // `w.health > 0`. DEFERRED (O10): they need DoDamage / the blood
-                // nobject and DRAW RAND. The 4c scenario keeps every worm out of
-                // range, so this arm never runs; a worm inside the box with
-                // `health > 0` would need the O10 port. (The `from && !from->has_hit`
-                // Hit-stats path at :87-90 draws no rand and is omitted.)
-                debug_assert!(
-                    w.health <= 0,
-                    "worm-in-range damage arm (DoDamage + rand(128) blood fan + rand(3) hit-sound) deferred (O10)"
-                );
+                // :58/:71 power_sum: starts as the x `power`, then folds in the y
+                // `power` as `(power_sum + power) / 2` (truncating). Reuses the
+                // already-computed power_x/power_y (do NOT recompute differently).
+                let power_sum = (power_x + power_y) / 2;
+
+                // :82-85 z = damage * power_sum, then `if (detect_range) z /=
+                // detect_range` (truncating).
+                let mut z = ty.damage * power_sum;
+                if dr != 0 {
+                    z /= dr;
+                }
+
+                // :87-90 `if (from && !from->has_hit) Hit(...)` — stats only, no
+                // sim/RNG; omitted (the `from`/`has_hit` plumbing is unported).
+
+                // :92-112 the LIVE worm-damage arm (5b/O10 turned ON). Gated on
+                // `w.health > 0`; draws RNG, so the order is the contract.
+                if w.health > 0 {
+                    // :93 DoDamage(w, z, owner_idx) — RNG-free wound (normal mode).
+                    w.do_damage(z, owner_idx);
+                    // :94 DamageDealt stat — omitted (no sim/RNG).
+
+                    // :96 kBloodAmount = settings.blood * power_sum / 100 (trunc).
+                    let k_blood_amount = blood * power_sum / 100;
+
+                    // :98-103 the blood fan. Per particle: rand(128) [kAngle] THEN
+                    // nobject_types[6].Create2(kAngle, w.vel/3, w.pos, 0, w.index,
+                    // fired_by) — Create2 draws rand(speed_v) then rand(dist*2)x2.
+                    // owner is `w.index` (the wounded worm), NOT the explosion
+                    // owner_idx. `w.vel` is the POST blow-away nudge velocity; the
+                    // `/3` is the truncating per-component divide. (fired_by is
+                    // stats-only — unported in nobject_create2.) The blood nobject
+                    // (type 6) has blood_trail=true; it is NOT Process'd here.
+                    if k_blood_amount > 0 {
+                        for _ in 0..k_blood_amount {
+                            let k_angle = rand.bound(128) as i32;
+                            nobject_create2(
+                                &nobject_types[6],
+                                k_angle,
+                                w.vel.div(3),
+                                w.pos,
+                                0,
+                                w.index,
+                                cossin,
+                                rand,
+                                nobjects,
+                            );
+                        }
+                    }
+
+                    // :105-111 hit-sound gate: rand(3) is ALWAYS drawn; on `== 0`
+                    // a SECOND rand(3) picks `18 + rand(3)`. The `Play` is a hashing
+                    // no-op (skipped) but the rand draws are the contract.
+                    if rand.bound(3) == 0 {
+                        let _k_snd = 18 + rand.bound(3) as i32;
+                        // sound_player->Play(kSnd) — omitted (no sim/RNG).
+                    }
+                }
             }
         }
 
@@ -433,7 +484,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, 100, &mut rand,
         );
 
         // Obj init (:35-39): id = 2, x = 50-8, y = 50-8, cur_frame = 0,
@@ -470,7 +521,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, 100, &mut rand,
         );
 
         assert_eq!(rand.last(), 0, "start_sound < 0 -> no rand drawn at all");
@@ -513,7 +564,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, 100, &mut rand,
         );
 
         assert_eq!(worms[0].vel, Vec2::zero(), "out-of-range worm not nudged");
@@ -544,7 +595,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, 100, &mut rand,
         );
 
         // delta_x = 57-50 = 7 > 0 -> vel.x += blow_away * (8 - 7) = 3000.
@@ -559,6 +610,186 @@ mod tests {
             rand.last(),
             expected_last,
             "dead in-box worm: damage arm skipped, no extra rand"
+        );
+    }
+
+    // ---- Step 2b: the LIVE worm-damage arm (5b/O10) -------------------------
+
+    // The blood nobject (nobject_types[6], blood_trail = true). Tuned so the arm's
+    // per-particle draw shape is exactly [rand(speed_v), rand(distribution*2),
+    // rand(distribution*2)] inside Create2 and NOTHING inside Create:
+    //   speed_v = 40         -> rand(40)
+    //   distribution = 20000 -> rand(40000) x2 (Create2 draws rand(distribution*2))
+    //   start_frame <= 0     -> cur_frame = color/color_bullets (NO rand)
+    //   time_to_explo_v = 0  -> no time jitter (NO rand)
+    // Matches the brief's blood-spray draw shape [rand(128), rand(40), rand(40000),
+    // rand(40000)] (the rand(128) kAngle is drawn by the arm BEFORE Create2).
+    fn blood_nobject() -> NObjectType {
+        NObjectType {
+            id: 6,
+            speed: 100,
+            speed_v: 40,
+            distribution: 20000,
+            start_frame: 0,
+            num_frames: 0,
+            color_bullets: 0,
+            time_to_explo: 0,
+            time_to_explo_v: 0,
+            blood_trail: true,
+            ..Default::default()
+        }
+    }
+
+    // nobject_types table padded so index 6 is the blood particle (index 2 is the
+    // dirt particle; the rest are unused placeholders).
+    fn nts_with_blood() -> Vec<NObjectType> {
+        let mut v = vec![NObjectType::default(); 7];
+        v[2] = dirt_nobject();
+        v[6] = blood_nobject();
+        v
+    }
+
+    #[test]
+    fn worm_inside_box_wounded_sprays_blood_with_exact_draw_order() {
+        // A worm at x+7 (inside the box) with health 100: the LIVE damage arm
+        // wounds it (health stays > 0), spawns kBloodAmount type-6 blood nobjects,
+        // and draws the exact RNG cluster. We do NOT Process the spawned blood
+        // nobjects (their blood_trail arm is deferred).
+        let cossin = precompute_cossin();
+        let ty = small_explosion(-1); // no carve: isolate the worm arm + (inert) dirt-throw
+        let nts = nts_with_blood();
+        let mut level = bg_level(100, 100); // no dirt -> dirt-throw draws nothing
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms = vec![worm_at(57, 50, 100)]; // x=50 -> 57 is x+7, IN; healthy
+        let mut rand = seeded();
+        let blood = 100;
+
+        // Hand-computed arithmetic (no RNG):
+        //  power_x = dr - |57-50| = 8 - 7 = 1; power_y = dr - |50-50| = 8.
+        //  power_sum = (1 + 8) / 2 = 4 (truncating).
+        //  z = damage(5) * power_sum(4) = 20; dr != 0 -> z /= 8 -> 2.
+        //  health 100 - 2 = 98 (> 0 -> wound, not kill).
+        //  kBloodAmount = blood(100) * power_sum(4) / 100 = 4.
+        // Post blow-away nudge: vel.x += 3000*1 = 3000; vel.y -= 3000*8 = -24000.
+        // Create2 base vel = w.vel / 3 = (1000, -8000) (truncating per component).
+        let expected_blood = 4;
+
+        // Reference stream (separately seeded): sound, then the worm arm's draws.
+        let mut refr = seeded();
+        refr.bound(2); // :24 sound
+        for _ in 0..expected_blood {
+            refr.bound(128); // :100 kAngle
+            refr.bound(40); // Create2 :53 rand(speed_v)
+            refr.bound(40000); // Create2 :59 rand(distribution*2) x
+            refr.bound(40000); // Create2 :60 rand(distribution*2) y
+        }
+        // :105 hit-sound gate: rand(3) ALWAYS; on 0 a SECOND rand(3) (kSnd pick).
+        if refr.bound(3) == 0 {
+            refr.bound(3);
+        }
+        let expected_last = refr.last();
+
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, blood, &mut rand,
+        );
+
+        // Wound: health dropped by the clamped z = 2, stays > 0; not a kill, so
+        // last_killed_by_idx is untouched (-1).
+        assert_eq!(worms[0].health, 98, "health reduced by z = 2 (wound)");
+        assert!(worms[0].health > 0, "worm wounded, not killed");
+        assert_eq!(
+            worms[0].last_killed_by_idx, -1,
+            "wound (health > 0) does NOT set last_killed_by_idx"
+        );
+
+        // The blow-away nudge is the ONLY thing that changed w.vel; the blood
+        // spray reads w.vel / 3 by value and does not mutate it.
+        assert_eq!(worms[0].vel, Vec2::new(3000, -24000), "vel = post blow-away nudge");
+
+        // Exactly kBloodAmount type-6 nobjects spawned, each owned by w.index (0).
+        assert_eq!(
+            nobjects.len(),
+            expected_blood as usize,
+            "kBloodAmount = blood * power_sum / 100 = 4 blood nobjects"
+        );
+        for k in 0..nobjects.len() {
+            let b = *nobjects.get(k).expect("blood nobject in slot");
+            assert_eq!(b.ty, Some(6), "blood nobject {k} is nobject_types[6]");
+            assert_eq!(b.owner_idx, 0, "blood nobject {k} owned by w.index");
+        }
+
+        // Exact RNG order/count: sound, then per blood particle [rand(128),
+        // rand(40), rand(40000), rand(40000)], then the rand(3) gate (+ a 2nd
+        // rand(3) iff the gate hit 0).
+        assert_eq!(
+            rand.last(),
+            expected_last,
+            "blood-spray + hit-sound RNG order/count matches the reference stream"
+        );
+    }
+
+    #[test]
+    fn worm_outside_box_takes_no_damage_and_sprays_no_blood() {
+        // A healthy worm OUTSIDE the box: the arm is skipped entirely — no damage,
+        // no blood, and the only draw is the sound.
+        let cossin = precompute_cossin();
+        let ty = small_explosion(-1);
+        let nts = nts_with_blood();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms = vec![worm_at(59, 50, 100)]; // x+9 -> OUT
+        let mut rand = seeded();
+
+        let mut refr = seeded();
+        refr.bound(2); // sound only
+        let expected_last = refr.last();
+
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, 100, &mut rand,
+        );
+
+        assert_eq!(worms[0].health, 100, "out-of-range worm takes no damage");
+        assert_eq!(worms[0].vel, Vec2::zero(), "out-of-range worm not nudged");
+        assert_eq!(nobjects.len(), 0, "out-of-range worm sprays no blood");
+        assert_eq!(rand.last(), expected_last, "only the sound rand drawn");
+    }
+
+    #[test]
+    fn worm_inside_box_with_zero_blood_setting_draws_no_blood_but_still_gates_sound() {
+        // blood = 0 -> kBloodAmount = 0: the blood loop runs zero times (no
+        // rand(128)/Create2 draws, no spawns), but the hit-sound rand(3) gate is
+        // STILL drawn (it is outside the `kBloodAmount > 0` guard). Discriminates
+        // the gate from the blood fan.
+        let cossin = precompute_cossin();
+        let ty = small_explosion(-1);
+        let nts = nts_with_blood();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms = vec![worm_at(57, 50, 100)];
+        let mut rand = seeded();
+
+        let mut refr = seeded();
+        refr.bound(2); // sound
+        // No blood draws (kBloodAmount == 0); straight to the gate.
+        if refr.bound(3) == 0 {
+            refr.bound(3);
+        }
+        let expected_last = refr.last();
+
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, 0, &mut rand,
+        );
+
+        // Still wounded (DoDamage runs regardless of blood), but no blood nobjects.
+        assert_eq!(worms[0].health, 98, "DoDamage still applied with blood = 0");
+        assert_eq!(nobjects.len(), 0, "blood = 0 -> no blood nobjects");
+        assert_eq!(
+            rand.last(),
+            expected_last,
+            "hit-sound gate drawn even when kBloodAmount == 0"
         );
     }
 
@@ -618,7 +849,7 @@ mod tests {
 
         sobject_create(
             &ty, cx, cy, 3, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, 100, &mut rand,
         );
 
         // Exact total draw count + order: rand.last matches the reference iff the
@@ -666,7 +897,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, 100, &mut rand,
         );
 
         assert_eq!(rand.last(), expected_last, "no dirt -> no rand(8) drawn");
@@ -759,7 +990,7 @@ mod tests {
         let mut rand = seeded();
         sobject_create(
             &ty, cx, cy, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &sprites, &textures, &mut sobjects, &mut rand,
+            &mut level, &cossin, &sprites, &textures, &mut sobjects, 100, &mut rand,
         );
 
         // (a) the carve's rand(2) is the LAST draw of the cluster.

@@ -157,6 +157,7 @@ fn sim_slice2_physics_matches_cpp_oracle() {
         Vec::new(),
         100,
         true,
+        100,
     );
 
     // Assert tick-0 components against the freshly-built state FIRST. Then drive

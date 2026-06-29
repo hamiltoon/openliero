@@ -208,6 +208,7 @@ fn sim_slice4a_fan_fire_matches_cpp_oracle() {
         objects.nobject_types.clone(),
         100,
         true,
+        100,
     );
 
     let check = |tick: u32, name: &str, got: u32, want: u32| {

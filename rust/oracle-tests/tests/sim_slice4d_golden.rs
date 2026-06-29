@@ -263,6 +263,7 @@ fn sim_slice4d_handgun_deferrals_match_cpp_oracle() {
         objects.nobject_types.clone(),
         0,
         true,
+        100,
     );
     // The 7x7 small-sprite bank is set post-construction (kept out of the
     // SimState::new arg list to leave the other slices' call sites unchanged). The

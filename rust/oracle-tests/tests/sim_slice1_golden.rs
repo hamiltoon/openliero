@@ -154,6 +154,7 @@ fn sim_slice1_tick0_hash_matches_cpp_oracle() {
         Vec::new(),
         100,
         true,
+        100,
     );
     let got_state = hash_game_state(&state);
     let c = hash_components(&state);

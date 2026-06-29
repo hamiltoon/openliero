@@ -154,6 +154,7 @@ fn fire_state() -> (SimState, Weapon, Vec2, u8, u8) {
         Vec::new(),
         100,
         true,
+        100,
     );
 
     // Aim flat-right at cossin index 32 (== (+max, 0); see precompute_cossin). It

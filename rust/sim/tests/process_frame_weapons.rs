@@ -182,6 +182,7 @@ fn open_state(weapon_slots: [WeaponInit; NUM_WEAPONS]) -> (SimState, Weapon) {
         objects.nobject_types.clone(),
         SETTINGS_LOADING_TIME,
         true, // load_change default
+        100,
     );
     // Aim straight up (cossin[64] = (0,-1)); index 64 sits at the left band's
     // aim_min_left limit, so process_aiming leaves it alone with no Up/Down input.
@@ -366,6 +367,7 @@ fn dig_carves_the_level_advances_rng_and_rearms_on_single_direction() {
         objects.nobject_types.clone(),
         SETTINGS_LOADING_TIME,
         true,
+        100,
     );
     // Down-left aim, inside the left band [12, 64] so process_aiming keeps it.
     s.worms[0].aiming_angle = itof(12);

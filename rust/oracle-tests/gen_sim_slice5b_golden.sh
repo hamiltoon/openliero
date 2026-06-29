@@ -3,13 +3,13 @@
 # N ticks of the FULL ProcessFrame subset (object loops BEFORE worms, then each
 # worm->Process: control/aim/Fire/weapon-timer) under SCRIPTED input, dumping per-tick
 # master + component hashes (see sim_physics_dump.cpp). Slice 5b adds only a new
-# scenario (worm0 FIRES the DART, which skims low-left into the dirt and EXPLODES into a
-# small_explosion sobject that WOUNDS the now-visible+grounded worm1 -> blood nobjects +
-# the live `bobjects` blood pool + carved level) and this driver; the dumper is the
-# slice-5b T0 build (object loops + `weapon <slot> <name>` directive + settings->shadow=
-# false + base StatsRecorder so a worm-hit does not crash headless + `++cycles` at the
-# game.cpp:357 point). The dart's explosion + worm-damage + blood reach SObject::Create /
-# NObject / BObject automatically — no dumper edit. Needs the full C++ build (links the
+# scenario (worm0 FIRES the EXPLOSIVES, whose 3 spread projectiles bounce + crawl
+# low-left and AIR-BURST into large_explosion sobjects that WOUND the now-visible+grounded
+# worm1 -> blood nobjects + the live `bobjects` blood pool + carved level) and this
+# driver; the dumper is the slice-5b T0 build (object loops + `weapon <slot> <name>`
+# directive + settings->shadow=false + base StatsRecorder so a worm-hit does not crash
+# headless + `++cycles` at the game.cpp:357 point). The explosion + worm-damage + blood
+# reach SObject::Create / NObject / BObject automatically — no dumper edit. Needs the full C++ build (links the
 # `game` target), so this is a LOCAL/MANUAL step — it is NOT run in the lightweight
 # rust.yml CI. Override PRESET for other platforms (e.g. linux-x64).
 set -euo pipefail

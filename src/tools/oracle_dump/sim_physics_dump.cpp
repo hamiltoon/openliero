@@ -211,6 +211,16 @@ int main(int argc, char** argv) {
   // is a pure no-op (the crashing subclass is `NormalStatsRecorder`, :44-77), so this is
   // inert for slices 1-5a — they never hit a worm.
   game.stats_recorder = std::make_shared<StatsRecorder>();
+  // StartGame parity for the blood pool: the real game sizes `bobjects` from
+  // `settings->blood_particle_max` in `Game::StartGame` (game.cpp:513). This dumper
+  // hand-rolls setup and never calls `StartGame` (it would play sounds / reset stats /
+  // spawn zones), so without this the `BObjectList` keeps its `FastObjectList` default
+  // limit of 1 — and `NewObjectReuse` then OVERWRITES that single slot on every
+  // `CreateBObject`, collapsing a whole blood spray to ONE particle (a dumper artifact,
+  // not real game behaviour). Resizing here mirrors `StartGame` so the golden's
+  // `bobjects` column reflects the true 700-cap pool the Rust `SimState` models. Inert
+  // for slices 1-5a (they spawn no bobjects). Uses no RNG.
+  game.bobjects.Resize(settings->blood_particle_max);
   game.rand.Seed(seed);
 
   // Load a FIXED level (NOT GenerateFromSettings, which would consume RNG). The

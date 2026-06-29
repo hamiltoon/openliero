@@ -8,7 +8,7 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-06-29 · **Current focus:** Step 2, Slice 4d (Slice-3 deferrals), T3/9 done (reload live); T4 load_change gate next
+> **Last updated:** 2026-06-29 · **Current focus:** Step 2, Slice 4d (Slice-3 deferrals), T4/9 done (all 5 deferrals ported); T5 driver integration next
 
 ---
 
@@ -45,7 +45,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 │   ├─ ✅ 4a  projectile lifecycle — fan (RNG goes live)         SHIPPED
 │   ├─ ✅ 4b  terrain destruction — greenball / DrawDirtEffect   SHIPPED (level hash live, 91 ticks bit-exact)
 │   ├─ ✅ 4c  explosion sobjects + nobjects — dart               SHIPPED (sobjects/nobjects live + carving, 91 ticks bit-exact)
-│   └─ 🔄 4d  slice-3/4 deferrals (dig body, reload, shell, …)   ◀── HERE (T3/9 done — reload live)
+│   └─ 🔄 4d  slice-3/4 deferrals (dig body, reload, shell, …)   ◀── HERE (T4/9 done — all 5 deferrals ported)
 ├─ ⬜ Slice 5  remaining object families (nobjects/sobjects/blood/bonuses)
 └─ ⬜ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match
 ```

@@ -218,7 +218,7 @@ Refines the breakdown's six-step ordering:
    tick-for-tick over 146 ticks incl. aim/jump/weapon-change/ninjarope phases.)
 4. **One weapon, full lifecycle.** `Worm::Fire` → `WObject::Process` (move, collide,
    explode) → terrain destruction → resulting `SObject`/`NObject`. Simplest
-   projectile first; the roadmap's headline milestone. **← 4a + 4b DONE & bit-exact**
+   projectile first; the roadmap's headline milestone. **← 4a + 4b + 4c DONE & bit-exact**
    (**4a = fan**, the explodes-into-nothing projectile: `worm_fire`/`weapon_fire`/
    `wobject_process`/`blow_up`, the driver promoted to a ProcessFrame subset
    `process_frame` (object loops before worms + Fire gate), C++ dumper extended with
@@ -228,7 +228,15 @@ Refines the breakdown's six-step ordering:
    branches), `blow_up`'s `dirt_effect` branch, `settings->shadow=false` in the dumper
    (O4), golden `sim_slice4b.txt` matches C++ master+components over 91 ticks — **the
    `level` hash is now a live time series** (`95f63601→ddd76202→63307ba3` across two
-   shots). 4c sobjects+nobjects / 4d Slice-3 deferrals planned next. 4a's milestone
+   shots). **4c = dart→small_explosion**: `sobject_create`/`sobject_process`, the
+   `nobject` family (`Create`/`Create1`/`Create2`/`Process`), `blow_up`'s
+   `create_on_exp` branch, and the driver's `sobjects`/`nobjects` loops go live — the
+   `sobjects` + `nobjects` pools are non-empty + hashed for the first time and the
+   carving `DrawDirtEffect` (texture 2, `n_draw_back=true`) carves the `level` for
+   real; golden `sim_slice4c.txt` matches C++ master+components over 91 ticks (rng flat
+   at the dart fire tick, the whole sound→dirt-throw→`Create2`→crater cluster at the
+   explode tick; a small `shot_type=1` enablement in `wobject_process` was needed; O5
+   confirmed, O9/O10/O11 recorded). 4d Slice-3 deferrals planned next. 4a's milestone
    also surfaced + fixed a latent `if(visible)` worm-gate bug.)
 5. **Remaining object families.** nobjects (incl. splinters), sobjects (blast →
    terrain + worm damage), bobjects (blood), bonuses (spawn/pickup). Each vs its

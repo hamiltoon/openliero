@@ -531,7 +531,7 @@ pub fn process_weapon_change(worm: &mut WormState, load_change: bool) {
 // ---------------------------------------------------------------------------
 
 /// Port of `Worm::ProcessMovement` (`src/game/worm.cpp:850-957`) — walk left/
-/// right, face the worm, and re-arm the dig (terrain dig body DEFERRED).
+/// right, face the worm, and the dig (terrain dig body ported in Slice-4d Task 1).
 ///
 /// Runs in step 11 of the per-worm pass when Change is *not* held (the driver's
 /// `else` branch; Task 5 wires it, and that branch also clears

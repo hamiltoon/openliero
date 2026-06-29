@@ -632,12 +632,14 @@ pub struct SimState {
     /// `Vec` and stay byte-identical. Carried now so Slice-4c's behaviour tasks
     /// have the table in place.
     pub nobject_types: Vec<NObjectType>,
-    /// C++ `Settings::loading_time` (`settings.hpp:75`): the reload countdown
-    /// written into `loading_left` when a weapon is selected (Slice-4d Task 1,
-    /// weapon-change gate). Default 100. **Not** hashed (settings scalar).
+    /// C++ `Settings::loading_time` (`settings.hpp:79`): the reload countdown
+    /// scaled into `loading_left` when a weapon depletes (Slice-4d reload). The
+    /// in-game default is 100, but the **oracle dumper sets it to 0**
+    /// (`sim_physics_dump.cpp`), so the slice-4d golden uses 0 (instant reload);
+    /// pass the value the scenario's dumper used. **Not** hashed (settings scalar).
     pub settings_loading_time: i32,
-    /// C++ `Settings::load_change` (`settings.hpp:79`): whether selecting a
-    /// weapon triggers a reload cycle (Slice-4d Task 1 gate). Default `true`.
+    /// C++ `Settings::load_change` (`settings.hpp:75`): whether a weapon can be
+    /// changed while still loading (Slice-4d weapon-change gate). Default `true`.
     /// **Not** hashed (settings scalar).
     pub load_change: bool,
 }

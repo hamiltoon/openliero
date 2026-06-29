@@ -223,7 +223,8 @@ pub enum WObjectOutcome {
 }
 
 /// Port of the single non-laser pass of `WObject::Process` (`weapon.cpp:127-338`)
-/// for the **fan** projectile shape.
+/// for the **fan** (ST_NORMAL) and **dart** (ST_TYPE1) projectile shapes — the two
+/// share an identical per-tick flight (see the `shot_type` guard below).
 ///
 /// Advances one wobject by one tick: integrate `pos += vel`, clamp `pos` at the
 /// level edges, test the next-step cell for a ground collision, apply gravity in
@@ -261,10 +262,16 @@ pub fn wobject_process(
     weapon: &Weapon,
     _rand: &mut Rand,
 ) -> WObjectOutcome {
-    // Deferred-branch guards (4b/4c). Fan satisfies every one; a config that
-    // would take an un-ported branch fails loudly in debug builds.
+    // Deferred-branch guards (4b/4c). Fan and dart satisfy every one (the dart
+    // trips only the shot_type guard, now relaxed to admit ST_TYPE1); a config
+    // that would take an un-ported branch fails loudly in debug builds.
+    // ST_NORMAL and ST_TYPE1 (the dart) share an identical per-tick flight: the
+    // C++ Process do-while body runs once for any non-laser, and the only
+    // shot_type-specific branches are the steering ones (2/3) and the laser loop
+    // guard (4) — ST_TYPE1 takes none of them and draws no rng (weapon.cpp:144-167,
+    // 336). ST_TYPE2/STEERABLE/laser STAY deferred.
     debug_assert!(
-        weapon.shot_type == ST_NORMAL,
+        weapon.shot_type == ST_NORMAL || weapon.shot_type == ST_TYPE1,
         "steerable/type2/laser Process branches deferred (4b/4c)"
     );
     debug_assert!(weapon.bounce == 0, "bounce Process branch deferred (4b/4c)");
@@ -1029,6 +1036,121 @@ mod tests {
             "fan Process draws no rng (rand.last unchanged)"
         );
         assert_eq!(obj.vel, Vec2::new(itof(2), 0), "gravity 0 -> vel unchanged");
+    }
+
+    // ---- Step 6: real dart (shot_type = 1) flows through Process -------------
+
+    // The REAL shipped dart, loaded from the TC config. shot_type = 1 (ST_TYPE1).
+    // Cross-ref lists are empty: none of the *Process* fields (shot_type, bounce,
+    // mult_speed, gravity, expl_ground, time_to_explo, num_frames, the trail
+    // delays) depend on a cross-ref, and the two trail object refs are ABSENT from
+    // dart.cfg so they resolve via the empty-string sentinel to -1 regardless of
+    // the lists. `createOnExp = "small_explosion"` resolves to 0 here, but
+    // create_on_exp is unused by `wobject_process`, so the flight is unaffected.
+    fn dart_weapon_real(id: i32) -> Weapon {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/TC/openliero/weapons/dart.cfg"
+        ));
+        let mut w = Weapon::load(bytes, &[], &[], &[]).unwrap();
+        w.id = id;
+        w
+    }
+
+    #[test]
+    fn dart_resolved_process_fields_trip_only_the_shot_type_guard() {
+        // Empirical resolution of the REAL dart: it is shot_type = 1 (ST_TYPE1),
+        // so it trips ONLY the relaxed shot_type guard. Every OTHER deferred-branch
+        // guard is satisfied by the resolved config — in particular both trail
+        // object refs resolve to the -1 "no trail" sentinel (dart.cfg omits
+        // objTrailType/partTrailObj -> "" -> obj_ref_from_str -> -1), even though
+        // the trail DELAYS are 0. So no trail guard needs relaxing.
+        let dart = dart_weapon_real(1);
+        assert_eq!(dart.shot_type, ST_TYPE1, "dart is shot_type = 1 (ST_TYPE1)");
+        assert_eq!(dart.bounce, 0, "dart bounce = 0 (guard satisfied)");
+        assert_eq!(dart.mult_speed, 100, "dart mult_speed = 100 (guard satisfied)");
+        assert_eq!(dart.num_frames, 0, "dart num_frames = 0 (guard satisfied)");
+        assert_eq!(
+            dart.obj_trail_type, -1,
+            "dart obj_trail_type = -1 (no obj trail; guard satisfied)"
+        );
+        assert_eq!(
+            dart.part_trail_obj, -1,
+            "dart part_trail_obj = -1 (no part trail; guard satisfied)"
+        );
+        // Flight knobs that differ from fan but are already handled by Process.
+        assert_eq!(dart.gravity, 200, "dart gravity = 200");
+        assert_eq!(
+            dart.time_to_explo, 0,
+            "dart time_to_explo = 0 -> no countdown (guard gates it)"
+        );
+        assert!(dart.expl_ground, "dart expl_ground = true");
+    }
+
+    #[test]
+    fn dart_flows_through_process_like_a_normal_projectile() {
+        // The REAL dart (shot_type = 1) must flow through wobject_process WITHOUT
+        // panicking on the (now relaxed) shot_type guard and arc under gravity
+        // exactly as a NORMAL projectile would — the C++ Process do-while body runs
+        // once for any non-laser, and ST_TYPE1 takes none of the shot_type-specific
+        // branches (the steering branches are 2/3, the laser is the loop guard).
+        // cur_frame is set deterministically at Fire by the ST_TYPE1 clamp; with
+        // num_frames = 0 the animation never runs, so Process leaves it FROZEN.
+        let dart = dart_weapon_real(1);
+        let level = air_level();
+
+        // A Fire-set cur_frame in the ST_TYPE1 clamp range [0, 12] — a DETERMINISTIC
+        // value, NOT a colour-rand value (dart color_bullets = 0, so the colour-rand
+        // path would have produced 0 - rand(2); shot_type = 1 never takes it).
+        const FIRE_CUR_FRAME: i32 = 7;
+        let vel0 = Vec2::new(itof(3), itof(-2));
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(200)),
+            vel: vel0,
+            cur_frame: FIRE_CUR_FRAME,
+            time_left: 0, // dart time_to_explo = 0 -> never decremented, never times out
+            ty: Some(dart.id),
+            ..WObject::default()
+        };
+
+        // Process must draw NO rng for this config (no steering rand, no
+        // particle-trail rand, no worm-hit rand). Pre-advance, snapshot, compare.
+        let mut rand = seeded();
+        rand.bound(1000);
+        let last_before = rand.last();
+
+        // Independent expected arc, identical to the fan/ST_NORMAL flight path
+        // (see fan_free_flight_*): pos += vel using the CURRENT vel, THEN free-air
+        // gravity is added to vel.y for the next tick.
+        let mut exp_pos = obj.pos;
+        let mut exp_vel = vel0;
+        for tick in 0..5 {
+            let out = wobject_process(&mut obj, &level, &dart, &mut rand);
+            assert_eq!(
+                out,
+                WObjectOutcome::Keep,
+                "dart free flight keeps on tick {tick}"
+            );
+            exp_pos = exp_pos.add(exp_vel);
+            exp_vel.y = exp_vel.y.wrapping_add(dart.gravity);
+            assert_eq!(obj.pos, exp_pos, "dart pos arcs under gravity on tick {tick}");
+            assert_eq!(obj.vel, exp_vel, "dart vel gains gravity on tick {tick}");
+            assert_eq!(
+                obj.cur_frame, FIRE_CUR_FRAME,
+                "num_frames = 0 -> cur_frame frozen on tick {tick}"
+            );
+        }
+
+        // No rng drawn: the dart's Process path is rand-free, identical to fan.
+        assert_eq!(
+            rand.last(),
+            last_before,
+            "dart Process draws no rng (the _rand param is unused for this config)"
+        );
+        assert_eq!(
+            obj.cur_frame, FIRE_CUR_FRAME,
+            "cur_frame stayed the deterministic Fire value across all ticks"
+        );
     }
 
     // ---- blow_up: dirt_effect branch (greenball) + fan regression ----------

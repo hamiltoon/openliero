@@ -245,6 +245,16 @@ mod tests {
             bobj_gravity: 0,
             settings_max_bonuses: 0,
             bonus_drop_chance: 0,
+            bonus_spawn_rect_w: 0,
+            bonus_spawn_rect_h: 0,
+            bonus_spawn_rect_x: 0,
+            bonus_spawn_rect_y: 0,
+            h_bonus_spawn_rect: false,
+            h_bonus_only_health: false,
+            h_bonus_only_weapon: false,
+            h_bonus_disable: false,
+            bonus_rand_timer: [[0, 0], [0, 0]],
+            weap_table: Vec::new(),
         }
     }
 
@@ -471,6 +481,7 @@ mod tests {
             timer: 30,
             weapon: 2,
             frame: 1,
+            vel_y: 99, // decoy: vel_y is NOT hashed
         });
         state.bobjects.spawn(BObject {
             pos: Vec2::new(-1, -2),

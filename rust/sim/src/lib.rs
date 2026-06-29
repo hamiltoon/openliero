@@ -11,6 +11,7 @@
 
 pub mod blit;
 pub mod bobject;
+pub mod bonus;
 pub mod control;
 pub mod hash;
 pub mod nobject;

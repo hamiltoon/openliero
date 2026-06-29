@@ -372,6 +372,14 @@ impl WormState {
 // ---------------------------------------------------------------------------
 
 /// A weapon bonus crate. Hash reads `x, y, timer, weapon, frame`.
+///
+/// `vel_y` mirrors C++ `Bonus::vel_y` (`bonus.hpp`): the fixed-point fall
+/// velocity `Game::CreateBonus` writes (`game.cpp:250`, set to 0 at spawn) and
+/// `Bonus::Process` integrates. It is **not** hashed (the C++ `stateHash` / Rust
+/// `hash.rs` bonus fold reads `x, y, timer, weapon, frame` only), so adding it
+/// leaves the bonus hash and slices 1-5b goldens unchanged. `Bonus::Process` (the
+/// reader) is deferred to Slice-5c Task 3; carried now so the T2 spawn writes the
+/// full C++ field set.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Bonus {
     pub x: i32,
@@ -379,6 +387,8 @@ pub struct Bonus {
     pub timer: i32,
     pub weapon: i32,
     pub frame: i32,
+    /// C++ `Bonus::vel_y`. Default 0. Not hashed (fall velocity for T3).
+    pub vel_y: i32,
 }
 
 /// A weapon projectile. Hash reads `pos, vel, cur_frame, time_left, ty.id`.
@@ -745,17 +755,52 @@ pub struct SimState {
     /// after `new`, the same post-`new` pattern as the blood consts. **Not** hashed
     /// (TC scalar; the resulting bonus position would hash, but spawning is deferred).
     pub bonus_drop_chance: i32,
-}
 
-/// `Game::CreateBonus` (`game.cpp:216`) tripwire — DEFERRED to Slice-5c Task 2. The
-/// per-tick bonus-drop roll in [`SimState::process_frame`] only reaches here when
-/// `settings_max_bonuses > 0 && rand(CBonusDropChance) == 0`, which never holds for the
-/// slice 1-5b scenarios (no `max_bonuses` directive -> default 0 -> the roll
-/// short-circuits before this). T2 replaces this with the real spawn (the
-/// `rand(BonusSpawnRectW/H)` placement loop). Panicking here makes any premature
-/// reach during T0 testing loud rather than silently spawning nothing.
-fn create_bonus() {
-    unimplemented!("CreateBonus is deferred to Slice-5c Task 2 (T0 adds only the gated roll)");
+    // --- Slice 5c T2: `Game::CreateBonus` constants (game.cpp:216-265) --------
+    // The bonus-spawn search/draw inputs `create_bonus` reads once a bonus-drop
+    // roll fires. Like the blood consts they are **defaulted (0/false/empty)**
+    // here and assigned the real TC values by the difftest AFTER `new` (NO
+    // `SimState::new` signature change) — left at the defaults `create_bonus` is
+    // never reached (the roll is gated on `max_bonuses > 0`, which slices 1-5b
+    // never set), so those goldens stay byte-identical. **None are hashed.**
+    /// C++ `LC(BonusSpawnRectW)` (`common.c[CBonusSpawnRectW]`): the bound of the
+    /// per-trial `rand(BonusSpawnRectW)` x-placement draw (`game.cpp:224`).
+    pub bonus_spawn_rect_w: i32,
+    /// C++ `LC(BonusSpawnRectH)`: the bound of the per-trial `rand(BonusSpawnRectH)`
+    /// y-placement draw (`game.cpp:225`).
+    pub bonus_spawn_rect_h: i32,
+    /// C++ `LC(BonusSpawnRectX)`: the x-offset added to the placement **only** when
+    /// the `HBonusSpawnRect` hack is set (`game.cpp:228`). Inert in this TC (hack off).
+    pub bonus_spawn_rect_x: i32,
+    /// C++ `LC(BonusSpawnRectY)`: the y-offset added when `HBonusSpawnRect` is set
+    /// (`game.cpp:229`). Inert in this TC.
+    pub bonus_spawn_rect_y: i32,
+    /// C++ `common.h[HBonusSpawnRect]`: when set, offset the placement by
+    /// `BonusSpawnRectX/Y` (`game.cpp:227`). False in the openliero TC.
+    pub h_bonus_spawn_rect: bool,
+    /// C++ `common.h[HBonusOnlyHealth]`: when set, force `frame = 1` (a health
+    /// bonus) instead of drawing `rand(2)` (`game.cpp:235`). False in this TC.
+    pub h_bonus_only_health: bool,
+    /// C++ `common.h[HBonusOnlyWeapon]`: when set, force `frame = 0` (a weapon
+    /// bonus) instead of drawing `rand(2)` (`game.cpp:237`). False in this TC.
+    pub h_bonus_only_weapon: bool,
+    /// C++ `common.h[HBonusDisable]`: when set, suppress the per-tick bonus-drop
+    /// roll entirely (`game.cpp:359`, the `!h[HBonusDisable] && …` gate). False in
+    /// the openliero TC; threaded for dumper symmetry (the T0 review flagged the
+    /// missing term). Folded into [`process_frame`]'s roll gate.
+    pub h_bonus_disable: bool,
+    /// C++ `common.bonus_rand_timer[NUM_BONUS_SOBJECTS][2]` (`common.hpp:168`):
+    /// per-`frame` `[base, range]`, where the spawn timer is `rand(range) + base`
+    /// (`game.cpp:252`). `NUM_BONUS_SOBJECTS == 2`, so the two rows are frames 0
+    /// (weapon) and 1 (health). Defaulted to zeros; the difftest assigns the TC's
+    /// `constants.bonuses[i].{timer, timer_v}`.
+    pub bonus_rand_timer: [[i32; 2]; 2],
+    /// C++ `settings->weap_table` (`settings.hpp`): the per-weapon availability
+    /// table (0/1/2). The weapon-bonus reject loop (`game.cpp:256-258`) re-draws
+    /// `rand(weapons.size())` while `weap_table[w] == 2` (a banned weapon).
+    /// Defaulted empty; the difftest assigns the real per-weapon table. Read only
+    /// for a `frame == 0` bonus (when `max_bonuses > 0`).
+    pub weap_table: Vec<i32>,
 }
 
 impl SimState {
@@ -847,6 +892,20 @@ impl SimState {
             // the blood consts) for the 5c scenario that makes the bonus pool live.
             settings_max_bonuses: 0,
             bonus_drop_chance: 0,
+            // CreateBonus constants: defaulted (0/false/empty). create_bonus is only
+            // reached when `max_bonuses > 0` (slices 1-5b never set it), so these stay
+            // inert and the priors stay byte-identical; the difftest assigns the real
+            // TC values after `new` (post-`new` pattern, like the blood consts).
+            bonus_spawn_rect_w: 0,
+            bonus_spawn_rect_h: 0,
+            bonus_spawn_rect_x: 0,
+            bonus_spawn_rect_y: 0,
+            h_bonus_spawn_rect: false,
+            h_bonus_only_health: false,
+            h_bonus_only_weapon: false,
+            h_bonus_disable: false,
+            bonus_rand_timer: [[0, 0], [0, 0]],
+            weap_table: Vec::new(),
         }
     }
 
@@ -934,6 +993,17 @@ impl SimState {
             bobj_gravity,
             settings_max_bonuses,
             bonus_drop_chance,
+            bonus_spawn_rect_w,
+            bonus_spawn_rect_h,
+            bonus_spawn_rect_x,
+            bonus_spawn_rect_y,
+            h_bonus_spawn_rect,
+            h_bonus_only_health,
+            h_bonus_only_weapon,
+            h_bonus_disable,
+            bonus_rand_timer,
+            weap_table,
+            bonuses,
             cycles,
             ..
         } = self;
@@ -946,6 +1016,14 @@ impl SimState {
         let bobj_gravity = *bobj_gravity;
         let settings_max_bonuses = *settings_max_bonuses;
         let bonus_drop_chance = *bonus_drop_chance;
+        let bonus_spawn_rect_w = *bonus_spawn_rect_w;
+        let bonus_spawn_rect_h = *bonus_spawn_rect_h;
+        let bonus_spawn_rect_x = *bonus_spawn_rect_x;
+        let bonus_spawn_rect_y = *bonus_spawn_rect_y;
+        let h_bonus_spawn_rect = *h_bonus_spawn_rect;
+        let h_bonus_only_health = *h_bonus_only_health;
+        let h_bonus_only_weapon = *h_bonus_only_weapon;
+        let h_bonus_disable = *h_bonus_disable;
         // The object loops read `cycles` as a value for the `cycles % delay` /
         // `cycles & 7` gates inside `nobject_process`. They must see the value left by
         // the PREVIOUS tick's increment (cycles=k-1 on tick k) — exactly as the C++
@@ -1089,17 +1167,45 @@ impl SimState {
         *cycles = cycles.wrapping_add(1);
 
         // Bonus-drop roll (`game.cpp:359-362`), at the exact game.cpp:359 point — AFTER
-        // `++cycles`, BEFORE the worm loop. Gated on `settings_max_bonuses > 0` (C++
-        // `settings->max_bonuses`): the `&&` short-circuits left-to-right, so
-        // `max_bonuses == 0` draws NO rand. THE WIN vs 5b: every prior scenario sets no
-        // `max_bonuses` directive (-> default 0), so the roll never fires and slices
-        // 1-5b stay byte-identical (no golden regen). `HBonusDisable` is false in the
-        // openliero TC, so it does not gate here (omitted). The `rand(CBonusDropChance)`
-        // draw uses the SAME shared RNG at this load-bearing position. On a 0 roll it
-        // would `CreateBonus` — DEFERRED to Slice-5c Task 2 (the tripwire below); it is
-        // unreachable until a scenario sets `max_bonuses > 0` (5c's, threaded by T6).
-        if settings_max_bonuses > 0 && rand.bound(bonus_drop_chance as u32) == 0 {
-            create_bonus();
+        // `++cycles`, BEFORE the worm loop. The full C++ gate is
+        // `!h[HBonusDisable] && max_bonuses > 0 && rand(CBonusDropChance) == 0` and the
+        // `&&` short-circuits left-to-right: `HBonusDisable` set or `max_bonuses == 0`
+        // both draw NO rand. THE WIN vs 5b: every prior scenario leaves `max_bonuses` at
+        // its default 0, so the roll never fires and slices 1-5b stay byte-identical (no
+        // golden regen). `HBonusDisable` is false in the openliero TC (so it never gates
+        // here in practice) but the term is threaded for dumper symmetry — T0's review
+        // flagged its absence. The `rand(CBonusDropChance)` draw uses the SAME shared RNG
+        // at this load-bearing position; on a 0 roll it runs `create_bonus` (T2 port).
+        if !h_bonus_disable
+            && settings_max_bonuses > 0
+            && rand.bound(bonus_drop_chance as u32) == 0
+        {
+            crate::bonus::create_bonus(
+                bonuses,
+                level,
+                worms,
+                wobjects,
+                nobjects,
+                sobjects,
+                weapons,
+                nobject_types,
+                sobject_types,
+                cossin,
+                large_sprites,
+                textures,
+                blood,
+                settings_max_bonuses,
+                bonus_spawn_rect_w,
+                bonus_spawn_rect_h,
+                bonus_spawn_rect_x,
+                bonus_spawn_rect_y,
+                h_bonus_spawn_rect,
+                h_bonus_only_health,
+                h_bonus_only_weapon,
+                bonus_rand_timer,
+                weap_table,
+                rand,
+            );
         }
 
         for (i, w) in worms.iter_mut().enumerate() {
@@ -2178,12 +2284,15 @@ mod tests {
         let mut reference = Rand::new();
         reference.seed(42);
         let bounded = reference.bound(11);
-        // The roll calls the (deferred) create_bonus tripwire iff the bounded draw is 0.
-        // Guard the seed/chance so it is NOT 0 — otherwise process_frame would panic in
-        // the T0 tripwire. If a future RNG change makes this 0, the assert fails loudly.
+        // The roll runs create_bonus iff the bounded draw is 0. This test isolates the
+        // SINGLE bonus-drop roll draw, so guard the seed/chance to keep it NON-zero —
+        // otherwise create_bonus would fire and draw its own placement cluster, and
+        // `rand.last()` would no longer equal the reference's single draw. (create_bonus
+        // itself is covered by the bonus.rs unit tests.) If a future RNG change makes
+        // this 0, the assert fails loudly.
         assert_ne!(
             bounded, 0,
-            "test seed/chance must avoid the deferred create_bonus tripwire (roll != 0)"
+            "test seed/chance must keep the roll != 0 so it isolates the single draw"
         );
 
         state.process_frame(&[]);

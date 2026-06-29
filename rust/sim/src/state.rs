@@ -950,7 +950,7 @@ impl SimState {
                 .ty
                 .expect("live wobject must carry a resolved weapon type")
                 as usize];
-            match wobject_process(&mut obj, level, weapon, rand) {
+            match wobject_process(&mut obj, level, weapon, cycles_now, rand) {
                 WObjectOutcome::Keep => {
                     *wobjects.get_mut(slot).expect("slot still live") = obj;
                 }

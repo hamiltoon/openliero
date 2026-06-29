@@ -245,11 +245,17 @@ pub enum WObjectOutcome {
 /// collision test (line 249). The clamp mutates `pos`; `inew` is frozen — that
 /// ordering is load-bearing, so we mirror it exactly.
 ///
+/// **`bounce` and the `num_frames` animation are now LIVE** (Slice-5b T4a), so a
+/// closed-gate weapon (explosives: `bounce=30`, `num_frames=3`, `loop_anim=true`)
+/// flies. Both are RNG-free; the bounce mirrors the nobject bounce
+/// (`nobject.rs:300-324`) and the animation gates on the pre-`++cycles` snapshot
+/// `(cycles & 7) == 0` (the same threading the nobject animation uses).
+///
 /// Deferred / inert branches (guarded by `debug_assert!` so a non-fan config
 /// trips loudly, or omitted because they need state the driver owns):
-/// steering (`shot_type` 2/3) and the laser do-loop, `bounce`, `mult_speed`,
-/// object/particle trails, and projectile animation are all `debug_assert`ed to
-/// their fan-shaped no-op values. The `collide_with_objects` impulse loop and
+/// steering (`shot_type` 2/3) and the laser do-loop, `mult_speed`, and
+/// object/particle trails are all `debug_assert`ed to their fan-shaped no-op
+/// values. The `collide_with_objects` impulse loop and
 /// the worm-hit loop need the object pools / worm list and draw no RNG under the
 /// 4a single-shot scenario (self-skip, worms out of range), so they are omitted
 /// here and land in 4b/4c with the driver. The `RemExp` early-explode block
@@ -261,6 +267,7 @@ pub fn wobject_process(
     obj: &mut WObject,
     level: &LevelSim,
     weapon: &Weapon,
+    cycles: i32,
     _rand: &mut Rand,
 ) -> WObjectOutcome {
     // Deferred-branch guards (4b/4c). Fan and dart satisfy every one (the dart
@@ -275,7 +282,6 @@ pub fn wobject_process(
         weapon.shot_type == ST_NORMAL || weapon.shot_type == ST_TYPE1,
         "steerable/type2/laser Process branches deferred (4b/4c)"
     );
-    debug_assert!(weapon.bounce == 0, "bounce Process branch deferred (4b/4c)");
     debug_assert!(
         weapon.mult_speed == 100,
         "mult_speed Process branch deferred (4b/4c)"
@@ -288,10 +294,6 @@ pub fn wobject_process(
         weapon.part_trail_obj < 0,
         "particle-trail spawn deferred (4b/4c)"
     );
-    debug_assert!(
-        weapon.num_frames == 0,
-        "projectile animation deferred (4b/4c)"
-    );
 
     let mut do_explode = false;
 
@@ -300,6 +302,56 @@ pub fn wobject_process(
 
     // pos += vel.
     obj.pos = obj.pos.add(obj.vel);
+
+    // Bounce (weapon.cpp:169-190) — SAME pattern as the nobject bounce
+    // (nobject.rs:300-324). Natural C++ guard `bounce > 0` (skipped for fan/dart,
+    // bounce=0; explosives bounce=30). Two sequential terrain probes mutate `vel`
+    // in place: ipos = Ftoi(pos), inew = Ftoi(pos + vel) computed HERE (the second
+    // probe reads what the first wrote). `bounce != 100`: reflect-and-damp
+    // (vel.x = -vel.x*bounce/100, vel.y = vel.y*4/5; symmetric for the y probe);
+    // `bounce == 100`: pure negate. No rand. Truncating `/100`, `*4/5`. The
+    // boundary-clamp `inew` below is recomputed from the POST-bounce vel (matching
+    // the C++ recompute at :234), so a reflected vel feeds the ground test.
+    if weapon.bounce > 0 {
+        let ipos_x = ftoi(obj.pos.x);
+        let ipos_y = ftoi(obj.pos.y);
+        let b_inew_x = ftoi(obj.pos.x.wrapping_add(obj.vel.x));
+        let b_inew_y = ftoi(obj.pos.y.wrapping_add(obj.vel.y));
+
+        // :173 x probe: (inew.x, ipos.y).
+        if !level.inside(b_inew_x, ipos_y) || level.dirt_rock(b_inew_x, ipos_y) {
+            if weapon.bounce != 100 {
+                // :175 vel.x = -vel.x * bounce / 100; :176 vel.y = (vel.y * 4) / 5.
+                obj.vel.x = obj
+                    .vel
+                    .x
+                    .wrapping_neg()
+                    .wrapping_mul(weapon.bounce)
+                    .wrapping_div(100);
+                obj.vel.y = obj.vel.y.wrapping_mul(4).wrapping_div(5);
+            } else {
+                // :178 vel.x = -vel.x.
+                obj.vel.x = obj.vel.x.wrapping_neg();
+            }
+        }
+
+        // :182 y probe: (ipos.x, inew.y).
+        if !level.inside(ipos_x, b_inew_y) || level.dirt_rock(ipos_x, b_inew_y) {
+            if weapon.bounce != 100 {
+                // :184 vel.y = -vel.y * bounce / 100; :185 vel.x = (vel.x * 4) / 5.
+                obj.vel.y = obj
+                    .vel
+                    .y
+                    .wrapping_neg()
+                    .wrapping_mul(weapon.bounce)
+                    .wrapping_div(100);
+                obj.vel.x = obj.vel.x.wrapping_mul(4).wrapping_div(5);
+            } else {
+                // :187 vel.y = -vel.y.
+                obj.vel.y = obj.vel.y.wrapping_neg();
+            }
+        }
+    }
 
     // The collide_with_objects impulse loop (weapon.cpp:212-232) and the worm-hit
     // loop (287-326) go here in C++; omitted (driver-owned + inert for one shot;
@@ -334,9 +386,39 @@ pub fn wobject_process(
             }
         }
     } else {
-        // Free air: apply gravity (fan gravity 0 -> no-op). The num_frames
-        // animation that follows in C++ is deferred (guarded above).
+        // Free air: apply gravity (fan gravity 0 -> no-op).
         obj.vel.y = obj.vel.y.wrapping_add(weapon.gravity);
+
+        // Animation (weapon.cpp:260-278) — INSIDE the air branch, AFTER gravity.
+        // Natural C++ guard `num_frames > 0` (inert for fan/dart, num_frames=0;
+        // explosives num_frames=3). cur_frame advances only when `(cycles & 7) == 0`
+        // — `cycles` is the SAME pre-`++cycles` snapshot the rest of the tick sees
+        // (the T0 threading; the object loops run before `++cycles`), so it matches
+        // the nobject animation gate. `cur_frame` IS hashed (wobject master folds
+        // it), so this advance is load-bearing. No rand. `loop_anim` picks the
+        // vel.x-direction branch (explosives loopAnim=true); the non-loop branch is
+        // a plain `++` wrap.
+        if weapon.num_frames > 0 && (cycles & 7) == 0 {
+            if !weapon.loop_anim {
+                // :263 if (++cur_frame > num_frames) cur_frame = 0.
+                obj.cur_frame += 1;
+                if obj.cur_frame > weapon.num_frames {
+                    obj.cur_frame = 0;
+                }
+            } else if obj.vel.x < 0 {
+                // :268 if (--cur_frame < 0) cur_frame = num_frames.
+                obj.cur_frame -= 1;
+                if obj.cur_frame < 0 {
+                    obj.cur_frame = weapon.num_frames;
+                }
+            } else if obj.vel.x > 0 {
+                // :272 if (++cur_frame > num_frames) cur_frame = 0.
+                obj.cur_frame += 1;
+                if obj.cur_frame > weapon.num_frames {
+                    obj.cur_frame = 0;
+                }
+            }
+        }
     }
 
     // Explosion timer (weapon.cpp:281-285): the decrement only happens when
@@ -885,7 +967,7 @@ mod tests {
 
         let mut expected = obj.pos;
         for tick in 0..3 {
-            let out = wobject_process(&mut obj, &level, &fan, &mut rand);
+            let out = wobject_process(&mut obj, &level, &fan, 0, &mut rand);
             assert_eq!(out, WObjectOutcome::Keep, "tick {tick} keeps the object");
             expected = expected.add(vel);
             assert_eq!(obj.pos, expected, "pos advanced by vel on tick {tick}");
@@ -917,7 +999,7 @@ mod tests {
                 ..WObject::default()
             };
             let mut rand = seeded();
-            wobject_process(&mut obj, &level, &w, &mut rand);
+            wobject_process(&mut obj, &level, &w, 0, &mut rand);
             obj
         };
 
@@ -959,7 +1041,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        let out = wobject_process(&mut obj, &level, &w, &mut rand);
+        let out = wobject_process(&mut obj, &level, &w, 0, &mut rand);
         assert_eq!(
             out,
             WObjectOutcome::Explode,
@@ -981,7 +1063,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        let out = wobject_process(&mut obj, &level, &w, &mut rand);
+        let out = wobject_process(&mut obj, &level, &w, 0, &mut rand);
         assert_eq!(out, WObjectOutcome::Keep, "free air -> Keep");
         assert_eq!(obj.vel.y, 1000, "air branch adds gravity to vel.y");
     }
@@ -1000,7 +1082,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        let out = wobject_process(&mut obj, &level, &w, &mut rand);
+        let out = wobject_process(&mut obj, &level, &w, 0, &mut rand);
         assert_eq!(out, WObjectOutcome::Keep, "no expl_ground -> Keep");
         assert_eq!(
             obj.vel,
@@ -1030,7 +1112,7 @@ mod tests {
         };
         let mut rand = seeded();
         assert_eq!(
-            wobject_process(&mut at_zero, &level, &fan, &mut rand),
+            wobject_process(&mut at_zero, &level, &fan, 0, &mut rand),
             WObjectOutcome::Explode,
             "time_left 0 -> explodes on this tick"
         );
@@ -1045,7 +1127,7 @@ mod tests {
         };
         let mut rand2 = seeded();
         assert_eq!(
-            wobject_process(&mut at_one, &level, &fan, &mut rand2),
+            wobject_process(&mut at_one, &level, &fan, 0, &mut rand2),
             WObjectOutcome::Keep,
             "time_left 1 -> survives this tick"
         );
@@ -1074,7 +1156,7 @@ mod tests {
             ty: Some(fan.id),
             ..WObject::default()
         };
-        let out = wobject_process(&mut obj, &level, &fan, &mut rand);
+        let out = wobject_process(&mut obj, &level, &fan, 0, &mut rand);
 
         assert_eq!(out, WObjectOutcome::Keep, "free flight keeps");
         assert_eq!(
@@ -1172,7 +1254,7 @@ mod tests {
         let mut exp_pos = obj.pos;
         let mut exp_vel = vel0;
         for tick in 0..5 {
-            let out = wobject_process(&mut obj, &level, &dart, &mut rand);
+            let out = wobject_process(&mut obj, &level, &dart, 0, &mut rand);
             assert_eq!(
                 out,
                 WObjectOutcome::Keep,
@@ -1198,6 +1280,293 @@ mod tests {
             obj.cur_frame, FIRE_CUR_FRAME,
             "cur_frame stayed the deterministic Fire value across all ticks"
         );
+    }
+
+    // ====================================================================
+    // Slice-5b T4a: bounce + animation FLIGHT branches (RNG-free)
+    // ====================================================================
+
+    // A synthetic projectile shaped like a closed-gate weapon's Process path:
+    // shot_type normal, mult_speed 100, no trails, bounce/num_frames/loop_anim set
+    // explicitly by the test. gravity 0 so the air branch leaves vel untouched and
+    // the reflected/animated state is read cleanly; time_to_explo 0 so no countdown
+    // (every tick returns Keep). expl_ground false.
+    fn bounce_weapon(bounce: i32) -> Weapon {
+        Weapon {
+            id: 1,
+            shot_type: ST_NORMAL,
+            bounce,
+            mult_speed: 100,
+            gravity: 0,
+            expl_ground: false,
+            time_to_explo: 0,
+            num_frames: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    fn anim_weapon(num_frames: i32, loop_anim: bool) -> Weapon {
+        Weapon {
+            id: 1,
+            shot_type: ST_NORMAL,
+            bounce: 0,
+            mult_speed: 100,
+            gravity: 0,
+            expl_ground: false,
+            time_to_explo: 0,
+            num_frames,
+            loop_anim,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    // ---- bounce (weapon.cpp:169-190), mirroring the nobject bounce -----------
+
+    #[test]
+    fn bounce_x_probe_reflects_and_damps_for_bounce_30() {
+        // floor_level: rock at (10,10). Initial pos (8,10), vel (1,0): after
+        // pos += vel pos = (9,10), so ipos = (9,10), inew = Ftoi(pos+vel) = (10,10).
+        // x probe (inew.x=10, ipos.y=10) hits the rock -> fires. y probe
+        // (ipos.x=9, inew.y=10) at cell (9,10) is empty -> does NOT fire.
+        let w = bounce_weapon(30);
+        let level = floor_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(8), itof(10)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        let out = wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep, "bounce -> Keep (no ground explode)");
+        // vel.x = -vel.x * 30 / 100 = -65536*30/100 = -1966080/100 = -19660 (trunc).
+        assert_eq!(obj.vel.x, -19660, "x probe: vel.x = -vel.x*bounce/100");
+        // vel.y = vel.y*4/5 = 0.
+        assert_eq!(obj.vel.y, 0, "x probe: vel.y = vel.y*4/5 (0 here)");
+    }
+
+    #[test]
+    fn bounce_y_probe_reflects_and_damps_for_bounce_30() {
+        // Initial pos (10,8), vel (0,1): after pos += vel pos = (10,9), so
+        // ipos = (10,9), inew = (10,10). x probe (inew.x=10, ipos.y=9) at cell
+        // (10,9) is empty -> no fire. y probe (ipos.x=10, inew.y=10) hits rock.
+        let w = bounce_weapon(30);
+        let level = floor_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(10), itof(8)),
+            vel: Vec2::new(0, itof(1)),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        let out = wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep, "bounce -> Keep");
+        // vel.y = -vel.y*30/100 = -19660; vel.x = vel.x*4/5 = 0.
+        assert_eq!(obj.vel.y, -19660, "y probe: vel.y = -vel.y*bounce/100");
+        assert_eq!(obj.vel.x, 0, "y probe: vel.x = vel.x*4/5 (0 here)");
+    }
+
+    #[test]
+    fn bounce_100_pure_negates_velocity() {
+        // bounce == 100: the x probe pure-negates vel.x (no damp), vel.y untouched.
+        let w = bounce_weapon(100);
+        let level = floor_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(8), itof(10)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(obj.vel.x, itof(-1), "bounce 100: vel.x = -vel.x (pure negate)");
+        assert_eq!(obj.vel.y, 0, "bounce 100: vel.y untouched by x probe");
+    }
+
+    #[test]
+    fn bounce_open_air_does_not_reflect() {
+        // air_level: every cell in range is empty, so neither probe fires; with
+        // gravity 0 the vel is exactly unchanged.
+        let w = bounce_weapon(30);
+        let level = air_level();
+        let mut rand = seeded();
+        let vel = Vec2::new(itof(3), itof(-2));
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(200)),
+            vel,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(obj.vel, vel, "open air: no probe fires, vel unchanged");
+    }
+
+    #[test]
+    fn bounce_draws_no_rng() {
+        // The bounce branch is RNG-free: a bouncing tick must not touch the RNG.
+        let w = bounce_weapon(30);
+        let level = floor_level();
+        let mut rand = seeded();
+        rand.bound(1000);
+        let last_before = rand.last();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(8), itof(10)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(rand.last(), last_before, "bounce draws no rng");
+    }
+
+    // ---- animation (weapon.cpp:260-278), gated on (cycles & 7) == 0 ----------
+
+    #[test]
+    fn anim_loop_advances_forward_on_positive_vel_x_when_cycles_gate_open() {
+        // loop_anim + vel.x > 0 + (cycles & 7) == 0 -> ++cur_frame.
+        let w = anim_weapon(3, true);
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        wobject_process(&mut obj, &level, &w, 8, &mut rand); // 8 & 7 == 0
+        assert_eq!(obj.cur_frame, 2, "vel.x>0, gate open: cur_frame 1 -> 2");
+    }
+
+    #[test]
+    fn anim_loop_forward_wraps_past_num_frames_to_zero() {
+        // cur_frame == num_frames (3): ++ -> 4 > 3 -> wraps to 0.
+        let w = anim_weapon(3, true);
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            cur_frame: 3,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        wobject_process(&mut obj, &level, &w, 8, &mut rand);
+        assert_eq!(obj.cur_frame, 0, "wrap: cur_frame 3 -> ++4 > num_frames -> 0");
+    }
+
+    #[test]
+    fn anim_loop_advances_backward_on_negative_vel_x() {
+        // loop_anim + vel.x < 0 -> --cur_frame; from 0 it underflows to num_frames.
+        let w = anim_weapon(3, true);
+        let level = air_level();
+        let mut rand = seeded();
+
+        let mut a = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(-1), 0),
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        wobject_process(&mut a, &level, &w, 8, &mut rand);
+        assert_eq!(a.cur_frame, 0, "vel.x<0: cur_frame 1 -> 0");
+
+        let mut b = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(-1), 0),
+            cur_frame: 0,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        wobject_process(&mut b, &level, &w, 8, &mut rand);
+        assert_eq!(b.cur_frame, 3, "underflow: cur_frame 0 -> --(-1)<0 -> num_frames");
+    }
+
+    #[test]
+    fn anim_non_loop_always_increments_regardless_of_vel_x() {
+        // loop_anim false: the plain ++ branch fires for ANY vel.x sign.
+        let w = anim_weapon(3, false);
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(-1), 0), // negative, yet non-loop still ++
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        wobject_process(&mut obj, &level, &w, 8, &mut rand);
+        assert_eq!(obj.cur_frame, 2, "non-loop: ++ regardless of vel.x sign");
+    }
+
+    #[test]
+    fn anim_does_not_advance_when_cycles_gate_closed() {
+        // cycles = 5 -> 5 & 7 == 5 != 0 -> no advance.
+        let w = anim_weapon(3, true);
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        wobject_process(&mut obj, &level, &w, 5, &mut rand);
+        assert_eq!(obj.cur_frame, 1, "cycles 5: gate closed, cur_frame frozen");
+    }
+
+    #[test]
+    fn anim_num_frames_zero_never_changes_cur_frame() {
+        // num_frames = 0: the animation guard is false even on an open gate.
+        let w = anim_weapon(0, true);
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        wobject_process(&mut obj, &level, &w, 8, &mut rand);
+        assert_eq!(obj.cur_frame, 1, "num_frames 0: cur_frame never changes");
+    }
+
+    #[test]
+    fn anim_draws_no_rng() {
+        let w = anim_weapon(3, true);
+        let level = air_level();
+        let mut rand = seeded();
+        rand.bound(1000);
+        let last_before = rand.last();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        wobject_process(&mut obj, &level, &w, 8, &mut rand);
+        assert_eq!(rand.last(), last_before, "animation draws no rng");
     }
 
     // ---- blow_up: dirt_effect branch (greenball) + fan regression ----------

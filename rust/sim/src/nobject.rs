@@ -265,18 +265,34 @@ fn check_for_spec_worm_hit(
     if !worm.visible {
         return false;
     }
-    // RED PLACEHOLDER (T2): the 5a box over-approx — returns true on ANY non-empty
-    // intersection with the 16x16 rect, ignoring the sprite pixels. Replaced by the
-    // per-pixel scan in the GREEN step; kept here only so the per-pixel tests fail
-    // first (the transparent-corner case returns true under the box).
-    let _ = (worm_sprites, material_flags);
+    // :1169 WormSprite(current_frame, direction, 0) — colour ALWAYS 0. Bank index
+    // matches `SimState::worm_sprite`: frame + direction*21 + colour*42.
+    let worm_sprite =
+        worm_sprites.sprite((worm.current_frame + worm.direction * 21) as usize);
+    // :1171-1172 deltas relative to the worm sprite's top-left (offset +7,+5).
     let delta_x = x - ftoi(worm.pos.x) + 7;
     let delta_y = y - ftoi(worm.pos.y) + 5;
+    // :1174-1176 Rect(delta-dist, delta-dist, delta+dist+1, delta+dist+1)
+    // intersected with the 16x16 sprite rect — INTERSECT BEFORE the scan. The
+    // `max(x1)/max(y1)/min(x2)/min(y2)` clamp is C++ `Rect::Intersect`; the scan
+    // bounds are half-open [x1,x2) × [y1,y2), matching the C++ `for` loops.
     let x1 = (delta_x - dist).max(0);
     let y1 = (delta_y - dist).max(0);
     let x2 = (delta_x + dist + 1).min(16);
     let y2 = (delta_y + dist + 1).min(16);
-    x1 < x2 && y1 < y2
+    // :1178-1185 scan the clamped rect; first Worm pixel is a hit. material_flags is
+    // indexed DIRECTLY by the sprite's palette index (the palette index IS the
+    // material id here, as in `common.materials[worm_sprite[cy*16+cx]].Worm()`).
+    for cy in y1..y2 {
+        for cx in x1..x2 {
+            let pal = worm_sprite[(cy * 16 + cx) as usize];
+            if (material_flags[pal as usize] & MAT_WORM) != 0 {
+                return true;
+            }
+        }
+    }
+    // :1187 no worm pixel under the window.
+    false
 }
 
 /// Port of `NObject::Process` (`nobject.cpp:68-234`) — advance one nobject by one
@@ -1554,6 +1570,17 @@ mod tests {
         };
         let mut level = bg_level(200, 200);
         let sprites = no_sprites();
+        // A minimal non-empty worm bank: per-pixel now fetches WormSprite (worm.cpp
+        // :1169) unconditionally for a visible worm — BEFORE the rect — so an empty
+        // bank would panic the fetch. C++'s bank is never empty. All-transparent, so
+        // even if the rect were non-empty there is no worm pixel (there is not here:
+        // the visible worm is 100px out of range).
+        let worm_bank = SpriteSet {
+            width: 16,
+            height: 16,
+            count: 1,
+            data: vec![0u8; 16 * 16],
+        };
         let mut nobjects: Pool<NObject> = Pool::new(8);
         let mut sobjects: Pool<SObject> = Pool::new(1);
         let mut bobjects: BloodPool<BObject> = BloodPool::new(700);
@@ -1582,7 +1609,7 @@ mod tests {
             &cossin,
             &sprites,
             &sprites,
-            &sprites,
+            &worm_bank,
             &[],
             &mut worms,
             &mut wobjects,

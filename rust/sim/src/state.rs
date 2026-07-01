@@ -1651,21 +1651,68 @@ fn begin_respawn(
     min_spawn_dist_enemy: i32,
     rand: &mut Rand,
 ) {
-    // RED (Slice 5d T4): the port lands in GREEN. Consume the args so the stub
-    // type-checks; the T4 tests exercise this directly and must fail here first.
-    let _ = (
-        &worms,
-        index,
-        level,
-        spawn_rect_x,
-        spawn_rect_y,
-        spawn_rect_w,
-        spawn_rect_h,
-        min_spawn_dist_last,
-        min_spawn_dist_enemy,
-        &rand,
-    );
-    todo!("Slice 5d T4 GREEN: port worm.cpp:711-742 (BeginRespawn)")
+    // :714 temp = Ftoi(pos) — the death position, in integer pixels.
+    let temp_x = ftoi(worms[index].pos.x);
+    let temp_y = ftoi(worms[index].pos.y);
+
+    // :716 logic_respawn = temp - IVec2(80, 80). Stored in the Vec2-as-IVec2 field
+    // (integer pixels), the drop-in cursor DoRespawning (T5) walks.
+    worms[index].logic_respawn = Vec2::new(temp_x - 80, temp_y - 80);
+
+    // :718-722 enemy = temp; iff two worms, enemy = Ftoi(worms[index^1].pos) — the
+    // LIVE enemy pos (a desync input). Only read when `worms.len() == 2`.
+    let (mut enemy_x, mut enemy_y) = (temp_x, temp_y);
+    if worms.len() == 2 {
+        enemy_x = ftoi(worms[index ^ 1].pos.x);
+        enemy_y = ftoi(worms[index ^ 1].pos.y);
+    }
+
+    // :724-739 the trial loop. `do { … } while (!Check…)` -> Rust `loop { … }`
+    // with the break points transcribed in the exact C++ order.
+    let mut trials: i32 = 0;
+    loop {
+        // :726 candidate x — `rand(WormSpawnRectW)` drawn FIRST.
+        let cand_x = spawn_rect_x + rand.bound(spawn_rect_w as u32) as i32;
+        // :727 candidate y — `rand(WormSpawnRectH)` drawn SECOND.
+        let cand_y = spawn_rect_y + rand.bound(spawn_rect_h as u32) as i32;
+        worms[index].pos.x = itof(cand_x);
+        worms[index].pos.y = itof(cand_y);
+
+        // :731-734 drop-down: slide `pos.y` down over Background pixels. Reads the
+        // LIVE level via `Mat(x, y+4).Background()` (in-bounds; guarded by
+        // `Ftoi(pos.y)+4 < height`), draws NO rand.
+        while ftoi(worms[index].pos.y) + 4 < level.height
+            && level.background(ftoi(worms[index].pos.x), ftoi(worms[index].pos.y) + 4)
+        {
+            worms[index].pos.y = worms[index].pos.y.wrapping_add(itof(1));
+        }
+
+        // :736-738 runaway guard — `++trials` then compare, BEFORE the while-cond.
+        trials += 1;
+        if trials >= 50000 {
+            break;
+        }
+
+        // :739 the `while (!CheckRespawnPosition(…))` condition: accept -> break.
+        let cx = ftoi(worms[index].pos.x);
+        let cy = ftoi(worms[index].pos.y);
+        if check_respawn_position(
+            level,
+            enemy_x,
+            enemy_y,
+            temp_x,
+            temp_y,
+            cx,
+            cy,
+            min_spawn_dist_last,
+            min_spawn_dist_enemy,
+        ) {
+            break;
+        }
+    }
+
+    // :741 killed_timer = -1 (hand off to DoRespawning next).
+    worms[index].killed_timer = -1;
 }
 
 /// Port of `CheckRespawnPosition` (`game.cpp:611-650`) — the **rand-free** accept
@@ -1698,20 +1745,51 @@ fn check_respawn_position(
     min_spawn_dist_last: i32,
     min_spawn_dist_enemy: i32,
 ) -> bool {
-    // RED (Slice 5d T4): the port lands in GREEN. Consume the args so the stub
-    // type-checks; the T4 tests exercise this directly and must fail here first.
-    let _ = (
-        level,
-        x2,
-        y2,
-        old_x,
-        old_y,
-        x,
-        y,
-        min_spawn_dist_last,
-        min_spawn_dist_enemy,
-    );
-    todo!("Slice 5d T4 GREEN: port game.cpp:611-650 (CheckRespawnPosition)")
+    // :614-617 — NB `kDeltaX = old_x` (the raw last x, NOT `old_x - x`; C++ bug,
+    // mirrored). `kDeltaY` IS a real delta.
+    let k_delta_x = old_x;
+    let k_delta_y = old_y - y;
+    let k_enemy_dx = x2 - x;
+    let k_enemy_dy = y2 - y;
+
+    // :619-624 min-distance rejects FIRST (last-pos OR enemy).
+    if (k_delta_x.abs() <= min_spawn_dist_last && k_delta_y.abs() <= min_spawn_dist_last)
+        || (k_enemy_dx.abs() <= min_spawn_dist_enemy && k_enemy_dy.abs() <= min_spawn_dist_enemy)
+    {
+        return false;
+    }
+
+    // :626-638 the [x-3, x+3) × [y-4, y+4) box, clamped to the level.
+    let mut max_x = x + 3;
+    let mut max_y = y + 4;
+    let mut min_x = x - 3;
+    let mut min_y = y - 4;
+    if max_x >= level.width {
+        max_x = level.width - 1;
+    }
+    if max_y >= level.height {
+        max_y = level.height - 1;
+    }
+    min_x = min_x.max(0);
+    min_y = min_y.max(0);
+
+    // :640-647 reject on any Rock() pixel (half-open `!=` bounds, exactly as C++;
+    // the clamps guarantee `min <= max`). The "special rock respawn bug" TODO
+    // (:642) behaviour is intentionally preserved.
+    let mut i = min_x;
+    while i != max_x {
+        let mut j = min_y;
+        while j != max_y {
+            if level.rock(i, j) {
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+
+    // :649 accept.
+    true
 }
 
 /// Stub for `Worm::DoRespawning` (`worm.cpp:755-809`) — the drop-in convergence

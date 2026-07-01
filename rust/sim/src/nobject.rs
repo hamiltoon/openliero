@@ -62,7 +62,7 @@ use crate::blit::{blit_image_on_map, draw_dirt_effect};
 use crate::bobject::create_bobject;
 use crate::pool::{BloodPool, Pool};
 use crate::sobject::sobject_create;
-use crate::state::{BObject, LevelSim, NObject, SObject, WObject, WormState};
+use crate::state::{BObject, LevelSim, NObject, SObject, WObject, WormState, MAT_WORM};
 
 /// Port of `NObjectType::Create` (`nobject.cpp:7-39`) — the shared spawn core.
 ///
@@ -230,33 +230,48 @@ pub enum NObjectOutcome {
     Remove,
 }
 
-/// Port of `CheckForSpecWormHit` (`worm.cpp:1162-1188`) reduced to its **rand-free
-/// geometry**: the worm must be `visible`, and the `±dist` box around the impact
-/// point `(x, y)` must overlap the worm's 16x16 sprite box (offset `(+7, +5)` from
-/// `Ftoi(w.pos)`, exactly as C++). The per-pixel
-/// `materials[worm_sprite[...]].Worm()` test — which decides a *solid* hit and
-/// needs the worm sprite bank + the `Worm` material flag (neither lives in the
-/// sim yet) — is the part of the predicate that belongs to the DEFERRED
-/// DoDamage/blood body (O10/5b), so it is approximated here by treating the whole
-/// 16x16 sprite box as solid.
+/// Faithful port of `CheckForSpecWormHit` (`worm.cpp:1162-1188`) — the **exact
+/// per-pixel** sprite-collision predicate (T2 replaces 5a's box over-approx).
 ///
-/// This reduction **over-approximates** (it can only return `true` where C++
-/// returns `true`-or-`false`, never `false` where C++ returns `true` within the
-/// box), which is safe for 5a: every worm is far out of range, so both the full
-/// C++ test and this reduction return `false`, the loop draws nothing, and the
-/// deferred body guard is never reached. The `Rect::Intersect` is the same
-/// `max(x1)/max(y1)/min(x2)/min(y2)` clamp [`crate::sobject`] uses; a non-empty
-/// intersection is the hit.
-fn check_for_spec_worm_hit(worm: &WormState, x: i32, y: i32, dist: i32) -> bool {
+/// The worm must be `visible`. We fetch its 16x16 sprite `WormSprite(current_frame,
+/// direction, 0)` — colour is **always 0** (`worm.cpp:1169`), it is a silhouette
+/// test, not a colour one. The impact point `(x, y)` maps into sprite-local
+/// coordinates via the `+7` / `+5` offsets from `Ftoi(w.pos)` (`:1171-1172`,
+/// the sprite's top-left is 7px left / 5px above the worm origin). The `±dist`
+/// `Rect(delta-dist, delta-dist, delta+dist+1, delta+dist+1)` (`:1174`) is
+/// **intersected with the 16x16 sprite rect FIRST** (`:1176`), then every pixel in
+/// the clamped rect is scanned (`:1178-1185`): the first pixel whose palette index
+/// maps to a `Worm` material (`materials[worm_sprite[cy*16+cx]].Worm()`) is a hit.
+///
+/// `Rect::Intersect` is the C++ `max(x1)/max(y1)/min(x2)/min(y2)` clamp; the scan
+/// bounds are half-open `[x1, x2) × [y1, y2)`, matching the C++ `for` loops. The
+/// material lookup indexes `material_flags` **directly by the sprite pixel** (the
+/// palette index IS the material id here — same as `LevelSim::worm_pixel` /
+/// `common.materials[worm_sprite[...]]`), NOT through `material_id[]`.
+///
+/// This is the exact predicate the deferred DoDamage/blood/vel-kick body (O10/5b,
+/// T3) gates on. It only ever returns `true` where a solid worm pixel actually sits
+/// under the `±dist` window — a transparent sprite corner overlapping the box is a
+/// **miss**, where 5a's box over-approx wrongly reported a hit.
+fn check_for_spec_worm_hit(
+    worm: &WormState,
+    x: i32,
+    y: i32,
+    dist: i32,
+    worm_sprites: &SpriteSet,
+    material_flags: &[u8; 256],
+) -> bool {
     // :1165-1167 invisible worms are never hit.
     if !worm.visible {
         return false;
     }
-    // :1171-1172 deltas relative to the worm sprite's top-left (offset +7,+5).
+    // RED PLACEHOLDER (T2): the 5a box over-approx — returns true on ANY non-empty
+    // intersection with the 16x16 rect, ignoring the sprite pixels. Replaced by the
+    // per-pixel scan in the GREEN step; kept here only so the per-pixel tests fail
+    // first (the transparent-corner case returns true under the box).
+    let _ = (worm_sprites, material_flags);
     let delta_x = x - ftoi(worm.pos.x) + 7;
     let delta_y = y - ftoi(worm.pos.y) + 5;
-    // :1174-1176 Rect(delta-dist, delta-dist, delta+dist+1, delta+dist+1)
-    // intersected with the 16x16 sprite rect; a non-empty result is a hit.
     let x1 = (delta_x - dist).max(0);
     let y1 = (delta_y - dist).max(0);
     let x2 = (delta_x + dist + 1).min(16);
@@ -326,6 +341,7 @@ pub fn nobject_process(
     cossin: &[Vec2; 128],
     large_sprites: &SpriteSet,
     small_sprites: &SpriteSet,
+    worm_sprites: &SpriteSet,
     textures: &[Texture],
     worms: &mut [WormState],
     wobjects: &mut Pool<WObject>,
@@ -495,7 +511,14 @@ pub fn nobject_process(
     // structure is the fix.
     if !do_explode && ty.hit_damage > 0 {
         for w in worms.iter() {
-            if check_for_spec_worm_hit(w, ftoi(obj.pos.x), ftoi(obj.pos.y), ty.detect_distance) {
+            if check_for_spec_worm_hit(
+                w,
+                ftoi(obj.pos.x),
+                ftoi(obj.pos.y),
+                ty.detect_distance,
+                worm_sprites,
+                &level.material_flags,
+            ) {
                 // :172-199 DEFERRED body (O10/5b): w.vel += vel*blow_away/100,
                 // DoDamage, the hit-sound rand(3), the rand(128) blood fan, and
                 // worm_explode/worm_destroy. They DRAW RAND and need DoDamage / the
@@ -975,6 +998,7 @@ mod tests {
             cossin,
             &sprites,
             &sprites,
+            &sprites,
             &[],
             &mut worms,
             &mut wobjects,
@@ -1360,6 +1384,7 @@ mod tests {
             cossin,
             &sprites,
             &sprites,
+            &sprites,
             &[],
             &mut worms,
             &mut wobjects,
@@ -1476,6 +1501,7 @@ mod tests {
             &cossin,
             &sprites,
             &sprites,
+            &sprites,
             &[],
             &mut worms,
             &mut wobjects,
@@ -1556,6 +1582,7 @@ mod tests {
             &cossin,
             &sprites,
             &sprites,
+            &sprites,
             &[],
             &mut worms,
             &mut wobjects,
@@ -1580,23 +1607,82 @@ mod tests {
         assert_eq!(nobjects.len(), 0, "no spawns");
     }
 
+    // A synthetic 1-sprite worm bank (frame 0, dir 0, colour 0 -> bank index 0):
+    // 16x16, all transparent (palette 0) EXCEPT a single solid worm pixel (palette
+    // 5) at (cx=8, cy=8). `material_flags[5] = MAT_WORM`; every other palette index
+    // maps to nothing. This is the whole point of the per-pixel test: the sprite is
+    // mostly background, so a `±dist` window that overlaps the 16x16 box but misses
+    // (8,8) must be a MISS — where 5a's box over-approx wrongly reported a hit.
+    fn worm_hit_fixture() -> (SpriteSet, [u8; 256]) {
+        let mut data = vec![0u8; 16 * 16];
+        data[8 * 16 + 8] = 5; // solid worm pixel at (cx=8, cy=8)
+        let sprites = SpriteSet {
+            width: 16,
+            height: 16,
+            count: 1,
+            data,
+        };
+        let mut flags = [0u8; 256];
+        flags[5] = MAT_WORM;
+        (sprites, flags)
+    }
+
+    // (a) invisible worm -> false regardless of distance.
     #[test]
-    fn worm_hit_in_range_check_is_visibility_and_box_gated() {
-        // Directly pin check_for_spec_worm_hit's reduced geometry: invisible -> false
-        // regardless of distance; visible + far -> false; visible + on-point -> true.
-        let invisible = worm_at(50, 50, false);
+    fn spec_worm_hit_invisible_is_false() {
+        let (sprites, flags) = worm_hit_fixture();
+        let mut w = worm_at(50, 50, false);
+        w.current_frame = 0;
+        w.direction = 0;
         assert!(
-            !check_for_spec_worm_hit(&invisible, 50, 50, 4),
+            !check_for_spec_worm_hit(&w, 50, 50, 4, &sprites, &flags),
             "invisible worm is never hit even on-point"
         );
-        let visible_far = worm_at(50, 50, true);
+    }
+
+    // (b) a SOLID silhouette pixel inside the ±dist window -> true. Worm at (50,50);
+    // impact (50,50) dist 4 -> deltas (7,5), scan [3,12)×[1,10) covers sprite (8,8)
+    // which is the worm pixel -> hit.
+    #[test]
+    fn spec_worm_hit_solid_pixel_in_window_is_true() {
+        let (sprites, flags) = worm_hit_fixture();
+        let mut w = worm_at(50, 50, true);
+        w.current_frame = 0;
+        w.direction = 0;
         assert!(
-            !check_for_spec_worm_hit(&visible_far, 200, 200, 2),
-            "visible worm far outside the box is not hit"
+            check_for_spec_worm_hit(&w, 50, 50, 4, &sprites, &flags),
+            "a worm pixel under the +/-dist window is a hit"
         );
+    }
+
+    // (c) THE DISCRIMINATOR (fd33bbc transparent-corner): the ±dist window overlaps
+    // the 16x16 sprite box ONLY at the transparent corner pixel (15,15). Worm at
+    // (50,50); impact (60,62) dist 2 -> deltas (17,17), Rect(15..20, 15..20)
+    // intersected with (0,0,16,16) = {15}×{15}. That pixel is background (palette 0),
+    // so per-pixel returns FALSE. The 5a box over-approx returned TRUE here (non-empty
+    // intersection) — this test is exactly what tells per-pixel apart from the box.
+    #[test]
+    fn spec_worm_hit_transparent_corner_is_false() {
+        let (sprites, flags) = worm_hit_fixture();
+        let mut w = worm_at(50, 50, true);
+        w.current_frame = 0;
+        w.direction = 0;
         assert!(
-            check_for_spec_worm_hit(&visible_far, 57, 55, 2),
-            "visible worm whose sprite box overlaps the +/-dist box is hit"
+            !check_for_spec_worm_hit(&w, 60, 62, 2, &sprites, &flags),
+            "window overlapping only a transparent corner is a MISS (box said hit)"
+        );
+    }
+
+    // (d) worm far out of range -> false (empty intersection, no scan).
+    #[test]
+    fn spec_worm_hit_out_of_range_is_false() {
+        let (sprites, flags) = worm_hit_fixture();
+        let mut w = worm_at(50, 50, true);
+        w.current_frame = 0;
+        w.direction = 0;
+        assert!(
+            !check_for_spec_worm_hit(&w, 200, 200, 2, &sprites, &flags),
+            "window entirely off the 16x16 sprite box is a miss"
         );
     }
 
@@ -1650,6 +1736,7 @@ mod tests {
             &[],
             level,
             cossin,
+            &sprites,
             &sprites,
             &sprites,
             &[],

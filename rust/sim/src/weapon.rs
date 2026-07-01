@@ -443,21 +443,90 @@ pub fn wobject_process(
         }
     }
 
-    // In-flight worm-hit loop (weapon.cpp:287-326) — NOT YET IMPLEMENTED (T3 RED).
-    // The extended signature is present so the `worm_hit_*` tests compile against
-    // the final shape, but the arm body lands in GREEN; these tests FAIL here.
-    let _ = (
-        &mut *worms,
-        &mut *nobjects,
-        nobject_types,
-        worm_sprites,
-        cossin,
-        blood,
-        &mut *rand,
-    );
+    // In-flight worm-hit loop (weapon.cpp:287-326) — LIVE (5′a T3, re-applying
+    // fd33bbc), gated by the per-pixel `check_for_spec_worm_hit` (T2). Runs AFTER
+    // the timeout countdown and BEFORE the do_explode/do_remove tail. Per worm:
+    //
+    //   BLOOD FAN comes BEFORE the hit-sound gate (`:301` then `:308`) — the
+    //   OPPOSITE order to the nobject arm (nobject.cpp:180 sound, then :188 blood).
+    //   This asymmetry is load-bearing; the two C++ functions genuinely differ.
+    let mut do_remove = false;
+    for worm in worms.iter_mut() {
+        // :290-291 gate: ANY hit param non-zero AND a per-pixel sprite hit at the
+        // wobject's fixed pos (Ftoi -> integer pixel), within detect_distance.
+        if (weapon.hit_damage != 0
+            || weapon.blow_away != 0
+            || weapon.blood_on_hit != 0
+            || weapon.worm_collide)
+            && check_for_spec_worm_hit(
+                worm,
+                ftoi(obj.pos.x),
+                ftoi(obj.pos.y),
+                weapon.detect_distance,
+                worm_sprites,
+                &level.material_flags,
+            )
+        {
+            // :292 vel-kick — the WOBJECT's vel * blow_away / 100 (integer,
+            // truncating), added to the worm's vel. NO rand.
+            worm.vel = worm.vel.add(obj.vel.mul(weapon.blow_away).div(100));
 
+            // :294 DoDamage(worm, hit_damage, owner_idx) — RNG-free wound in
+            // normal mode; sets `last_killed_by_idx` only when it drops <= 0.
+            worm.do_damage(weapon.hit_damage, obj.owner_idx);
+            // :295-298 DamageDealt/Hit stats — no-op (has_hit unported).
+
+            // :301-306 BLOOD FAN FIRST. kBloodAmount = blood_on_hit * blood / 100
+            // (truncating). Per particle: rand(128) [kAngle] THEN
+            // nobject_types[6].Create2(kAngle, obj.vel/3, obj.pos, 0, worm.index).
+            // The base vel/pos are the WOBJECT's `obj.vel/3` / `obj.pos` (NOT the
+            // worm's), and owner is the WOUNDED worm (`worm.index`). Create2 draws
+            // rand(speed_v) + rand(dist*2)x2 -> 4 draws/particle for blood.
+            let k_blood_amount = weapon.blood_on_hit * blood / 100;
+            for _ in 0..k_blood_amount {
+                let k_angle = rand.bound(128) as i32;
+                nobject_create2(
+                    &nobject_types[6],
+                    k_angle,
+                    obj.vel.div(3),
+                    obj.pos,
+                    0,
+                    worm.index,
+                    cossin,
+                    rand,
+                    nobjects,
+                );
+            }
+
+            // :308-314 hit-sound gate SECOND. The OUTER rand(3) is only drawn when
+            // `hit_damage > 0 && worm.health > 0` (short-circuit — reading the
+            // POST-DoDamage health). On `== 0` the INNER rand(3) is ALWAYS taken
+            // (the C++ `NOTE: MUST be outside the unpredictable branch`); Play is a
+            // render-only no-op (omitted), but the draws are the contract.
+            if weapon.hit_damage > 0 && worm.health > 0 && rand.bound(3) == 0 {
+                let _k_snd = 18 + rand.bound(3) as i32;
+                // sound_player->Play(kSnd, &worm) — omitted (no sim/RNG).
+            }
+
+            // :316-324 worm_collide branch. `rand(w.worm_collide)`: worm_collide is
+            // a bool (== 1 when set), so this is `rand(1)` — always 0 — meaning a
+            // set worm_collide always fires. worm_explode -> do_explode; either
+            // way do_remove. do_explode wins at the tail (C++ checks it first).
+            if weapon.worm_collide && rand.bound(1) == 0 {
+                if weapon.worm_explode {
+                    do_explode = true;
+                }
+                do_remove = true;
+            }
+        }
+    }
+
+    // Tail (weapon.cpp:328-335): do_explode (BlowUpObject + Free) wins over
+    // do_remove (Free without exploding); otherwise the projectile lives on.
     if do_explode {
         WObjectOutcome::Explode
+    } else if do_remove {
+        WObjectOutcome::Remove
     } else {
         WObjectOutcome::Keep
     }

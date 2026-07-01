@@ -1799,8 +1799,37 @@ fn check_respawn_position(
     true
 }
 
-/// Port of `Worm::DoRespawning` (`worm.cpp:755-809`) — the drop-in convergence
-/// and the lone `rand() & 1` aiming draw.
+/// Port of `LimitXy` (`worm.cpp:744-753`): clamp `(x, y)` into
+/// `[0, max_x] × [0, max_y]` in place. The C++ x/y arms use different idioms
+/// (`if/else if` vs `std::max`/`std::min`) but both clamp to `[0, max]`.
+fn limit_xy(x: &mut i32, y: &mut i32, max_x: i32, max_y: i32) {
+    if *x < 0 {
+        *x = 0;
+    } else if *x > max_x {
+        *x = max_x;
+    }
+    *y = (*y).max(0).min(max_y);
+}
+
+/// Port of `Worm::DoRespawning` (`worm.cpp:755-809`) — run each tick while
+/// `killed_timer < 0`. It walks the `logic_respawn` cursor toward
+/// `Ftoi(pos) - 80` (the drop-in point), and once the cursor has converged
+/// (within ±5) AND the player has pressed Fire (`ready`), it completes the
+/// respawn: a dirt puff, the aiming reset, and (KillEmAll) the health restore.
+///
+/// RNG contract (the only two draws, in this order):
+/// 1. [`draw_dirt_effect`]'s one `rand(rframe)` (drawn before any pixel write);
+/// 2. the lone **no-arg** `rand() & 1` (`:799`) — the raw next MT draw's LOW bit.
+///    C++ is `game.rand() & 1` (`Rand::operator()()` = `last = engine()`), so
+///    this is [`Rand::next_u32`]`() & 1`, NOT `rand.bound(2)` (which would be the
+///    HIGH bit of the same draw): they advance the RNG identically but select
+///    different bits, so the call form is load-bearing.
+///
+/// Omissions (faithful to the dumper's settings): `CorrectShadow` (`:784-786`,
+/// gated on `settings->shadow`, **false**), the `SoundAlive` play (`:789`) and
+/// `AfterSpawn` stats (`:807`) — all render/sound/stats side effects the sim
+/// drops. The Scales-of-Justice guard on the health restore (`:794`) folds away
+/// (the TC is KillEmAll), so `health` is always restored here.
 #[allow(clippy::too_many_arguments)]
 fn do_respawning(
     worm: &mut WormState,
@@ -1810,7 +1839,75 @@ fn do_respawning(
     settings_health: i32,
     rand: &mut Rand,
 ) {
-    todo!("DoRespawning ported in Slice 5d T5 GREEN");
+    // :758-770 step the cursor toward Ftoi(pos)-80 by ±1, FOUR times per tick,
+    // each axis independently. No rand. C++ re-reads Ftoi(pos) each iteration;
+    // `pos` is constant across the loop, so recomputing the target here matches.
+    for _ in 0..4 {
+        let dest_x = ftoi(worm.pos.x) - 80;
+        if worm.logic_respawn.x < dest_x {
+            worm.logic_respawn.x += 1;
+        } else if worm.logic_respawn.x > dest_x {
+            worm.logic_respawn.x -= 1;
+        }
+
+        let dest_y = ftoi(worm.pos.y) - 80;
+        if worm.logic_respawn.y < dest_y {
+            worm.logic_respawn.y += 1;
+        } else if worm.logic_respawn.y > dest_y {
+            worm.logic_respawn.y -= 1;
+        }
+    }
+
+    // :772 clamp the cursor into the level (a 158px bottom/right margin).
+    limit_xy(
+        &mut worm.logic_respawn.x,
+        &mut worm.logic_respawn.y,
+        level.width - 158,
+        level.height - 158,
+    );
+
+    // :774-776 the (clamped) destination the cursor converges on.
+    let mut dest_x = ftoi(worm.pos.x) - 80;
+    let mut dest_y = ftoi(worm.pos.y) - 80;
+    limit_xy(&mut dest_x, &mut dest_y, level.width - 158, level.height - 158);
+
+    // :778-780 converged within ±5 of the destination AND `ready` (the Fire
+    // press the dead arm latched; "Don't spawn in quicksim").
+    if worm.logic_respawn.x < dest_x + 5
+        && worm.logic_respawn.x > dest_x - 5
+        && worm.logic_respawn.y < dest_y + 5
+        && worm.logic_respawn.y > dest_y - 5
+        && worm.ready
+    {
+        // :782-783 dirt puff at Ftoi(pos)-7 (dirt_effect 0). This consumes the
+        // FIRST of the two draws (draw_dirt_effect draws before writing pixels).
+        let ipos_x = ftoi(worm.pos.x);
+        let ipos_y = ftoi(worm.pos.y);
+        draw_dirt_effect(level, large_sprites, textures, 0, ipos_x - 7, ipos_y - 7, rand);
+
+        // :784-786 CorrectShadow — gated on settings->shadow (false) => OMITTED.
+
+        // :788 ready = false; :789 Play(SoundAlive) => sound-only, omitted.
+        worm.ready = false;
+        // :791-793 revive.
+        worm.visible = true;
+        worm.fire_cone = 0;
+        worm.vel = Vec2::zero();
+        // :794-796 health = settings->health (Scales guard folds away; KillEmAll).
+        worm.health = settings_health;
+
+        // :799-805 the lone no-arg `rand() & 1` (raw next draw's LOW bit). Odd =>
+        // face left-ish (Itof(32), dir 0); even => face right-ish (Itof(96), dir 1).
+        if rand.next_u32() & 1 != 0 {
+            worm.aiming_angle = itof(32);
+            worm.direction = 0;
+        } else {
+            worm.aiming_angle = itof(96);
+            worm.direction = 1;
+        }
+
+        // :807 AfterSpawn(this) — stats, omitted.
+    }
 }
 
 /// Port of the **pre-death blood drip** (`worm.cpp:355-367`) — the tail of the

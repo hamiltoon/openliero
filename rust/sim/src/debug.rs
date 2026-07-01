@@ -92,7 +92,11 @@ pub fn render_ascii(state: &SimState, opts: &RenderOpts) -> String {
         put(so.x, so.y, b'x');
     }
     for bo in state.bonuses.iter() {
-        put(bo.x, bo.y, if bo.frame == 1 { b'$' } else { b'w' });
+        // NOTE: despite the field names, `Bonus::x`/`y` are 16.16 fixed-point
+        // (see `bonus.rs`: spawn stores `itof(ix)`, and `Bonus::Process` reads
+        // pixel coords via `ftoi(bonus.x)`/`ftoi(bonus.y)`) — not plain pixel
+        // ints like `SObject::x`/`y`. Must convert before stamping.
+        put(ftoi(bo.x), ftoi(bo.y), if bo.frame == 1 { b'$' } else { b'w' });
     }
     for (i, wm) in state.worms.iter().enumerate() {
         let glyph = if !wm.visible {

@@ -1,0 +1,689 @@
+//! Deterministic state hashing, mirroring the C++ `stateHash.hpp`.
+//!
+//! These two functions reproduce `HashGameState` / `HashGameComponents`
+//! *bit-for-bit*. They are the determinism oracle for Step 2: the Rust tick-0
+//! state must hash to the same `u32` the C++ engine produces for the same state.
+//!
+//! Every arithmetic step uses `wrapping_*` because the C++ relies on `uint32_t`
+//! overflow, and every signed field is reinterpreted with `as u32`
+//! (two's-complement reinterpret == C++ `static_cast<uint32_t>(int)`). Field
+//! order, the `*31`/`*33^` mixers, the empty-pool seed of `1`, and the
+//! `if (type)` conditional pushes are all load-bearing — see `stateHash.hpp`.
+
+use crate::state::SimState;
+
+/// Number of players whose per-worm component hash is reported. Mirrors C++
+/// `kNumPlayers` (`stateHash.hpp:116`).
+pub const NUM_PLAYERS: usize = 2;
+
+/// Per-subsystem hashes, for diagnostic output on a desync. Mirrors the C++
+/// `ComponentHashes` struct (`stateHash.hpp:118`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ComponentHashes {
+    pub rng: u32,
+    pub level: u32,
+    pub worms: [u32; NUM_PLAYERS],
+    pub bobjects: u32,
+    pub bonuses: u32,
+    pub sobjects: u32,
+    pub nobjects: u32,
+    pub wobjects: u32,
+}
+
+/// Folds the level material map into `h` with the `h = h*33 ^ byte` mixer
+/// (C++ `stateHash.hpp:21-23` / `136-138`). Shared by master + component hash.
+#[inline]
+fn fold_level(mut h: u32, state: &SimState) -> u32 {
+    let count = (state.level.width as i64 * state.level.height as i64) as usize;
+    for &byte in &state.level.material_id[..count] {
+        h = h.wrapping_mul(33) ^ (byte as u32);
+    }
+    h
+}
+
+/// Comprehensive hash of all simulation-relevant state. Mirrors C++
+/// `HashGameState` (`stateHash.hpp:15-113`) line for line.
+pub fn hash_game_state(state: &SimState) -> u32 {
+    let mut h: u32 = 1;
+
+    h = h.wrapping_mul(31).wrapping_add(state.rand.last());
+    h = h.wrapping_mul(31).wrapping_add(state.cycles as u32);
+
+    h = fold_level(h, state);
+
+    for w in &state.worms {
+        h = h.wrapping_mul(31).wrapping_add(w.pos.x as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.pos.y as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.vel.x as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.vel.y as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.aiming_angle as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.health as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.lives as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.kills as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.timer as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.visible as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.control_states.pack());
+
+        for weapon in &w.weapons {
+            h = h.wrapping_mul(31).wrapping_add(weapon.ammo as u32);
+            h = h.wrapping_mul(31).wrapping_add(weapon.delay_left as u32);
+            h = h.wrapping_mul(31).wrapping_add(weapon.loading_left as u32);
+            if let Some(id) = weapon.ty {
+                h = h.wrapping_mul(31).wrapping_add(id as u32);
+            }
+        }
+
+        h = h.wrapping_mul(31).wrapping_add(w.ninjarope.out as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.ninjarope.pos.x as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.ninjarope.pos.y as u32);
+    }
+
+    for b in state.bobjects.iter() {
+        h = h.wrapping_mul(31).wrapping_add(b.pos.x as u32);
+        h = h.wrapping_mul(31).wrapping_add(b.pos.y as u32);
+    }
+
+    for b in state.bonuses.iter() {
+        h = h.wrapping_mul(31).wrapping_add(b.x as u32);
+        h = h.wrapping_mul(31).wrapping_add(b.y as u32);
+        h = h.wrapping_mul(31).wrapping_add(b.timer as u32);
+        h = h.wrapping_mul(31).wrapping_add(b.weapon as u32);
+        h = h.wrapping_mul(31).wrapping_add(b.frame as u32);
+    }
+
+    for s in state.sobjects.iter() {
+        h = h.wrapping_mul(31).wrapping_add(s.id as u32);
+        h = h.wrapping_mul(31).wrapping_add(s.cur_frame as u32);
+    }
+
+    for n in state.nobjects.iter() {
+        h = h.wrapping_mul(31).wrapping_add(n.pos.x as u32);
+        h = h.wrapping_mul(31).wrapping_add(n.pos.y as u32);
+        h = h.wrapping_mul(31).wrapping_add(n.vel.x as u32);
+        h = h.wrapping_mul(31).wrapping_add(n.vel.y as u32);
+        h = h.wrapping_mul(31).wrapping_add(n.cur_frame as u32);
+        if let Some(id) = n.ty {
+            h = h.wrapping_mul(31).wrapping_add(id as u32);
+        }
+    }
+
+    for wo in state.wobjects.iter() {
+        h = h.wrapping_mul(31).wrapping_add(wo.pos.x as u32);
+        h = h.wrapping_mul(31).wrapping_add(wo.pos.y as u32);
+        h = h.wrapping_mul(31).wrapping_add(wo.vel.x as u32);
+        h = h.wrapping_mul(31).wrapping_add(wo.vel.y as u32);
+        h = h.wrapping_mul(31).wrapping_add(wo.cur_frame as u32);
+        h = h.wrapping_mul(31).wrapping_add(wo.time_left as u32);
+        if let Some(id) = wo.ty {
+            h = h.wrapping_mul(31).wrapping_add(id as u32);
+        }
+    }
+
+    h
+}
+
+/// Per-component hashes for diagnostic output on desync. Mirrors C++
+/// `HashGameComponents` (`stateHash.hpp:129-213`). Each pool's hash seeds at
+/// `1`; the per-worm hash uses the *subset* of fields in `HashGameComponents`.
+pub fn hash_components(state: &SimState) -> ComponentHashes {
+    let mut c = ComponentHashes {
+        rng: state.rand.last(),
+        ..ComponentHashes::default()
+    };
+
+    c.level = fold_level(1, state);
+
+    for (wi, w) in state.worms.iter().take(NUM_PLAYERS).enumerate() {
+        let mut h: u32 = 1;
+        h = h.wrapping_mul(31).wrapping_add(w.pos.x as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.pos.y as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.vel.x as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.vel.y as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.health as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.lives as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.visible as u32);
+        h = h.wrapping_mul(31).wrapping_add(w.timer as u32);
+        c.worms[wi] = h;
+    }
+
+    {
+        let mut h: u32 = 1;
+        for b in state.bobjects.iter() {
+            h = h.wrapping_mul(31).wrapping_add(b.pos.x as u32);
+            h = h.wrapping_mul(31).wrapping_add(b.pos.y as u32);
+        }
+        c.bobjects = h;
+    }
+
+    {
+        let mut h: u32 = 1;
+        for b in state.bonuses.iter() {
+            h = h.wrapping_mul(31).wrapping_add(b.x as u32);
+            h = h.wrapping_mul(31).wrapping_add(b.y as u32);
+            h = h.wrapping_mul(31).wrapping_add(b.timer as u32);
+            h = h.wrapping_mul(31).wrapping_add(b.weapon as u32);
+        }
+        c.bonuses = h;
+    }
+
+    {
+        let mut h: u32 = 1;
+        for s in state.sobjects.iter() {
+            h = h.wrapping_mul(31).wrapping_add(s.id as u32);
+            h = h.wrapping_mul(31).wrapping_add(s.cur_frame as u32);
+        }
+        c.sobjects = h;
+    }
+
+    {
+        let mut h: u32 = 1;
+        for n in state.nobjects.iter() {
+            h = h.wrapping_mul(31).wrapping_add(n.pos.x as u32);
+            h = h.wrapping_mul(31).wrapping_add(n.pos.y as u32);
+        }
+        c.nobjects = h;
+    }
+
+    {
+        let mut h: u32 = 1;
+        for wo in state.wobjects.iter() {
+            h = h.wrapping_mul(31).wrapping_add(wo.pos.x as u32);
+            h = h.wrapping_mul(31).wrapping_add(wo.pos.y as u32);
+        }
+        c.wobjects = h;
+    }
+
+    c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pool::{BloodPool, Pool};
+    use crate::state::{
+        BObject, Bonus, ControlState, LevelSim, NObject, Ninjarope, SObject, WObject, WormState,
+        WormWeapon, NUM_WEAPONS,
+    };
+    use sim_core::rng::Rand;
+    use sim_core::vec::Vec2;
+
+    // An empty state with a single-byte level and no worms / no objects, built
+    // by hand (not via `SimState::new`) so the test owns every hashed field.
+    fn empty_state(last_seed: u32, cycles: i32, level_byte: u8) -> SimState {
+        let mut rand = Rand::new();
+        rand.seed(last_seed);
+        SimState {
+            rand,
+            cycles,
+            level: LevelSim {
+                width: 1,
+                height: 1,
+                material_id: vec![level_byte],
+                material_flags: [0u8; 256],
+            },
+            worms: vec![],
+            bonuses: Pool::new(4),
+            wobjects: Pool::new(4),
+            sobjects: Pool::new(4),
+            nobjects: Pool::new(4),
+            bobjects: BloodPool::new(4),
+            physics: crate::physics::PhysicsConsts::default(),
+            control: crate::control::ControlConsts::default(),
+            weapons: Vec::new(),
+            cossin: sim_core::tables::precompute_cossin(),
+            h_signed_recoil: false,
+            large_sprites: assets::sprite::SpriteSet::default(),
+            worm_sprites: assets::sprite::SpriteSet::default(),
+            small_sprites: assets::sprite::SpriteSet::default(),
+            textures: Vec::new(),
+            sobject_types: Vec::new(),
+            nobject_types: Vec::new(),
+            settings_loading_time: 100,
+            load_change: true,
+            blood: 100,
+            num_blood_colours: 0,
+            first_blood_colour: 0,
+            bobj_gravity: 0,
+            settings_health: 100,
+            last_killed_idx: -1,
+            got_changed: false,
+            settings_max_bonuses: 0,
+            bonus_drop_chance: 0,
+            bonus_spawn_rect_w: 0,
+            bonus_spawn_rect_h: 0,
+            bonus_spawn_rect_x: 0,
+            bonus_spawn_rect_y: 0,
+            h_bonus_spawn_rect: false,
+            h_bonus_only_health: false,
+            h_bonus_only_weapon: false,
+            h_bonus_disable: false,
+            bonus_rand_timer: [[0, 0], [0, 0]],
+            weap_table: Vec::new(),
+            bonus_gravity: 0,
+            bonus_bounce_mul: 0,
+            bonus_bounce_div: 0,
+            bonus_s_objects: [0, 0],
+            worm_spawn_rect_x: 0,
+            worm_spawn_rect_y: 0,
+            worm_spawn_rect_w: 0,
+            worm_spawn_rect_h: 0,
+            worm_min_spawn_dist_last: 0,
+            worm_min_spawn_dist_enemy: 0,
+        }
+    }
+
+    // (a) Master hash for a trivial state, folded by hand from the documented
+    // accumulation: h=1, +rand.last, +cycles, then h*33 ^ byte for the level.
+    #[test]
+    fn master_hash_trivial_state_matches_hand_fold() {
+        // rand.last() is 0 right after seeding (no draw consumed).
+        let state = empty_state(0x1234, 7, 200);
+        assert_eq!(state.rand.last(), 0, "no RNG drawn -> last == 0");
+
+        // Hand fold, independent of the implementation.
+        let mut h: u32 = 1;
+        h = h.wrapping_mul(31).wrapping_add(0); // + rand.last
+        h = h.wrapping_mul(31).wrapping_add(7u32); // + cycles
+        h = h.wrapping_mul(33) ^ 200u32; // level byte
+                                         // h = ((1*31+0)*31+7) = 968; 968*33 = 31944; 31944 ^ 200 = 31744.
+        assert_eq!(h, 31744, "by-hand intermediate sanity");
+
+        assert_eq!(hash_game_state(&state), 31744);
+    }
+
+    // Same, but with a non-zero rand.last (draw once) and a different cycles to
+    // make sure both the rng and cycles terms are wired the right way round.
+    #[test]
+    fn master_hash_uses_rand_last_and_cycles() {
+        let mut rand = Rand::new();
+        rand.seed(0xABCD);
+        let _ = rand.next_u32();
+        let last = rand.last();
+        assert_ne!(last, 0, "drew once -> last is the drawn value");
+
+        let mut state = empty_state(0, 0, 50);
+        state.rand = rand;
+        state.cycles = -3; // exercise the signed->unsigned reinterpret on cycles
+
+        let mut h: u32 = 1;
+        h = h.wrapping_mul(31).wrapping_add(last);
+        h = h.wrapping_mul(31).wrapping_add((-3i32) as u32);
+        h = h.wrapping_mul(33) ^ 50u32;
+
+        assert_eq!(hash_game_state(&state), h);
+    }
+
+    // (b) Component hashes for an empty state: every pool == seed 1, rng ==
+    // rand.last, level == by-hand level fold, worms all default (1, no worms).
+    #[test]
+    fn component_hashes_empty_state() {
+        let state = empty_state(0, 0, 123);
+        let c = hash_components(&state);
+
+        // Level fold by hand: h=1, then 1*33 ^ 123 = 33 ^ 123 = 90.
+        let mut lv: u32 = 1;
+        lv = lv.wrapping_mul(33) ^ 123u32;
+        assert_eq!(lv, 90);
+        assert_eq!(c.level, 90);
+
+        assert_eq!(c.rng, state.rand.last());
+        assert_eq!(c.rng, 0);
+
+        // Empty pools all reduce to the seed value 1.
+        assert_eq!(c.bobjects, 1);
+        assert_eq!(c.bonuses, 1);
+        assert_eq!(c.sobjects, 1);
+        assert_eq!(c.nobjects, 1);
+        assert_eq!(c.wobjects, 1);
+
+        // No worms -> the worm slots stay at their default 0 (never written).
+        assert_eq!(c.worms, [0, 0]);
+    }
+
+    // A worm with chosen field values, used by both the master- and
+    // component-hash worm tests below.
+    fn worm_fixture() -> WormState {
+        let mut weapons = [WormWeapon::default(); NUM_WEAPONS];
+        // Slot 0: a real weapon (ty set -> its id IS pushed).
+        weapons[0] = WormWeapon {
+            ty: Some(4),
+            ammo: 10,
+            delay_left: 1,
+            loading_left: 2,
+        };
+        // Slot 1: empty slot (ty None -> id is NOT pushed), negative ammo to
+        // exercise the signed reinterpret.
+        weapons[1] = WormWeapon {
+            ty: None,
+            ammo: -1,
+            delay_left: 0,
+            loading_left: 0,
+        };
+        WormState {
+            pos: Vec2::new(100, -200),
+            vel: Vec2::new(-5, 6),
+            aiming_angle: 32768,
+            health: 100,
+            lives: 5,
+            kills: 3,
+            timer: -7,
+            visible: true,
+            killed_timer: 150,
+            control_states: ControlState::unpack(0x5a),
+            weapons,
+            ninjarope: Ninjarope {
+                out: true,
+                pos: Vec2::new(11, -22),
+            },
+            index: 0,
+            stats_x: 0,
+            last_killed_by_idx: -1,
+            // Slice-3 control fields are not hashed; defaults suffice here.
+            aiming_speed: 0,
+            direction: 0,
+            movable: true,
+            able_to_jump: false,
+            able_to_dig: false,
+            key_change_pressed: false,
+            current_weapon: 0,
+            fire_cone: 0,
+            leave_shell_timer: 0,
+            // Slice-5d dead/respawn runtime fields — not hashed; defaults suffice.
+            logic_respawn: Vec2::zero(),
+            ready: true,
+            make_sight_green: false,
+            steerable_count: 0,
+            current_frame: 0,
+            animate: false,
+        }
+    }
+
+    // (c) The worm contribution to the master hash matches a by-hand fold that
+    // covers field order, the `as u32` casts, the per-weapon `if type` push,
+    // and the ninjarope tail.
+    #[test]
+    fn master_hash_worm_contribution_matches_hand_fold() {
+        let mut state = empty_state(0, 0, 200);
+        let w = worm_fixture();
+        state.worms = vec![w.clone()];
+
+        // Reproduce the full accumulation by hand.
+        let mut h: u32 = 1;
+        h = h.wrapping_mul(31).wrapping_add(0); // rand.last
+        h = h.wrapping_mul(31).wrapping_add(0); // cycles
+        h = h.wrapping_mul(33) ^ 200u32; // level byte
+
+        h = h.wrapping_mul(31).wrapping_add((100i32) as u32); // pos.x
+        h = h.wrapping_mul(31).wrapping_add((-200i32) as u32); // pos.y
+        h = h.wrapping_mul(31).wrapping_add((-5i32) as u32); // vel.x
+        h = h.wrapping_mul(31).wrapping_add((6i32) as u32); // vel.y
+        h = h.wrapping_mul(31).wrapping_add((32768i32) as u32); // aiming_angle
+        h = h.wrapping_mul(31).wrapping_add((100i32) as u32); // health
+        h = h.wrapping_mul(31).wrapping_add((5i32) as u32); // lives
+        h = h.wrapping_mul(31).wrapping_add((3i32) as u32); // kills
+        h = h.wrapping_mul(31).wrapping_add((-7i32) as u32); // timer
+        h = h.wrapping_mul(31).wrapping_add(1u32); // visible (true)
+        h = h.wrapping_mul(31).wrapping_add(0x5au32); // control_states.pack()
+
+        // weapon slot 0 (ty Some(4)): ammo, delay, loading, THEN id.
+        h = h.wrapping_mul(31).wrapping_add((10i32) as u32);
+        h = h.wrapping_mul(31).wrapping_add((1i32) as u32);
+        h = h.wrapping_mul(31).wrapping_add((2i32) as u32);
+        h = h.wrapping_mul(31).wrapping_add((4i32) as u32); // id pushed
+                                                            // weapon slot 1 (ty None): ammo, delay, loading, NO id.
+        h = h.wrapping_mul(31).wrapping_add((-1i32) as u32);
+        h = h.wrapping_mul(31).wrapping_add((0i32) as u32);
+        h = h.wrapping_mul(31).wrapping_add((0i32) as u32);
+        // weapon slots 2..5 are default (ty None, all zero): ammo, delay, loading.
+        for _ in 2..NUM_WEAPONS {
+            h = h.wrapping_mul(31).wrapping_add(0u32);
+            h = h.wrapping_mul(31).wrapping_add(0u32);
+            h = h.wrapping_mul(31).wrapping_add(0u32);
+        }
+
+        // ninjarope tail.
+        h = h.wrapping_mul(31).wrapping_add(1u32); // out (true)
+        h = h.wrapping_mul(31).wrapping_add((11i32) as u32); // pos.x
+        h = h.wrapping_mul(31).wrapping_add((-22i32) as u32); // pos.y
+
+        assert_eq!(hash_game_state(&state), h);
+    }
+
+    // (c') The per-worm component hash uses the documented SUBSET, in order:
+    // pos.x, pos.y, vel.x, vel.y, health, lives, visible, timer.
+    #[test]
+    fn component_worm_hash_uses_subset() {
+        let mut state = empty_state(0, 0, 1);
+        state.worms = vec![worm_fixture()];
+        let c = hash_components(&state);
+
+        let mut h: u32 = 1;
+        h = h.wrapping_mul(31).wrapping_add((100i32) as u32); // pos.x
+        h = h.wrapping_mul(31).wrapping_add((-200i32) as u32); // pos.y
+        h = h.wrapping_mul(31).wrapping_add((-5i32) as u32); // vel.x
+        h = h.wrapping_mul(31).wrapping_add((6i32) as u32); // vel.y
+        h = h.wrapping_mul(31).wrapping_add((100i32) as u32); // health
+        h = h.wrapping_mul(31).wrapping_add((5i32) as u32); // lives
+        h = h.wrapping_mul(31).wrapping_add(1u32); // visible
+        h = h.wrapping_mul(31).wrapping_add((-7i32) as u32); // timer
+
+        assert_eq!(c.worms[0], h);
+        assert_eq!(c.worms[1], 0, "second worm slot untouched");
+    }
+
+    // The level fold must visit exactly width*height bytes in order (and only
+    // those), with the h*33 ^ byte mixer.
+    #[test]
+    fn level_fold_visits_all_cells_in_order() {
+        let mut state = empty_state(0, 0, 0);
+        state.level = LevelSim {
+            width: 2,
+            height: 3,
+            material_id: vec![1, 2, 3, 4, 5, 6], // 6 cells
+            material_flags: [0u8; 256],
+        };
+        let c = hash_components(&state);
+
+        let mut h: u32 = 1;
+        for byte in [1u8, 2, 3, 4, 5, 6] {
+            h = h.wrapping_mul(33) ^ (byte as u32);
+        }
+        assert_eq!(c.level, h);
+    }
+
+    // Populated pools fold their fields in slot order; spot-check bonuses and
+    // bobjects feed the master hash (and the component subset) correctly.
+    #[test]
+    fn populated_pools_fold_in_order() {
+        let mut state = empty_state(0, 0, 9);
+        state.bonuses.spawn(Bonus {
+            x: 10,
+            y: 20,
+            timer: 30,
+            weapon: 2,
+            frame: 1,
+            vel_y: 99, // decoy: vel_y is NOT hashed
+        });
+        state.bobjects.spawn(BObject {
+            pos: Vec2::new(-1, -2),
+            vel: Vec2::new(33, 44), // decoy: vel is NOT hashed
+            color: 55,              // decoy: color is NOT hashed
+        });
+        state.sobjects.spawn(SObject {
+            id: 7,
+            x: 111, // decoy: x is NOT hashed
+            y: 222, // decoy: y is NOT hashed
+            cur_frame: 8,
+            anim_delay: 33, // decoy: anim_delay is NOT hashed
+        });
+        state.nobjects.spawn(NObject {
+            pos: Vec2::new(3, 4),
+            vel: Vec2::new(5, 6),
+            cur_frame: 9,
+            ty: Some(2),
+            owner_idx: 99, // decoy: owner_idx is NOT hashed
+            time_left: 88, // decoy: time_left is NOT hashed
+        });
+        state.wobjects.spawn(WObject {
+            pos: Vec2::new(7, 8),
+            vel: Vec2::new(9, 10),
+            cur_frame: 11,
+            time_left: 12,
+            ty: None,
+            owner_idx: 0,
+        });
+
+        // Master hash by hand (no worms).
+        let mut h: u32 = 1;
+        h = h.wrapping_mul(31).wrapping_add(0); // rand
+        h = h.wrapping_mul(31).wrapping_add(0); // cycles
+        h = h.wrapping_mul(33) ^ 9u32; // level
+                                       // bobjects: pos.x, pos.y
+        h = h.wrapping_mul(31).wrapping_add((-1i32) as u32);
+        h = h.wrapping_mul(31).wrapping_add((-2i32) as u32);
+        // bonuses: x, y, timer, weapon, frame
+        h = h.wrapping_mul(31).wrapping_add(10u32);
+        h = h.wrapping_mul(31).wrapping_add(20u32);
+        h = h.wrapping_mul(31).wrapping_add(30u32);
+        h = h.wrapping_mul(31).wrapping_add(2u32);
+        h = h.wrapping_mul(31).wrapping_add(1u32);
+        // sobjects: id, cur_frame
+        h = h.wrapping_mul(31).wrapping_add(7u32);
+        h = h.wrapping_mul(31).wrapping_add(8u32);
+        // nobjects: pos.x, pos.y, vel.x, vel.y, cur_frame, ty.id (Some(2))
+        h = h.wrapping_mul(31).wrapping_add(3u32);
+        h = h.wrapping_mul(31).wrapping_add(4u32);
+        h = h.wrapping_mul(31).wrapping_add(5u32);
+        h = h.wrapping_mul(31).wrapping_add(6u32);
+        h = h.wrapping_mul(31).wrapping_add(9u32);
+        h = h.wrapping_mul(31).wrapping_add(2u32);
+        // wobjects: pos.x, pos.y, vel.x, vel.y, cur_frame, time_left (ty None -> no id)
+        h = h.wrapping_mul(31).wrapping_add(7u32);
+        h = h.wrapping_mul(31).wrapping_add(8u32);
+        h = h.wrapping_mul(31).wrapping_add(9u32);
+        h = h.wrapping_mul(31).wrapping_add(10u32);
+        h = h.wrapping_mul(31).wrapping_add(11u32);
+        h = h.wrapping_mul(31).wrapping_add(12u32);
+
+        assert_eq!(hash_game_state(&state), h);
+
+        // Component subset spot-checks.
+        let c = hash_components(&state);
+        let mut hb: u32 = 1;
+        hb = hb.wrapping_mul(31).wrapping_add(10u32);
+        hb = hb.wrapping_mul(31).wrapping_add(20u32);
+        hb = hb.wrapping_mul(31).wrapping_add(30u32);
+        hb = hb.wrapping_mul(31).wrapping_add(2u32);
+        assert_eq!(c.bonuses, hb, "component bonuses omits frame");
+        let mut hn: u32 = 1;
+        hn = hn.wrapping_mul(31).wrapping_add(3u32);
+        hn = hn.wrapping_mul(31).wrapping_add(4u32);
+        assert_eq!(c.nobjects, hn, "component nobjects is pos only");
+    }
+
+    // (Step 3) The sobjects fold — first non-empty — pinned to a literal reference
+    // value hand-computed from the formula (`stateHash.hpp:76-77`/`184-185`), AND
+    // proven to IGNORE the Slice-4c non-hashed fields (`SObject::x/y/anim_delay`).
+    #[test]
+    fn sobject_fold_pinned_and_ignores_position_and_anim_delay() {
+        // Component sobjects fold: h=1; *31+id; *31+cur_frame.
+        // id=5, cur_frame=9 -> 1*31+5=36; 36*31+9=1125.
+        let mut bare = empty_state(0, 0, 1);
+        bare.sobjects.spawn(SObject {
+            id: 5,
+            x: 0,
+            y: 0,
+            cur_frame: 9,
+            anim_delay: 0,
+        });
+        let cb = hash_components(&bare);
+        assert_eq!(
+            cb.sobjects, 1125,
+            "sobjects component fold = ((1*31+id)*31+cur_frame)"
+        );
+
+        // Same id/cur_frame, decoy x/y/anim_delay set: master + component unchanged
+        // (the new fields must NOT enter either fold).
+        let mut decoy = empty_state(0, 0, 1);
+        decoy.sobjects.spawn(SObject {
+            id: 5,
+            x: -7,
+            y: 1234,
+            cur_frame: 9,
+            anim_delay: 42,
+        });
+        let cd = hash_components(&decoy);
+        assert_eq!(
+            cd.sobjects, cb.sobjects,
+            "x/y/anim_delay must not enter the sobjects component fold"
+        );
+        assert_eq!(
+            hash_game_state(&decoy),
+            hash_game_state(&bare),
+            "x/y/anim_delay must not enter the master hash"
+        );
+    }
+
+    // (Step 3) The nobjects fold — first non-empty — pinned to literal reference
+    // values (master = pos.x,pos.y,vel.x,vel.y,cur_frame,type_id per
+    // `stateHash.hpp:85-92`; component = pos.x,pos.y ONLY per `:195-196`), AND
+    // proven to IGNORE the Slice-4c non-hashed fields (`owner_idx`/`time_left`).
+    #[test]
+    fn nobject_fold_pinned_and_ignores_owner_idx_and_time_left() {
+        // Component nobjects fold is pos ONLY: h=1; *31+pos.x; *31+pos.y.
+        // pos=(2,3) -> 1*31+2=33; 33*31+3=1026.
+        let mut bare = empty_state(0, 0, 1);
+        bare.nobjects.spawn(NObject {
+            pos: Vec2::new(2, 3),
+            vel: Vec2::new(4, 5),
+            cur_frame: 6,
+            ty: Some(7),
+            owner_idx: 0,
+            time_left: 0,
+        });
+        let cb = hash_components(&bare);
+        assert_eq!(
+            cb.nobjects, 1026,
+            "nobjects component fold = pos.x, pos.y only"
+        );
+
+        // Master nobjects contribution by hand pins the field ORDER:
+        // pos.x, pos.y, vel.x, vel.y, cur_frame, then ty.id (Some -> pushed).
+        let mut h: u32 = 1;
+        h = h.wrapping_mul(31).wrapping_add(0); // rand.last
+        h = h.wrapping_mul(31).wrapping_add(0); // cycles
+        h = h.wrapping_mul(33) ^ 1u32; // level byte
+        h = h.wrapping_mul(31).wrapping_add(2u32); // pos.x
+        h = h.wrapping_mul(31).wrapping_add(3u32); // pos.y
+        h = h.wrapping_mul(31).wrapping_add(4u32); // vel.x
+        h = h.wrapping_mul(31).wrapping_add(5u32); // vel.y
+        h = h.wrapping_mul(31).wrapping_add(6u32); // cur_frame
+        h = h.wrapping_mul(31).wrapping_add(7u32); // ty.id (Some(7))
+        assert_eq!(
+            hash_game_state(&bare),
+            h,
+            "nobjects master fold order: pos, vel, cur_frame, ty.id"
+        );
+
+        // Decoy owner_idx/time_left set: both hashes unchanged.
+        let mut decoy = empty_state(0, 0, 1);
+        decoy.nobjects.spawn(NObject {
+            pos: Vec2::new(2, 3),
+            vel: Vec2::new(4, 5),
+            cur_frame: 6,
+            ty: Some(7),
+            owner_idx: 123,
+            time_left: -9,
+        });
+        let cd = hash_components(&decoy);
+        assert_eq!(
+            cd.nobjects, cb.nobjects,
+            "owner_idx/time_left must not enter the nobjects component fold"
+        );
+        assert_eq!(
+            hash_game_state(&decoy),
+            hash_game_state(&bare),
+            "owner_idx/time_left must not enter the master hash"
+        );
+    }
+}

@@ -1,0 +1,26 @@
+# Step 2 Slice 5d T9 — fixed-level multi-seed respawn FUZZ, VARIANT 3 of 4 (O21).
+# See sim_slice5d_fuzz1_scenario.txt for the full trial-count-lever explanation.
+#
+# VARIANT 3: worm0 x=335, worm1 x=300 (base +185), worm1 health 12. worm1 dies at x=300
+# (>160). Against the C++ oracle: death ~tick 87, BeginRespawn ~tick 237 with **2 trials**
+# (rng burst = 2*2 = 4 draws), reborn ~tick 268 — inside the 360-tick window. The killer
+# is far enough right that the enemy-distance band leaves a large accept region => the
+# shortest search of the four.
+seed 42
+level Levels/physics_fall_test.lev
+ticks 360
+max_bonuses 0
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+worm 0  21954560 12779520 100 10 0   1
+worm 1  19660800 12845520  12 10 218 1
+weapon 0 EXPLOSIVES
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 38 16 0
+input 150 0 16

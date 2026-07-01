@@ -28,10 +28,18 @@ const LOWER_MASK: u32 = 0x7fff_ffff; // the lower 31 bits
 pub struct Rand {
     mt: [u32; N],
     idx: usize,
-    // Mirrors C++'s `last` (the most recently generated value). Not used in the
-    // port yet, but kept for future parity (serialization/equality in rand.hpp).
-    #[allow(dead_code)]
+    // Mirrors C++'s `last` (the most recently generated value). Exposed via
+    // `last()` for state hashing and serialization parity with rand.hpp.
     last: u32,
+    // Monotonic count of raw draws (`next_u32` calls) since construction. Pure
+    // test/diagnostic instrumentation with NO C++ counterpart: it is NOT hashed
+    // (neither the master nor the component fold reads it — they read `last()`
+    // only), NOT serialized, and never influences the sequence. It lets the
+    // differential harnesses witness a per-tick RNG *burst* (draws-per-tick)
+    // directly from the driven state — e.g. the death-spray and the
+    // BeginRespawn trial-count bursts of Slice 5d. Adding it leaves every
+    // existing golden byte-identical.
+    draws: u64,
 }
 
 impl Rand {
@@ -42,6 +50,7 @@ impl Rand {
             mt: [0; N],
             idx: N + 1,
             last: 0,
+            draws: 0,
         };
         r.seed(0x1337);
         r
@@ -95,6 +104,7 @@ impl Rand {
         y ^= (y << 15) & 0xefc6_0000;
         y ^= y >> 18;
         self.last = y;
+        self.draws += 1;
         y
     }
 
@@ -112,10 +122,45 @@ impl Rand {
     pub fn bound_range(&mut self, min: u32, max: u32) -> u32 {
         self.bound(max - min) + min
     }
+
+    /// The most recently generated value (mirrors C++ `Rand::last`).
+    /// Returns `0` immediately after `seed()`, or the value returned by the
+    /// last `next_u32()` call.
+    pub fn last(&self) -> u32 {
+        self.last
+    }
+
+    /// Monotonic count of raw draws (`next_u32` calls) since construction.
+    /// Diagnostic-only (no C++ counterpart, not hashed, not serialized): the
+    /// differential harnesses take per-tick deltas to witness an RNG *burst*
+    /// directly from the driven state.
+    pub fn draws(&self) -> u64 {
+        self.draws
+    }
 }
 
 impl Default for Rand {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_is_zero_after_seed() {
+        let mut r = Rand::new();
+        r.seed(42);
+        assert_eq!(r.last(), 0, "last() must be 0 immediately after seed");
+    }
+
+    #[test]
+    fn last_equals_most_recent_draw() {
+        let mut r = Rand::new();
+        r.seed(42);
+        let v = r.next_u32();
+        assert_eq!(r.last(), v, "last() must equal the value returned by next_u32()");
     }
 }

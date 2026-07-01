@@ -1,0 +1,53 @@
+# Step 2 Slice 5c scenario (MILESTONE) — the `bonuses` pool goes LIVE. With
+# `max_bonuses 4` the per-tick bonus-drop roll (`game.cpp:359`, T0) draws
+# `rand(CBonusDropChance)` (CBonusDropChance=1700) every tick; under seed 42 the first
+# 0-roll lands producing TICK 252, where `Game::CreateBonus` (T2) drops a bonus that then
+# FALLS + bounces under `Bonus::Process` (T3, BonusGravity=1500, BounceMul/Div=40/100).
+# NO weapon is fired and NO input is sent: the ONLY RNG per idle tick is the single
+# bonus-drop roll, so `rng` ticks once/tick and is otherwise flat. Read by BOTH the C++
+# dumper (oracle_dump_sim_physics, slice-5c T0+T3 build = bonuses Process loop + the gated
+# bonus-drop roll) and the Rust N-tick test. Same grammar as slice 3/4a/4b/4c/5a/5b plus
+# the new `max_bonuses` directive.
+#
+# === WHY THIS LANDS AS THE 5c MILESTONE (drop + fall; expiry OPTIONAL/out-of-scope) ====
+# The 5c headline is the pool going LIVE: `bonuses` leaves the empty-pool hash at the drop
+# tick (252) and EVOLVES every tick after — first the FALL (x,y move under gravity/bounce)
+# then a steady `--timer` countdown once settled (the bonus hash folds x,y,timer,weapon,
+# frame, so the column keeps moving even at rest). The ONLY sobject is the bonus SPAWN
+# FLASH `sobject_types[7]` = teleport_flash (detectRange=0, damage=0, numSounds=0 => RNG-
+# free AND the deferred chain-loop `sobject.cpp:217-227` is INERT: its detect box `kIx >
+# x-0 && kIx < x+0` is empty, so no flash ever catches a bonus). A bit-exact match over
+# all ticks IS the proof that no chain-loop fired.
+#
+# WHY THE WINDOW STOPS AT 500 (clean): the seed-42 drop is a FRAME-1 (health) bonus; its
+# timer-expiry (timer=rand(2000)+2000 => ~tick 2250-4250) spawns `bonus_s_objects[1]` =
+# zimm_flash (detectRange=0 => inert). A SECOND roll-drop lands at ~tick 2096, and the LONG
+# run's later frame-0 drops expire into large_explosion (detectRange=20) that carves dirt
+# AND arms the deferred chain-loop. All are out of 5c scope (the plan marks expiry
+# "(optionally)"; reaching expiry needs a multi-thousand-tick golden). So the window ends at
+# 500: a SINGLE bonus, drop -> fall -> settle -> timer countdown, fully clean (level
+# constant, no chain-loop, no damage, both worms flat).
+#
+# Control bits (7-bit ControlState): Up=1 Down=2 Left=4 Right=8 Fire=16 Change=32 Jump=64.
+seed 42
+# physics_fall_test.lev: open sky band (Background mat 130) over a solid floor at y=200px
+# (Dirt mat 12), level 504x350. Reused unchanged from slices 2/3/4a/4b/4c/5a/5b. The
+# BonusSpawnRect (504x350, the whole level) overlaps the clear sky band, so CreateBonus's
+# CheckBonusSpawnPosition search succeeds (a 5x5 box free of DirtRock) up in the sky; the
+# bonus then falls to the floor.
+level Levels/physics_fall_test.lev
+ticks 500
+# max_bonuses <n>: Settings::max_bonuses, the cap the per-tick bonus-drop roll gates on
+# (`!h[HBonusDisable] && max_bonuses > 0 && rand(CBonusDropChance)==0`). 0 (the default
+# for every prior scenario) short-circuits the roll => no rand drawn => slices 1-5b stay
+# byte-identical. 4 (the in-game default) opens the roll and makes the pool live.
+max_bonuses 4
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# pos_*: 16.16 fixed-point. BOTH worms VISIBLE, grounded and AT REST from tick 0 (reusing
+# 5b worm1's settled floor y=12845520 == ~196px), placed near the level EDGES (x=60 and
+# x=462) so the falling bonus (its rand-x lands in the middle band) stays > 11px clear of
+# both 11x11 pickup boxes => pickup (deferred) NEVER triggers and both worm columns are
+# CONSTANT every tick (verified: w0=57c56f96, w1=cdf36f96 flat through the window). No
+# weapon directive, no input lines.
+worm 0  3932160 12845520 100 10 0   1
+worm 1 30277632 12845520 100 10 218 1

@@ -1,0 +1,29 @@
+# Step 2 Slice 5d T9 — fixed-level multi-seed respawn FUZZ, VARIANT 4 of 4 (O21).
+# See sim_slice5d_fuzz1_scenario.txt for the full trial-count-lever explanation.
+#
+# VARIANT 4: worm0 x=335, worm1 x=300 — the SAME positions as variant 3 — but worm1
+# health 8 (not 12). The lower health makes the pre-death drip (rand(health+6) rolls,
+# worm.cpp:355) fire on a different tick pattern and worm1 dies one tick earlier (~tick
+# 86), so the rand stream reaching BeginRespawn is SHIFTED even though nothing moved.
+# Against the C++ oracle: BeginRespawn ~tick 236 with **6 trials** (rng burst = 2*6 = 12
+# draws), reborn ~tick 289 — inside the 360-tick window. This isolates the drip-timing
+# (rand-state) lever from the position lever: same geometry as variant 3 (2 trials), a
+# DIFFERENT trial count (6) purely from the health-driven rand-stream shift.
+seed 42
+level Levels/physics_fall_test.lev
+ticks 360
+max_bonuses 0
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+worm 0  21954560 12779520 100 10 0   1
+worm 1  19660800 12845520   8 10 218 1
+weapon 0 EXPLOSIVES
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 38 16 0
+input 150 0 16

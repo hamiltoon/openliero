@@ -1,0 +1,170 @@
+# Step 2 Slice 4d scenario - HANDGUN exercises all five deferrals (reload,
+# shell-drop, load_change weapon-cycle, dig; ProcessSight stays omitted yet the
+# golden matches because handgun has laserSight=true => its inert-ness is proven).
+#
+# Read by the C++ dumper (oracle_dump_sim_physics, slice-4c build + the optional
+# [ammo] token added in slice-4d task 6) and the Rust N-tick test. Grammar = slices
+# 3/4a/4b/4c plus 'weapon <slot> <name> [ammo]' (3rd token = low-ammo override).
+#
+# Control bits (7-bit ControlState): Up=1 Down=2 Left=4 Right=8 Fire=16 Change=32
+# Jump=64.  Aim convention (empirical, seed 42): worm0's SETTLED rest aim points
+# straight DOWN; holding Up raises the muzzle into a downrange arc; holding Down
+# pins it back straight down for digging.
+#
+# LOAD-BEARING CONSTRAINTS (verified in the golden):
+#  * Both worms health 100.  worm1 is INVISIBLE (visible 0) and parked HIGH in the
+#    sky (x=480,y=70): Worm::Process is gated on visible, so worm1 never moves/draws
+#    RNG (its column is CONSTANT); bullet flight (CheckForSpecWormHit) is gated on
+#    visible so it ignores worm1; and no floor explosion (y~200) can reach y=70.
+#  * handgun createOnExp=small_explosion: a ground-exploding bullet spawns the 4c
+#    sobject cluster + dirt-throw + crater. The headless dumper's StatsRecorder is
+#    only safe when NO worm is in an explosion's +/-detect_range(=8px) box, so every
+#    shot is ARCED (>=25 Up ticks) to explode DOWNRANGE, clear of worm0; <25 Up
+#    ticks would explode at the worm's feet and blow/damage it.  bobjects stays
+#    EMPTY and worm0's vel shows no blow-spike => no worm was ever hit.
+#  * Fire and dig never share a tick (Fire needs Fire-pressed; dig needs L+R with
+#    Change released) so the per-tick RNG order stays one-method-at-a-time.
+#  * The dig holds Down (input 14 = Down|Left|Right) so the aim stays straight-down
+#    and the worm sinks into the Dirt floor, carving FRESH dirt each dig => 'level'
+#    moves repeatedly; a Down-only tick (2) between digs re-arms able_to_dig.
+seed 42
+# physics_fall_test.lev: open sky over a solid Dirt floor (~y=200), 504x350. Reused
+# unchanged from slices 2/3/4a/4b/4c.
+level Levels/physics_fall_test.lev
+ticks 125
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+worm 0  9830400 12779520 100 10 0   1
+worm 1 31457280  4587520 100 10 218 0
+# 'weapon <slot> <name> [ammo]': handgun in slot 0 (current_weapon) with ammo=2 so
+# the 2nd shot empties the magazine -> reload. handgun.cfg: shotType0, parts=1,
+# distribution=2000, startFrame=-1, leaveShells=1, delay=20, loadingTime=220,
+# laserSight=true, createOnExp=small_explosion.
+weapon 0 HANDGUN 2
+#
+# === Phase layout (tick : worm0 action) ==================================
+# 0-12    settle (empty)        : worm0 lands grounded (~tick 13)
+# 13-37   Up                    : raise the muzzle ~25 ticks for an arced shot
+# 38      Fire  -> SHOT 1       : dart arcs downrange; ammo 2->1; leave_shell armed
+# 39      (shell drop)          : leave_shell_timer expires -> SHELL nobject (+5 rng)
+# 39-63   Up                    : re-raise (delay=20 from shot1 expires by tick 58)
+# 64      Fire  -> SHOT 2       : ammo 1->0; leave_shell armed again
+# 65      RELOAD ARMS           : ProcessWeapons sees ammo<=0 -> loading_left=220,
+#                                 ammo=15, then counts down; SHELL 2 drops too
+# 65-71   Change|Right / Change : load_change weapon-cycle WHILE loading_left>0
+# 72-93   Down                  : pin the aim back straight down for digging
+# 94-124  dig (Down held)       : L+R(14)/Down(2) toggled -> worm sinks, carves the
+#                                 Dirt floor; 'level' moves repeatedly, rng +2 / dig
+#
+# input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0; invisible/inert)
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 21 1 0
+input 22 1 0
+input 23 1 0
+input 24 1 0
+input 25 1 0
+input 26 1 0
+input 27 1 0
+input 28 1 0
+input 29 1 0
+input 30 1 0
+input 31 1 0
+input 32 1 0
+input 33 1 0
+input 34 1 0
+input 35 1 0
+input 36 1 0
+input 37 1 0
+input 38 16 0
+input 39 1 0
+input 40 1 0
+input 41 1 0
+input 42 1 0
+input 43 1 0
+input 44 1 0
+input 45 1 0
+input 46 1 0
+input 47 1 0
+input 48 1 0
+input 49 1 0
+input 50 1 0
+input 51 1 0
+input 52 1 0
+input 53 1 0
+input 54 1 0
+input 55 1 0
+input 56 1 0
+input 57 1 0
+input 58 1 0
+input 59 1 0
+input 60 1 0
+input 61 1 0
+input 62 1 0
+input 63 1 0
+input 64 16 0
+input 65 40 0
+input 66 32 0
+input 67 40 0
+input 68 32 0
+input 69 40 0
+input 70 32 0
+input 71 40 0
+input 72 2 0
+input 73 2 0
+input 74 2 0
+input 75 2 0
+input 76 2 0
+input 77 2 0
+input 78 2 0
+input 79 2 0
+input 80 2 0
+input 81 2 0
+input 82 2 0
+input 83 2 0
+input 84 2 0
+input 85 2 0
+input 86 2 0
+input 87 2 0
+input 88 2 0
+input 89 2 0
+input 90 2 0
+input 91 2 0
+input 92 2 0
+input 93 2 0
+input 94 14 0
+input 95 2 0
+input 96 14 0
+input 97 2 0
+input 98 14 0
+input 99 2 0
+input 100 14 0
+input 101 2 0
+input 102 14 0
+input 103 2 0
+input 104 14 0
+input 105 2 0
+input 106 14 0
+input 107 2 0
+input 108 14 0
+input 109 2 0
+input 110 14 0
+input 111 2 0
+input 112 14 0
+input 113 2 0
+input 114 14 0
+input 115 2 0
+input 116 14 0
+input 117 2 0
+input 118 14 0
+input 119 2 0
+input 120 14 0
+input 121 2 0
+input 122 14 0
+input 123 2 0
+input 124 14 0

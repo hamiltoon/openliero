@@ -1,0 +1,2726 @@
+//! Port of `Worm::Fire` (`worm.cpp:1099-1148`) + `Weapon::Fire`
+//! (`weapon.cpp:16-76`) — **the slice where RNG goes live**.
+//!
+//! [`worm_fire`] is the per-worm fire entry point: it decrements ammo, arms the
+//! firing delay, sets the fire-cone, computes the muzzle position/velocity, fires
+//! `parts` projectiles (each via [`weapon_fire`]), and finally applies recoil to
+//! the worm's velocity. [`weapon_fire`] spawns one [`WObject`] into the wobjects
+//! pool and draws the spread / colour / time-variance RNG.
+//!
+//! **The `rand()` call order is the contract.** For the fan weapon the sequence
+//! is exactly four draws, in this order (`weapon.cpp:33-75`):
+//!
+//! 1. spread `vel.x` = `rand(distribution * 2)`   (fan: `rand(24000)`)
+//! 2. spread `vel.y` = `rand(distribution * 2)`   (fan: `rand(24000)`)
+//! 3. colour       = `rand(2)`                    (`start_frame < 0` path)
+//! 4. time-var     = `rand(time_to_explo_v)`      (fan: `rand(10)`)
+//!
+//! The leave-shell draw (`rand(leave_shells)`, `worm.cpp:1114`) precedes all of
+//! these but is **guarded** by `leave_shells > 0`; fan has `leave_shells = 0`, so
+//! it is not drawn. A reordered / extra / missing draw shifts every downstream
+//! `rand.last` and desyncs the simulation, so the order here is load-bearing.
+//!
+//! Fixed-point: `cossin * speed / 100`, `vel * 100 / speed`, `* recoil / 100` all
+//! use **truncating** integer division ([`Vec2::div`], `wrapping_div`), never an
+//! arithmetic shift. `Ftoi(aiming_angle)` is the arithmetic `>> 16` ([`ftoi`]).
+
+use assets::object::{NObjectType, SObjectType, Weapon};
+use assets::sprite::SpriteSet;
+use assets::tc::Texture;
+use sim_core::fixed::{ftoi, itof};
+use sim_core::rng::Rand;
+use sim_core::vec::Vec2;
+
+use crate::blit::draw_dirt_effect;
+use crate::nobject::{check_for_spec_worm_hit, nobject_create2};
+use crate::pool::Pool;
+use crate::sobject::sobject_create;
+use crate::state::{LevelSim, NObject, SObject, WObject, WormState};
+
+// `Weapon::shot_type` enum values (`weapon.hpp:21`):
+// `enum { kStNormal, kStdType1, kStSteerable, kStdType2, kStLaser };`
+const ST_NORMAL: i32 = 0;
+const ST_TYPE1: i32 = 1;
+const ST_STEERABLE: i32 = 2;
+const ST_TYPE2: i32 = 3;
+
+/// Port of `Weapon::Fire` (`weapon.cpp:16-76`): spawn one projectile.
+///
+/// `angle` is `Ftoi(aiming_angle)` (the 0..127 cossin index), `vel` is the
+/// `firing_vel` carried from [`worm_fire`], `speed` the (possibly worm-adjusted)
+/// weapon speed, `pos` the muzzle position, `owner_idx` the firing worm's index.
+///
+/// Draws RNG in C++ order: spread `vel.x`, spread `vel.y` (only when
+/// `distribution != 0`), then the colour `rand(2)` on the `start_frame < 0` path,
+/// then `rand(time_to_explo_v)` (only when non-zero). Returns the spawned slot
+/// index (`Some` while the pool has room — always the case in 4a; the
+/// `NewObjectReuse` full-pool overwrite is deferred).
+///
+/// The C++ stats calls (`DamagePotential`, `Shot`) and the stats-only
+/// `fired_by` / `has_hit` fields are no-ops and are omitted.
+#[allow(clippy::too_many_arguments)]
+pub fn weapon_fire(
+    weapon: &Weapon,
+    angle: i32,
+    vel: Vec2,
+    speed: i32,
+    pos: Vec2,
+    owner_idx: i32,
+    cossin: &[Vec2; 128],
+    rand: &mut Rand,
+    wobjects: &mut Pool<WObject>,
+) -> Option<usize> {
+    let mut obj = WObject {
+        pos,
+        owner_idx,
+        ty: Some(weapon.id),
+        ..WObject::default()
+    };
+
+    // obj.vel = cossin[angle] * speed / 100 + vel   (truncating div, then add).
+    obj.vel = cossin[angle as usize].mul(speed).div(100).add(vel);
+
+    // Spread RNG — x THEN y, only when distribution != 0 (fan: 12000).
+    if weapon.distribution != 0 {
+        let dist = weapon.distribution;
+        let max = (dist * 2) as u32;
+        obj.vel.x = obj
+            .vel
+            .x
+            .wrapping_add((rand.bound(max) as i32).wrapping_sub(dist));
+        obj.vel.y = obj
+            .vel
+            .y
+            .wrapping_add((rand.bound(max) as i32).wrapping_sub(dist));
+    }
+
+    // cur_frame (weapon.cpp:39-69). Fan takes the `start_frame < 0` colour-rand
+    // path; the other branches are ported faithfully for non-fan weapons.
+    if weapon.start_frame >= 0 {
+        if weapon.shot_type == ST_NORMAL {
+            obj.cur_frame = if weapon.loop_anim {
+                if weapon.num_frames != 0 {
+                    rand.bound((weapon.num_frames + 1) as u32) as i32
+                } else {
+                    rand.bound(2) as i32
+                }
+            } else {
+                0
+            };
+        } else if weapon.shot_type == ST_TYPE1 {
+            let mut a = angle;
+            if a > 64 {
+                a -= 1;
+            }
+            // C++ clamps cur_frame into [0, 12] via two ifs; clamp is identical.
+            obj.cur_frame = ((a - 12) >> 3).clamp(0, 12);
+        } else if weapon.shot_type == ST_TYPE2 || weapon.shot_type == ST_STEERABLE {
+            obj.cur_frame = angle;
+        } else {
+            obj.cur_frame = 0;
+        }
+    } else {
+        obj.cur_frame = weapon.color_bullets - rand.bound(2) as i32;
+    }
+
+    // time_left = time_to_explo (- rand(time_to_explo_v) when non-zero).
+    obj.time_left = weapon.time_to_explo;
+    if weapon.time_to_explo_v != 0 {
+        obj.time_left -= rand.bound(weapon.time_to_explo_v as u32) as i32;
+    }
+
+    wobjects.spawn(obj)
+}
+
+/// Port of `Worm::Fire` (`worm.cpp:1099-1148`).
+///
+/// Mutates `worm` (ammo--, `delay_left`, `fire_cone`, the recoil on `vel`, and —
+/// when its guard fires — `leave_shell_timer`) and spawns `parts` projectiles
+/// into `wobjects`. `h_signed_recoil` is `common.h[HSignedRecoil]` (the TC
+/// `[hacks].SignedRecoil` flag); fan's `recoil = 2` never triggers it.
+///
+/// Statement order matches C++ exactly: ammo/delay/fire_cone, muzzle position,
+/// **leave-shell guard** (the first potential `rand`), sound (skipped — no sim or
+/// RNG effect), `affect_by_worm` speed/firing_vel, the `parts × weapon_fire`
+/// loop, then recoil **after** the loop.
+pub fn worm_fire(
+    worm: &mut WormState,
+    weapons: &[Weapon],
+    cossin: &[Vec2; 128],
+    h_signed_recoil: bool,
+    rand: &mut Rand,
+    wobjects: &mut Pool<WObject>,
+) {
+    let cw = worm.current_weapon as usize;
+    let weapon_id = worm.weapons[cw]
+        .ty
+        .expect("worm_fire: current weapon slot must have a resolved type");
+    let w = &weapons[weapon_id as usize];
+
+    // --ww.ammo;  ww.delay_left = w.delay;
+    worm.weapons[cw].ammo -= 1;
+    worm.weapons[cw].delay_left = w.delay;
+
+    worm.fire_cone = w.fire_cone;
+
+    // kFiring = cossin[angle] * (detect_distance + 5) + pos - (0, Itof(1)).
+    let angle = ftoi(worm.aiming_angle);
+    let firing_pos = cossin[angle as usize]
+        .mul(w.detect_distance + 5)
+        .add(worm.pos)
+        .sub(Vec2::new(0, itof(1)));
+
+    // Leave-shell guard (the first potential rand). Fan: leave_shells = 0 -> skip.
+    if w.leave_shells > 0 && rand.bound(w.leave_shells as u32) == 0 {
+        worm.leave_shell_timer = w.leave_shell_delay;
+    }
+
+    // Launch sound: skipped (no sim / RNG effect).
+
+    let mut speed = w.speed;
+    let mut firing_vel = Vec2::zero();
+    let parts = w.parts;
+
+    if w.affect_by_worm {
+        speed = speed.max(100);
+        firing_vel = worm.vel.mul(100).div(speed);
+    }
+
+    for _ in 0..parts {
+        weapon_fire(
+            w, angle, firing_vel, speed, firing_pos, worm.index, cossin, rand, wobjects,
+        );
+    }
+
+    // Recoil, AFTER the parts loop. HSignedRecoil hack: recoil >= 128 -> -256.
+    let mut recoil = w.recoil;
+    if h_signed_recoil && recoil >= 128 {
+        recoil -= 256;
+    }
+    worm.vel = worm.vel.sub(cossin[angle as usize].mul(recoil).div(100));
+}
+
+/// The verdict a single [`wobject_process`] pass returns to the driver
+/// (Task 3), mirroring the `do_explode` / `do_remove` flags at the tail of C++
+/// `WObject::Process` (`weapon.cpp:328-335`):
+///
+/// * [`Keep`](WObjectOutcome::Keep) — the projectile lives on (no flag set).
+/// * [`Explode`](WObjectOutcome::Explode) — `do_explode`: the driver calls
+///   [`blow_up`] then frees the slot.
+/// * [`Remove`](WObjectOutcome::Remove) — `do_remove`: the driver frees the
+///   slot **without** exploding (the `worm_collide` path). Never produced for
+///   fan in 4a — the worm-hit loop is deferred — but part of the contract Task
+///   3 consumes.
+///
+/// Splitting the verdict out (instead of freeing inside `Process`) keeps
+/// `wobject_process` free of the pool: the C++ frees `this` mid-iteration, which
+/// Rust's borrow checker forbids while the driver still holds the pool, so the
+/// free-during-iteration is the driver's job.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WObjectOutcome {
+    Keep,
+    Explode,
+    Remove,
+}
+
+/// Port of the single non-laser pass of `WObject::Process` (`weapon.cpp:127-338`)
+/// for the **fan** (ST_NORMAL) and **dart** (ST_TYPE1) projectile shapes — the two
+/// share an identical per-tick flight (see the `shot_type` guard below).
+///
+/// Advances one wobject by one tick: integrate `pos += vel`, clamp `pos` at the
+/// level edges, test the next-step cell for a ground collision, apply gravity in
+/// free air, and run the explosion-timer countdown. Returns the
+/// [`WObjectOutcome`]; the driver (Task 3) performs the [`blow_up`] + `Pool::free`
+/// when it is [`Explode`](WObjectOutcome::Explode)/[`Remove`](WObjectOutcome::Remove).
+///
+/// **Collision uses `inside`/`dirt_rock`, NOT `checked_mat_background`.** The
+/// worm-physics probe wraps a negative `x` into a wrong-row in-range pixel; the
+/// projectile collision instead tests `Inside` *first* (a true range check) and
+/// only then reads `DirtRock`, so a projectile leaving the level never reads a
+/// wrapped cell (`weapon.cpp:249`).
+///
+/// **`inew` is computed once, before the clamp, and reused.** C++ computes
+/// `inew_pos = Ftoi(pos + vel)` at line 234, clamps `pos` against it (lines
+/// 236-247) **without recomputing**, then feeds the *same* `inew` into the
+/// collision test (line 249). The clamp mutates `pos`; `inew` is frozen — that
+/// ordering is load-bearing, so we mirror it exactly.
+///
+/// **`bounce` and the `num_frames` animation are now LIVE** (Slice-5b T4a), so a
+/// closed-gate weapon (explosives: `bounce=30`, `num_frames=3`, `loop_anim=true`)
+/// flies. Both are RNG-free; the bounce mirrors the nobject bounce
+/// (`nobject.rs:300-324`) and the animation gates on the pre-`++cycles` snapshot
+/// `(cycles & 7) == 0` (the same threading the nobject animation uses).
+///
+/// Deferred / inert branches (guarded by `debug_assert!` so a non-fan config
+/// trips loudly, or omitted because they need state the driver owns):
+/// steering (`shot_type` 2/3) and the laser do-loop, `mult_speed`, and
+/// object/particle trails are all `debug_assert`ed to their fan-shaped no-op
+/// values. The `collide_with_objects` impulse loop needs the wobject/nobject
+/// pools and draws no RNG under the single-shot scenarios (self-skip), so it is
+/// omitted here and lands with the driver.
+///
+/// **The in-flight worm-hit arm (`weapon.cpp:287-326`) is now LIVE** (Slice-5′a
+/// T3, re-applying `fd33bbc`): after the timeout countdown a per-worm loop, gated
+/// by the per-pixel [`check_for_spec_worm_hit`] (T2), applies the vel-kick +
+/// `DoDamage` + **the blood fan BEFORE the hit-sound gate** (the load-bearing
+/// order — the OPPOSITE of the nobject arm) + the `worm_collide` explode/remove
+/// verdict. See the inline block for the exact RNG order. The `RemExp` early-explode block
+/// (`weapon.cpp:138-142`, gated on the `HRemExp` hack AND the weapon being the
+/// configurable `RemExpObject` LC slot) is likewise omitted: fan is not the
+/// `RemExpObject` weapon, so it is inert here (differential-proven over 93 ticks);
+/// port it when a slice exercises `RemExpObject`.
+#[allow(clippy::too_many_arguments)]
+pub fn wobject_process(
+    obj: &mut WObject,
+    level: &LevelSim,
+    weapon: &Weapon,
+    cycles: i32,
+    worms: &mut [WormState],
+    nobjects: &mut Pool<NObject>,
+    nobject_types: &[NObjectType],
+    worm_sprites: &SpriteSet,
+    cossin: &[Vec2; 128],
+    blood: i32,
+    rand: &mut Rand,
+) -> WObjectOutcome {
+    // Deferred-branch guards (4b/4c). Fan and dart satisfy every one (the dart
+    // trips only the shot_type guard, now relaxed to admit ST_TYPE1); a config
+    // that would take an un-ported branch fails loudly in debug builds.
+    // ST_NORMAL and ST_TYPE1 (the dart) share an identical per-tick flight: the
+    // C++ Process do-while body runs once for any non-laser, and the only
+    // shot_type-specific branches are the steering ones (2/3) and the laser loop
+    // guard (4) — ST_TYPE1 takes none of them and draws no rng (weapon.cpp:144-167,
+    // 336). ST_TYPE2/STEERABLE/laser STAY deferred.
+    debug_assert!(
+        weapon.shot_type == ST_NORMAL || weapon.shot_type == ST_TYPE1,
+        "steerable/type2/laser Process branches deferred (4b/4c)"
+    );
+    debug_assert!(
+        weapon.mult_speed == 100,
+        "mult_speed Process branch deferred (4b/4c)"
+    );
+    debug_assert!(
+        weapon.obj_trail_type < 0,
+        "object-trail spawn deferred (4b/4c)"
+    );
+    debug_assert!(
+        weapon.part_trail_obj < 0,
+        "particle-trail spawn deferred (4b/4c)"
+    );
+
+    let mut do_explode = false;
+
+    // do { ... } while (shot_type == kStLaser && ...): fan is not a laser, so the
+    // body runs exactly once.
+
+    // pos += vel.
+    obj.pos = obj.pos.add(obj.vel);
+
+    // Bounce (weapon.cpp:169-190) — SAME pattern as the nobject bounce
+    // (nobject.rs:300-324). Natural C++ guard `bounce > 0` (skipped for fan/dart,
+    // bounce=0; explosives bounce=30). Two sequential terrain probes mutate `vel`
+    // in place: ipos = Ftoi(pos), inew = Ftoi(pos + vel) computed HERE (the second
+    // probe reads what the first wrote). `bounce != 100`: reflect-and-damp
+    // (vel.x = -vel.x*bounce/100, vel.y = vel.y*4/5; symmetric for the y probe);
+    // `bounce == 100`: pure negate. No rand. Truncating `/100`, `*4/5`. The
+    // boundary-clamp `inew` below is recomputed from the POST-bounce vel (matching
+    // the C++ recompute at :234), so a reflected vel feeds the ground test.
+    if weapon.bounce > 0 {
+        let ipos_x = ftoi(obj.pos.x);
+        let ipos_y = ftoi(obj.pos.y);
+        let b_inew_x = ftoi(obj.pos.x.wrapping_add(obj.vel.x));
+        let b_inew_y = ftoi(obj.pos.y.wrapping_add(obj.vel.y));
+
+        // :173 x probe: (inew.x, ipos.y).
+        if !level.inside(b_inew_x, ipos_y) || level.dirt_rock(b_inew_x, ipos_y) {
+            if weapon.bounce != 100 {
+                // :175 vel.x = -vel.x * bounce / 100; :176 vel.y = (vel.y * 4) / 5.
+                obj.vel.x = obj
+                    .vel
+                    .x
+                    .wrapping_neg()
+                    .wrapping_mul(weapon.bounce)
+                    .wrapping_div(100);
+                obj.vel.y = obj.vel.y.wrapping_mul(4).wrapping_div(5);
+            } else {
+                // :178 vel.x = -vel.x.
+                obj.vel.x = obj.vel.x.wrapping_neg();
+            }
+        }
+
+        // :182 y probe: (ipos.x, inew.y).
+        if !level.inside(ipos_x, b_inew_y) || level.dirt_rock(ipos_x, b_inew_y) {
+            if weapon.bounce != 100 {
+                // :184 vel.y = -vel.y * bounce / 100; :185 vel.x = (vel.x * 4) / 5.
+                obj.vel.y = obj
+                    .vel
+                    .y
+                    .wrapping_neg()
+                    .wrapping_mul(weapon.bounce)
+                    .wrapping_div(100);
+                obj.vel.x = obj.vel.x.wrapping_mul(4).wrapping_div(5);
+            } else {
+                // :187 vel.y = -vel.y.
+                obj.vel.y = obj.vel.y.wrapping_neg();
+            }
+        }
+    }
+
+    // The collide_with_objects impulse loop (weapon.cpp:212-232) goes here in C++;
+    // omitted (driver-owned + inert for one shot; no RNG drawn under the scenario).
+    // The worm-hit loop (weapon.cpp:287-326) is AFTER the timeout, below.
+
+    // Boundary clamp (weapon.cpp:234-247). inew = Ftoi(pos + vel), computed ONCE
+    // and reused by the collision test; the clamp below mutates pos, not inew.
+    // wrapping_add + arithmetic-shift Ftoi match C++'s two's-complement `pos+vel`
+    // and signed `>>`.
+    let inew_x = ftoi(obj.pos.x.wrapping_add(obj.vel.x));
+    let inew_y = ftoi(obj.pos.y.wrapping_add(obj.vel.y));
+    if inew_x < 0 {
+        obj.pos.x = 0;
+    }
+    if inew_y < 0 {
+        obj.pos.y = 0;
+    }
+    if inew_x >= level.width {
+        obj.pos.x = itof(level.width - 1);
+    }
+    if inew_y >= level.height {
+        obj.pos.y = itof(level.height - 1);
+    }
+
+    // Ground collision vs free air (weapon.cpp:249-279).
+    if !level.inside(inew_x, inew_y) || level.dirt_rock(inew_x, inew_y) {
+        if weapon.bounce == 0 {
+            if weapon.expl_ground {
+                do_explode = true;
+            } else {
+                obj.vel = Vec2::zero();
+            }
+        }
+    } else {
+        // Free air: apply gravity (fan gravity 0 -> no-op).
+        obj.vel.y = obj.vel.y.wrapping_add(weapon.gravity);
+
+        // Animation (weapon.cpp:260-278) — INSIDE the air branch, AFTER gravity.
+        // Natural C++ guard `num_frames > 0` (inert for fan/dart, num_frames=0;
+        // explosives num_frames=3). cur_frame advances only when `(cycles & 7) == 0`
+        // — `cycles` is the SAME pre-`++cycles` snapshot the rest of the tick sees
+        // (the T0 threading; the object loops run before `++cycles`), so it matches
+        // the nobject animation gate. `cur_frame` IS hashed (wobject master folds
+        // it), so this advance is load-bearing. No rand. `loop_anim` picks the
+        // vel.x-direction branch (explosives loopAnim=true); the non-loop branch is
+        // a plain `++` wrap.
+        if weapon.num_frames > 0 && (cycles & 7) == 0 {
+            if !weapon.loop_anim {
+                // :263 if (++cur_frame > num_frames) cur_frame = 0.
+                obj.cur_frame += 1;
+                if obj.cur_frame > weapon.num_frames {
+                    obj.cur_frame = 0;
+                }
+            } else if obj.vel.x < 0 {
+                // :268 if (--cur_frame < 0) cur_frame = num_frames.
+                obj.cur_frame -= 1;
+                if obj.cur_frame < 0 {
+                    obj.cur_frame = weapon.num_frames;
+                }
+            } else if obj.vel.x > 0 {
+                // :272 if (++cur_frame > num_frames) cur_frame = 0.
+                obj.cur_frame += 1;
+                if obj.cur_frame > weapon.num_frames {
+                    obj.cur_frame = 0;
+                }
+            }
+        }
+    }
+
+    // Explosion timer (weapon.cpp:281-285): the decrement only happens when
+    // time_to_explo > 0, and an underflow past 0 explodes.
+    if weapon.time_to_explo > 0 {
+        obj.time_left -= 1;
+        if obj.time_left < 0 {
+            do_explode = true;
+        }
+    }
+
+    // In-flight worm-hit loop (weapon.cpp:287-326) — LIVE (5′a T3, re-applying
+    // fd33bbc), gated by the per-pixel `check_for_spec_worm_hit` (T2). Runs AFTER
+    // the timeout countdown and BEFORE the do_explode/do_remove tail. Per worm:
+    //
+    //   BLOOD FAN comes BEFORE the hit-sound gate (`:301` then `:308`) — the
+    //   OPPOSITE order to the nobject arm (nobject.cpp:180 sound, then :188 blood).
+    //   This asymmetry is load-bearing; the two C++ functions genuinely differ.
+    let mut do_remove = false;
+    for worm in worms.iter_mut() {
+        // :290-291 gate: ANY hit param non-zero AND a per-pixel sprite hit at the
+        // wobject's fixed pos (Ftoi -> integer pixel), within detect_distance.
+        if (weapon.hit_damage != 0
+            || weapon.blow_away != 0
+            || weapon.blood_on_hit != 0
+            || weapon.worm_collide)
+            && check_for_spec_worm_hit(
+                worm,
+                ftoi(obj.pos.x),
+                ftoi(obj.pos.y),
+                weapon.detect_distance,
+                worm_sprites,
+                &level.material_flags,
+            )
+        {
+            // :292 vel-kick — the WOBJECT's vel * blow_away / 100 (integer,
+            // truncating), added to the worm's vel. NO rand.
+            worm.vel = worm.vel.add(obj.vel.mul(weapon.blow_away).div(100));
+
+            // :294 DoDamage(worm, hit_damage, owner_idx) — RNG-free wound in
+            // normal mode; sets `last_killed_by_idx` only when it drops <= 0.
+            worm.do_damage(weapon.hit_damage, obj.owner_idx);
+            // :295-298 DamageDealt/Hit stats — no-op (has_hit unported).
+
+            // :301-306 BLOOD FAN FIRST. kBloodAmount = blood_on_hit * blood / 100
+            // (truncating). Per particle: rand(128) [kAngle] THEN
+            // nobject_types[6].Create2(kAngle, obj.vel/3, obj.pos, 0, worm.index).
+            // The base vel/pos are the WOBJECT's `obj.vel/3` / `obj.pos` (NOT the
+            // worm's), and owner is the WOUNDED worm (`worm.index`). Create2 draws
+            // rand(speed_v) + rand(dist*2)x2 -> 4 draws/particle for blood.
+            let k_blood_amount = weapon.blood_on_hit * blood / 100;
+            for _ in 0..k_blood_amount {
+                let k_angle = rand.bound(128) as i32;
+                nobject_create2(
+                    &nobject_types[6],
+                    k_angle,
+                    obj.vel.div(3),
+                    obj.pos,
+                    0,
+                    worm.index,
+                    cossin,
+                    rand,
+                    nobjects,
+                );
+            }
+
+            // :308-314 hit-sound gate SECOND. The OUTER rand(3) is only drawn when
+            // `hit_damage > 0 && worm.health > 0` (short-circuit — reading the
+            // POST-DoDamage health). On `== 0` the INNER rand(3) is ALWAYS taken
+            // (the C++ `NOTE: MUST be outside the unpredictable branch`); Play is a
+            // render-only no-op (omitted), but the draws are the contract.
+            if weapon.hit_damage > 0 && worm.health > 0 && rand.bound(3) == 0 {
+                let _k_snd = 18 + rand.bound(3) as i32;
+                // sound_player->Play(kSnd, &worm) — omitted (no sim/RNG).
+            }
+
+            // :316-324 worm_collide branch. `rand(w.worm_collide)`: worm_collide is
+            // a bool (== 1 when set), so this is `rand(1)` — always 0 — meaning a
+            // set worm_collide always fires. worm_explode -> do_explode; either
+            // way do_remove. do_explode wins at the tail (C++ checks it first).
+            if weapon.worm_collide && rand.bound(1) == 0 {
+                if weapon.worm_explode {
+                    do_explode = true;
+                }
+                do_remove = true;
+            }
+        }
+    }
+
+    // Tail (weapon.cpp:328-335): do_explode (BlowUpObject + Free) wins over
+    // do_remove (Free without exploding); otherwise the projectile lives on.
+    if do_explode {
+        WObjectOutcome::Explode
+    } else if do_remove {
+        WObjectOutcome::Remove
+    } else {
+        WObjectOutcome::Keep
+    }
+}
+
+/// Port of `WObject::BlowUpObject` (`weapon.cpp:78-125`) — the `create_on_exp`
+/// sobject spawn (`weapon.cpp:89-92`) followed by the `dirt_effect` crater branch
+/// (`weapon.cpp:117-124`).
+///
+/// In C++ this frees the wobject, then (conditionally) spawns a `create_on_exp`
+/// sobject, plays the explosion sound, scatters `splinter_amount` nobjects, and
+/// applies a `dirt_effect` crater. The actual `Pool::free` is the driver's job
+/// (it frees the slot after this returns), and the sound is a render-only side
+/// effect with no sim/RNG impact, so it is omitted.
+///
+/// **`create_on_exp` is now live** (Slice-4c Task 4): when `create_on_exp >= 0`
+/// it calls [`sobject_create`] for `sobject_types[create_on_exp]` at
+/// `Ftoi(pos.x), Ftoi(pos.y)` (`weapon.cpp:90-91` `Create(game, Ftoi(kX),
+/// Ftoi(kY), cause_idx, fired_by, this)`; the `-8` centre→top-left offset is
+/// applied INSIDE `sobject_create`, NOT here). This runs **after** `Free(this)`
+/// (the driver's job) and **before** the dart's own `dirt_effect` branch — the
+/// C++ order is load-bearing because the sobject's own dirt-throw / crater draw
+/// their RNG between the two. `owner_idx` is the exploding wobject's `owner_idx`
+/// (C++ `cause_idx == fired_by`).
+///
+/// The **`dirt_effect` branch is live** (Slice-4b): when the DART's own
+/// `dirt_effect >= 0` it calls [`draw_dirt_effect`] to carve a 16x16 crater
+/// centred on the wobject, with the C++ `Ftoi(x) - 7, Ftoi(y) - 7` top-left
+/// offset ([`ftoi`] is the arithmetic `>> 16`). This is where greenball-style
+/// explosions (dirt_effect=6) destroy terrain and draw their `rand(rframe)`.
+/// **`CorrectShadow` is omitted (O4)** — the dumper sets `settings->shadow =
+/// false`, so it never runs.
+///
+/// Branch behaviour by weapon:
+/// * **fan** (`create_on_exp = -1`, `dirt_effect = -1`) — both branches skipped:
+///   inert, draws no RNG, writes no `material_id`. The 4a path is preserved.
+/// * **greenball** (`create_on_exp = -1`, `dirt_effect = 6`) — only the crater
+///   fires: a crater is stamped and exactly one `rand(rframe)` is drawn (4b).
+/// * **dart** (`create_on_exp = 2`) — the sobject spawn fires: `small_explosion`
+///   runs its full sound / dirt-throw / crater cluster via [`sobject_create`].
+///
+/// **The `splinter_amount` scatter is now live** (Slice-5a T0,
+/// `weapon.cpp:96-115`): when `splinter_amount > 0` and `splinter_scatter == 0`
+/// (the cannon path) it spawns `splinter_amount` nobjects of `splinter_type` via
+/// [`nobject_create2`], drawing per splinter `rand(128)` (`kAngle`) **then**
+/// `rand(2)` (`kColorSub`) **then** `Create2`'s own draws, at the wobject's
+/// **fixed** `pos` (`fixedvec(kX, kY)` — NO `Ftoi`) with zero velocity and colour
+/// `splinter_colour - kColorSub`. It runs **after** `create_on_exp` and **before**
+/// the dart's own `dirt_effect` — the C++ order is load-bearing because each
+/// `Create2` draws its RNG between the two. The `scatter != 0` sub-branch (the
+/// C++ `Create1` path) is **guarded** (O18): no weapon in this TC takes it (only
+/// `mini_nuke` has `scatter=1`, out of scope) and `blow_up` has no access to the
+/// wobject velocity `Create1` needs, so a config that would hit it trips loudly.
+#[allow(clippy::too_many_arguments)]
+pub fn blow_up(
+    weapon: &Weapon,
+    level: &mut LevelSim,
+    large_sprites: &SpriteSet,
+    textures: &[Texture],
+    pos: Vec2,
+    owner_idx: i32,
+    sobject_types: &[SObjectType],
+    nobject_types: &[NObjectType],
+    cossin: &[Vec2; 128],
+    worms: &mut [WormState],
+    wobjects: &mut Pool<WObject>,
+    weapons: &[Weapon],
+    nobjects: &mut Pool<NObject>,
+    sobjects: &mut Pool<SObject>,
+    blood: i32,
+    rand: &mut Rand,
+) {
+    // :89-92 create-on-explosion — BEFORE the dart's own dirt_effect (the order
+    // is load-bearing: the sobject's sound/dirt-throw/crater draw RNG between the
+    // sobject spawn and the dart crater). Pass `Ftoi(pos.x), Ftoi(pos.y)`; the
+    // `-8` centre→top-left offset is applied inside sobject_create.
+    if weapon.create_on_exp >= 0 {
+        sobject_create(
+            &sobject_types[weapon.create_on_exp as usize],
+            ftoi(pos.x),
+            ftoi(pos.y),
+            owner_idx,
+            worms,
+            wobjects,
+            weapons,
+            nobjects,
+            nobject_types,
+            level,
+            cossin,
+            large_sprites,
+            textures,
+            sobjects,
+            blood,
+            rand,
+        );
+    }
+
+    // :94 explo sound (render-only, no sim/RNG) — omitted.
+
+    // :96-115 splinter scatter — AFTER create_on_exp, BEFORE the dart's own
+    // dirt_effect. The C++ order is load-bearing: each Create2 draws its RNG
+    // between the sobject spawn and the crater.
+    if weapon.splinter_amount > 0 {
+        if weapon.splinter_scatter == 0 {
+            // :99-106 scatter == 0 (cannon path). Per splinter: rand(128) [kAngle]
+            // THEN rand(2) [kColorSub], THEN nobject_types[splinter_type].Create2
+            // with zero vel, the FIXED pos (`fixedvec(kX, kY)` — NO Ftoi), and
+            // colour `splinter_colour - kColorSub`. cause_idx == fired_by ==
+            // owner_idx (the exploding wobject's owner).
+            for _ in 0..weapon.splinter_amount {
+                let angle = rand.bound(128) as i32;
+                let color_sub = rand.bound(2) as i32;
+                nobject_create2(
+                    &nobject_types[weapon.splinter_type as usize],
+                    angle,
+                    Vec2::zero(),
+                    pos,
+                    weapon.splinter_colour - color_sub,
+                    owner_idx,
+                    cossin,
+                    rand,
+                    nobjects,
+                );
+            }
+        } else {
+            // :107-114 scatter != 0 -> the C++ Create1 splinter branch. GUARDED
+            // (O18): no weapon in this TC takes it (only mini_nuke has scatter=1,
+            // with the special small_nukes type, out of scope), AND blow_up has no
+            // access to the wobject velocity that C++ Create1 needs (`fixedvec(
+            // kVelX, kVelY)`). A config that would hit it trips loudly here.
+            debug_assert!(
+                false,
+                "splinter_scatter != 0 (Create1 branch) deferred (O18): needs wobject vel"
+            );
+        }
+    }
+
+    if weapon.dirt_effect >= 0 {
+        draw_dirt_effect(
+            level,
+            large_sprites,
+            textures,
+            weapon.dirt_effect,
+            ftoi(pos.x) - 7,
+            ftoi(pos.y) - 7,
+            rand,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{
+        LevelSim, WeaponInit, WormInit, MAT_BACKGROUND, MAT_DIRT, MAT_ROCK, MAT_WORM, NUM_WEAPONS,
+    };
+    use sim_core::tables::precompute_cossin;
+
+    // The real fan weapon, loaded from the shipped TC config. Cross-ref lists are
+    // empty: none of the fired fields (speed, distribution, parts, recoil,
+    // time_to_explo*, start_frame, color_bullets, leave_shells, affect_by_worm,
+    // fire_cone, delay, detect_distance) depend on a cross-ref, and `id` is set by
+    // the caller (== array index in the weapon table). So an empty-list load
+    // yields fan's exact fire parameters.
+    fn fan_weapon(id: i32) -> Weapon {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/TC/openliero/weapons/fan.cfg"
+        ));
+        let mut w = Weapon::load(bytes, &[], &[], &[]).unwrap();
+        w.id = id;
+        w
+    }
+
+    // A worm wired to fire weapon-slot 0 at a known kinematic state: aiming_angle
+    // = Itof(32) (cossin index 32), a non-zero pos and vel so the muzzle position
+    // and firing_vel are both exercised. The slot's `ty` is the index INTO the
+    // weapons slice (0), which is decoupled from the weapon's `id` (the value
+    // stored on the spawned wobject); callers pass a one-element `&[weapon]`.
+    fn firing_worm(ammo: i32) -> WormState {
+        let mut weapons = [WeaponInit::default(); NUM_WEAPONS];
+        weapons[0] = WeaponInit { ty: Some(0), ammo };
+        let mut w = WormState::from_init(&WormInit {
+            index: 1,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons,
+            start_pos: Vec2::new(6_553_600, 3_276_800), // (100.0, 50.0) in 16.16
+            visible: true,
+        });
+        w.aiming_angle = itof(32);
+        w.vel = Vec2::new(200_000, -100_000);
+        w.current_weapon = 0;
+        w
+    }
+
+    // A seed whose first two rand(24000) draws differ, so an x<->y swap is
+    // detectable; asserted in the order test.
+    const SEED: u32 = 0x4242;
+
+    fn seeded() -> Rand {
+        let mut r = Rand::new();
+        r.seed(SEED);
+        r
+    }
+
+    // ---- Step 1: Fire RNG order + spawn (fan constants) ----------------------
+
+    #[test]
+    fn fan_fire_spawns_one_wobject_with_spread_vel_x_then_y() {
+        let cossin = precompute_cossin();
+        let fan = fan_weapon(7);
+        let mut worm = firing_worm(150);
+        let pre_vel = worm.vel;
+        let mut pool: Pool<WObject> = Pool::new(600);
+        let mut rand = seeded();
+
+        // Reference RNG stream: the four fan draws in order.
+        let mut refr = seeded();
+        let d_spread_x = refr.bound(24000) as i32;
+        let d_spread_y = refr.bound(24000) as i32;
+        let d_color = refr.bound(2) as i32;
+        let d_time = refr.bound(10) as i32;
+        assert_ne!(
+            d_spread_x, d_spread_y,
+            "seed must give distinct x/y draws so an order swap is detectable"
+        );
+
+        worm_fire(&mut worm, &[fan], &cossin, false, &mut rand, &mut pool);
+
+        // Exactly `parts` (= 1) wobjects spawned, in slot 0.
+        assert_eq!(pool.len(), 1, "fan parts = 1 -> exactly one wobject");
+        let obj = *pool.get(0).expect("wobject spawned in slot 0");
+
+        // vel = cossin[32]*180/100 + firing_vel, then += (dx-12000, dy-12000).
+        let firing_vel = pre_vel.mul(100).div(180); // affect_by_worm, speed 180
+        let base = cossin[32].mul(180).div(100).add(firing_vel);
+        assert_eq!(
+            obj.vel.x,
+            base.x + (d_spread_x - 12000),
+            "vel.x uses the FIRST rand(24000)"
+        );
+        assert_eq!(
+            obj.vel.y,
+            base.y + (d_spread_y - 12000),
+            "vel.y uses the SECOND rand(24000)"
+        );
+
+        // cur_frame = color_bullets - rand(2) (start_frame < 0 path).
+        assert_eq!(obj.cur_frame, 25 - d_color, "cur_frame = 25 - rand(2)");
+        // time_left = 45 - rand(10).
+        assert_eq!(obj.time_left, 45 - d_time, "time_left = 45 - rand(10)");
+
+        // owner + type carried through.
+        assert_eq!(obj.owner_idx, 1, "owner_idx = worm.index");
+        assert_eq!(obj.ty, Some(7), "ty = weapon id");
+    }
+
+    #[test]
+    fn fan_fire_draws_exactly_four_rands_in_order() {
+        let cossin = precompute_cossin();
+        let fan = fan_weapon(3);
+        let mut worm = firing_worm(150);
+        let mut pool: Pool<WObject> = Pool::new(600);
+        let mut rand = seeded();
+
+        worm_fire(&mut worm, &[fan], &cossin, false, &mut rand, &mut pool);
+
+        // A reference Rand advanced by EXACTLY the four fan draws (spread x,
+        // spread y, colour, time-var). leave_shells = 0 -> no fifth/leading draw.
+        // bound() consumes one next_u32 each, so last() matches iff worm_fire drew
+        // exactly four times, in this order.
+        let mut refr = seeded();
+        refr.bound(24000);
+        refr.bound(24000);
+        refr.bound(2);
+        refr.bound(10);
+        assert_eq!(
+            rand.last(),
+            refr.last(),
+            "fan must draw exactly 4 rands (no leave-shell draw)"
+        );
+        // leave_shells = 0 -> the shell branch never ran.
+        assert_eq!(
+            worm.leave_shell_timer, 0,
+            "no leave-shell draw/timer for fan"
+        );
+    }
+
+    #[test]
+    fn fan_fire_updates_worm_ammo_delay_firecone_and_recoil() {
+        let cossin = precompute_cossin();
+        let fan = fan_weapon(7);
+        let mut worm = firing_worm(150);
+        let pre_vel = worm.vel;
+        let mut pool: Pool<WObject> = Pool::new(600);
+        let mut rand = seeded();
+
+        worm_fire(&mut worm, &[fan], &cossin, false, &mut rand, &mut pool);
+
+        assert_eq!(worm.weapons[0].ammo, 149, "ammo decremented");
+        assert_eq!(worm.weapons[0].delay_left, 0, "delay_left = w.delay (0)");
+        assert_eq!(worm.fire_cone, 0, "fire_cone = w.fire_cone (0)");
+
+        // vel -= cossin[32] * recoil(2) / 100, AFTER the parts loop. The recoil
+        // subtracts from the PRE-fire vel (the loop does not touch worm.vel).
+        let expected = pre_vel.sub(cossin[32].mul(2).div(100));
+        assert_eq!(worm.vel, expected, "recoil applied after parts loop");
+    }
+
+    // ---- Step 2: affect_by_worm + HSignedRecoil ------------------------------
+
+    // A synthetic weapon with NO RNG draws (distribution 0, start_frame >= 0 with
+    // shot_type 0 + loop_anim false, time_to_explo_v 0) so obj.vel is exactly the
+    // deterministic base — isolating the affect_by_worm / recoil arithmetic.
+    fn synth_weapon(id: i32, speed: i32, recoil: i32, affect_by_worm: bool) -> Weapon {
+        Weapon {
+            id,
+            speed,
+            recoil,
+            affect_by_worm,
+            distribution: 0,
+            parts: 1,
+            delay: 0,
+            fire_cone: 0,
+            detect_distance: 1,
+            time_to_explo: 45,
+            time_to_explo_v: 0,
+            start_frame: 0,
+            shot_type: ST_NORMAL,
+            loop_anim: false,
+            num_frames: 0,
+            color_bullets: 25,
+            leave_shells: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn affect_by_worm_clamps_speed_and_carries_firing_vel() {
+        let cossin = precompute_cossin();
+        // speed 50 < 100 -> clamps to 100; firing_vel = vel * 100 / 100 = vel.
+        let w = synth_weapon(2, 50, 0, true);
+        let mut worm = firing_worm(10);
+        let pre_vel = worm.vel;
+        let mut pool: Pool<WObject> = Pool::new(8);
+        let mut rand = seeded();
+
+        worm_fire(&mut worm, &[w], &cossin, false, &mut rand, &mut pool);
+
+        let obj = *pool.get(0).unwrap();
+        // speed clamped to 100: base = cossin[32]*100/100 + vel = cossin[32] + vel.
+        let firing_vel = pre_vel.mul(100).div(100);
+        let expected = cossin[32].mul(100).div(100).add(firing_vel);
+        assert_eq!(obj.vel, expected, "speed clamped to 100, firing_vel = vel");
+        // No RNG consumed by this synthetic weapon.
+        assert_eq!(
+            rand.last(),
+            0,
+            "no rand drawn (distribution/v/frame all skip)"
+        );
+    }
+
+    #[test]
+    fn no_affect_by_worm_leaves_firing_vel_zero_and_speed_untouched() {
+        let cossin = precompute_cossin();
+        let w = synth_weapon(2, 200, 0, false);
+        let mut worm = firing_worm(10);
+        let mut pool: Pool<WObject> = Pool::new(8);
+        let mut rand = seeded();
+
+        worm_fire(&mut worm, &[w], &cossin, false, &mut rand, &mut pool);
+
+        let obj = *pool.get(0).unwrap();
+        // firing_vel = 0, speed unchanged (200): base = cossin[32]*200/100.
+        let expected = cossin[32].mul(200).div(100);
+        assert_eq!(
+            obj.vel, expected,
+            "no affect_by_worm: firing_vel 0, speed kept"
+        );
+    }
+
+    #[test]
+    fn signed_recoil_hack_subtracts_256_when_recoil_ge_128() {
+        let cossin = precompute_cossin();
+        // recoil 200 >= 128. Hack ON -> recoil 200-256 = -56; hack OFF -> 200.
+        let w = synth_weapon(2, 100, 200, false);
+
+        let mut worm_on = firing_worm(10);
+        let pre = worm_on.vel;
+        let mut pool: Pool<WObject> = Pool::new(8);
+        let mut r = seeded();
+        worm_fire(&mut worm_on, &[w.clone()], &cossin, true, &mut r, &mut pool);
+        let expected_on = pre.sub(cossin[32].mul(-56).div(100));
+        assert_eq!(worm_on.vel, expected_on, "hack on: recoil -= 256 -> -56");
+
+        let mut worm_off = firing_worm(10);
+        let mut pool2: Pool<WObject> = Pool::new(8);
+        let mut r2 = seeded();
+        worm_fire(&mut worm_off, &[w], &cossin, false, &mut r2, &mut pool2);
+        let expected_off = pre.sub(cossin[32].mul(200).div(100));
+        assert_eq!(worm_off.vel, expected_off, "hack off: recoil stays 200");
+
+        assert_ne!(
+            worm_on.vel, worm_off.vel,
+            "the HSignedRecoil branch must change the recoil sign"
+        );
+    }
+
+    #[test]
+    fn fan_recoil_two_is_below_signed_recoil_threshold() {
+        // Fan recoil = 2 < 128, so the hack is a no-op even when enabled: the
+        // worm vel is identical with the hack on or off.
+        let cossin = precompute_cossin();
+        let fan = fan_weapon(7);
+
+        let mut worm_on = firing_worm(150);
+        let mut p1: Pool<WObject> = Pool::new(8);
+        let mut r1 = seeded();
+        worm_fire(
+            &mut worm_on,
+            &[fan.clone()],
+            &cossin,
+            true,
+            &mut r1,
+            &mut p1,
+        );
+
+        let mut worm_off = firing_worm(150);
+        let mut p2: Pool<WObject> = Pool::new(8);
+        let mut r2 = seeded();
+        worm_fire(&mut worm_off, &[fan], &cossin, false, &mut r2, &mut p2);
+
+        assert_eq!(
+            worm_on.vel, worm_off.vel,
+            "fan recoil 2 < 128: HSignedRecoil is a no-op"
+        );
+    }
+
+    #[test]
+    fn weapon_fire_returns_spawned_slot() {
+        let cossin = precompute_cossin();
+        let fan = fan_weapon(7);
+        let mut pool: Pool<WObject> = Pool::new(8);
+        let mut rand = seeded();
+        let slot = weapon_fire(
+            &fan,
+            32,
+            Vec2::zero(),
+            fan.speed,
+            Vec2::new(1, 2),
+            1,
+            &cossin,
+            &mut rand,
+            &mut pool,
+        );
+        assert_eq!(slot, Some(0), "spawn returns the slot index (Some in 4a)");
+    }
+
+    // ====================================================================
+    // wobject_process + blow_up (Task 2)
+    // ====================================================================
+
+    // A large, all-background level: every cell is material 0 with no flags, so
+    // `dirt_rock` is false everywhere in range and `inside` is true for the test
+    // positions. Lets a projectile fly free so only timeout/explicit collision
+    // pins an outcome.
+    fn air_level() -> LevelSim {
+        LevelSim {
+            width: 1000,
+            height: 1000,
+            material_id: vec![0u8; 1000 * 1000],
+            material_flags: [0u8; 256],
+        }
+    }
+
+    // A 20x20 level with a single rock cell at (10,10) (idx 10 + 10*20 = 210).
+    // Material 1 carries the kRock flag -> DirtRock; everything else is empty.
+    fn floor_level() -> LevelSim {
+        let mut material_flags = [0u8; 256];
+        material_flags[1] = MAT_ROCK;
+        let mut material_id = vec![0u8; 20 * 20];
+        material_id[10 + 10 * 20] = 1; // (10,10) is solid
+        LevelSim {
+            width: 20,
+            height: 20,
+            material_id,
+            material_flags,
+        }
+    }
+
+    // A synthetic projectile weapon shaped like fan's *Process* path (shot_type
+    // normal, no bounce, mult_speed 100, no trails, no animation) but with the
+    // collision knobs under test set explicitly. obj_trail_type / part_trail_obj
+    // are -1 (the "no trail" sentinel) so the deferred-branch debug_asserts in
+    // wobject_process are satisfied.
+    fn proc_weapon(expl_ground: bool, gravity: i32, time_to_explo: i32) -> Weapon {
+        Weapon {
+            id: 1,
+            shot_type: ST_NORMAL,
+            bounce: 0,
+            mult_speed: 100,
+            gravity,
+            expl_ground,
+            time_to_explo,
+            num_frames: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    // Drives `wobject_process` with an EMPTY worm list so the T3 in-flight
+    // worm-hit arm is inert (no worm to hit): it never calls
+    // `check_for_spec_worm_hit` and draws no arm RNG. Preserves the pre-T3 5-arg
+    // call shape used by the flight / collision / timeout tests below, which pin
+    // the flight path in isolation. The arm itself is exercised by the
+    // `worm_hit_*` tests further down, which call `wobject_process` directly with
+    // a real worm + sprite bank.
+    fn proc_no_worms(
+        obj: &mut WObject,
+        level: &LevelSim,
+        weapon: &Weapon,
+        cycles: i32,
+        rand: &mut Rand,
+    ) -> WObjectOutcome {
+        let mut worms: [WormState; 0] = [];
+        let mut nobjects: Pool<NObject> = Pool::new(1);
+        let nobject_types: [NObjectType; 0] = [];
+        let worm_sprites = SpriteSet::default();
+        let cossin = precompute_cossin();
+        wobject_process(
+            obj,
+            level,
+            weapon,
+            cycles,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            rand,
+        )
+    }
+
+    // ---- Step 1: movement + gravity -----------------------------------------
+
+    #[test]
+    fn fan_free_flight_is_a_straight_line_with_constant_velocity() {
+        // Fan gravity = 0, so on a free-flight tick vel is unchanged and pos
+        // advances by exactly vel each tick: a straight line.
+        let fan = fan_weapon(7);
+        assert_eq!(fan.gravity, 0, "fan gravity is 0");
+        let level = air_level();
+        let mut rand = seeded();
+
+        let vel = Vec2::new(itof(3), itof(-1));
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(200)),
+            vel,
+            time_left: 100, // well above the tick count -> no timeout
+            ty: Some(fan.id),
+            ..WObject::default()
+        };
+
+        let mut expected = obj.pos;
+        for tick in 0..3 {
+            let out = proc_no_worms(&mut obj, &level, &fan, 0, &mut rand);
+            assert_eq!(out, WObjectOutcome::Keep, "tick {tick} keeps the object");
+            expected = expected.add(vel);
+            assert_eq!(obj.pos, expected, "pos advanced by vel on tick {tick}");
+            assert_eq!(obj.vel, vel, "gravity 0 -> vel unchanged on tick {tick}");
+        }
+    }
+
+    // ---- Step 2: boundary clamp (weapon.cpp:234-247) ------------------------
+
+    #[test]
+    fn boundary_clamp_pins_pos_to_each_edge() {
+        // expl_ground false + bounce 0: an out-of-level inew zeroes vel (no
+        // explode), so we can read back the clamped pos. inew is computed from
+        // the already-moved pos PLUS vel again, so it overshoots the edge.
+        let w = proc_weapon(false, 0, 0); // 10x10 air level below
+        let level = LevelSim {
+            width: 10,
+            height: 10,
+            material_id: vec![0u8; 100],
+            material_flags: [0u8; 256],
+        };
+
+        let run = |pos: Vec2, vel: Vec2| -> WObject {
+            let mut obj = WObject {
+                pos,
+                vel,
+                time_left: 100,
+                ty: Some(w.id),
+                ..WObject::default()
+            };
+            let mut rand = seeded();
+            proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
+            obj
+        };
+
+        // Right edge: inew.x >= width -> pos.x = Itof(width-1).
+        let r = run(Vec2::new(itof(9), itof(5)), Vec2::new(itof(5), 0));
+        assert_eq!(r.pos.x, itof(9), "right edge clamps pos.x to Itof(width-1)");
+
+        // Left edge: inew.x < 0 -> pos.x = 0.
+        let l = run(Vec2::new(itof(1), itof(5)), Vec2::new(itof(-5), 0));
+        assert_eq!(l.pos.x, 0, "left edge clamps pos.x to 0");
+
+        // Top edge: inew.y < 0 -> pos.y = 0.
+        let t = run(Vec2::new(itof(5), itof(1)), Vec2::new(0, itof(-5)));
+        assert_eq!(t.pos.y, 0, "top edge clamps pos.y to 0");
+
+        // Bottom edge: inew.y >= height -> pos.y = Itof(height-1).
+        let b = run(Vec2::new(itof(5), itof(9)), Vec2::new(0, itof(5)));
+        assert_eq!(
+            b.pos.y,
+            itof(9),
+            "bottom edge clamps pos.y to Itof(height-1)"
+        );
+    }
+
+    // ---- Step 3: ground collision explode vs air (weapon.cpp:249-258) -------
+
+    #[test]
+    fn dirt_rock_collision_with_expl_ground_returns_explode() {
+        // inew lands on the rock cell (10,10). bounce 0 + expl_ground -> Explode.
+        let w = proc_weapon(true, 0, 0);
+        let level = floor_level();
+        let mut rand = seeded();
+
+        // pos += vel -> (9,10); inew = Ftoi(pos+vel) = (10,10) = the rock cell.
+        let mut obj = WObject {
+            pos: Vec2::new(itof(8), itof(10)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        let out = proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(
+            out,
+            WObjectOutcome::Explode,
+            "DirtRock + expl_ground -> Explode"
+        );
+    }
+
+    #[test]
+    fn air_tick_adds_gravity_and_keeps() {
+        // inew lands on empty space -> air branch: vel.y += gravity, no explode.
+        let w = proc_weapon(true, 1000, 0);
+        let level = floor_level();
+        let mut rand = seeded();
+
+        let mut obj = WObject {
+            pos: Vec2::new(itof(2), itof(2)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        let out = proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep, "free air -> Keep");
+        assert_eq!(obj.vel.y, 1000, "air branch adds gravity to vel.y");
+    }
+
+    #[test]
+    fn dirt_rock_collision_without_expl_ground_zeroes_velocity() {
+        // bounce 0, expl_ground false: a ground hit zeroes vel instead of exploding.
+        let w = proc_weapon(false, 0, 0);
+        let level = floor_level();
+        let mut rand = seeded();
+
+        let mut obj = WObject {
+            pos: Vec2::new(itof(8), itof(10)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        let out = proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep, "no expl_ground -> Keep");
+        assert_eq!(
+            obj.vel,
+            Vec2::zero(),
+            "ground hit without expl_ground zeroes vel"
+        );
+    }
+
+    // ---- Step 4: timeout explode (weapon.cpp:281-285) -----------------------
+
+    #[test]
+    fn timeout_explodes_when_time_left_goes_negative() {
+        let fan = fan_weapon(7);
+        assert!(
+            fan.time_to_explo > 0,
+            "fan time_to_explo gates the countdown"
+        );
+        let level = air_level();
+
+        // time_left 0 -> --time_left = -1 < 0 -> Explode this tick.
+        let mut at_zero = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 0,
+            ty: Some(fan.id),
+            ..WObject::default()
+        };
+        let mut rand = seeded();
+        assert_eq!(
+            proc_no_worms(&mut at_zero, &level, &fan, 0, &mut rand),
+            WObjectOutcome::Explode,
+            "time_left 0 -> explodes on this tick"
+        );
+
+        // time_left 1 -> --time_left = 0, not < 0 -> Keep, counter now 0.
+        let mut at_one = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 1,
+            ty: Some(fan.id),
+            ..WObject::default()
+        };
+        let mut rand2 = seeded();
+        assert_eq!(
+            proc_no_worms(&mut at_one, &level, &fan, 0, &mut rand2),
+            WObjectOutcome::Keep,
+            "time_left 1 -> survives this tick"
+        );
+        assert_eq!(at_one.time_left, 0, "time_left decremented to 0");
+    }
+
+    // ---- Step 5: inert guarded branches draw NO rng -------------------------
+
+    #[test]
+    fn fan_process_draws_no_rng() {
+        // A free-flight fan tick (no collision, no timeout) must not touch the
+        // RNG: the bounce branch (bounce 0), the collide-with-objects loop (no
+        // pool walk here) and the worm-hit loop (no worms) are all inert. We
+        // pre-advance the RNG, snapshot last(), and assert it is unchanged.
+        let fan = fan_weapon(7);
+        let level = air_level();
+        let mut rand = seeded();
+        rand.bound(1000);
+        rand.bound(1000);
+        let last_before = rand.last();
+
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(2), 0),
+            time_left: 100,
+            ty: Some(fan.id),
+            ..WObject::default()
+        };
+        let out = proc_no_worms(&mut obj, &level, &fan, 0, &mut rand);
+
+        assert_eq!(out, WObjectOutcome::Keep, "free flight keeps");
+        assert_eq!(
+            rand.last(),
+            last_before,
+            "fan Process draws no rng (rand.last unchanged)"
+        );
+        assert_eq!(obj.vel, Vec2::new(itof(2), 0), "gravity 0 -> vel unchanged");
+    }
+
+    // ---- Step 6: real dart (shot_type = 1) flows through Process -------------
+
+    // The REAL shipped dart, loaded from the TC config. shot_type = 1 (ST_TYPE1).
+    // Cross-ref lists are empty: none of the *Process* fields (shot_type, bounce,
+    // mult_speed, gravity, expl_ground, time_to_explo, num_frames, the trail
+    // delays) depend on a cross-ref, and the two trail object refs are ABSENT from
+    // dart.cfg so they resolve via the empty-string sentinel to -1 regardless of
+    // the lists. `createOnExp = "small_explosion"` resolves to 0 here, but
+    // create_on_exp is unused by `wobject_process`, so the flight is unaffected.
+    fn dart_weapon_real(id: i32) -> Weapon {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/TC/openliero/weapons/dart.cfg"
+        ));
+        let mut w = Weapon::load(bytes, &[], &[], &[]).unwrap();
+        w.id = id;
+        w
+    }
+
+    #[test]
+    fn dart_resolved_process_fields_trip_only_the_shot_type_guard() {
+        // Empirical resolution of the REAL dart: it is shot_type = 1 (ST_TYPE1),
+        // so it trips ONLY the relaxed shot_type guard. Every OTHER deferred-branch
+        // guard is satisfied by the resolved config — in particular both trail
+        // object refs resolve to the -1 "no trail" sentinel (dart.cfg omits
+        // objTrailType/partTrailObj -> "" -> obj_ref_from_str -> -1), even though
+        // the trail DELAYS are 0. So no trail guard needs relaxing.
+        let dart = dart_weapon_real(1);
+        assert_eq!(dart.shot_type, ST_TYPE1, "dart is shot_type = 1 (ST_TYPE1)");
+        assert_eq!(dart.bounce, 0, "dart bounce = 0 (guard satisfied)");
+        assert_eq!(dart.mult_speed, 100, "dart mult_speed = 100 (guard satisfied)");
+        assert_eq!(dart.num_frames, 0, "dart num_frames = 0 (guard satisfied)");
+        assert_eq!(
+            dart.obj_trail_type, -1,
+            "dart obj_trail_type = -1 (no obj trail; guard satisfied)"
+        );
+        assert_eq!(
+            dart.part_trail_obj, -1,
+            "dart part_trail_obj = -1 (no part trail; guard satisfied)"
+        );
+        // Flight knobs that differ from fan but are already handled by Process.
+        assert_eq!(dart.gravity, 200, "dart gravity = 200");
+        assert_eq!(
+            dart.time_to_explo, 0,
+            "dart time_to_explo = 0 -> no countdown (guard gates it)"
+        );
+        assert!(dart.expl_ground, "dart expl_ground = true");
+    }
+
+    #[test]
+    fn dart_flows_through_process_like_a_normal_projectile() {
+        // The REAL dart (shot_type = 1) must flow through wobject_process WITHOUT
+        // panicking on the (now relaxed) shot_type guard and arc under gravity
+        // exactly as a NORMAL projectile would — the C++ Process do-while body runs
+        // once for any non-laser, and ST_TYPE1 takes none of the shot_type-specific
+        // branches (the steering branches are 2/3, the laser is the loop guard).
+        // cur_frame is set deterministically at Fire by the ST_TYPE1 clamp; with
+        // num_frames = 0 the animation never runs, so Process leaves it FROZEN.
+        let dart = dart_weapon_real(1);
+        let level = air_level();
+
+        // A Fire-set cur_frame in the ST_TYPE1 clamp range [0, 12] — a DETERMINISTIC
+        // value, NOT a colour-rand value (dart color_bullets = 0, so the colour-rand
+        // path would have produced 0 - rand(2); shot_type = 1 never takes it).
+        const FIRE_CUR_FRAME: i32 = 7;
+        let vel0 = Vec2::new(itof(3), itof(-2));
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(200)),
+            vel: vel0,
+            cur_frame: FIRE_CUR_FRAME,
+            time_left: 0, // dart time_to_explo = 0 -> never decremented, never times out
+            ty: Some(dart.id),
+            ..WObject::default()
+        };
+
+        // Process must draw NO rng for this config (no steering rand, no
+        // particle-trail rand, no worm-hit rand). Pre-advance, snapshot, compare.
+        let mut rand = seeded();
+        rand.bound(1000);
+        let last_before = rand.last();
+
+        // Independent expected arc, identical to the fan/ST_NORMAL flight path
+        // (see fan_free_flight_*): pos += vel using the CURRENT vel, THEN free-air
+        // gravity is added to vel.y for the next tick.
+        let mut exp_pos = obj.pos;
+        let mut exp_vel = vel0;
+        for tick in 0..5 {
+            let out = proc_no_worms(&mut obj, &level, &dart, 0, &mut rand);
+            assert_eq!(
+                out,
+                WObjectOutcome::Keep,
+                "dart free flight keeps on tick {tick}"
+            );
+            exp_pos = exp_pos.add(exp_vel);
+            exp_vel.y = exp_vel.y.wrapping_add(dart.gravity);
+            assert_eq!(obj.pos, exp_pos, "dart pos arcs under gravity on tick {tick}");
+            assert_eq!(obj.vel, exp_vel, "dart vel gains gravity on tick {tick}");
+            assert_eq!(
+                obj.cur_frame, FIRE_CUR_FRAME,
+                "num_frames = 0 -> cur_frame frozen on tick {tick}"
+            );
+        }
+
+        // No rng drawn: the dart's Process path is rand-free, identical to fan.
+        assert_eq!(
+            rand.last(),
+            last_before,
+            "dart Process draws no rng (the _rand param is unused for this config)"
+        );
+        assert_eq!(
+            obj.cur_frame, FIRE_CUR_FRAME,
+            "cur_frame stayed the deterministic Fire value across all ticks"
+        );
+    }
+
+    // ====================================================================
+    // Slice-5b T4a: bounce + animation FLIGHT branches (RNG-free)
+    // ====================================================================
+
+    // A synthetic projectile shaped like a closed-gate weapon's Process path:
+    // shot_type normal, mult_speed 100, no trails, bounce/num_frames/loop_anim set
+    // explicitly by the test. gravity 0 so the air branch leaves vel untouched and
+    // the reflected/animated state is read cleanly; time_to_explo 0 so no countdown
+    // (every tick returns Keep). expl_ground false.
+    fn bounce_weapon(bounce: i32) -> Weapon {
+        Weapon {
+            id: 1,
+            shot_type: ST_NORMAL,
+            bounce,
+            mult_speed: 100,
+            gravity: 0,
+            expl_ground: false,
+            time_to_explo: 0,
+            num_frames: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    fn anim_weapon(num_frames: i32, loop_anim: bool) -> Weapon {
+        Weapon {
+            id: 1,
+            shot_type: ST_NORMAL,
+            bounce: 0,
+            mult_speed: 100,
+            gravity: 0,
+            expl_ground: false,
+            time_to_explo: 0,
+            num_frames,
+            loop_anim,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    // ---- bounce (weapon.cpp:169-190), mirroring the nobject bounce -----------
+
+    #[test]
+    fn bounce_x_probe_reflects_and_damps_for_bounce_30() {
+        // floor_level: rock at (10,10). Initial pos (8,10), vel (1,0): after
+        // pos += vel pos = (9,10), so ipos = (9,10), inew = Ftoi(pos+vel) = (10,10).
+        // x probe (inew.x=10, ipos.y=10) hits the rock -> fires. y probe
+        // (ipos.x=9, inew.y=10) at cell (9,10) is empty -> does NOT fire.
+        let w = bounce_weapon(30);
+        let level = floor_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(8), itof(10)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        let out = proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep, "bounce -> Keep (no ground explode)");
+        // vel.x = -vel.x * 30 / 100 = -65536*30/100 = -1966080/100 = -19660 (trunc).
+        assert_eq!(obj.vel.x, -19660, "x probe: vel.x = -vel.x*bounce/100");
+        // vel.y = vel.y*4/5 = 0.
+        assert_eq!(obj.vel.y, 0, "x probe: vel.y = vel.y*4/5 (0 here)");
+    }
+
+    #[test]
+    fn bounce_y_probe_reflects_and_damps_for_bounce_30() {
+        // Initial pos (10,8), vel (0,1): after pos += vel pos = (10,9), so
+        // ipos = (10,9), inew = (10,10). x probe (inew.x=10, ipos.y=9) at cell
+        // (10,9) is empty -> no fire. y probe (ipos.x=10, inew.y=10) hits rock.
+        let w = bounce_weapon(30);
+        let level = floor_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(10), itof(8)),
+            vel: Vec2::new(0, itof(1)),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        let out = proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep, "bounce -> Keep");
+        // vel.y = -vel.y*30/100 = -19660; vel.x = vel.x*4/5 = 0.
+        assert_eq!(obj.vel.y, -19660, "y probe: vel.y = -vel.y*bounce/100");
+        assert_eq!(obj.vel.x, 0, "y probe: vel.x = vel.x*4/5 (0 here)");
+    }
+
+    #[test]
+    fn bounce_100_pure_negates_velocity() {
+        // bounce == 100: the x probe pure-negates vel.x (no damp), vel.y untouched.
+        let w = bounce_weapon(100);
+        let level = floor_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(8), itof(10)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(obj.vel.x, itof(-1), "bounce 100: vel.x = -vel.x (pure negate)");
+        assert_eq!(obj.vel.y, 0, "bounce 100: vel.y untouched by x probe");
+    }
+
+    #[test]
+    fn bounce_open_air_does_not_reflect() {
+        // air_level: every cell in range is empty, so neither probe fires; with
+        // gravity 0 the vel is exactly unchanged.
+        let w = bounce_weapon(30);
+        let level = air_level();
+        let mut rand = seeded();
+        let vel = Vec2::new(itof(3), itof(-2));
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(200)),
+            vel,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(obj.vel, vel, "open air: no probe fires, vel unchanged");
+    }
+
+    #[test]
+    fn bounce_draws_no_rng() {
+        // The bounce branch is RNG-free: a bouncing tick must not touch the RNG.
+        let w = bounce_weapon(30);
+        let level = floor_level();
+        let mut rand = seeded();
+        rand.bound(1000);
+        let last_before = rand.last();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(8), itof(10)),
+            vel: Vec2::new(itof(1), 0),
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
+        assert_eq!(rand.last(), last_before, "bounce draws no rng");
+    }
+
+    // ---- animation (weapon.cpp:260-278), gated on (cycles & 7) == 0 ----------
+
+    #[test]
+    fn anim_loop_advances_forward_on_positive_vel_x_when_cycles_gate_open() {
+        // loop_anim + vel.x > 0 + (cycles & 7) == 0 -> ++cur_frame.
+        let w = anim_weapon(3, true);
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        proc_no_worms(&mut obj, &level, &w, 8, &mut rand); // 8 & 7 == 0
+        assert_eq!(obj.cur_frame, 2, "vel.x>0, gate open: cur_frame 1 -> 2");
+    }
+
+    #[test]
+    fn anim_loop_forward_wraps_past_num_frames_to_zero() {
+        // cur_frame == num_frames (3): ++ -> 4 > 3 -> wraps to 0.
+        let w = anim_weapon(3, true);
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            cur_frame: 3,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        proc_no_worms(&mut obj, &level, &w, 8, &mut rand);
+        assert_eq!(obj.cur_frame, 0, "wrap: cur_frame 3 -> ++4 > num_frames -> 0");
+    }
+
+    #[test]
+    fn anim_loop_advances_backward_on_negative_vel_x() {
+        // loop_anim + vel.x < 0 -> --cur_frame; from 0 it underflows to num_frames.
+        let w = anim_weapon(3, true);
+        let level = air_level();
+        let mut rand = seeded();
+
+        let mut a = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(-1), 0),
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        proc_no_worms(&mut a, &level, &w, 8, &mut rand);
+        assert_eq!(a.cur_frame, 0, "vel.x<0: cur_frame 1 -> 0");
+
+        let mut b = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(-1), 0),
+            cur_frame: 0,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        proc_no_worms(&mut b, &level, &w, 8, &mut rand);
+        assert_eq!(b.cur_frame, 3, "underflow: cur_frame 0 -> --(-1)<0 -> num_frames");
+    }
+
+    #[test]
+    fn anim_non_loop_always_increments_regardless_of_vel_x() {
+        // loop_anim false: the plain ++ branch fires for ANY vel.x sign.
+        let w = anim_weapon(3, false);
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(-1), 0), // negative, yet non-loop still ++
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        proc_no_worms(&mut obj, &level, &w, 8, &mut rand);
+        assert_eq!(obj.cur_frame, 2, "non-loop: ++ regardless of vel.x sign");
+    }
+
+    #[test]
+    fn anim_does_not_advance_when_cycles_gate_closed() {
+        // cycles = 5 -> 5 & 7 == 5 != 0 -> no advance.
+        let w = anim_weapon(3, true);
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        proc_no_worms(&mut obj, &level, &w, 5, &mut rand);
+        assert_eq!(obj.cur_frame, 1, "cycles 5: gate closed, cur_frame frozen");
+    }
+
+    #[test]
+    fn anim_num_frames_zero_never_changes_cur_frame() {
+        // num_frames = 0: the animation guard is false even on an open gate.
+        let w = anim_weapon(0, true);
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        proc_no_worms(&mut obj, &level, &w, 8, &mut rand);
+        assert_eq!(obj.cur_frame, 1, "num_frames 0: cur_frame never changes");
+    }
+
+    #[test]
+    fn anim_draws_no_rng() {
+        let w = anim_weapon(3, true);
+        let level = air_level();
+        let mut rand = seeded();
+        rand.bound(1000);
+        let last_before = rand.last();
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::new(itof(1), 0),
+            cur_frame: 1,
+            time_left: 100,
+            ty: Some(w.id),
+            ..WObject::default()
+        };
+        proc_no_worms(&mut obj, &level, &w, 8, &mut rand);
+        assert_eq!(rand.last(), last_before, "animation draws no rng");
+    }
+
+    // ---- blow_up: dirt_effect branch (greenball) + fan regression ----------
+
+    const SPRITE_SIZE: usize = 256; // 16 x 16
+
+    // A SpriteSet of `count` 16x16 sprites with each (index, bytes) override laid
+    // over an all-zero bank (mirrors blit.rs's test helper).
+    fn make_sprites(count: i32, overrides: &[(usize, Vec<u8>)]) -> SpriteSet {
+        let mut data = vec![0u8; count as usize * SPRITE_SIZE];
+        for (idx, bytes) in overrides {
+            assert_eq!(bytes.len(), SPRITE_SIZE);
+            data[idx * SPRITE_SIZE..idx * SPRITE_SIZE + SPRITE_SIZE].copy_from_slice(bytes);
+        }
+        SpriteSet {
+            width: 16,
+            height: 16,
+            count,
+            data,
+        }
+    }
+
+    // The shipped greenball weapon shape relevant to blow_up: dirt_effect = 6
+    // (indexes the texture table), create_on_exp = -1, splinter_amount = 0 so the
+    // ONLY rng blow_up draws is draw_dirt_effect's rand(rframe).
+    fn greenball_weapon() -> Weapon {
+        Weapon {
+            id: 6,
+            dirt_effect: 6,
+            create_on_exp: -1,
+            splinter_amount: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn greenball_blow_up_writes_terrain_and_draws_one_rand() {
+        // Greenball: dirt_effect = 6 -> blow_up stamps a 16x16 crater at
+        // (Ftoi(pos.x)-7, Ftoi(pos.y)-7) via draw_dirt_effect.
+        let weapon = greenball_weapon();
+
+        // mask 38 = all case-6 (fill every Background cell); fill frames 82=const
+        // 200, 83=const 201, so the written value reveals which frame was picked.
+        let sprites = make_sprites(
+            84,
+            &[
+                (38, vec![6u8; SPRITE_SIZE]),
+                (82, vec![200u8; SPRITE_SIZE]),
+                (83, vec![201u8; SPRITE_SIZE]),
+            ],
+        );
+        // dirt_effect (=6) indexes the texture table; textures[6] is greenball.
+        let mut textures = vec![Texture::default(); 7];
+        textures[6] = Texture {
+            sframe: 82,
+            rframe: 2,
+            mframe: 38,
+            ndrawback: false,
+        };
+
+        // Background-above-Dirt boundary: rows < 20 are Background (material 0),
+        // rows >= 20 are Dirt (material 5).
+        let mut material_flags = [0u8; 256];
+        material_flags[0] = MAT_BACKGROUND;
+        material_flags[5] = MAT_DIRT;
+        let width = 40;
+        let height = 40;
+        let mut material_id = vec![0u8; (width * height) as usize];
+        for y in 20..height {
+            for x in 0..width {
+                material_id[(y * width + x) as usize] = 5;
+            }
+        }
+        let mut level = LevelSim {
+            width,
+            height,
+            material_id,
+            material_flags,
+        };
+
+        // pos = (20.5, 20.5) in 16.16. Ftoi TRUNCATES to 20 (not rounds to 21),
+        // so the window top-left = (20-7, 20-7) = (13, 13).
+        let pos = Vec2::new(itof(20) + 0x8000, itof(20) + 0x8000);
+        assert_eq!(ftoi(pos.x), 20, "Ftoi truncates 20.5 -> 20");
+
+        // Oracle: exactly one rand(2) selects the fill frame (82 + draw).
+        let mut oracle = seeded();
+        let draw = oracle.bound(2);
+        let expected_last = oracle.last();
+        let fill_val = 200u8.wrapping_add(draw as u8);
+
+        let mut rand = seeded();
+        let cossin = precompute_cossin();
+        let (mut worms, mut wobjects, mut nobjects, mut sobjects) = blow_up_pools();
+        blow_up(
+            &weapon,
+            &mut level,
+            &sprites,
+            &textures,
+            pos,
+            0,
+            &[],
+            &[],
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            100,
+            &mut rand,
+        );
+
+        // (a) exactly one rand(2): no create_on_exp / splinter draws.
+        assert_eq!(
+            rand.last(),
+            expected_last,
+            "only draw_dirt_effect's rand(2)"
+        );
+        assert_eq!(
+            sobjects.len(),
+            0,
+            "greenball create_on_exp = -1 -> no sobject spawned"
+        );
+
+        // (b) -7,-7 offset + Ftoi truncation: top-left written cell is (13,13);
+        // the cells just left/above the window are untouched.
+        let at = |x: i32, y: i32| level.material_id[(y * width + x) as usize];
+        assert_eq!(
+            at(13, 13),
+            fill_val,
+            "window top-left = (Ftoi-7, Ftoi-7) = (13,13)"
+        );
+        assert_eq!(at(12, 13), 0, "x=12 is left of the window -> untouched");
+        assert_eq!(at(13, 12), 0, "y=12 is above the window -> untouched");
+
+        // (c) Background cells in the window changed; Dirt cells did NOT (the
+        // additive-over-Background path only writes Background cells).
+        assert_eq!(
+            at(28, 19),
+            fill_val,
+            "last Background cell in-window written"
+        );
+        assert_eq!(at(13, 20), 5, "first Dirt cell in-window untouched");
+        assert_eq!(at(28, 28), 5, "last Dirt cell in-window untouched");
+    }
+
+    #[test]
+    fn fan_blow_up_is_inert_and_draws_no_rng() {
+        // Fan has create_on_exp/dirt_effect = -1 and splinter_amount = 0, so
+        // blow_up does nothing for it: no dirt write, no rng. The 4a path is
+        // preserved despite the new signature — the dirt_effect branch is skipped
+        // for dirt_effect < 0, so the assets are never read.
+        let fan = fan_weapon(7);
+        assert_eq!(fan.dirt_effect, -1, "fan dirt_effect is the -1 sentinel");
+
+        let sprites = make_sprites(1, &[]);
+        let textures: Vec<Texture> = Vec::new();
+        let mut level = air_level();
+        let before = level.material_id.clone();
+
+        let mut rand = seeded();
+        rand.bound(1000);
+        let last_before = rand.last();
+
+        let cossin = precompute_cossin();
+        let (mut worms, mut wobjects, mut nobjects, mut sobjects) = blow_up_pools();
+        blow_up(
+            &fan,
+            &mut level,
+            &sprites,
+            &textures,
+            Vec2::new(itof(50), itof(50)),
+            0,
+            &[],
+            &[],
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(
+            rand.last(),
+            last_before,
+            "fan blow_up draws no rng (rand.last unchanged)"
+        );
+        assert_eq!(
+            level.material_id, before,
+            "fan blow_up writes no material (4a path preserved)"
+        );
+        assert_eq!(sobjects.len(), 0, "fan create_on_exp = -1 -> no sobject");
+    }
+
+    // ====================================================================
+    // blow_up: create_on_exp branch (dart -> small_explosion) — Task 4
+    // ====================================================================
+
+    use assets::object::{NObjectType, SObjectType};
+
+    // Empty object pools + worm list for blow_up calls whose `create_on_exp < 0`
+    // never touch them (fan / greenball regression guards).
+    fn blow_up_pools() -> (Vec<WormState>, Pool<WObject>, Pool<NObject>, Pool<SObject>) {
+        (Vec::new(), Pool::new(1), Pool::new(1), Pool::new(1))
+    }
+
+    // The shipped small_explosion sobject (the dart's create_on_exp target):
+    // start_sound >= 0 (num_sounds 2), anim_delay 2, num_frames 5, detect_range 8
+    // (kWidth 4, a 9x9 dirt-throw box), damage > 0, blow_away set. `dirt_effect` is
+    // passed in: 2 to exercise the crater, -1 to isolate the dirt-throw.
+    fn small_explosion(dirt_effect: i32) -> SObjectType {
+        SObjectType {
+            id: 2,
+            start_sound: 0,
+            num_sounds: 2,
+            anim_delay: 2,
+            start_frame: 0,
+            num_frames: 5,
+            detect_range: 8,
+            damage: 5,
+            blow_away: 3000,
+            dirt_effect,
+            ..Default::default()
+        }
+    }
+
+    // The dirt particle nobject_types[2]: speed_v 40, distribution 10000, so its
+    // Create2 draws exactly rand(40), rand(20000), rand(20000) and Create resolves
+    // cur_frame = kPix with no draw.
+    fn dirt_nobject() -> NObjectType {
+        NObjectType {
+            id: 2,
+            speed: 100,
+            speed_v: 40,
+            distribution: 10000,
+            start_frame: 0,
+            num_frames: 0,
+            color_bullets: 0,
+            time_to_explo: 0,
+            time_to_explo_v: 0,
+            ..Default::default()
+        }
+    }
+
+    // The dart weapon shape relevant to blow_up: create_on_exp = 2 (-> the
+    // small_explosion sobject), splinter_amount = 0 (no wobject splinters), and
+    // its OWN dirt_effect = -1 (the explosion is wholly delegated to the sobject).
+    fn dart_weapon() -> Weapon {
+        Weapon {
+            id: 1,
+            create_on_exp: 2,
+            splinter_amount: 0,
+            dirt_effect: -1,
+            ..Default::default()
+        }
+    }
+
+    // A level whose entire 16x16 carve window (and the inner 9x9 dirt-throw box)
+    // around (cx, cy) is dirt material `dirt_mat`. Carved cells become `fill_mat`.
+    fn all_dirt_level(cx: i32, cy: i32, dirt_mat: u8, fill_mat: u8) -> LevelSim {
+        let mut material_flags = [0u8; 256];
+        material_flags[dirt_mat as usize] = MAT_DIRT;
+        material_flags[fill_mat as usize] = MAT_BACKGROUND;
+        let width = 80;
+        let height = 80;
+        let mut material_id = vec![0u8; (width * height) as usize];
+        for yy in (cy - 7)..(cy + 9) {
+            for xx in (cx - 7)..(cx + 9) {
+                material_id[(yy * width + xx) as usize] = dirt_mat;
+            }
+        }
+        LevelSim {
+            width,
+            height,
+            material_id,
+            material_flags,
+        }
+    }
+
+    #[test]
+    fn dart_blow_up_spawns_small_explosion_with_full_cluster() {
+        // A dart explodes over dirt: blow_up must (a) spawn sobject id=2 at
+        // (Ftoi(x)-8, Ftoi(y)-8) — the -8 applied INSIDE sobject_create, proving
+        // blow_up passed Ftoi(x),Ftoi(y) and NOT -7/-8; (b) spawn dirt debris from
+        // the dirt-throw; (c) carve the level; (d) advance rand by exactly the
+        // cluster (sound + per-fired-cell + crater rand(2)); the dart's
+        // splinter_amount=0 / dirt_effect=-1 add no draws of their own.
+        let cossin = precompute_cossin();
+        let weapon = dart_weapon();
+        let (cx, cy) = (40, 40);
+        let dirt_mat: u8 = 10;
+        let fill_mat: u8 = 7;
+        let mut level = all_dirt_level(cx, cy, dirt_mat, fill_mat);
+
+        // pos = (40.5, 40.5) in 16.16; Ftoi truncates to 40, so the sobject lands
+        // at (40-8, 40-8) and the carve window top-left at (40-7-... )—the -7/-8
+        // offsets are inside the called functions.
+        let pos = Vec2::new(itof(cx) + 0x8000, itof(cy) + 0x8000);
+        assert_eq!(ftoi(pos.x), cx, "Ftoi truncates 40.5 -> 40");
+
+        // Carve texture textures[2]: ndrawback, mframe all case-6, sframe const
+        // fill_mat (a Background material) so case-6 clears dirt to fill_mat.
+        let sprites = make_sprites(
+            84,
+            &[
+                (38, vec![6u8; SPRITE_SIZE]),
+                (82, vec![fill_mat; SPRITE_SIZE]),
+                (83, vec![fill_mat; SPRITE_SIZE]),
+            ],
+        );
+        let mut textures = vec![Texture::default(); 3];
+        textures[2] = Texture {
+            sframe: 82,
+            rframe: 2,
+            mframe: 38,
+            ndrawback: true,
+        };
+
+        let mut sobject_types = vec![SObjectType::default(); 3];
+        sobject_types[2] = small_explosion(2); // dirt_effect = 2 -> carve LIVE
+        let mut nobject_types = vec![NObjectType::default(); 3];
+        nobject_types[2] = dirt_nobject();
+
+        // Reference RNG stream: sound rand(2), then row-major over the all-dirt 9x9
+        // box (every cell fires rand(8); on 0 -> rand(128), rand(40), rand(20000)x2),
+        // then the crater rand(rframe) = rand(2) LAST.
+        let mut refr = seeded();
+        refr.bound(2); // sound
+        let mut fired = 0;
+        for _yy in (cy - 4)..(cy + 5) {
+            for _xx in (cx - 4)..(cx + 5) {
+                if refr.bound(8) == 0 {
+                    refr.bound(128);
+                    refr.bound(40);
+                    refr.bound(20000);
+                    refr.bound(20000);
+                    fired += 1;
+                }
+            }
+        }
+        refr.bound(2); // crater rand(rframe), LAST
+        let expected_last = refr.last();
+
+        let mut rand = seeded();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(8);
+        let mut nobjects: Pool<NObject> = Pool::new(600);
+        let mut sobjects: Pool<SObject> = Pool::new(700);
+
+        blow_up(
+            &weapon,
+            &mut level,
+            &sprites,
+            &textures,
+            pos,
+            3, // owner_idx (= cause_idx / fired_by)
+            &sobject_types,
+            &nobject_types,
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            100,
+            &mut rand,
+        );
+
+        // (a) sobject spawned at (Ftoi(x)-8, Ftoi(y)-8): the -8 is inside Create,
+        // so x == 32 proves blow_up passed Ftoi(x)=40 (NOT 40-7 or 40-8).
+        assert_eq!(sobjects.len(), 1, "dart spawns exactly one sobject");
+        let so = *sobjects.get(0).expect("sobject in slot 0");
+        assert_eq!(so.id, 2, "sobject id = create_on_exp target id");
+        assert_eq!(so.x, cx - 8, "sobject.x = Ftoi(x) - 8 (offset inside Create)");
+        assert_eq!(so.y, cy - 8, "sobject.y = Ftoi(y) - 8 (offset inside Create)");
+
+        // (d) exact rand cluster: sound + dirt-throw + crater rand(2). A wrong
+        // Ftoi offset / a missing or extra draw shifts rand.last.
+        assert_eq!(
+            rand.last(),
+            expected_last,
+            "rand advanced by exactly the small_explosion cluster"
+        );
+
+        // (b) dirt debris: one nobject per fired cell, owner_idx carried through.
+        assert!(fired > 0, "seed must fire at least one dirt cell");
+        assert_eq!(nobjects.len(), fired, "one dirt nobject per fired cell");
+        assert_eq!(
+            nobjects.get(0).unwrap().owner_idx,
+            3,
+            "debris carries the dart's owner_idx"
+        );
+        // PRE-CARVE read: debris colour is the original dirt_mat.
+        assert_eq!(
+            nobjects.get(0).unwrap().cur_frame,
+            dirt_mat as i32,
+            "debris cur_frame = PRE-CARVE kPix (dirt_mat)"
+        );
+
+        // (c) the crater cleared the box dirt to the fill (Background) material.
+        assert_eq!(
+            level.material_id[(cy * level.width + cx) as usize],
+            fill_mat,
+            "crater cleared the box centre dirt to the fill material"
+        );
+    }
+
+    #[test]
+    fn dart_blow_up_with_no_dirt_draws_only_the_sound() {
+        // Over a background-only level the small_explosion's dirt-throw fires no
+        // rand(8) (short-circuit) and its dirt_effect = -1 draws no crater, so the
+        // ONLY draw is the sound rand(2). Proves the create_on_exp branch is wired
+        // straight through to sobject_create's sound, with nothing extra.
+        let cossin = precompute_cossin();
+        let weapon = dart_weapon();
+
+        let mut material_flags = [0u8; 256];
+        material_flags[0] = MAT_BACKGROUND;
+        let mut level = LevelSim {
+            width: 100,
+            height: 100,
+            material_id: vec![0u8; 100 * 100],
+            material_flags,
+        };
+
+        let mut sobject_types = vec![SObjectType::default(); 3];
+        sobject_types[2] = small_explosion(-1); // no crater -> sound is the only draw
+        let mut nobject_types = vec![NObjectType::default(); 3];
+        nobject_types[2] = dirt_nobject();
+
+        let mut refr = seeded();
+        refr.bound(2); // sound only
+        let expected_last = refr.last();
+
+        let mut rand = seeded();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(8);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut sobjects: Pool<SObject> = Pool::new(8);
+
+        blow_up(
+            &weapon,
+            &mut level,
+            &SpriteSet::default(),
+            &[],
+            Vec2::new(itof(50), itof(50)),
+            2,
+            &sobject_types,
+            &nobject_types,
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(sobjects.len(), 1, "sobject spawned");
+        assert_eq!(rand.last(), expected_last, "only the sound rand(2) drawn");
+        assert_eq!(nobjects.len(), 0, "background level -> no dirt debris");
+    }
+
+    // ====================================================================
+    // blow_up: splinter scatter arm (BlowUpObject weapon.cpp:96-115) — 5a T0
+    // ====================================================================
+
+    // A weapon shaped to ISOLATE the splinter arm: create_on_exp = -1 and the
+    // weapon's own dirt_effect = -1, so the ONLY rng blow_up draws is the
+    // splinter loop's. splinter_type = 0 indexes nobject_types; splinter_colour
+    // = 80. `scatter` selects the Create2 (==0) vs guarded Create1 (!=0) path.
+    fn splinter_weapon(amount: i32, scatter: i32) -> Weapon {
+        Weapon {
+            id: 9,
+            create_on_exp: -1,
+            dirt_effect: -1,
+            splinter_amount: amount,
+            splinter_scatter: scatter,
+            splinter_type: 0,
+            splinter_colour: 80,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn splinter_scatter_zero_spawns_n_and_draws_angle_colorsub_then_create2() {
+        // scatter == 0 (cannon path): splinter_amount=3 spawns 3 nobjects of
+        // splinter_type, drawing per splinter rand(128) [kAngle], rand(2)
+        // [kColorSub], then Create2's rand(40) + 2x rand(20000) (dirt-like type),
+        // in that exact order. Asserts the spawned count, each colour
+        // (splinter_colour - kColorSub), and the post-loop rand.last.
+        let cossin = precompute_cossin();
+        let weapon = splinter_weapon(3, 0);
+        // nobject_types[0] = dirt-like (speed_v 40, dist 10000): each Create2
+        // draws rand(40), rand(20000), rand(20000); Create resolves cur_frame =
+        // color (start_frame<=0 & color!=0) with NO draw, so the per-splinter
+        // draw shape is exactly [rand(128), rand(2), rand(40), rand(20000)x2].
+        let nobject_types = vec![dirt_nobject()];
+        let pos = Vec2::new(itof(50), itof(60));
+
+        // Reference rng stream: the three splinters' draws, in order. Capture each
+        // color_sub so the spawned colours are a real (non-tautological) assertion.
+        let mut refr = seeded();
+        let mut subs = [0i32; 3];
+        for s in subs.iter_mut() {
+            refr.bound(128); // kAngle
+            *s = refr.bound(2) as i32; // kColorSub
+            refr.bound(40); // Create2 speed_v
+            refr.bound(20000); // dist x
+            refr.bound(20000); // dist y
+        }
+        let expected_last = refr.last();
+        assert!(
+            subs.iter().any(|&s| s != 0),
+            "seed must give a non-zero color_sub so the `- kColorSub` is exercised"
+        );
+
+        let mut rand = seeded();
+        let mut level = air_level();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(8);
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut sobjects: Pool<SObject> = Pool::new(8);
+
+        blow_up(
+            &weapon,
+            &mut level,
+            &SpriteSet::default(),
+            &[],
+            pos,
+            4, // owner_idx (= C++ cause_idx == fired_by)
+            &[],
+            &nobject_types,
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            100,
+            &mut rand,
+        );
+
+        // N nobjects spawned, none diverted to sobjects.
+        assert_eq!(nobjects.len(), 3, "splinter_amount=3 -> three nobjects");
+        assert_eq!(sobjects.len(), 0, "create_on_exp = -1 -> no sobject");
+
+        // Exact rng order/count: matching rand.last pins both.
+        assert_eq!(
+            rand.last(),
+            expected_last,
+            "3x [rand(128), rand(2), rand(40), rand(20000), rand(20000)] in order"
+        );
+
+        // Each splinter: colour = splinter_colour - kColorSub, owner carried,
+        // ty = nobject_types[splinter_type].
+        for (i, sub) in subs.iter().enumerate() {
+            let obj = *nobjects.get(i).expect("splinter spawned");
+            assert_eq!(
+                obj.cur_frame,
+                80 - sub,
+                "splinter {i} cur_frame = splinter_colour - rand(2)"
+            );
+            assert_eq!(obj.owner_idx, 4, "splinter {i} inherits owner_idx");
+            assert_eq!(obj.ty, Some(2), "splinter {i} is nobject_types[splinter_type]");
+        }
+    }
+
+    #[test]
+    fn splinter_amount_zero_spawns_none_and_draws_nothing() {
+        // splinter_amount = 0: the whole arm is skipped — no nobject, no rng. (The
+        // dormant-for-prior-weapons invariant: fan/dart all have amount 0.)
+        let cossin = precompute_cossin();
+        let weapon = splinter_weapon(0, 0);
+        let nobject_types = vec![dirt_nobject()];
+
+        let mut rand = seeded();
+        rand.bound(777); // pre-advance so "unchanged" is a real assertion
+        let last_before = rand.last();
+
+        let mut level = air_level();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(8);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut sobjects: Pool<SObject> = Pool::new(8);
+
+        blow_up(
+            &weapon,
+            &mut level,
+            &SpriteSet::default(),
+            &[],
+            Vec2::new(itof(50), itof(50)),
+            1,
+            &[],
+            &nobject_types,
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(nobjects.len(), 0, "splinter_amount=0 -> no splinters");
+        assert_eq!(rand.last(), last_before, "splinter arm skipped -> no rng drawn");
+    }
+
+    #[test]
+    #[should_panic(expected = "Create1 branch")]
+    fn splinter_scatter_nonzero_trips_the_guarded_create1_branch() {
+        // scatter != 0 -> the C++ Create1 splinter branch. It is GUARDED (O18): no
+        // weapon in this TC takes it (only mini_nuke has scatter=1, out of scope),
+        // and blow_up has no access to the wobject velocity Create1 needs. A config
+        // that would hit it must trip loudly.
+        let cossin = precompute_cossin();
+        let weapon = splinter_weapon(2, 1);
+        let nobject_types = vec![dirt_nobject()];
+
+        let mut rand = seeded();
+        let mut level = air_level();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(8);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut sobjects: Pool<SObject> = Pool::new(8);
+
+        blow_up(
+            &weapon,
+            &mut level,
+            &SpriteSet::default(),
+            &[],
+            Vec2::new(itof(50), itof(50)),
+            1,
+            &[],
+            &nobject_types,
+            &cossin,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &mut sobjects,
+            100,
+            &mut rand,
+        );
+    }
+
+    // ====================================================================
+    // wobject in-flight worm-hit arm (weapon.cpp:287-326) — Task T3
+    // ====================================================================
+
+    // A 1-sprite worm bank (frame 0, dir 0, colour 0 -> bank index 0): 16x16, all
+    // transparent (palette 0) EXCEPT a single solid worm pixel (palette 5) at
+    // (cx=8, cy=8). `material_flags[5] = MAT_WORM`. Mirrors the T2 fixture in
+    // `nobject.rs` so the per-pixel gate lands the same way.
+    fn worm_hit_sprites() -> (SpriteSet, [u8; 256]) {
+        let mut data = vec![0u8; 16 * 16];
+        data[8 * 16 + 8] = 5;
+        let sprites = SpriteSet {
+            width: 16,
+            height: 16,
+            count: 1,
+            data,
+        };
+        let mut flags = [0u8; 256];
+        flags[5] = MAT_WORM;
+        (sprites, flags)
+    }
+
+    // A big air level carrying `flags` as its material_flags (the per-pixel gate
+    // reads `level.material_flags`). No solid cell anywhere, so the flight path is
+    // free — only the worm-hit arm is under test.
+    fn hit_level(flags: [u8; 256]) -> LevelSim {
+        LevelSim {
+            width: 1000,
+            height: 1000,
+            material_id: vec![0u8; 1000 * 1000],
+            material_flags: flags,
+        }
+    }
+
+    // A worm at pixel (px, py), visible, health 100, index 3, frame/dir 0, with a
+    // caller-set velocity so the blow-away kick is observable.
+    fn hit_worm(px: i32, py: i32, vel: Vec2) -> WormState {
+        let mut w = WormState::from_init(&WormInit {
+            index: 3,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit::default(); NUM_WEAPONS],
+            start_pos: Vec2::new(itof(px), itof(py)),
+            visible: true,
+        });
+        w.vel = vel;
+        w.current_frame = 0;
+        w.direction = 0;
+        w
+    }
+
+    // nobject_types[0..=6]; [6] is the blood type. start_frame 0 + time_to_explo_v
+    // 0 -> `nobject_create` draws nothing, so `Create2` draws EXACTLY rand(speed_v)
+    // + rand(dist*2)x2 = 3, plus the arm's rand(128) angle = 4 draws / particle.
+    fn blood_types() -> Vec<NObjectType> {
+        let mut v = vec![NObjectType::default(); 7];
+        v[6] = NObjectType {
+            id: 6,
+            speed: 100,
+            speed_v: 50,
+            distribution: 8,
+            ..Default::default()
+        };
+        v
+    }
+
+    // A dart-shaped hit weapon: hit_damage=5, blood_on_hit=10, blow_away=28. Flight
+    // knobs neutral (ST_NORMAL, no bounce/anim/trail/timeout) so only the arm runs.
+    fn hit_weapon(worm_collide: bool, worm_explode: bool) -> Weapon {
+        Weapon {
+            id: 9,
+            shot_type: ST_NORMAL,
+            bounce: 0,
+            mult_speed: 100,
+            gravity: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            time_to_explo: 0,
+            expl_ground: false,
+            hit_damage: 5,
+            blood_on_hit: 10,
+            blow_away: 28,
+            detect_distance: 4,
+            worm_collide,
+            worm_explode,
+            ..Default::default()
+        }
+    }
+
+    // Spawn the wobject so that AFTER the tick's `pos += vel` step it sits exactly
+    // on the worm's pixel (50,50): pre-move pos = (50,50) - vel.
+    fn hit_wobject(vel: Vec2) -> WObject {
+        WObject {
+            pos: Vec2::new(itof(50), itof(50)).sub(vel),
+            vel,
+            owner_idx: 1,
+            ty: Some(9),
+            time_left: 100,
+            ..WObject::default()
+        }
+    }
+
+    #[test]
+    fn worm_hit_draws_blood_fan_before_sound_gate() {
+        // On a per-pixel HIT with dart params the arm: kicks worm.vel, applies
+        // DoDamage(5) (health 100 -> 95), sprays the 10-particle blood fan FIRST,
+        // THEN runs the hit-sound gate. The blood-first ORDER is pinned by
+        // comparing the spawned nobjects against a reference built in blood-first
+        // draw order: a sound-first arm would draw rand(3) before the first
+        // rand(128) angle, shifting every blood velocity — the pool would diverge.
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        let weapon = hit_weapon(false, false);
+        let nobject_types = blood_types();
+        let blood = 100;
+
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let obj_pos = Vec2::new(itof(50), itof(50)); // post-move position
+
+        // --- Reference: replay the EXPECTED order (BLOOD FAN then SOUND gate). ---
+        let mut refr = seeded();
+        let mut ref_pool: Pool<NObject> = Pool::new(64);
+        let k_blood = 10 * blood / 100; // = 10
+        for _ in 0..k_blood {
+            let angle = refr.bound(128) as i32;
+            nobject_create2(
+                &nobject_types[6],
+                angle,
+                obj_vel.div(3),
+                obj_pos,
+                0,
+                3, // worm.index
+                &cossin,
+                &mut refr,
+                &mut ref_pool,
+            );
+        }
+        // hit-sound gate: hit_damage(5) > 0 && health(95) > 0 -> outer rand(3); on 0
+        // the inner rand(3) is always taken.
+        if refr.bound(3) == 0 {
+            refr.bound(3);
+        }
+
+        // --- Actual ---
+        let pre_vel = Vec2::new(itof(1), itof(1));
+        let mut worms = [hit_worm(50, 50, pre_vel)];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        let mut obj = hit_wobject(obj_vel);
+
+        let out = wobject_process(
+            &mut obj,
+            &level,
+            &weapon,
+            0,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            blood,
+            &mut rand,
+        );
+
+        assert_eq!(out, WObjectOutcome::Keep, "no worm_collide -> projectile lives");
+        assert_eq!(worms[0].health, 95, "DoDamage(5) applied to the hit worm");
+        assert_eq!(
+            worms[0].vel,
+            pre_vel.add(obj_vel.mul(28).div(100)),
+            "vel kicked by obj.vel * blow_away(28) / 100 (integer)"
+        );
+        // Exact draw count (positional): 10 blood particles (4 draws each) + the
+        // sound gate. A missing/extra draw shifts rand.last().
+        assert_eq!(
+            rand.last(),
+            refr.last(),
+            "exact draw count: 10*[rand(128)+Create2] + rand(3)(+inner on 0)"
+        );
+        assert_eq!(nobjects.len(), 10, "10 blood particles (blood_on_hit*blood/100)");
+        assert_eq!(nobjects.len(), ref_pool.len(), "blood count matches reference");
+        // ORDER pin: each blood nobject equals the blood-FIRST reference.
+        for i in 0..64 {
+            assert_eq!(
+                nobjects.get(i).copied(),
+                ref_pool.get(i).copied(),
+                "blood nobject slot {i} matches the blood-first reference (order)"
+            );
+        }
+    }
+
+    #[test]
+    fn worm_hit_no_hit_draws_nothing() {
+        // A per-pixel MISS (worm far from the wobject) leaves the worm untouched
+        // and draws no RNG / spawns no blood — the gate short-circuits on
+        // check_for_spec_worm_hit == false.
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        let weapon = hit_weapon(false, false);
+        let nobject_types = blood_types();
+
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let pre_vel = Vec2::new(itof(1), itof(1));
+        // Worm at (500,500); the wobject lands at (50,50) -> way out of the 16x16
+        // sprite window.
+        let mut worms = [hit_worm(500, 500, pre_vel)];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        rand.bound(777); // pre-advance so an accidental draw is detectable
+        let rng_before = rand.last();
+        let mut obj = hit_wobject(obj_vel);
+
+        let out = wobject_process(
+            &mut obj,
+            &level,
+            &weapon,
+            0,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(out, WObjectOutcome::Keep, "no hit -> keep");
+        assert_eq!(worms[0].health, 100, "no hit -> no DoDamage");
+        assert_eq!(worms[0].vel, pre_vel, "no hit -> no vel kick");
+        assert_eq!(rand.last(), rng_before, "no hit -> zero RNG drawn");
+        assert_eq!(nobjects.len(), 0, "no hit -> no blood");
+    }
+
+    #[test]
+    fn worm_hit_blow_away_only_kicks_vel_and_draws_no_rng() {
+        // The gate-difference pin (vs the sobject arm): a hit with hit_damage == 0,
+        // blood_on_hit == 0, blow_away > 0 kicks the worm's velocity but draws NO
+        // rng — the hit-sound gate's outer rand(3) is guarded by `hit_damage > 0`
+        // (short-circuit), and there is no blood fan.
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        let weapon = Weapon {
+            hit_damage: 0,
+            blood_on_hit: 0,
+            blow_away: 28,
+            ..hit_weapon(false, false)
+        };
+        let nobject_types = blood_types();
+
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let pre_vel = Vec2::new(itof(1), itof(1));
+        let mut worms = [hit_worm(50, 50, pre_vel)];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        rand.bound(999);
+        let rng_before = rand.last();
+        let mut obj = hit_wobject(obj_vel);
+
+        let out = wobject_process(
+            &mut obj,
+            &level,
+            &weapon,
+            0,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(out, WObjectOutcome::Keep);
+        assert_eq!(
+            worms[0].vel,
+            pre_vel.add(obj_vel.mul(28).div(100)),
+            "vel still kicked when hit_damage == 0"
+        );
+        assert_eq!(worms[0].health, 100, "hit_damage 0 -> no health change");
+        assert_eq!(
+            rand.last(),
+            rng_before,
+            "hit_damage 0 gates OFF the rand(3) sound draw; no blood -> zero RNG"
+        );
+        assert_eq!(nobjects.len(), 0, "blood_on_hit 0 -> no blood");
+    }
+
+    #[test]
+    fn worm_hit_worm_collide_explode_returns_explode_with_one_rand() {
+        // worm_collide + worm_explode: after the (empty) blood fan and the gated
+        // sound draw, the worm_collide branch draws exactly one rand(worm_collide)
+        // = rand(1) and, on the always-zero result, sets do_explode -> Explode.
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        // hit_damage 0 + blood 0 so the ONLY draw is the worm_collide rand(1).
+        let weapon = Weapon {
+            hit_damage: 0,
+            blood_on_hit: 0,
+            blow_away: 0,
+            ..hit_weapon(true, true)
+        };
+        let nobject_types = blood_types();
+
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let mut worms = [hit_worm(50, 50, Vec2::zero())];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        let mut refr = seeded();
+        refr.bound(1); // exactly one rand(1) for the worm_collide gate
+        let mut obj = hit_wobject(obj_vel);
+
+        let out = wobject_process(
+            &mut obj,
+            &level,
+            &weapon,
+            0,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(out, WObjectOutcome::Explode, "worm_collide + worm_explode -> Explode");
+        assert_eq!(rand.last(), refr.last(), "exactly one rand(worm_collide)=rand(1)");
+        assert_eq!(nobjects.len(), 0, "blood_on_hit 0 -> no blood");
+    }
+
+    #[test]
+    fn worm_hit_worm_collide_without_explode_returns_remove() {
+        // worm_collide set but worm_explode false: the branch sets do_remove only ->
+        // Remove (free without exploding).
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        let weapon = Weapon {
+            hit_damage: 0,
+            blood_on_hit: 0,
+            blow_away: 0,
+            ..hit_weapon(true, false)
+        };
+        let nobject_types = blood_types();
+
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let mut worms = [hit_worm(50, 50, Vec2::zero())];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        let mut obj = hit_wobject(obj_vel);
+
+        let out = wobject_process(
+            &mut obj,
+            &level,
+            &weapon,
+            0,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(
+            out,
+            WObjectOutcome::Remove,
+            "worm_collide without worm_explode -> Remove"
+        );
+    }
+}

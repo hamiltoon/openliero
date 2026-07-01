@@ -17,7 +17,13 @@ pub struct Tga {
 
 /// A sprite bank: `count` sprites of `width × height` palette indices, stored
 /// back-to-back (`sprite N` at `data[N*width*height ..]`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Default` is an **empty** bank (zero dimensions, no pixels): the sim unit
+/// tests + slices 1-4a — which never index `large_sprites` — construct one this
+/// way instead of loading a real TGA. Indexing an empty bank with `sprite()`
+/// would panic, which is exactly the desired "you forgot to load the bank"
+/// signal for code paths that DO dig.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SpriteSet {
     pub width: i32,
     pub height: i32,

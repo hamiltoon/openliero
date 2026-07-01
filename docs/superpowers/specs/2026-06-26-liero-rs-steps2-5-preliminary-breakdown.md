@@ -42,23 +42,35 @@ Part of: `2026-06-26-liero-rs-roadmap.md`
 
 ---
 
-## Step 2 — Sim core in ECS
+## Step 2 — Sim core (pure Rust, Bevy-free)
+
+> **Updated 2026-06-28 — step 2 reached; architecture now LOCKED.** The
+> authoritative step-2 doc is `2026-06-28-liero-rs-step2-overview.md` (+ the
+> per-slice design/plan). The big framing change vs this preliminary sketch:
+> the sim is a **pure Rust, Bevy-free `sim` crate**, NOT ECS-native — `ProcessFrame`
+> is ported as one ordered driver function calling per-entity helpers in exact C++
+> order; Bevy only drives/renders it from step 3. Several "open questions" below are
+> now resolved (marked inline). The slice ordering and the per-tick checksum oracle
+> below proved correct and are unchanged; slice 1 is DONE & bit-exact.
 
 ### Goal / done-when
-Port `ProcessFrame` and the per-entity `process()` logic into the Rust/Bevy ECS
-so that, given identical seed + level + per-frame inputs, the Rust sim's
-`HashGameState`-equivalent **matches C++ tick by tick** over a long run (the
-roadmap's "bullet fired → moves → explodes → destroys terrain, checksum matches
-C++"). This is the crown-jewel step: it is where determinism is won or lost.
+Port `ProcessFrame` and the per-entity `process()` logic into a **pure Rust,
+Bevy-free `sim` module** (driven by Bevy only from step 3) so that, given identical
+seed + level + per-frame inputs, the Rust sim's `HashGameState`-equivalent **matches
+C++ tick by tick** over a long run (the roadmap's "bullet fired → moves → explodes →
+destroys terrain, checksum matches C++"). This is the crown-jewel step: it is where
+determinism is won or lost.
 
 ### Provisional sub-slice breakdown
 A plausible *thin-vertical-then-widen* ordering, each piece independently
 differential-testable against a C++ component hash:
 
-1. **Level → ECS + checksum harness.** Load `LevelData` into the world; reproduce
-   the level material-map hash. Stand up the Rust-side state-hash that mirrors
-   `HashGameState`. No dynamics yet — proves the harness and the level half of
-   the checksum before any motion exists.
+1. **Level → sim-state + checksum harness** *(slice 1 ✓ done & bit-exact)*. Build
+   `SimState` from `LevelData`; reproduce the level material-map hash. Stand up the
+   Rust-side state-hash that mirrors `HashGameState`. No dynamics yet — proves the
+   harness and the level half of the checksum before any motion exists. (Shipped:
+   `sim` crate + `oracle_dump_sim`; tick-0 hash matches C++ bit-for-bit — see
+   overview.)
 2. **One worm, physics only.** Port `Worm::ProcessPhysics` (gravity, terrain
    collision against the material map, position/velocity in fixed-point) for a
    single worm with scripted inputs; match worm `pos/vel` component hash.
@@ -99,12 +111,13 @@ differential-testable against a C++ component hash:
 - **The Bevy trap (the central risk).** Bevy schedules systems in parallel and in
   unspecified order; `ProcessFrame` is a strict sequence with read-after-write
   dependencies (sobjects before wobjects before nobjects before bobjects, then
-  worms, then ninjaropes). The sim must run in an explicitly **ordered, single
-  schedule** (the future `GgrsSchedule` shape, even before ggrs lands) with no
-  reliance on parallelism. Decide early whether the sim is "ECS-native systems
-  with hard ordering" or "sim-core functions called from one driver system." The
-  latter de-risks determinism at the cost of less idiomatic ECS — an open design
-  call (see open questions).
+  worms, then ninjaropes). **Decided (overview, LOCKED):** the sim is **sim-core-driver
+  functions called from one ordered tick** — a single `SimState::process_frame` that
+  invokes per-entity `process` helpers in exact C++ order (sobjects → wobjects →
+  nobjects → bobjects → `++cycles` → bonus-drop roll → worms → ninjaropes) — **not**
+  ECS-native systems-with-ordering. Determinism is chosen over idiomatic ECS; Bevy
+  only drives this one function from step 3 (`GgrsSchedule` at step 5). The order
+  remains load-bearing: a single reordered or extra step desyncs everything downstream.
 - **RNG as ordered, shared state.** `rand` is consumed mid-frame (bonus-drop
   roll, fire spread, splinters, respawn search). Call order must match C++
   exactly; a single extra/missing/reordered `rand()` call desyncs everything
@@ -116,8 +129,11 @@ differential-testable against a C++ component hash:
   back into the sim.
 - **Iteration order over object pools.** C++ uses pool iterators with stable
   order and free-list semantics; ECS query iteration order is not guaranteed.
-  Entity spawn/despawn order and iteration order must be made deterministic
-  (explicit ordering key, or keep the pool model inside sim-core).
+  **Decided (overview, LOCKED):** keep the pool model in the `sim` crate — a generic
+  `Pool<T>` mirroring C++ `FixedObjectList::All()` (lowest-free slot reuse, slot-order
+  iteration) plus a `BloodPool<T>` mirroring `BObjectList` (free-during-iteration /
+  swap-remove) — **not** ECS entities with an ordering component. (Pools live in the
+  `sim` crate, not in dependency-free `sim-core`.)
 - **Death/respawn + level-dependent RNG search** (`beginRespawn`) is a known C++
   desync-sensitive path — port it carefully and fuzz it (the existing death fuzz
   test is the template).
@@ -132,15 +148,25 @@ differential-testable against a C++ component hash:
 
 ### Open questions to resolve before detailed planning
 - ECS-native systems vs. sim-core-driver-system architecture for the tick?
+  **RESOLVED:** sim-core-driver — one ordered `process_frame` tick function, not
+  ECS-native systems.
 - How are pooled objects modeled in ECS while keeping deterministic
   iteration/spawn order (entities + ordering component, vs. keep pools in
-  sim-core, vs. a hybrid)?
-- Exact scenario/input-vector format for the time-series oracle, and how many
-  seeds/levels/modes constitute "enough" coverage for the milestone.
+  sim-core, vs. a hybrid)? **RESOLVED:** keep the pool model in the `sim` crate
+  (`Pool<T>`/`BloodPool<T>` mirroring `FixedObjectList`/`BObjectList`), not ECS
+  entities.
 - Where does the Rust state-hash live so both the headless oracle test and the
-  future game binary share it?
+  future game binary share it? **RESOLVED:** in the `sim` crate (`sim::hash`),
+  shared by the headless oracle test now and the future game binary / ggrs
+  checksum later.
 - Single-worm shortcut: is a 1-worm scenario meaningfully testable, or must the
-  oracle always run the 2-worm setup the C++ fixtures assume?
+  oracle always run the 2-worm setup the C++ fixtures assume? **RESOLVED:** the
+  oracle runs the 2-worm fixture the C++ code assumes (the component hash carries
+  `worms[2]`); slice 1 confirmed worm0 == worm1.
+- **STILL OPEN:** the exact scenario/input-vector format and the coverage matrix
+  (how many seeds/levels/modes constitute "enough" for the milestone). Slice 1
+  established the golden column format; the multi-tick input vector is detailed in
+  slice 2.
 
 ---
 
@@ -326,9 +352,11 @@ reorder — i.e. the Rust equivalent of the C++ `test_rollback_*` suite passes.
 These genuinely depend on learning from earlier steps; locking them now would be
 false precision.
 
-- **ECS architecture of the tick** (systems-native vs. sim-core-driver, how pools
-  map to entities, deterministic iteration strategy) — decide *during step 2*
-  with the checksum oracle in hand.
+- ~~**ECS architecture of the tick** (systems-native vs. sim-core-driver, how pools
+  map to entities, deterministic iteration strategy)~~ — **DECIDED during step 2**
+  (overview, LOCKED): sim-core-driver ordered tick, pools kept in the `sim` crate,
+  not ECS entities. (Listed here originally as deferred; resolved once step 2 was
+  reached.)
 - **Exact Bevy / bevy_ggrs / bevy_rand versions and feature sets** — these move
   fast; research them right before steps 3 and 5, not now.
 - **Rendering fidelity bar and palette-rendering technique** — decide in step 3

@@ -1541,6 +1541,49 @@ fn worm_pre_death_drip(
     }
 }
 
+/// Port of the **death block** (`worm.cpp:369-426`) — the tail of the visible arm
+/// that runs when a worm's `health` reaches `<= 0`: it plays a death sound,
+/// decrements `lives`, does the kill bookkeeping, hides the worm, arms the
+/// `killed_timer`, and sprays the `kMax`-particle blood fan + the 8 worm-gibs.
+///
+/// RNG order (the contract, verified against `worm.cpp:369-426`):
+/// 1. `rand(3)` death-sound index `15 + …` (`:378`) — the ONLY pre-spray draw
+///    (the `loop_sound` Stop and the `Play` are sound-only side effects with no
+///    rand, omitted by the sim);
+/// 2. `--lives` / kill bookkeeping (`:384-405`) — **no rand**;
+/// 3. **iff `kMax = 120*blood/100 > 1`** (`:412`, strict `>`, NOT `>= 1`): for
+///    `i in 1..=kMax` a `rand(128)` angle (`:414`, the arg — drawn in worm.cpp,
+///    OUTSIDE `Create2`) then `nobject_types[6].Create2` (its own draws);
+/// 4. the **8**-iteration gib spray `for i in (7..=105).step_by(14)`
+///    (`{7,21,35,49,63,77,91,105}`, `:418`): a `rand(14)` angle (`:419`, added to
+///    `i`, drawn OUTSIDE `Create2`) then `nobject_types[index].Create2` — the gib
+///    type is the **per-worm** type `nobject_types[index]` (worm index 0/1), NOT
+///    blood.
+///
+/// Returns `Some(killer_idx)` when the killer's `kills` must be incremented
+/// (`:403-405`, `last_killed_by_idx >= 0 && != index`) — applied by the caller
+/// AFTER the worm loop (the `kills++` targets a *different* worm, which the
+/// in-loop `&mut` borrow forbids; deferring is hash-equivalent since `kills` is
+/// read only at the end-of-tick fold). `None` otherwise. Gated on `health <= 0`
+/// (`:369`), so it is inert — zero draws, no mutation — for a live worm; slices
+/// 1-5c (worms at full health) never enter it, keeping their goldens
+/// byte-identical.
+#[allow(clippy::too_many_arguments)]
+fn worm_death(
+    _w: &mut WormState,
+    _index: i32,
+    _blood: i32,
+    _nobject_types: &[NObjectType],
+    _cossin: &[Vec2; 128],
+    _rand: &mut Rand,
+    _nobjects: &mut Pool<NObject>,
+    _last_killed_idx: &mut i32,
+    _got_changed: &mut bool,
+) -> Option<usize> {
+    // RED stub (T3): the real port lands in GREEN.
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2819,5 +2862,310 @@ mod tests {
             "draws outer + inner + SOUND + Create1(x,y)"
         );
         assert_eq!(pool.len(), 1, "blood spawns after the sound draw");
+    }
+
+    // ----- Slice 5d T3: death block (worm.cpp:369-426) ----------------------
+    // The death block runs at the END of the visible arm when health <= 0. RNG
+    // contract (verified against :369-426):
+    //   rand(3)                          [death sound 15 + rand(3); the ONLY
+    //                                      pre-spray draw]
+    //   --lives / kill bookkeeping        [no rand]
+    //   kMax = 120*blood/100; iff kMax>1: [strict >, NOT >=1]
+    //     for i in 1..=kMax:  rand(128)   [angle arg, OUTSIDE Create2]
+    //                         + nobject_types[6].Create2 (its own draws)
+    //   for i in {7,21,..,105} (8 iters): rand(14)  [angle arg, OUTSIDE Create2]
+    //                         + nobject_types[index].Create2  [PER-WORM gib type]
+    // Tests drive the standalone `worm_death` against a SEEDED Rand and replay a
+    // reference stream to pin the exact draw ORDER + COUNT + spawn count.
+
+    // Synthetic nobject_types for the death block. Blood (index 6): speed_v +
+    // distribution != 0 => Create2 draws 3 (speed, dist x, dist y); start_frame
+    // <= 0 & time_to_explo_v == 0 => no Create draw. Per blood particle =
+    // rand(128) + 3 = 4 draws. Worm-gib types (indices 0/1) are given DISTINCT
+    // shapes so the per-worm indexing (`nobject_types[index]`, not [6]) is
+    // observable: gib[0] has distribution == 0 => Create2 draws only 1 (speed);
+    // gib[1] has distribution != 0 => Create2 draws 3. Per gib = rand(14) + the
+    // type's own draws.
+    fn death_types() -> Vec<NObjectType> {
+        let mut v = vec![NObjectType::default(); 7];
+        // Blood (type 6): 3 internal draws.
+        v[6] = NObjectType {
+            speed_v: 40,
+            distribution: 10000,
+            start_frame: 0,
+            time_to_explo_v: 0,
+            ..Default::default()
+        };
+        // Gib type for worm 0: distribution == 0 => ONLY the speed draw (1).
+        v[0] = NObjectType {
+            speed_v: 20,
+            distribution: 0,
+            start_frame: 0,
+            time_to_explo_v: 0,
+            ..Default::default()
+        };
+        // Gib type for worm 1: distribution != 0 => speed + dist x + dist y (3).
+        v[1] = NObjectType {
+            speed_v: 20,
+            distribution: 5000,
+            start_frame: 0,
+            time_to_explo_v: 0,
+            ..Default::default()
+        };
+        v
+    }
+
+    // A dying worm (health <= 0), visible, with a known last_killed_by_idx and a
+    // known velocity (so vel/3 into Create2 is exercised).
+    fn dying_worm(index: usize, health: i32, killed_by: i32) -> WormState {
+        let mut w = WormState::from_init(&two_worms()[index]);
+        w.health = health;
+        w.visible = true;
+        w.last_killed_by_idx = killed_by;
+        w.vel = Vec2::new(300, -600);
+        // Non-default sentinels the death block must overwrite/clear.
+        w.fire_cone = 9;
+        w.leave_shell_timer = 9;
+        w.make_sight_green = true;
+        w.ninjarope.out = true;
+        w.control_states.set(ControlState::FIRE, true);
+        w
+    }
+
+    #[test]
+    fn t3_death_gate_health_positive_draws_nothing_and_no_mutation() {
+        // health > 0: the death block is skipped entirely — no draw, no spawn, no
+        // field mutation, no killer. Pins the `health <= 0` gate (:369).
+        let mut w = dying_worm(1, 1, 0); // health 1 > 0
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(7);
+        let before = rand.last();
+        let (mut lki, mut gc) = (-1i32, false);
+
+        let killer = worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+
+        assert_eq!(rand.last(), before, "live worm: death block draws NO rand");
+        assert_eq!(pool.len(), 0, "live worm: no spray");
+        assert!(w.visible, "live worm stays visible");
+        assert_eq!(w.killed_timer, 150, "killed_timer untouched (still initial)");
+        assert_eq!(killer, None, "no death => no kill attribution");
+    }
+
+    #[test]
+    fn t3_death_sound_lives_visible_timer_and_field_clears() {
+        // health <= 0 with NO blood spray (blood 0 => kMax 0) isolates the single
+        // rand(3) death sound + the 8-gib spray. Worm index 0 => gib type[0]
+        // (distribution 0 => 1 internal draw / gib). Expected draws:
+        //   rand(3)                       [1, death sound]
+        //   8 x (rand(14) + speed)        [8 x 2 = 16]
+        // => 17 draws total; 8 nobjects (gibs only). Asserts the state mutations.
+        let mut w = dying_worm(0, 0, -1); // no killer
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (-1i32, false);
+
+        // Reference stream: sound + 8 gibs each (angle + 1 speed draw).
+        let mut refr = seeded_rand(11);
+        let _snd = 15 + refr.bound(3);
+        for _ in 0..8 {
+            let _angle = refr.bound(14); // gib angle arg
+            let _speed = refr.bound(20); // gib[0] speed_v (distribution 0 => no dist draws)
+        }
+
+        let killer = worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+
+        assert_eq!(rand.last(), refr.last(), "draws: sound(1) + 8 gibs x (angle+speed)");
+        assert_eq!(pool.len(), 8, "blood 0 => kMax 0 => NO blood spray; exactly 8 gibs");
+        assert!(!w.visible, "visible=false on death (:407)");
+        assert_eq!(w.killed_timer, 150, "killed_timer = kKilledTimerInitial (:408)");
+        assert_eq!(w.lives, 4, "--lives (KillEmAll, :390): started 5");
+        assert_eq!(w.fire_cone, 0, "fire_cone = 0 (:381)");
+        assert_eq!(w.leave_shell_timer, 0, "leave_shell_timer = 0 (:370)");
+        assert!(!w.make_sight_green, "make_sight_green = false (:371)");
+        assert!(!w.ninjarope.out, "ninjarope.out = false (:382)");
+        assert!(
+            !w.control_states.get(ControlState::FIRE),
+            "Release(kFire) clears the Fire bit (:425) — folded into the master hash"
+        );
+        assert_eq!(killer, None, "last_killed_by_idx < 0 => no kills++");
+        assert_eq!(lki, 0, "KillEmAll: game.last_killed_idx = index");
+        assert!(gc, "got_changed = (old(-1) != 0)");
+    }
+
+    #[test]
+    fn t3_kills_attributed_to_the_killer_when_a_different_worm() {
+        // last_killed_by_idx >= 0 && != index => Some(killer). Worm index 1 killed
+        // by worm 0 => Some(0). (kMax 0 to keep the draw stream irrelevant here.)
+        let mut w = dying_worm(1, 0, 0);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(3);
+        let (mut lki, mut gc) = (-1i32, false);
+
+        let killer = worm_death(&mut w, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+
+        assert_eq!(killer, Some(0), "killer worm 0 gets kills++ (:403-405)");
+    }
+
+    #[test]
+    fn t3_kills_not_attributed_on_self_kill_or_no_killer() {
+        // last_killed_by_idx == index (self) => None; last_killed_by_idx < 0
+        // (unknown) => None. Pins BOTH halves of the `>= 0 && != index` predicate.
+        let types = death_types();
+        let cossin = precompute_cossin();
+
+        let mut w_self = dying_worm(1, 0, 1); // killed_by == index 1 (self)
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(3);
+        let (mut lki, mut gc) = (-1i32, false);
+        let self_killer =
+            worm_death(&mut w_self, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        assert_eq!(self_killer, None, "self-kill (killed_by == index) => no kills++");
+
+        let mut w_none = dying_worm(0, 0, -1);
+        let mut pool2: Pool<NObject> = Pool::new(600);
+        let mut rand2 = seeded_rand(3);
+        let (mut lki2, mut gc2) = (-1i32, false);
+        let none_killer =
+            worm_death(&mut w_none, 0, 0, &types, &cossin, &mut rand2, &mut pool2, &mut lki2, &mut gc2);
+        assert_eq!(none_killer, None, "unknown killer (< 0) => no kills++");
+    }
+
+    #[test]
+    fn t3_blood100_sprays_120_particles_480_draws_plus_8_gibs() {
+        // blood = 100 => kMax = 120 (> 1) => 120 blood particles, each
+        // rand(128) + Create2(blood: speed + dist x + dist y = 3) = 4 draws =>
+        // 480 blood draws. Worm index 1 => gib type[1] (distribution != 0 => 3
+        // internal): 8 gibs each rand(14) + 3 = 4 => 32 gib draws. Plus the
+        // rand(3) sound => 1. Total = 1 + 480 + 32 = 513 draws; 128 nobjects.
+        let mut w = dying_worm(1, -50, -1);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(99);
+        let (mut lki, mut gc) = (-1i32, false);
+
+        let mut refr = seeded_rand(99);
+        let _snd = 15 + refr.bound(3); // sound
+        // 120 blood particles: angle(128) + speed(40) + dist x(20000) + dist y(20000).
+        for _ in 0..120 {
+            refr.bound(128);
+            refr.bound(40);
+            refr.bound(20000);
+            refr.bound(20000);
+        }
+        // 8 gibs (worm 1 => type[1], distribution 5000): angle(14) + speed(20)
+        // + dist x(10000) + dist y(10000).
+        for _ in 0..8 {
+            refr.bound(14);
+            refr.bound(20);
+            refr.bound(10000);
+            refr.bound(10000);
+        }
+
+        worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+
+        assert_eq!(
+            rand.last(),
+            refr.last(),
+            "1 (sound) + 120x4 (blood) + 8x4 (gib[1]) = 513 draws in order"
+        );
+        assert_eq!(pool.len(), 128, "120 blood + 8 gibs");
+    }
+
+    #[test]
+    fn t3_blood1_gate_closed_no_spray_but_8_gibs_still_fire() {
+        // blood = 1 => kMax = 120*1/100 = 1, which is NOT > 1 => the blood spray
+        // is SKIPPED (pins the strict `> 1` gate, not `>= 1`). The 8-gib spray is
+        // OUTSIDE that gate and still fires. Worm index 0 => gib type[0]
+        // (distribution 0 => 1 internal). Draws: sound(1) + 8 x (angle + speed) =
+        // 17; nobjects: 8 (gibs only). If the gate were `>= 1`, one blood
+        // particle would spawn (9 nobjects) — this asserts it does NOT.
+        let mut w = dying_worm(0, 0, -1);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(5);
+        let (mut lki, mut gc) = (-1i32, false);
+
+        let mut refr = seeded_rand(5);
+        let _snd = 15 + refr.bound(3);
+        for _ in 0..8 {
+            refr.bound(14);
+            refr.bound(20);
+        }
+
+        worm_death(&mut w, 0, 1, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+
+        assert_eq!(rand.last(), refr.last(), "blood 1 => no blood draws; only sound + 8 gibs");
+        assert_eq!(pool.len(), 8, "kMax == 1 is NOT > 1 => no blood spray; exactly 8 gibs");
+    }
+
+    #[test]
+    fn t3_gib_loop_runs_exactly_8_times_pinning_the_i_le_105_bound() {
+        // The gib loop is `for i in (7..=105).step_by(14)` = {7,21,35,49,63,77,
+        // 91,105} = 8 iterations (the overview's "7x" is wrong). With blood 0
+        // (no blood spray) the pool holds EXACTLY the gibs, so pool.len() is the
+        // iteration count witness: 8, not 7 (would miss i=105) and not 9.
+        let mut w = dying_worm(0, 0, -1);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(1);
+        let (mut lki, mut gc) = (-1i32, false);
+
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+
+        assert_eq!(pool.len(), 8, "gib loop runs EXACTLY 8 times ({{7,21,..,105}})");
+    }
+
+    #[test]
+    fn t3_gib_spray_uses_the_per_worm_type_not_blood() {
+        // The gib type is `nobject_types[index]` (per-worm), NOT blood[6]. gib[0]
+        // (worm 0) has distribution 0 => 1 internal draw / gib; gib[1] (worm 1)
+        // has distribution != 0 => 3 internal draws / gib. With blood 0 (no blood
+        // spray) the ONLY difference between the two worms' draw counts is the gib
+        // type: worm 0 => 1 + 8x(1+1) = 17; worm 1 => 1 + 8x(1+3) = 33. If the code
+        // used blood[6] for gibs, both would draw the same. This discriminates.
+        let types = death_types();
+        let cossin = precompute_cossin();
+
+        let mut w0 = dying_worm(0, 0, -1);
+        let mut pool0: Pool<NObject> = Pool::new(600);
+        let mut r0 = seeded_rand(2);
+        let (mut lki0, mut gc0) = (-1i32, false);
+        worm_death(&mut w0, 0, 0, &types, &cossin, &mut r0, &mut pool0, &mut lki0, &mut gc0);
+        let mut ref0 = seeded_rand(2);
+        ref0.bound(3); // sound
+        for _ in 0..8 {
+            ref0.bound(14);
+            ref0.bound(20);
+        }
+        assert_eq!(r0.last(), ref0.last(), "worm 0 uses gib[0] (1 internal draw / gib)");
+
+        let mut w1 = dying_worm(1, 0, -1);
+        let mut pool1: Pool<NObject> = Pool::new(600);
+        let mut r1 = seeded_rand(2);
+        let (mut lki1, mut gc1) = (-1i32, false);
+        worm_death(&mut w1, 1, 0, &types, &cossin, &mut r1, &mut pool1, &mut lki1, &mut gc1);
+        let mut ref1 = seeded_rand(2);
+        ref1.bound(3); // sound
+        for _ in 0..8 {
+            ref1.bound(14);
+            ref1.bound(20);
+            ref1.bound(10000);
+            ref1.bound(10000);
+        }
+        assert_eq!(r1.last(), ref1.last(), "worm 1 uses gib[1] (3 internal draws / gib)");
+        assert_ne!(
+            r0.last(),
+            r1.last(),
+            "per-worm gib types => the two worms draw DIFFERENT amounts (not blood[6] for both)"
+        );
     }
 }

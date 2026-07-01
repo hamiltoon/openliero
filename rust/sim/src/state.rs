@@ -17,6 +17,7 @@ use sim_core::rng::Rand;
 use sim_core::tables::precompute_cossin;
 use sim_core::vec::Vec2;
 
+use crate::blit::draw_dirt_effect;
 use crate::control::{
     process_aiming, process_movement, process_tasks, process_weapon_change, process_weapons,
     ControlConsts,
@@ -1594,12 +1595,18 @@ impl SimState {
                     );
                 }
                 // `killed_timer < 0` -> DoRespawning (worm.cpp:447). Ported in
-                // Slice 5d T5 — STUB (unreachable in T4: the unit tests exercise
-                // `begin_respawn` directly and stop at `killed_timer == -1`, and no
-                // committed golden drives a full tick through `killed_timer == 0`
-                // until T5 lands `do_respawning`).
+                // Slice 5d T5: the drop-in convergence walk + the completion
+                // (dirt puff, aiming reset, health restore) once the cursor
+                // reaches `Ftoi(pos)-80` within ±5 AND `ready`.
                 if worms[i].killed_timer < 0 {
-                    do_respawning(&mut worms[i]);
+                    do_respawning(
+                        &mut worms[i],
+                        level,
+                        large_sprites,
+                        textures,
+                        settings_health,
+                        rand,
+                    );
                 }
             }
         }
@@ -1792,12 +1799,18 @@ fn check_respawn_position(
     true
 }
 
-/// Stub for `Worm::DoRespawning` (`worm.cpp:755-809`) — the drop-in convergence
-/// and the lone `rand() & 1` aiming draw, ported in Slice 5d T5. UNREACHABLE in
-/// T1: entered only when `killed_timer < 0`, reachable only after `BeginRespawn`
-/// sets it to `-1`.
-fn do_respawning(_worm: &mut WormState) {
-    unreachable!("DoRespawning is ported in Slice 5d T5; unreachable until a worm dies");
+/// Port of `Worm::DoRespawning` (`worm.cpp:755-809`) — the drop-in convergence
+/// and the lone `rand() & 1` aiming draw.
+#[allow(clippy::too_many_arguments)]
+fn do_respawning(
+    worm: &mut WormState,
+    level: &mut LevelSim,
+    large_sprites: &SpriteSet,
+    textures: &[Texture],
+    settings_health: i32,
+    rand: &mut Rand,
+) {
+    todo!("DoRespawning ported in Slice 5d T5 GREEN");
 }
 
 /// Port of the **pre-death blood drip** (`worm.cpp:355-367`) — the tail of the
@@ -3823,10 +3836,207 @@ mod tests {
         );
     }
 
-    // NOTE: no full-tick `process_frame` test drives worm 0 through the
-    // killed_timer 1 -> 0 transition here: per C++ (`worm.cpp:443-449`) the SAME
-    // tick that runs BeginRespawn (killed_timer -> -1) then falls through the
-    // `killed_timer < 0` arm into DoRespawning, which is still the T5 `unreachable!`
-    // stub. So T4 exercises begin_respawn DIRECTLY (above) and stops at
-    // killed_timer == -1; the full dead-arm drive lands with T5.
+    // ------------------------------------------------------------------------
+    // Slice 5d T5: DoRespawning (worm.cpp:755-809) — the drop-in convergence
+    // walk (+/-1 four times/tick, no rand), the LimitXy clamp, and — on
+    // convergence (+/-5) AND `ready` — the dirt puff then the lone no-arg
+    // `rand() & 1` aiming reset + the KillEmAll health restore.
+    // ------------------------------------------------------------------------
+
+    // A 1-frame 16x16 all-zero sprite bank: the dirt puff's mask cells are all
+    // "other" (value 0) so it writes NOTHING, but it still consumes its one
+    // rand(rframe) draw — which is all these tests observe about it.
+    fn dirt_sprites() -> SpriteSet {
+        SpriteSet {
+            width: 16,
+            height: 16,
+            count: 1,
+            data: vec![0u8; 256],
+        }
+    }
+
+    // rframe=1 => the dirt puff draws exactly one rand(1) (result 0, but a real
+    // MT draw) before the aiming rand. sframe=mframe=0 index the lone frame.
+    fn dirt_texture() -> Texture {
+        Texture {
+            sframe: 0,
+            rframe: 1,
+            mframe: 0,
+            ndrawback: false,
+        }
+    }
+
+    // A dead worm parked at integer death pos `(px, py)` with `logic_respawn` at
+    // `logic` and the given `ready`. killed_timer < 0 (the DoRespawning arm).
+    fn respawn_worm(px: i32, py: i32, logic: (i32, i32), ready: bool) -> WormState {
+        let mut w = WormState::from_init(&two_worms()[0]);
+        w.visible = false;
+        w.killed_timer = -1;
+        w.pos = Vec2::new(itof(px), itof(py));
+        w.logic_respawn = Vec2::new(logic.0, logic.1);
+        w.ready = ready;
+        w
+    }
+
+    #[test]
+    fn t5_do_respawning_steps_logic_respawn_four_times_by_one_no_rand() {
+        // pos=(150,150) => target = Ftoi(pos)-80 = (70,70). Start x below, y above
+        // the target so BOTH +/-1 directions are exercised. Not within +/-5 yet =>
+        // no draw, no respawn, no rand.
+        let sprites = dirt_sprites();
+        let tex = [dirt_texture()];
+        let mut level = flat_level(400, 400);
+        let mut w = respawn_worm(150, 150, (0, 200), true);
+        let mut rand = seeded_rand(999);
+
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+
+        // 4 steps: x 0->4 (++), y 200->196 (--). No rand consumed.
+        assert_eq!(
+            w.logic_respawn,
+            Vec2::new(4, 196),
+            "logic_respawn stepped +/-1 four times toward Ftoi(pos)-80, per axis"
+        );
+        assert_eq!(rand.last(), 0, "not converged => zero rand draws");
+        assert!(!w.visible, "not converged => no respawn (still invisible)");
+        assert!(w.ready, "not converged => ready untouched");
+    }
+
+    #[test]
+    fn t5_do_respawning_limit_xy_clamps_logic_respawn_both_bounds() {
+        // level 200x200 => LimitXy bounds are [0, 42] on both axes. ready=false so
+        // the clamp is observed in isolation (no draw even when converged).
+        let sprites = dirt_sprites();
+        let tex = [dirt_texture()];
+
+        // Upper clamp: logic far above => 4 `--` steps still >> 42 => clamp to 42.
+        let mut level = flat_level(200, 200);
+        let mut w = respawn_worm(150, 150, (1000, 1000), false);
+        let mut rand = seeded_rand(1);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        assert_eq!(w.logic_respawn, Vec2::new(42, 42), "clamped to [.,width-158]=42");
+        assert_eq!(rand.last(), 0, "ready=false => no draw even when (clamped) converged");
+        assert!(!w.visible, "ready=false => no respawn");
+
+        // Lower clamp: logic far below 0 => 4 `++` steps still < 0 => clamp to 0.
+        let mut level2 = flat_level(200, 200);
+        let mut w2 = respawn_worm(150, 150, (-1000, -1000), false);
+        let mut rand2 = seeded_rand(1);
+        do_respawning(&mut w2, &mut level2, &sprites, &tex, 100, &mut rand2);
+        assert_eq!(w2.logic_respawn, Vec2::new(0, 0), "clamped to [0,.]");
+    }
+
+    #[test]
+    fn t5_do_respawning_converged_but_not_ready_does_nothing() {
+        // Already at target (70,70) so the steps are no-ops => converged, but
+        // ready=false => no dirt draw, no respawn (the "Don't spawn in quicksim"
+        // / Fire-not-yet-pressed gate).
+        let sprites = dirt_sprites();
+        let tex = [dirt_texture()];
+        let mut level = flat_level(400, 400);
+        let mut w = respawn_worm(150, 150, (70, 70), false);
+        let mut rand = seeded_rand(7);
+
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+
+        assert_eq!(rand.last(), 0, "converged but !ready => zero rand draws");
+        assert!(!w.visible, "converged but !ready => no respawn");
+        assert_eq!(w.logic_respawn, Vec2::new(70, 70), "already at target, unmoved");
+    }
+
+    #[test]
+    fn t5_do_respawning_converged_and_ready_draws_dirt_then_aiming_bit_both_branches() {
+        // Converged (logic == target (70,70)) AND ready => the completion fires:
+        // dirt puff (one rand(rframe)) THEN the lone no-arg `rand() & 1` picking
+        // the facing. Sweep seeds to force BOTH branches; assert every mutation.
+        let mut seen_odd = false; // bit==1 -> Itof(32), direction 0
+        let mut seen_even = false; // bit==0 -> Itof(96), direction 1
+        for seed in 0u32..64 {
+            // Reference stream: dirt draw = rand(1) FIRST, then the raw no-arg
+            // draw whose LOW bit picks the facing (C++ `game.rand() & 1`).
+            let mut refr = seeded_rand(seed);
+            refr.bound(1);
+            let bit = refr.next_u32() & 1;
+            let expected_last = refr.last();
+
+            let sprites = dirt_sprites();
+            let tex = [dirt_texture()];
+            let mut level = flat_level(400, 400);
+            let mut w = respawn_worm(150, 150, (70, 70), true);
+            // Non-default pre-state so the resets are observable.
+            w.fire_cone = 99;
+            w.vel = Vec2::new(5, 5);
+            w.health = 1;
+            w.aiming_angle = 12345;
+            w.direction = 9;
+            let mut rand = seeded_rand(seed);
+
+            do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+
+            // Exactly 2 draws, in order: dirt puff THEN the lone aiming rand.
+            assert_eq!(
+                rand.last(),
+                expected_last,
+                "dirt rand(rframe) THEN the lone no-arg rand()&1 (exactly 2 draws, in order)"
+            );
+            assert!(!w.ready, "ready cleared (:788)");
+            assert!(w.visible, "visible = true (:791)");
+            assert_eq!(w.fire_cone, 0, "fire_cone = 0 (:792)");
+            assert_eq!(w.vel, Vec2::zero(), "vel.Zero() (:793)");
+            assert_eq!(w.health, 100, "health = settings_health, KillEmAll restore (:794-796)");
+            if bit != 0 {
+                assert_eq!(w.aiming_angle, itof(32), "odd bit => Itof(32)");
+                assert_eq!(w.direction, 0, "odd bit => direction 0");
+                seen_odd = true;
+            } else {
+                assert_eq!(w.aiming_angle, itof(96), "even bit => Itof(96)");
+                assert_eq!(w.direction, 1, "even bit => direction 1");
+                seen_even = true;
+            }
+        }
+        assert!(
+            seen_odd && seen_even,
+            "both `rand() & 1` branches (odd->Itof(32)/dir0, even->Itof(96)/dir1) exercised"
+        );
+    }
+
+    #[test]
+    fn t5_do_respawning_aiming_uses_raw_low_bit_not_bound2_high_bit() {
+        // The C++ call form is `game.rand() & 1` (raw next draw, LOW bit), NOT
+        // `rand.bound(2)` (Lemire's HIGH bit). They advance the RNG identically
+        // (one draw) but generally select DIFFERENT bits, so the call form is
+        // load-bearing. Find a seed where the two disagree and pin that the
+        // implementation follows the LOW bit.
+        let seed = (0u32..10_000)
+            .find(|&s| {
+                let mut a = seeded_rand(s);
+                a.bound(1); // consume the dirt draw
+                let raw = a.next_u32();
+                let low = raw & 1;
+                // bound(2) on the SAME draw would be the high bit:
+                let high = ((raw as u64 * 2) >> 32) as u32;
+                low != high
+            })
+            .expect("a seed where low-bit and bound(2) disagree must exist");
+
+        let mut refr = seeded_rand(seed);
+        refr.bound(1);
+        let low = refr.next_u32() & 1;
+
+        let sprites = dirt_sprites();
+        let tex = [dirt_texture()];
+        let mut level = flat_level(400, 400);
+        let mut w = respawn_worm(150, 150, (70, 70), true);
+        let mut rand = seeded_rand(seed);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+
+        // The facing must follow the LOW bit (odd => Itof(32)/dir0).
+        if low != 0 {
+            assert_eq!(w.aiming_angle, itof(32));
+            assert_eq!(w.direction, 0);
+        } else {
+            assert_eq!(w.aiming_angle, itof(96));
+            assert_eq!(w.direction, 1);
+        }
+    }
 }

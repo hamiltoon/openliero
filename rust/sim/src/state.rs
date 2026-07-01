@@ -21,7 +21,7 @@ use crate::control::{
     process_aiming, process_movement, process_tasks, process_weapon_change, process_weapons,
     ControlConsts,
 };
-use crate::nobject::{nobject_process, NObjectOutcome};
+use crate::nobject::{nobject_create1, nobject_process, NObjectOutcome};
 use crate::physics::{worm_process_physics, worm_reactions, PhysicsConsts};
 use crate::pool::{BloodPool, Pool};
 use crate::sobject::{sobject_process, SObjectOutcome};
@@ -1427,6 +1427,14 @@ impl SimState {
                         rand,
                     );
                 }
+
+                // 12. Pre-death blood drip (worm.cpp:355-367) — fires at the END
+                //     of the visible arm (after the change/movement gate) while
+                //     the worm is alive but under settings_health/4. Hash-neutral
+                //     for slices 1-5c: their worms start at full health
+                //     (>= settings_health/4) so the outer gate never opens and no
+                //     rand is drawn (goldens stay byte-identical).
+                worm_pre_death_drip(w, i as i32, settings_health, nobject_types, rand, nobjects);
             } else {
                 // Worm is dead (worm.cpp:431-450). None of this touches a hashed
                 // field except `killed_timer` (unhashed) and — on a Fire hit —
@@ -1484,18 +1492,53 @@ fn do_respawning(_worm: &mut WormState) {
     unreachable!("DoRespawning is ported in Slice 5d T5; unreachable until a worm dies");
 }
 
-/// Pre-death blood drip (`worm.cpp:355-367`) — RED stub (Slice 5d T2). Ported in
-/// the GREEN step; the no-op body draws nothing so the branch tests fail (RED)
-/// while the closed-gate test trivially holds.
+/// Port of the **pre-death blood drip** (`worm.cpp:355-367`) — the tail of the
+/// visible arm that sprays a single blood `nobject` while the worm is alive but
+/// under `settings_health / 4`.
+///
+/// RNG order (the contract, verified against `worm.cpp:355-367`):
+/// 1. `rand(health + 6)` (`:356`, the OUTER gate);
+/// 2. iff `== 0`: `rand(3)` (`:357`, the INNER gate);
+/// 3. iff the inner `== 0`: `rand(3)` for the sound index `18 + …` (`:358-359`) —
+///    **always drawn on the inner gate** (the C++ note pins it *outside* the
+///    unpredictable `IsPlaying`/`Play` branch, which draws no rand and is a
+///    sound-only side effect the sim omits);
+/// 4. **unconditionally within the OUTER gate** (whenever the outer roll was 0,
+///    regardless of the inner/sound gate): `nobject_types[6].Create1(vel, pos, 0,
+///    index)` (`:365`) — the blood spawn, which itself draws `rand(dist*2)` twice
+///    (x, y) when blood's `distribution != 0`.
+///
+/// The `Create1` spawn sits **inside** the outer gate but **outside** the sound
+/// gate. Gated on `health < settings_health / 4` (integer `/`), so it is inert —
+/// zero draws — for a full-health worm; slices 1-5c (worms at `settings_health`)
+/// never open the gate, keeping their goldens byte-identical.
 #[allow(clippy::too_many_arguments)]
 fn worm_pre_death_drip(
-    _w: &WormState,
-    _index: i32,
-    _settings_health: i32,
-    _nobject_types: &[NObjectType],
-    _rand: &mut Rand,
-    _nobjects: &mut Pool<NObject>,
+    w: &WormState,
+    index: i32,
+    settings_health: i32,
+    nobject_types: &[NObjectType],
+    rand: &mut Rand,
+    nobjects: &mut Pool<NObject>,
 ) {
+    // :355 outer gate — integer `/4`, strict `<`.
+    if w.health < settings_health / 4 {
+        // :356 outer roll. `(health + 6) as u32` mirrors C++ `int -> uint32_t`
+        // (2's-complement), matching `game.rand(health + 6)` for any health.
+        if rand.bound((w.health + 6) as u32) == 0 {
+            // :357 inner roll.
+            if rand.bound(3) == 0 {
+                // :358-359 sound index `18 + rand(3)`. The draw is kept (it
+                // advances the shared engine and is pinned outside the
+                // unpredictable IsPlaying branch); the Play side effect is
+                // sound-only and omitted from the sim.
+                let _snd = 18 + rand.bound(3);
+            }
+            // :365 Create1 is UNCONDITIONAL within the outer gate (outside the
+            // sound gate). Blood is nobject_types[6]; color 0, owner = index.
+            nobject_create1(&nobject_types[6], w.vel, w.pos, 0, index, rand, nobjects);
+        }
+    }
 }
 
 #[cfg(test)]

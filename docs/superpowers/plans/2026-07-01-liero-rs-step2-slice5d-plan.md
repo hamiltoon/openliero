@@ -257,20 +257,27 @@ single death; the default equals today's implicit value so priors stay identical
 
 ### T8 — `sim_slice5d_golden` difftest (MILESTONE)  [Opus]
 
-- [ ] Mirror `sim_slice5c_golden.rs`: expected parsed from the golden (all 11 columns);
+- [x] Mirror `sim_slice5c_golden.rs`: expected parsed from the golden (all 11 columns);
       actual from a genuinely driven `SimState` (real `.lev`/`tc.cfg`/`Objects::load`,
       `explosives` by name, `id==index` for the object tables, `SimState::new` full args);
       components asserted **before** master; input keyed `k-1`; all ticks incl. tick 0.
-- [ ] Coverage guards (non-vacuous, from driven state): worm1 `health` crosses `<=0` **and**
+- [x] Coverage guards (non-vacuous, from driven state): worm1 `health` crosses `<=0` **and**
       returns to `settings_health`; worm1 `visible` true→false→true; worm1 `lives` −1;
       worm0 `kills` +1; `rng` **bursts on the death tick AND on the `BeginRespawn` tick**
       (the trial-count witness); worm1 `pos` **jumps** at `BeginRespawn`; `level` carves at
       `DoRespawning`; `nobjects > 0` on the death tick and `< 600`; `bonuses` empty.
-- [ ] **Milestone:** master + all 9 component hashes bit-exact every tick **and** slices
-      1–5c re-run byte-identical (git diff empty). On failure, `systematic-debugging`
-      against the diverging column (spray via `rng`+`nobjects`; trial count via `rng`+worm1
-      `pos`; respawn via `rng`+`level`+`aiming_angle`; recall `killed_timer` is invisible —
-      a countdown desync shows only as a mis-timed `rng` burst).
+      (Death/BeginRespawn/DoRespawning `rng` bursts witnessed via a new diagnostic-only,
+      NON-hashed `Rand::draws()` per-tick delta — leaves every golden byte-identical.
+      Death tick: burst >100 draws + `visible`/`lives`/`kills`/`nobjects`. BeginRespawn:
+      `pos` jump >100px after the frozen dead phase + `killed_timer`→−1 (~150-tick
+      countdown) + ≥2 trial draws. DoRespawning completion: `visible`→true + `health`→
+      `settings_health` + the aiming `rand()&1`. `level` carve = ≥2 distinct level hashes
+      [continuous carving — the specific DoRespawning carve isn't hash-isolable, so the
+      respawn is pinned by the `visible`/`health`/`pos`/`rng` witnesses instead].)
+- [x] **Milestone:** master + all 9 component hashes bit-exact every tick (matched on the
+      FIRST run — no port bug surfaced) **and** slices 1–5c re-run byte-identical (git diff
+      shows only the new test + the non-hashed `Rand::draws()` counter). `cargo test
+      --workspace` green.
 - [ ] Reviewer (Opus): honesty (expected from golden, actual from driver), non-vacuous
       guards, the death/BeginRespawn/DoRespawning RNG order, "could it pass while the sim is
       wrong?" check (esp. the trial-count witness).

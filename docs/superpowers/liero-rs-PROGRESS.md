@@ -19,7 +19,12 @@
 > all-ticks match proves nothing chained. Slices 1–5b goldens stay **byte-identical** (the
 > roll short-circuits when `max_bonuses==0`). **Deferred:** bonus **pickup** (health/weapon/
 > booby worm-loop RNG) + the chain-loop port/tripwire (borrow-threading the bonus pool into
-> `sobject_create`) → slice 6 / follow-up. Next: 5d death+respawn.
+> `sobject_create`) → slice 6 / follow-up. **5d death+respawn MILESTONE difftest is now
+GREEN** (`sim_slice5d_golden`, master + all 9 components bit-exact over the full 361-tick
+death→respawn window; worm1 dies from the blast, counts down the invisible 150-tick
+`killed_timer`, then `BeginRespawn`'s level-reading RNG spawn-search teleports it and
+`DoRespawning` rebirths it at full health; slices 1–5c stay byte-identical). Next: 5d T9
+multi-seed respawn fuzz.
 
 ---
 
@@ -61,7 +66,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 │   ├─ ✅ 5a  splinters (cannon → medium_explosion + 5 splinters)  SHIPPED (PR #3, 131 ticks bit-exact)
 │   ├─ ✅ 5b  worm damage + blood (O10)  SHIPPED (PR #3, explosives wound → blood → live bobjects, 121 ticks; cycles live)
 │   ├─ ✅ 5c  bonuses (CreateBonus + bonus-drop roll + Bonus::Process)  MILESTONE GREEN (bonus drops/falls/bounces, 501 ticks; pickup + chain-loop deferred)
-│   └─ ⬜ 5d  death + respawn (BeginRespawn RNG-search; fuzzed)
+│   └─ 🔄 5d  death + respawn (BeginRespawn RNG-search; fuzzed)  MILESTONE difftest GREEN (T8: death→respawn, 361 ticks bit-exact); multi-seed fuzz (T9) next
 ├─ ⬜ Slice 5′ (deferred follow-up)  per-pixel CheckForSpecWormHit + wobject/nobject in-flight worm-hit arms
 └─ ⬜ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match
 ```
@@ -70,6 +75,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 |---|---|
 | Rewrite track (steps 0–5) | **~45–52%** |
 | Step 2 (current) | **~74–77%** |
+| Slice 5d (death + respawn) | **🔄 MILESTONE difftest GREEN** (`sim_slice5d_golden` master+9 components **all 361 ticks bit-exact** vs C++; the **worm death→respawn path goes live** — worm1 (health 12) dies from the explosives blast @death-tick [`rng` bursts 120-blood+8-gib spray, `visible`→false, `lives`−1, worm0 `kills`+1], the invisible 150-tick `killed_timer` counts down to `BeginRespawn` @tick 237 [the level-reading RNG spawn search: `pos` JUMPS, trial-count `rng` burst], then `DoRespawning` completes @tick 304 [`visible`→true, `health`→100]; slices 1–5c stay byte-identical; multi-seed respawn fuzz [T9] pending) |
 | Slice 5c (bonuses) | **✅ MILESTONE GREEN** (`sim_slice5c_golden` master+9 components 501 ticks; **`bonuses` pool live** — drop @tick 252 → falls/bounces under `Bonus::Process`, timer still counting at window end; worms clear (no pickup); spawn-flash `detectRange=0` ⇒ chain-loop inert & proven neutral; slices 1–5b byte-identical; pickup + chain-loop port deferred → slice 6) |
 | Slice 5b (worm damage + blood) | **✅ SHIPPED** (PR #3; `sim_slice5b_golden` master+9 components 121 ticks; worm wounded 100→82 + bleeds, **`bobjects` pool live**; `cycles` now advances; wobject bounce+animation flight branches ported; per-pixel worm-hit deferred → follow-up) |
 | Slice 5a (splinters) | **✅ SHIPPED** (`sim_slice5a_golden` master+9 components 131 ticks, debug+release; `BlowUpObject` splinter arm + `NObject::Process` `create_on_exp`/explode arms live; on PR #3) |

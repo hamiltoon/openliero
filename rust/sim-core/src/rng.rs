@@ -31,6 +31,15 @@ pub struct Rand {
     // Mirrors C++'s `last` (the most recently generated value). Exposed via
     // `last()` for state hashing and serialization parity with rand.hpp.
     last: u32,
+    // Monotonic count of raw draws (`next_u32` calls) since construction. Pure
+    // test/diagnostic instrumentation with NO C++ counterpart: it is NOT hashed
+    // (neither the master nor the component fold reads it — they read `last()`
+    // only), NOT serialized, and never influences the sequence. It lets the
+    // differential harnesses witness a per-tick RNG *burst* (draws-per-tick)
+    // directly from the driven state — e.g. the death-spray and the
+    // BeginRespawn trial-count bursts of Slice 5d. Adding it leaves every
+    // existing golden byte-identical.
+    draws: u64,
 }
 
 impl Rand {
@@ -41,6 +50,7 @@ impl Rand {
             mt: [0; N],
             idx: N + 1,
             last: 0,
+            draws: 0,
         };
         r.seed(0x1337);
         r
@@ -94,6 +104,7 @@ impl Rand {
         y ^= (y << 15) & 0xefc6_0000;
         y ^= y >> 18;
         self.last = y;
+        self.draws += 1;
         y
     }
 
@@ -117,6 +128,14 @@ impl Rand {
     /// last `next_u32()` call.
     pub fn last(&self) -> u32 {
         self.last
+    }
+
+    /// Monotonic count of raw draws (`next_u32` calls) since construction.
+    /// Diagnostic-only (no C++ counterpart, not hashed, not serialized): the
+    /// differential harnesses take per-tick deltas to witness an RNG *burst*
+    /// directly from the driven state.
+    pub fn draws(&self) -> u64 {
+        self.draws
     }
 }
 

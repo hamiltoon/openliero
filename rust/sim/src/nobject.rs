@@ -216,9 +216,9 @@ pub fn nobject_create2(
 ///   asks the driver to call `blow_up`); the driver only performs the final
 ///   `Pool::free` (`nobject.cpp:230-232`, `if (used) game.nobjects.Free(this)`).
 /// * [`Remove`](NObjectOutcome::Remove) — the `worm_destroy && used` path
-///   (`nobject.cpp:197-199`): free **without** exploding. Never produced while the
-///   worm-hit loop is deferred (`hit_damage <= 0` for the 4c types), but part of
-///   the contract Task 5 consumes.
+///   (`nobject.cpp:197-199`): free **without** exploding. Produced by the in-flight
+///   worm-hit arm (5′a T4) when a hit lands on a `worm_destroy` type that is not
+///   also `worm_explode`.
 ///
 /// As with [`crate::weapon::wobject_process`], the verdict is split out instead of
 /// freeing inside `Process` because the C++ frees `this` mid-iteration, which the
@@ -249,8 +249,8 @@ pub enum NObjectOutcome {
 /// palette index IS the material id here — same as `LevelSim::worm_pixel` /
 /// `common.materials[worm_sprite[...]]`), NOT through `material_id[]`.
 ///
-/// This is the exact predicate the deferred DoDamage/blood/vel-kick body (O10/5b,
-/// T3) gates on. It only ever returns `true` where a solid worm pixel actually sits
+/// This is the exact predicate the in-flight DoDamage/blood/vel-kick body (5′a T4,
+/// wobject counterpart T3) gates on. It only ever returns `true` where a solid worm pixel actually sits
 /// under the `±dist` window — a transparent sprite corner overlapping the box is a
 /// **miss**, where 5a's box over-approx wrongly reported a hit.
 pub(crate) fn check_for_spec_worm_hit(
@@ -335,13 +335,16 @@ pub(crate) fn check_for_spec_worm_hit(
 ///   ported (no rand). Inert for the dirt particle (`num_frames=0`).
 /// * **timeout** (`:160-164`) — `if ty.time_to_explo > 0` natural guard; fully
 ///   ported (no rand). Inert for the dirt particle (`time_to_explo=0`).
-/// * **worm-hit** (`:166-203`) — the per-worm loop SKELETON + the rand-free
-///   in-range test ([`check_for_spec_worm_hit`]) are ported; the vel-kick /
-///   `DoDamage` / hit-sound `rand(3)` / `rand(128)` blood fan / worm_explode /
-///   worm_destroy BODY stays DEFERRED (O10/5b) behind a guard INSIDE the in-range
-///   branch (per-worm, mirroring `sobject.rs`). The loop draws NOTHING on a no-hit,
-///   so a `hit_damage > 0` type with no worm in range is a no-op (no panic) —
-///   exactly what the 5a splinters need every flight tick.
+/// * **worm-hit** (`:166-203`) — LIVE (5′a T4). The per-worm loop, gated by the
+///   rand-free per-pixel in-range test ([`check_for_spec_worm_hit`]), runs the
+///   vel-kick (`vel*blow_away/100`) / [`WormState::do_damage`] / hit-sound `rand(3)`
+///   gate / `rand(128)` blood fan ([`nobject_create2`] on `nobject_types[6]`) /
+///   `worm_explode` -> [`Explode`](NObjectOutcome::Explode) / `worm_destroy` ->
+///   [`Remove`](NObjectOutcome::Remove). The **hit-sound gate fires BEFORE the blood
+///   fan** — the OPPOSITE order to [`crate::weapon::wobject_process`] (blood then
+///   sound); this transposition is load-bearing (the two C++ arms genuinely differ).
+///   The loop draws NOTHING on a no-hit, so a `hit_damage > 0` type with no worm in
+///   range is a no-op — exactly what the 5a splinters need every flight tick.
 /// * **explode arms** (`:205-233`, `if do_explode`) — `create_on_exp` fully ported
 ///   via [`sobject_create`] (BEFORE `dirt_effect`, the C++ order; this is the
 ///   splinter's secondary `small_explosion`); `dirt_effect` fully ported via
@@ -521,19 +524,21 @@ pub fn nobject_process(
         }
     }
 
-    // :166-203 worm-hit loop SKELETON. The C++ `if (t.hit_damage > 0)` per-worm
-    // loop runs the rand-free in-range test [`check_for_spec_worm_hit`]; the
-    // vel-kick / DoDamage / hit-sound `rand(3)` / `rand(128)` blood fan /
-    // worm_explode / worm_destroy BODY (`:172-199`) stays DEFERRED (O10/5b) behind
-    // a guard INSIDE the in-range branch — mirroring how `sobject.rs` defers its
-    // in-box DoDamage per-worm rather than type-level. For 5a every worm is out of
-    // range, so the loop iterates, finds NO hit, draws NOTHING, and never trips the
-    // guard — bit-exact with C++ (which also draws nothing on a no-hit). The
-    // `particle__small_damage` splinter has `hit_damage = 2`, so the OLD type-level
-    // `debug_assert!(hit_damage <= 0)` panicked every flight tick; the per-worm
-    // structure is the fix.
+    // :166-203 in-flight worm-hit arm — LIVE (5′a T4), gated by the per-pixel
+    // `check_for_spec_worm_hit` (T2). Outer guard `!do_explode && hit_damage > 0`
+    // is checked ONCE before the loop (C++ :166-167), so a worm-explode set mid-loop
+    // does NOT stop later worms from processing — faithfully matching C++.
+    //
+    //   The HIT-SOUND GATE fires BEFORE the BLOOD FAN (`:180-186` sound, THEN
+    //   `:188-193` blood) — the OPPOSITE order to the wobject arm
+    //   (weapon.cpp:301 blood, then :308 sound). This transposition is load-bearing;
+    //   the two C++ functions genuinely differ and must NOT be unified.
+    //
+    // For 5a every worm is out of detect range, so the loop finds NO hit, draws
+    // NOTHING, and leaves the golden byte-identical.
+    let mut do_remove = false;
     if !do_explode && ty.hit_damage > 0 {
-        for w in worms.iter() {
+        for w in worms.iter_mut() {
             if check_for_spec_worm_hit(
                 w,
                 ftoi(obj.pos.x),
@@ -542,14 +547,56 @@ pub fn nobject_process(
                 worm_sprites,
                 &level.material_flags,
             ) {
-                // :172-199 DEFERRED body (O10/5b): w.vel += vel*blow_away/100,
-                // DoDamage, the hit-sound rand(3), the rand(128) blood fan, and
-                // worm_explode/worm_destroy. They DRAW RAND and need DoDamage / the
-                // blood nobject, so a worm actually in range trips loudly here.
-                debug_assert!(
-                    false,
-                    "nobject worm-hit DoDamage/blood/vel-kick body deferred (O10/5b)"
-                );
+                // :172 vel-kick — the NOBJECT's vel * blow_away / 100 (integer,
+                // truncating), added to the worm's vel. NO rand.
+                w.vel = w.vel.add(obj.vel.mul(ty.blow_away).div(100));
+
+                // :174 DoDamage(worm, hit_damage, owner_idx) — RNG-free wound in
+                // normal mode; sets `last_killed_by_idx` only on a kill. :177 stats
+                // no-op (has_hit unported).
+                w.do_damage(ty.hit_damage, obj.owner_idx);
+
+                // :180-186 HIT-SOUND GATE FIRST. The OUTER rand(3) is only drawn when
+                // `hit_damage > 0 && w.health > 0` (short-circuit — reading the
+                // POST-DoDamage health). On `== 0` the INNER rand(3) is ALWAYS taken
+                // (the C++ `NOTE: MUST be outside the unpredictable branch`); Play is
+                // render-only (omitted), but the draws are the contract.
+                if ty.hit_damage > 0 && w.health > 0 && rand.bound(3) == 0 {
+                    let _k_snd = 18 + rand.bound(3) as i32;
+                    // sound_player->Play(kSnd, &w) — omitted (no sim/RNG).
+                }
+
+                // :188-193 BLOOD FAN SECOND. kBlood = blood_on_hit * blood / 100
+                // (truncating). Per particle: rand(128) [kAngle] THEN
+                // nobject_types[6].Create2(kAngle, vel/3, pos, 0, owner_idx). The base
+                // vel/pos are the NOBJECT's own `vel/3` / `pos`, and owner is the
+                // NOBJECT's owner (`owner_idx` — NOT the wounded worm, the asymmetry
+                // vs the wobject arm, which uses the worm's index). Create2 draws
+                // rand(speed_v) + rand(dist*2)x2.
+                let k_blood = ty.blood_on_hit * blood / 100;
+                for _ in 0..k_blood {
+                    let k_angle = rand.bound(128) as i32;
+                    nobject_create2(
+                        &nobject_types[6],
+                        k_angle,
+                        obj.vel.div(3),
+                        obj.pos,
+                        0,
+                        obj.owner_idx,
+                        cossin,
+                        rand,
+                        nobjects,
+                    );
+                }
+
+                // :195-199 outcome: worm_explode -> do_explode (runs the explode arms
+                // below, then Explode); else worm_destroy && used -> Remove (free
+                // WITHOUT exploding). `used` is always true for a processed object.
+                if ty.worm_explode {
+                    do_explode = true;
+                } else if ty.worm_destroy {
+                    do_remove = true;
+                }
             }
         }
     }
@@ -623,6 +670,11 @@ pub fn nobject_process(
         // :230-232 if (used) Free(this) — `used` always true for a processed
         // object; the driver performs the free on the Explode verdict.
         return NObjectOutcome::Explode;
+    }
+
+    // :197-199 worm_destroy path: free WITHOUT exploding (do_explode wins above).
+    if do_remove {
+        return NObjectOutcome::Remove;
     }
 
     NObjectOutcome::Keep
@@ -1885,5 +1937,355 @@ mod tests {
 
         assert_eq!(bobjects.len(), 0, "delay==0 -> no spawn (and no %0 panic)");
         assert_eq!(rand.last(), rng_before, "delay==0 drew no rand");
+    }
+
+    // ====================================================================
+    // nobject in-flight worm-hit arm (nobject.cpp:166-203) — Task T4
+    //
+    // The nobject arm is the TRANSPOSE of the wobject arm (weapon.rs T3): the
+    // hit-sound gate (nobject.cpp:180-186) fires BEFORE the blood fan (:188-193),
+    // where the wobject draws the blood fan (weapon.cpp:301) BEFORE the sound
+    // (:308). This asymmetry is load-bearing and the tests pin the transposition
+    // explicitly.
+    // ====================================================================
+
+    // nobject_types[0..=6]; [6] is the blood type. speed_v 50 + distribution 8 +
+    // start_frame 0 -> `nobject_create` draws nothing, so `Create2` draws EXACTLY
+    // rand(50) + rand(16)x2 = 3, plus the arm's rand(128) angle = 4 draws/particle.
+    fn hit_blood_nobject_types() -> Vec<NObjectType> {
+        let mut v = vec![NObjectType::default(); 7];
+        v[6] = NObjectType {
+            id: 6,
+            speed: 100,
+            speed_v: 50,
+            distribution: 8,
+            ..Default::default()
+        };
+        v
+    }
+
+    // A splinter-shaped hit nobject type: hit_damage=2, blood_on_hit=10,
+    // blow_away=28, detect_distance=4. Flight knobs neutral (no bounce/anim/trail/
+    // ground-explode/timeout) so ONLY the worm-hit arm runs on the tick.
+    fn hit_nobject_type(worm_explode: bool, worm_destroy: bool) -> NObjectType {
+        NObjectType {
+            id: 9,
+            hit_damage: 2,
+            blood_on_hit: 10,
+            blow_away: 28,
+            detect_distance: 4,
+            worm_explode,
+            worm_destroy,
+            bounce: 0,
+            num_frames: 0,
+            expl_ground: false,
+            gravity: 0,
+            time_to_explo: 0,
+            create_on_exp: -1,
+            dirt_effect: -1,
+            splinter_amount: 0,
+            leave_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    // Spawn the nobject so that AFTER the tick's `pos += vel` step it sits exactly
+    // on the worm's pixel (50,50): pre-move pos = (50,50) - vel.
+    fn hit_nobject(vel: Vec2, owner_idx: i32) -> NObject {
+        NObject {
+            pos: Vec2::new(itof(50), itof(50)).sub(vel),
+            vel,
+            ty: Some(9),
+            owner_idx,
+            ..Default::default()
+        }
+    }
+
+    // A worm at (px,py), visible, health 100, index `idx`, frame/dir 0, with a
+    // caller-set velocity so the blow-away kick is observable.
+    fn hit_worm(px: i32, py: i32, idx: i32, vel: Vec2) -> WormState {
+        let mut w = worm_at(px, py, true);
+        w.index = idx;
+        w.vel = vel;
+        w.current_frame = 0;
+        w.direction = 0;
+        w
+    }
+
+    // Run nobject_process wired for the worm-hit arm: a real worm bank, worms,
+    // blood nobject_types, air level (bg_level -> free flight, only the arm runs).
+    #[allow(clippy::too_many_arguments)]
+    fn run_process_hit(
+        obj: &mut NObject,
+        ty: &NObjectType,
+        nobject_types: &[NObjectType],
+        level: &mut LevelSim,
+        worm_bank: &SpriteSet,
+        cossin: &[Vec2; 128],
+        worms: &mut [WormState],
+        nobjects: &mut Pool<NObject>,
+        blood: i32,
+        rand: &mut Rand,
+    ) -> NObjectOutcome {
+        let sprites = no_sprites();
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bobjects: BloodPool<BObject> = BloodPool::new(700);
+        nobject_process(
+            obj,
+            ty,
+            nobject_types,
+            &[],
+            level,
+            cossin,
+            &sprites,
+            &sprites,
+            worm_bank,
+            &[],
+            worms,
+            &mut wobjects,
+            &[],
+            nobjects,
+            &mut sobjects,
+            &mut bobjects,
+            0,
+            blood,
+            0,
+            0,
+            rand,
+        )
+    }
+
+    #[test]
+    fn nobject_worm_hit_draws_sound_gate_before_blood_fan() {
+        // On a per-pixel HIT with splinter params the arm: kicks worm.vel by
+        // obj.vel*blow_away/100, applies DoDamage(2) (health 100 -> 98), runs the
+        // hit-sound gate FIRST, THEN sprays the 10-particle blood fan. The
+        // sound-first ORDER is pinned by replaying the EXPECTED (sound-then-blood)
+        // stream into a reference pool AND by asserting the actual pool DIFFERS from
+        // a blood-first (wobject-order) reference — the explicit transposition.
+        let cossin = precompute_cossin();
+        let (worm_bank, flags) = worm_hit_fixture();
+        let mut level = bg_level(1000, 1000);
+        level.material_flags = flags;
+        let ty = hit_nobject_type(false, false);
+        let nobject_types = hit_blood_nobject_types();
+        let blood = 100;
+        let owner_idx = 4;
+
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let obj_pos = Vec2::new(itof(50), itof(50)); // post-move position
+        let k_blood = 10 * blood / 100; // = 10
+
+        // --- Reference A: EXPECTED order — SOUND gate THEN blood fan. ---
+        let mut refa = seeded();
+        let mut ref_pool: Pool<NObject> = Pool::new(64);
+        // sound gate: hit_damage(2) > 0 && health(98) > 0 -> outer rand(3); on 0 the
+        // inner rand(3) is always taken.
+        if refa.bound(3) == 0 {
+            refa.bound(3);
+        }
+        for _ in 0..k_blood {
+            let angle = refa.bound(128) as i32;
+            nobject_create2(
+                &nobject_types[6],
+                angle,
+                obj_vel.div(3),
+                obj_pos,
+                0,
+                owner_idx, // the NOBJECT's owner (nobject.cpp:192) — NOT the worm
+                &cossin,
+                &mut refa,
+                &mut ref_pool,
+            );
+        }
+
+        // --- Reference B: the WRONG (wobject) order — blood fan THEN sound. If the
+        // arm drew blood first this is what the pool would be; it must NOT match. ---
+        let mut refb = seeded();
+        let mut ref_pool_blood_first: Pool<NObject> = Pool::new(64);
+        for _ in 0..k_blood {
+            let angle = refb.bound(128) as i32;
+            nobject_create2(
+                &nobject_types[6],
+                angle,
+                obj_vel.div(3),
+                obj_pos,
+                0,
+                owner_idx,
+                &cossin,
+                &mut refb,
+                &mut ref_pool_blood_first,
+            );
+        }
+
+        // --- Actual ---
+        let pre_vel = Vec2::new(itof(1), itof(1));
+        let mut worms = [hit_worm(50, 50, 3, pre_vel)];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        let mut obj = hit_nobject(obj_vel, owner_idx);
+
+        let out = run_process_hit(
+            &mut obj,
+            &ty,
+            &nobject_types,
+            &mut level,
+            &worm_bank,
+            &cossin,
+            &mut worms,
+            &mut nobjects,
+            blood,
+            &mut rand,
+        );
+
+        assert_eq!(out, NObjectOutcome::Keep, "no worm_explode/destroy -> Keep");
+        assert_eq!(worms[0].health, 98, "DoDamage(2) applied to the hit worm");
+        assert_eq!(
+            worms[0].vel,
+            pre_vel.add(obj_vel.mul(28).div(100)),
+            "vel kicked by obj.vel * blow_away(28) / 100 (integer)"
+        );
+        // Exact draw count/order: sound gate + 10 blood (4 draws each).
+        assert_eq!(
+            rand.last(),
+            refa.last(),
+            "exact draw order: rand(3)(+inner on 0) THEN 10*[rand(128)+Create2]"
+        );
+        assert_eq!(nobjects.len(), 10, "10 blood particles (blood_on_hit*blood/100)");
+        assert_eq!(nobjects.len(), ref_pool.len(), "blood count matches reference");
+        // ORDER pin: actual matches the SOUND-first reference in every slot.
+        for i in 0..64 {
+            assert_eq!(
+                nobjects.get(i).copied(),
+                ref_pool.get(i).copied(),
+                "blood nobject slot {i} matches the SOUND-first reference"
+            );
+        }
+        // TRANSPOSITION pin: actual must NOT match the blood-first (wobject) order —
+        // the sound gate's rand(3) shifts every blood particle's stream.
+        assert_ne!(
+            nobjects.get(0).copied(),
+            ref_pool_blood_first.get(0).copied(),
+            "sound-before-blood: pool differs from the blood-first (wobject) order"
+        );
+    }
+
+    #[test]
+    fn nobject_worm_hit_per_pixel_miss_draws_nothing() {
+        // The nobject lands inside the 16x16 sprite BOX but on a TRANSPARENT corner
+        // (the worm pixel sits at sprite (8,8); the impact maps to a corner). The
+        // per-pixel gate returns false -> the arm never runs: no vel-kick, no
+        // DoDamage, no rand, no blood. The OLD debug_assert!(false) panic is gone.
+        let cossin = precompute_cossin();
+        let (worm_bank, flags) = worm_hit_fixture();
+        let mut level = bg_level(1000, 1000);
+        level.material_flags = flags;
+        let ty = hit_nobject_type(false, false);
+        let nobject_types = hit_blood_nobject_types();
+
+        // Worm at (60,60); nobject lands at (50,50). deltas = 50-60+7 = -3, 50-60+5
+        // = -5; the ±4 window around (-3,-5) intersected with [0,16) never reaches
+        // the worm pixel (8,8) -> per-pixel MISS (a box test would falsely hit).
+        let pre_vel = Vec2::new(itof(1), itof(1));
+        let mut worms = [hit_worm(60, 60, 3, pre_vel)];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        rand.bound(55); // pre-advance so "no rand" is a real assertion
+        let rng_before = rand.last();
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let mut obj = hit_nobject(obj_vel, 4);
+
+        let out = run_process_hit(
+            &mut obj,
+            &ty,
+            &nobject_types,
+            &mut level,
+            &worm_bank,
+            &cossin,
+            &mut worms,
+            &mut nobjects,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(out, NObjectOutcome::Keep, "per-pixel miss -> Keep");
+        assert_eq!(worms[0].health, 100, "miss -> no DoDamage");
+        assert_eq!(worms[0].vel, pre_vel, "miss -> no vel kick");
+        assert_eq!(rand.last(), rng_before, "per-pixel miss -> draws no rand");
+        assert_eq!(nobjects.len(), 0, "miss -> no blood");
+    }
+
+    #[test]
+    fn nobject_worm_hit_worm_explode_returns_explode() {
+        // worm_explode set: after the sound gate + blood fan the outcome sets
+        // do_explode -> the explode arms run (inert here: create_on_exp<0,
+        // dirt_effect<0, splinter 0) and the verdict is Explode.
+        let cossin = precompute_cossin();
+        let (worm_bank, flags) = worm_hit_fixture();
+        let mut level = bg_level(1000, 1000);
+        level.material_flags = flags;
+        let ty = hit_nobject_type(true, false); // worm_explode
+        let nobject_types = hit_blood_nobject_types();
+
+        let pre_vel = Vec2::new(itof(1), itof(1));
+        let mut worms = [hit_worm(50, 50, 3, pre_vel)];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let mut obj = hit_nobject(obj_vel, 4);
+
+        let out = run_process_hit(
+            &mut obj,
+            &ty,
+            &nobject_types,
+            &mut level,
+            &worm_bank,
+            &cossin,
+            &mut worms,
+            &mut nobjects,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(out, NObjectOutcome::Explode, "worm_explode -> Explode");
+        assert_eq!(worms[0].health, 98, "DoDamage(2) still applied before explode");
+        assert_eq!(nobjects.len(), 10, "blood fan still sprayed (10 particles)");
+    }
+
+    #[test]
+    fn nobject_worm_hit_worm_destroy_returns_remove() {
+        // worm_destroy set (worm_explode false): the outcome frees WITHOUT
+        // exploding -> Remove. Blood/DoDamage still happen; the explode arms do not.
+        let cossin = precompute_cossin();
+        let (worm_bank, flags) = worm_hit_fixture();
+        let mut level = bg_level(1000, 1000);
+        level.material_flags = flags;
+        let ty = hit_nobject_type(false, true); // worm_destroy
+        let nobject_types = hit_blood_nobject_types();
+
+        let pre_vel = Vec2::new(itof(1), itof(1));
+        let mut worms = [hit_worm(50, 50, 3, pre_vel)];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let mut obj = hit_nobject(obj_vel, 4);
+
+        let out = run_process_hit(
+            &mut obj,
+            &ty,
+            &nobject_types,
+            &mut level,
+            &worm_bank,
+            &cossin,
+            &mut worms,
+            &mut nobjects,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(out, NObjectOutcome::Remove, "worm_destroy && used -> Remove");
+        assert_eq!(worms[0].health, 98, "DoDamage(2) still applied before remove");
+        assert_eq!(nobjects.len(), 10, "blood fan still sprayed (10 particles)");
     }
 }

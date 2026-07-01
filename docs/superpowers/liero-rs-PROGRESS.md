@@ -8,17 +8,18 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-06-29 · **Current focus:** Step 2, Slice 5 (remaining object
-> families) — **5a splinters SHIPPED** (PR #3) and **5b damage+blood MILESTONE difftest
-> GREEN** (`sim_slice5b_golden` matches the C++ master + all 9 components, all 121 ticks;
-> a worm is **wounded by an explosion** (health 100→82, survives) and **bleeds** — the
-> `bobjects` blood pool goes live for the first time, fed by the blood-trail at the
-> faithful `cycles%10` cadence). 5b also turned `cycles` live (dumper + Rust `++cycles`,
-> regenerating the prior goldens' master columns) and ported the wobject bounce+animation
-> flight branches. **Deferred to a follow-up slice:** the per-pixel `CheckForSpecWormHit`
-> + the wobject/nobject *in-flight* worm-hit arms (5b wounds only via the explosion's
-> sobject AABB, using the closed-gate weapon `explosives`). Next: 5c bonuses, 5d
-> death+respawn.
+> **Last updated:** 2026-07-01 · **Current focus:** Step 2, Slice 5 (remaining object
+> families) — **5a splinters + 5b damage+blood SHIPPED** (PR #3) and **5c bonuses
+> MILESTONE difftest GREEN** (`sim_slice5c_golden` matches the C++ master + all 9
+> components, all 501 ticks; the **`bonuses` pool goes live** — under seed 42 the per-tick
+> bonus-drop roll fires at tick 252, `CreateBonus` drops a health bonus that **falls and
+> bounces** under `Bonus::Process`, settling with its timer still counting down at the
+> window's end). The worms stay clear of the bonus (no pickup), and the spawn-flash
+> `teleport_flash` has `detectRange=0` so the deferred **chain-loop is inert** — the
+> all-ticks match proves nothing chained. Slices 1–5b goldens stay **byte-identical** (the
+> roll short-circuits when `max_bonuses==0`). **Deferred:** bonus **pickup** (health/weapon/
+> booby worm-loop RNG) + the chain-loop port/tripwire (borrow-threading the bonus pool into
+> `sobject_create`) → slice 6 / follow-up. Next: 5d death+respawn.
 
 ---
 
@@ -58,8 +59,8 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 │   └─ ✅ 4d  slice-3/4 deferrals (dig, reload, shell-drop+land, load_change)  SHIPPED (handgun, master+9 components bit-exact 126 ticks vs C++)
 ├─ 🔄 Slice 5  remaining object families — decomposed 5a–5d
 │   ├─ ✅ 5a  splinters (cannon → medium_explosion + 5 splinters)  SHIPPED (PR #3, 131 ticks bit-exact)
-│   ├─ ✅ 5b  worm damage + blood (O10)  MILESTONE GREEN (explosives wound → blood → live bobjects, 121 ticks; cycles live; await broad review + push)
-│   ├─ ⬜ 5c  bonuses (CreateBonus + bonus-drop roll + chain-loop)
+│   ├─ ✅ 5b  worm damage + blood (O10)  SHIPPED (PR #3, explosives wound → blood → live bobjects, 121 ticks; cycles live)
+│   ├─ ✅ 5c  bonuses (CreateBonus + bonus-drop roll + Bonus::Process)  MILESTONE GREEN (bonus drops/falls/bounces, 501 ticks; pickup + chain-loop deferred)
 │   └─ ⬜ 5d  death + respawn (BeginRespawn RNG-search; fuzzed)
 ├─ ⬜ Slice 5′ (deferred follow-up)  per-pixel CheckForSpecWormHit + wobject/nobject in-flight worm-hit arms
 └─ ⬜ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match
@@ -67,9 +68,10 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~43–50%** |
-| Step 2 (current) | **~70–73%** |
-| Slice 5b (worm damage + blood) | **✅ MILESTONE GREEN** (`sim_slice5b_golden` master+9 components 121 ticks; worm wounded 100→82 + bleeds, **`bobjects` pool live**; `cycles` now advances; wobject bounce+animation flight branches ported; per-pixel worm-hit deferred → follow-up; await broad review + push) |
+| Rewrite track (steps 0–5) | **~45–52%** |
+| Step 2 (current) | **~74–77%** |
+| Slice 5c (bonuses) | **✅ MILESTONE GREEN** (`sim_slice5c_golden` master+9 components 501 ticks; **`bonuses` pool live** — drop @tick 252 → falls/bounces under `Bonus::Process`, timer still counting at window end; worms clear (no pickup); spawn-flash `detectRange=0` ⇒ chain-loop inert & proven neutral; slices 1–5b byte-identical; pickup + chain-loop port deferred → slice 6) |
+| Slice 5b (worm damage + blood) | **✅ SHIPPED** (PR #3; `sim_slice5b_golden` master+9 components 121 ticks; worm wounded 100→82 + bleeds, **`bobjects` pool live**; `cycles` now advances; wobject bounce+animation flight branches ported; per-pixel worm-hit deferred → follow-up) |
 | Slice 5a (splinters) | **✅ SHIPPED** (`sim_slice5a_golden` master+9 components 131 ticks, debug+release; `BlowUpObject` splinter arm + `NObject::Process` `create_on_exp`/explode arms live; on PR #3) |
 | Slice 4 (weapon lifecycle) | **✅ SHIPPED** (4a + 4b + 4c + 4d all bit-exact vs C++) |
 | Slice 4c | **✅ SHIPPED** (sobjects/nobjects pools live + carving DrawDirtEffect, master+9 components bit-exact 91 ticks vs C++, on PR #3) |

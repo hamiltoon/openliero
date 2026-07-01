@@ -113,9 +113,14 @@ pub fn nobject_create(
         obj.time_left -= rand.bound(ty.time_to_explo_v as u32) as i32;
     }
 
-    nobjects
-        .spawn(obj)
-        .expect("nobject pool not full in 4c (NewObjectReuse overwrite deferred)")
+    // O3 — full-pool overwrite. C++ `NObjectType::Create` allocates via
+    // `NewObjectReuse` (`exactObjectList.hpp:57-67`), which at the 600-slot cap
+    // returns `&arr[limit-1]`: overwrite the last slot in place (no free/swap,
+    // count unchanged) rather than bailing. This is what keeps the death/damage
+    // blood storms bit-exact at the pool cap instead of panicking. Below cap it
+    // is identical to `spawn`, so slices 1-5c (which never reach the cap) are
+    // byte-identical.
+    nobjects.spawn_reuse(obj)
 }
 
 /// Port of `NObjectType::Create1` (`nobject.cpp:41-49`) — distribution scatter

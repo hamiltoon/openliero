@@ -64,6 +64,34 @@ impl<T> Pool<T> {
         Some(idx)
     }
 
+    /// Inserts `value`, mirroring C++ `ExactObjectList::NewObjectReuse`
+    /// (`exactObjectList.hpp:57-67`; the `nobjects` list is
+    /// `ExactObjectList<NObject, 600>`) and `FastObjectList::NewObjectReuse`
+    /// (`fastObjectList.hpp:35-44`).
+    ///
+    /// While a free slot exists this is identical to [`spawn`](Pool::spawn) —
+    /// the lowest free index, `len` incremented. When the pool is **full** it
+    /// returns `&arr[limit-1]`: the **last slot** (index `capacity-1`) is
+    /// overwritten *in place* and its index returned, with `len` left at the
+    /// cap (no free, no swap). Unlike [`spawn`](Pool::spawn) (C++ `NewObject`,
+    /// which returns `None` at cap) this never fails, so the death/blood spray
+    /// storm keeps producing objects at the 600 cap exactly as C++ does.
+    pub fn spawn_reuse(&mut self, value: T) -> usize {
+        match self.slots.iter().position(Option::is_none) {
+            Some(idx) => {
+                self.slots[idx] = Some(value);
+                self.len += 1;
+                idx
+            }
+            None => {
+                // Full: overwrite the last slot in place. `len` unchanged.
+                let last = self.slots.len() - 1;
+                self.slots[last] = Some(value);
+                last
+            }
+        }
+    }
+
     /// Frees the live object in `slot`. No-op if the slot is already free.
     pub fn free(&mut self, slot: usize) {
         if self.slots[slot].take().is_some() {

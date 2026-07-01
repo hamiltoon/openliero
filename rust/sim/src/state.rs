@@ -21,7 +21,7 @@ use crate::control::{
     process_aiming, process_movement, process_tasks, process_weapon_change, process_weapons,
     ControlConsts,
 };
-use crate::nobject::{nobject_create1, nobject_process, NObjectOutcome};
+use crate::nobject::{nobject_create1, nobject_create2, nobject_process, NObjectOutcome};
 use crate::physics::{worm_process_physics, worm_reactions, PhysicsConsts};
 use crate::pool::{BloodPool, Pool};
 use crate::sobject::{sobject_process, SObjectOutcome};
@@ -872,6 +872,17 @@ pub struct SimState {
     /// clamp is identity for slices 1-5c (health starts at 100 and never exceeds
     /// it), keeping those goldens byte-identical. **Not hashed** (settings scalar).
     pub settings_health: i32,
+
+    /// C++ `Game::last_killed_idx` (`game.hpp`, default `-1`): the index of the
+    /// most recently killed worm. Written by the death block (`worm.cpp:393-401`)
+    /// and read by the GameOfTag "it"-transfer guard. **Not hashed** (game-level
+    /// scalar, in neither the master nor the component fold); modelled only for a
+    /// faithful port of the `:393-405` bookkeeping. Defaulted to `-1` post-`new`.
+    pub last_killed_idx: i32,
+    /// C++ `Game::got_changed` (`game.hpp`, default `false`): set by the death
+    /// block to `old_last_killed != last_killed_idx` (`worm.cpp:401`), feeding
+    /// GameOfTag / stats. **Not hashed**; defaulted to `false` post-`new`.
+    pub got_changed: bool,
 }
 
 impl SimState {
@@ -990,6 +1001,11 @@ impl SimState {
             // consts) so no call site changes; the clamp is identity for slices
             // 1-5c (worms start at 100, never exceed it) => priors byte-identical.
             settings_health: 100,
+            // Game-level kill bookkeeping (worm.cpp:393-401). C++ defaults:
+            // last_killed_idx = -1, got_changed = false. Not hashed; written only
+            // when a worm dies (unreached for slices 1-5c) => priors identical.
+            last_killed_idx: -1,
+            got_changed: false,
         }
     }
 
@@ -1094,6 +1110,8 @@ impl SimState {
             bonuses,
             cycles,
             settings_health,
+            last_killed_idx,
+            got_changed,
             ..
         } = self;
         let h_signed_recoil = *h_signed_recoil;
@@ -1333,6 +1351,13 @@ impl SimState {
             );
         }
 
+        // Deferred kill attribution (worm.cpp:403-405). A dying worm's death
+        // block increments the KILLER's `kills` — a *different* worm the in-loop
+        // `&mut` borrow cannot touch. Collect the killer indices here and apply
+        // them AFTER the worm loop; hash-equivalent because `kills` is read only
+        // at the end-of-tick fold (nothing in the worm body branches on it).
+        let mut deferred_kills: Vec<usize> = Vec::new();
+
         for (i, w) in worms.iter_mut().enumerate() {
             // Interleave: apply this worm's input (≈ `Unpack`), then Process it.
             if let Some(input) = inputs.get(i) {
@@ -1435,6 +1460,27 @@ impl SimState {
                 //     (>= settings_health/4) so the outer gate never opens and no
                 //     rand is drawn (goldens stay byte-identical).
                 worm_pre_death_drip(w, i as i32, settings_health, nobject_types, rand, nobjects);
+
+                // 13. Death block (worm.cpp:369-426) — fires at the very END of
+                //     the visible arm when `health <= 0`. Plays a death sound
+                //     (rand(3)), decrements `lives`, hides the worm, arms
+                //     `killed_timer = 150`, and sprays the kMax-blood fan + 8
+                //     worm-gibs. Returns the killer index (if any) to defer its
+                //     `kills++`. Inert for slices 1-5c (worms never reach
+                //     health <= 0), so those goldens stay byte-identical.
+                if let Some(killer) = worm_death(
+                    w,
+                    i as i32,
+                    blood,
+                    nobject_types,
+                    cossin,
+                    rand,
+                    nobjects,
+                    last_killed_idx,
+                    got_changed,
+                ) {
+                    deferred_kills.push(killer);
+                }
             } else {
                 // Worm is dead (worm.cpp:431-450). None of this touches a hashed
                 // field except `killed_timer` (unhashed) and — on a Fire hit —
@@ -1471,6 +1517,14 @@ impl SimState {
                     do_respawning(w);
                 }
             }
+        }
+
+        // Apply the deferred killer `kills++` (worm.cpp:403-405) now that the
+        // worm-loop `&mut` borrow is released. Order is irrelevant: `kills` is
+        // additive and folded only at end-of-tick, so this matches the C++
+        // in-place increment bit-for-bit in the hash.
+        for killer in deferred_kills {
+            worms[killer].kills += 1;
         }
     }
 }
@@ -1570,18 +1624,110 @@ fn worm_pre_death_drip(
 /// byte-identical.
 #[allow(clippy::too_many_arguments)]
 fn worm_death(
-    _w: &mut WormState,
-    _index: i32,
-    _blood: i32,
-    _nobject_types: &[NObjectType],
-    _cossin: &[Vec2; 128],
-    _rand: &mut Rand,
-    _nobjects: &mut Pool<NObject>,
-    _last_killed_idx: &mut i32,
-    _got_changed: &mut bool,
+    w: &mut WormState,
+    index: i32,
+    blood: i32,
+    nobject_types: &[NObjectType],
+    cossin: &[Vec2; 128],
+    rand: &mut Rand,
+    nobjects: &mut Pool<NObject>,
+    last_killed_idx: &mut i32,
+    got_changed: &mut bool,
 ) -> Option<usize> {
-    // RED stub (T3): the real port lands in GREEN.
-    None
+    // :369 gate. Inert (zero draws, no mutation) while the worm is alive.
+    if w.health > 0 {
+        return None;
+    }
+
+    // :370-371 clear the shell-drop timer + the green-sight flag.
+    w.leave_shell_timer = 0;
+    w.make_sight_green = false;
+
+    // :373-376 stop the current weapon's loop_sound — a sound-only side effect
+    // with no rand; omitted (loop_sound is not modelled).
+
+    // :378 death-sound index `15 + rand(3)`. This is the ONLY draw before the
+    // sprays; the `Play` at :379 is a sound-only side effect the sim omits.
+    let _death_snd = 15 + rand.bound(3);
+
+    // :381-382 firecone off, rope stowed.
+    w.fire_cone = 0;
+    w.ninjarope.out = false;
+
+    // :384-391 lives. KillEmAll: `--lives` (:390). The Scales branch
+    // (`while health <= 0 { health += settings->health; --lives }`, :385-388) is
+    // the unmodelled alternate — game_mode is not modelled and the TC is always
+    // KillEmAll (see the T1 gate comment), so it is guarded-by-absence.
+    w.lives -= 1;
+
+    // :393-401 last_killed_idx / got_changed bookkeeping (no rand; unhashed).
+    // The GameOfTag guard at :396-398 is always true outside GameOfTag, so in
+    // KillEmAll `game.last_killed_idx = index` unconditionally.
+    let old_last_killed = *last_killed_idx;
+    *last_killed_idx = index;
+    *got_changed = old_last_killed != *last_killed_idx;
+
+    // :403-405 the killer's `kills++` (hashed on master). Deferred to the caller
+    // (targets a *different* worm; the in-loop `&mut` borrow forbids touching it
+    // here). Hash-equivalent: `kills` is read only at the end-of-tick fold.
+    let killer = if w.last_killed_by_idx >= 0 && w.last_killed_by_idx != index {
+        Some(w.last_killed_by_idx as usize)
+    } else {
+        None
+    };
+
+    // :407-408 hide the worm + arm the dead-phase countdown.
+    w.visible = false;
+    w.killed_timer = KILLED_TIMER_INITIAL;
+
+    // :410 kMax = 120 * blood / 100 (integer `/`). :412 the blood spray fires
+    // ONLY when kMax > 1 (strict — kMax == 1, i.e. blood == 1, draws nothing).
+    let k_max = 120 * blood / 100;
+    if k_max > 1 {
+        for _ in 1..=k_max {
+            // :414 rand(128) is the angle ARG (drawn in worm.cpp, evaluated
+            // BEFORE Create2's own draws), then blood `nobject_types[6].Create2`
+            // with vel/3 (truncating), color 0, owner = index.
+            let angle = rand.bound(128) as i32;
+            nobject_create2(
+                &nobject_types[6],
+                angle,
+                w.vel.div(3),
+                w.pos,
+                0,
+                index,
+                cossin,
+                rand,
+                nobjects,
+            );
+        }
+    }
+
+    // :418-421 worm-gib spray — `for (i = 7; i <= 105; i += 14)` = EXACTLY 8
+    // iterations {7,21,35,49,63,77,91,105}. The angle is `i + rand(14)` (the
+    // rand drawn in worm.cpp, outside Create2); the gib type is the PER-WORM
+    // type `nobject_types[index]` (worm index 0/1), NOT blood.
+    for i in (7..=105).step_by(14) {
+        let angle = i + rand.bound(14) as i32;
+        nobject_create2(
+            &nobject_types[index as usize],
+            angle,
+            w.vel.div(3),
+            w.pos,
+            0,
+            index,
+            cossin,
+            rand,
+            nobjects,
+        );
+    }
+
+    // :423 AfterDeath is a StatsRecorder no-op in the base recorder.
+    // :425 Release(kFire) clears the Fire bit — folded into the master hash via
+    // control_states.pack(), so it must run on the death tick.
+    w.control_states.set(ControlState::FIRE, false);
+
+    killer
 }
 
 #[cfg(test)]

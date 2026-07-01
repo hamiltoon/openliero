@@ -244,6 +244,8 @@ mod tests {
             first_blood_colour: 0,
             bobj_gravity: 0,
             settings_health: 100,
+            last_killed_idx: -1,
+            got_changed: false,
             settings_max_bonuses: 0,
             bonus_drop_chance: 0,
             bonus_spawn_rect_w: 0,

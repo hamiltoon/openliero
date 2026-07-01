@@ -233,6 +233,7 @@ mod tests {
             cossin: sim_core::tables::precompute_cossin(),
             h_signed_recoil: false,
             large_sprites: assets::sprite::SpriteSet::default(),
+            worm_sprites: assets::sprite::SpriteSet::default(),
             small_sprites: assets::sprite::SpriteSet::default(),
             textures: Vec::new(),
             sobject_types: Vec::new(),
@@ -392,6 +393,8 @@ mod tests {
             ready: true,
             make_sight_green: false,
             steerable_count: 0,
+            current_frame: 0,
+            animate: false,
         }
     }
 

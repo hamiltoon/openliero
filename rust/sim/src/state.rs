@@ -317,6 +317,27 @@ pub struct WormState {
     /// steerable-object accumulator the dead arm zeroes each tick. Default 0.
     /// **Not hashed.**
     pub steerable_count: i32,
+
+    // --- Slice 5' T1: worm-sprite selection (NOT hashed) -------------------
+    // The render-frame selector `CheckForSpecWormHit` (T2) reads to pick the
+    // worm's sprite silhouette. Both are hash-INVISIBLE (absent from
+    // `HashGameState`/`HashGameComponents`, verified against `stateHash.hpp` /
+    // `hash.rs`) yet load-bearing: `current_frame` picks the sprite → decides
+    // whether an in-flight hit lands → the downstream `rng`/`health` burst.
+    // Same "hash-silent selector, RNG-witnessed effect" pattern as 5d's
+    // `killed_timer`. Defaults match a freshly-constructed C++ worm
+    // (`worm.hpp:232` `animate{false}`, `worm.hpp:244` `current_frame{0}`).
+    /// `Worm::current_frame` (`worm.hpp:244` `current_frame{0}`): the worm's
+    /// animation frame `∈ 0..=20`, recomputed at the END of the visible arm
+    /// (`worm.cpp:427-430`) as `AngleFrame() + kWormAnimTab[animate ?
+    /// ((cycles & 31) >> 3) : 0]`. Read by `CheckForSpecWormHit` (T2).
+    /// **Not hashed.**
+    pub current_frame: i32,
+    /// `Worm::animate` (`worm.hpp:232` `animate{false}`): whether the worm is
+    /// moving and should cycle its walk animation. Set `true` at the walk sites
+    /// (`worm.cpp:870,886`), `false` at the idle/fire sites (`worm.cpp:954,
+    /// 1073`). Gates `current_frame`'s anim offset only. **Not hashed.**
+    pub animate: bool,
 }
 
 /// `Worm::kKilledTimerInitial` (`worm.hpp:243`): the respawn countdown the worm
@@ -372,6 +393,12 @@ impl WormState {
             ready: true, // ctor `ready(true)` (worm.hpp:179); ResetWorms keeps it
             make_sight_green: false,
             steerable_count: 0,
+
+            // Slice 5' T1 worm-sprite selection: fresh-worm defaults
+            // (`worm.hpp:244` current_frame{0}, `worm.hpp:232` animate{false}).
+            // Not hashed.
+            current_frame: 0,
+            animate: false,
         }
     }
 
@@ -537,6 +564,10 @@ pub const MAT_BACKGROUND: u8 = 1 << 3;
 /// i.e. bits 0|1|2 — the "solid to projectiles" combination. `kBackground`
 /// (bit 3) is deliberately excluded.
 pub const MAT_DIRT_ROCK: u8 = MAT_DIRT | MAT_DIRT2 | MAT_ROCK;
+/// `Material::kWormM` (`material.hpp:12`, `1 << 5 == 0x20`): the flag bit a
+/// worm-body palette index carries. `CheckForSpecWormHit` (T2) tests it on the
+/// worm-sprite pixel via [`LevelSim::worm_pixel`].
+pub const MAT_WORM: u8 = 1 << 5;
 
 impl LevelSim {
     /// Port of `Level::CheckedMatWrap(x, y).Background()` (`level.hpp:124-130` +
@@ -668,6 +699,69 @@ impl LevelSim {
         let idx = (x + y * self.width) as usize;
         (self.material_flags[self.material_id[idx] as usize] & MAT_ROCK) != 0
     }
+
+    /// Port of `common.materials[pal].Worm()` (`worm.cpp:1181` + `material.hpp:25`):
+    /// the `Worm` material bit of the **palette index `pal`**, indexed into
+    /// `material_flags` **DIRECTLY** (NOT through `material_id[]` — that indirection
+    /// is only for *level* pixels; a worm-sprite pixel is already a palette index,
+    /// as C++ `common.materials[worm_sprite[...]]`). `CheckForSpecWormHit` (T2)
+    /// calls this per silhouette pixel.
+    pub fn worm_pixel(&self, pal: u8) -> bool {
+        // RED stub — real body lands in GREEN.
+        let _ = pal;
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Worm-sprite frame selection (worm.cpp:427-473, settings.cpp:15)
+// ---------------------------------------------------------------------------
+
+/// `Settings::kWormAnimTab` (`settings.cpp:15`): the 4-entry walk-cycle offset
+/// table added to `AngleFrame()` when the worm is animating. Indexed by
+/// `(cycles & 31) >> 3` (a mask-then-shift ⇒ `0..=3`).
+pub const WORM_ANIM_TAB: [i32; 4] = [0, 7, 0, 14];
+
+/// Port of `Worm::AngleFrame` (`worm.cpp:454-473`): the pure `0..=6` sprite-row
+/// selector from the worm's aim + facing.
+///
+/// ```text
+/// x = Ftoi(aiming_angle) - 12;      // Ftoi == >> 16
+/// if direction != 0 { x -= 49; }
+/// x >>= 3;                          // ARITHMETIC shift on a signed int
+/// clamp x to [0, 6];
+/// if direction != 0 { x = 6 - x; } // mirror for a right-facing worm
+/// ```
+///
+/// The `>> 3` is an arithmetic right shift (Rust `i32 >> 3` matches C++ on a
+/// signed `int`), so a negative `x` floors toward −∞ before the clamp.
+pub fn angle_frame(aiming_angle: Fixed, direction: i32) -> i32 {
+    // RED stub — real body lands in GREEN.
+    let _ = (aiming_angle, direction);
+    0
+}
+
+/// Port of the `current_frame` update at `worm.cpp:427-430`:
+/// `AngleFrame() + kWormAnimTab[animate ? ((cycles & 31) >> 3) : 0]`.
+/// `cycles` is the POST-`++cycles` value (the worm loop runs after
+/// `game.cpp:357`). Result `∈ 0..=20`.
+pub fn compute_current_frame(aiming_angle: Fixed, direction: i32, animate: bool, cycles: i32) -> i32 {
+    // RED stub — real body lands in GREEN.
+    let _ = (aiming_angle, direction, animate, cycles);
+    0
+}
+
+/// Precompute the worm-sprite bank from `large_sprites`, mirroring C++
+/// `Common::Precompute` (`common.cpp:509-537`): 16x16 ×84 sprites laid out at
+/// index `f + dir*21 + w*42` (C++ `WormSprite(f, dir, w) = SpritePtr(f + dir*7*3
+/// + w*2*7*3)`). Frame `f∈0..=20` comes from `large_sprites[16+f]`; `dir=1` is a
+/// straight copy, `dir=0` a horizontal mirror (`x → 14-x`, col 15 → 0), `w=1`
+/// the colour-swap (`pix∈[30,34] → +9`). Returns an EMPTY bank when
+/// `large_sprites` lacks the 21 worm frames (slices that never load `large.tga`).
+fn build_worm_sprites(large: &SpriteSet) -> SpriteSet {
+    // RED stub — real body lands in GREEN.
+    let _ = large;
+    SpriteSet::default()
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +805,16 @@ pub struct SimState {
     /// hash reads the material map). Slices 1-4a never index it (no dig runs), so
     /// they pass an empty bank and stay byte-identical.
     pub large_sprites: SpriteSet,
+    /// The 16x16 ×84 worm-sprite bank (C++ `common.worm_sprites`,
+    /// `common.cpp:509-537`, `worm_sprites.Allocate(16, 16, 2*2*21)`): the
+    /// precomputed per-frame worm silhouettes `CheckForSpecWormHit` (T2) reads via
+    /// [`SimState::worm_sprite`]. Built in [`new`](Self::new) from
+    /// [`large_sprites`](Self::large_sprites) (sprites `16..=36`) — the `dir=0`
+    /// horizontal mirror + the `dir=1` straight copy + the `w=1` colour-swap
+    /// (`pix∈[30,34] → +9`). **Not hashed** (a sprite bank, like `large_sprites`).
+    /// Empty when `large_sprites` is empty (slices that never load `large.tga`),
+    /// so those callers stay byte-identical. Layout index `f + dir*21 + w*42`.
+    pub worm_sprites: SpriteSet,
     /// The 7x7 small-sprite bank (C++ `common.small_sprites`,
     /// `small_sprites.Allocate(7, 7, 130)`). `NObject::Process`'s ground-explode
     /// arm reads `small_sprites.SpritePtr(start_frame + cur_frame)` to
@@ -980,6 +1084,12 @@ impl SimState {
             // caller never supplies it (it is TC-independent).
             cossin: precompute_cossin(),
             h_signed_recoil,
+            // Precompute the worm-sprite bank from `large_sprites` per
+            // common.cpp:509-537 (mirrors C++ `Common::Precompute`). Built here,
+            // not passed, so no `new` signature churn. Empty when `large_sprites`
+            // lacks the worm frames (16..=36) — slices that never load `large.tga`
+            // — keeping their goldens byte-identical (T2 never runs for them).
+            worm_sprites: build_worm_sprites(&large_sprites),
             large_sprites,
             // Defaulted (empty); the differential harness assigns the real 7x7 bank
             // after `new`. Kept out of the arg list so existing call sites are
@@ -1047,6 +1157,15 @@ impl SimState {
             worm_min_spawn_dist_last: 0,
             worm_min_spawn_dist_enemy: 0,
         }
+    }
+
+    /// The 256-byte 16x16 worm sprite for `(frame, direction, colour)`, mirroring
+    /// C++ `Common::WormSprite(f, dir, w)` (`common.hpp:145`): bank index
+    /// `frame + dir*21 + colour*42`. `CheckForSpecWormHit` (T2) always passes
+    /// `colour == 0` (`worm.cpp:1169`).
+    pub fn worm_sprite(&self, frame: i32, direction: i32, colour: i32) -> &[u8] {
+        self.worm_sprites
+            .sprite((frame + direction * 21 + colour * 42) as usize)
     }
 
     /// Advance one tick: a **subset** of `Game::ProcessFrame` (`game.cpp:333-355`
@@ -4135,5 +4254,273 @@ mod tests {
             assert_eq!(w.aiming_angle, itof(96));
             assert_eq!(w.direction, 1);
         }
+    }
+
+    // =====================================================================
+    // Slice 5' T1: worm-sprite bank + MAT_WORM + current_frame / animate
+    // =====================================================================
+
+    // A synthetic 16x16 large-sprite bank of `count` sprites. Sprite `n` carries
+    // the pattern `p(x, y) = (x*16 + y) as u8` — independent of `n` so the
+    // expected transform is computed from `large.sprite(16+f)` in the test, and
+    // it deliberately includes palette values in `[30, 34]` (e.g. x=1,y=14 -> 30;
+    // x=2,y=2 -> 34) so the `w=1` colour-swap (`+9`) is genuinely exercised.
+    fn synthetic_large_bank(count: i32) -> SpriteSet {
+        let mut data = vec![0u8; count as usize * 16 * 16];
+        for n in 0..count as usize {
+            for y in 0..16usize {
+                for x in 0..16usize {
+                    data[n * 256 + y * 16 + x] = (x * 16 + y) as u8;
+                }
+            }
+        }
+        SpriteSet { width: 16, height: 16, count, data }
+    }
+
+    fn bank_state(large: SpriteSet) -> SimState {
+        SimState::new(
+            &synthetic_level(),
+            &two_worms(),
+            1,
+            &[0u8; 256],
+            Vec::new(),
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            large,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            100,
+            true,
+            100,
+        )
+    }
+
+    // (a) The built bank matches the C++ WormSprite precompute (common.cpp:509-537)
+    // PIXEL-FOR-PIXEL for the straight `dir=1`, the mirrored `dir=0`, and the
+    // colour-swapped `w=1` sub-banks. Expected is derived INDEPENDENTLY from the
+    // source `large.sprite(16+f)` (not from the build loop), so this is not a
+    // re-run of the implementation.
+    #[test]
+    fn worm_bank_matches_cpp_precompute_pixelwise() {
+        let large = synthetic_large_bank(40);
+        let state = bank_state(large.clone());
+        assert_eq!(state.worm_sprites.count, 84, "2*2*21 sprites");
+        assert_eq!((state.worm_sprites.width, state.worm_sprites.height), (16, 16));
+
+        for &f in &[0i32, 5, 20] {
+            let src = large.sprite((16 + f) as usize);
+            let d1c0 = state.worm_sprite(f, 1, 0); // straight, colour 0
+            let d0c0 = state.worm_sprite(f, 0, 0); // mirror, colour 0
+            let d1c1 = state.worm_sprite(f, 1, 1); // straight, colour 1 (swap)
+            let d0c1 = state.worm_sprite(f, 0, 1); // mirror, colour 1 (swap)
+
+            for y in 0..16usize {
+                for x in 0..16usize {
+                    let pix = src[y * 16 + x];
+                    // dir=1 colour 0: straight copy (common.cpp:517).
+                    assert_eq!(d1c0[y * 16 + x], pix, "d1c0 f={f} x={x} y={y}");
+                    // dir=0 colour 0: horizontal mirror; col 15 -> 0 (common.cpp:518-522).
+                    if x == 15 {
+                        assert_eq!(d0c0[y * 16 + 15], 0, "d0c0 col15 f={f} y={y}");
+                    } else {
+                        assert_eq!(d0c0[y * 16 + (14 - x)], pix, "d0c0 f={f} x={x} y={y}");
+                    }
+                    // colour swap (common.cpp:524-525): pix in [30,34] -> +9.
+                    let swapped = if (30..=34).contains(&pix) { pix + 9 } else { pix };
+                    assert_eq!(d1c1[y * 16 + x], swapped, "d1c1 f={f} x={x} y={y}");
+                    if x == 15 {
+                        assert_eq!(d0c1[y * 16 + 15], 0, "d0c1 col15 f={f} y={y}");
+                    } else {
+                        assert_eq!(d0c1[y * 16 + (14 - x)], swapped, "d0c1 f={f} x={x} y={y}");
+                    }
+                }
+            }
+        }
+
+        // The colour swap must be a genuine remap for at least one cell (guards
+        // against a swap that is silently the identity on this pattern).
+        // p(1,14) = 1*16+14 = 30 -> 39 in the w=1 bank.
+        let d1c1_f0 = state.worm_sprite(0, 1, 1);
+        assert_eq!(d1c1_f0[14 * 16 + 1], 39, "colour swap 30 -> 39 witnessed");
+    }
+
+    // The empty-bank guard: a `large_sprites` without the 21 worm frames yields an
+    // EMPTY worm bank, so slices that never load `large.tga` stay byte-identical
+    // (the T2 per-pixel test never runs for them).
+    #[test]
+    fn worm_bank_empty_when_large_sprites_empty() {
+        let state = bank_state(SpriteSet::default());
+        assert_eq!(state.worm_sprites.count, 0, "empty large -> empty worm bank");
+        // A bank with too few sprites (< 16+21) is also rejected.
+        let state2 = bank_state(synthetic_large_bank(30));
+        assert_eq!(state2.worm_sprites.count, 0, "count<37 -> empty worm bank");
+    }
+
+    // (b) `angle_frame` matches worm.cpp:454-473 across aim x direction, including
+    // the `<0`/`>6` clamps and the `dir!=0` `6-x` flip. Every expected value is
+    // hand-folded from the C++ formula (Ftoi == >>16; `x>>3` arithmetic).
+    #[test]
+    fn angle_frame_matches_cpp() {
+        // dir == 0: x = ftoi - 12; x >>= 3; clamp [0,6]; NO flip.
+        assert_eq!(angle_frame(itof(12), 0), 0, "ftoi12 -> 0");
+        assert_eq!(angle_frame(itof(20), 0), 1, "ftoi20 -> 8>>3=1");
+        assert_eq!(angle_frame(itof(60), 0), 6, "ftoi60 -> 48>>3=6");
+        assert_eq!(angle_frame(itof(100), 0), 6, "ftoi100 -> 88>>3=11 clamp 6");
+        assert_eq!(angle_frame(itof(0), 0), 0, "ftoi0 -> -12>>3=-2 clamp 0");
+        assert_eq!(angle_frame(itof(11), 0), 0, "ftoi11 -> -1>>3=-1 clamp 0");
+
+        // dir != 0: x = ftoi - 12 - 49; x >>= 3; clamp [0,6]; then x = 6 - x.
+        assert_eq!(angle_frame(itof(61), 1), 6, "ftoi61 -> 0 -> 6-0=6");
+        assert_eq!(angle_frame(itof(69), 1), 5, "ftoi69 -> 8>>3=1 -> 6-1=5");
+        assert_eq!(angle_frame(itof(109), 1), 0, "ftoi109 -> 48>>3=6 -> 6-6=0");
+        assert_eq!(angle_frame(itof(60), 1), 6, "ftoi60 -> -1>>3=-1 clamp0 -> 6");
+        assert_eq!(angle_frame(itof(200), 1), 0, "ftoi200 -> 139>>3=17 clamp6 -> 0");
+    }
+
+    // (c) `compute_current_frame`: idle (animate=false) == angle_frame (offset 0);
+    // moving (animate=true) == angle_frame + WORM_ANIM_TAB[(cycles&31)>>3].
+    #[test]
+    fn current_frame_formula() {
+        assert_eq!(WORM_ANIM_TAB, [0, 7, 0, 14], "settings.cpp:15");
+
+        // Idle: offset 0 regardless of cycles.
+        for c in [0, 8, 16, 24, 40, 999] {
+            assert_eq!(
+                compute_current_frame(itof(20), 0, false, c),
+                angle_frame(itof(20), 0),
+                "idle -> pure angle_frame (cycles={c})"
+            );
+        }
+
+        // Moving: the mask-then-shift `(cycles & 31) >> 3` selects the table entry.
+        let af = angle_frame(itof(20), 0); // == 1
+        assert_eq!(compute_current_frame(itof(20), 0, true, 0), af + 0, "cyc0 -> tab[0]=0");
+        assert_eq!(compute_current_frame(itof(20), 0, true, 8), af + 7, "cyc8 -> tab[1]=7");
+        assert_eq!(compute_current_frame(itof(20), 0, true, 16), af + 0, "cyc16 -> tab[2]=0");
+        assert_eq!(compute_current_frame(itof(20), 0, true, 24), af + 14, "cyc24 -> tab[3]=14");
+        assert_eq!(compute_current_frame(itof(20), 0, true, 32), af + 0, "cyc32 -> (32&31)=0");
+        assert_eq!(compute_current_frame(itof(20), 0, true, 40), af + 7, "cyc40 -> (40&31)=8>>3=1");
+    }
+
+    // (d) MAT_WORM == 0x20 and the per-pixel accessor returns true ONLY on a
+    // Worm-flagged palette index — indexed DIRECTLY (not via material_id[]).
+    #[test]
+    fn mat_worm_accessor() {
+        assert_eq!(MAT_WORM, 0x20, "kWormM == 1<<5");
+        let mut material_flags = [0u8; 256];
+        material_flags[5] = MAT_WORM; // worm body
+        material_flags[6] = MAT_DIRT | MAT_ROCK; // solid but NOT worm
+        material_flags[7] = MAT_WORM | MAT_BACKGROUND; // worm + other bits
+        let lvl = LevelSim {
+            width: 1,
+            height: 1,
+            material_id: vec![0u8],
+            material_flags,
+        };
+        assert!(lvl.worm_pixel(5), "MAT_WORM set -> true");
+        assert!(lvl.worm_pixel(7), "MAT_WORM among other bits -> true");
+        assert!(!lvl.worm_pixel(6), "no MAT_WORM -> false");
+        assert!(!lvl.worm_pixel(0), "flags 0 -> false");
+    }
+
+    // A wide all-background level so physics is inert (no rock, reacts 0) and the
+    // worm neither dies nor gets blocked — isolating the current_frame update.
+    fn open_state(worm_angle: Fixed, worm_dir: i32) -> SimState {
+        let w = 64i32;
+        let level = LevelData {
+            width: w,
+            height: w,
+            material_id: vec![1u8; (w * w) as usize],
+            palette: None,
+            display: None,
+        };
+        let mut flags = [0u8; 256];
+        flags[0] = MAT_BACKGROUND;
+        flags[1] = MAT_BACKGROUND;
+        let mk = |index: i32| WormInit {
+            index,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            // ammo > 0 so process_weapons never enters the reload branch (which
+            // would index the empty weapons table); no Fire input either, so the
+            // weapon type is never dereferenced.
+            weapons: [WeaponInit { ty: Some(0), ammo: 100 }; NUM_WEAPONS],
+            start_pos: Vec2::new(itof(20), itof(20)),
+            visible: true,
+        };
+        let mut state = SimState::new(
+            &level,
+            &[mk(0), mk(1)],
+            1,
+            &flags,
+            Vec::new(),
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            SpriteSet::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            100,
+            true,
+            100,
+        );
+        for wm in &mut state.worms {
+            wm.aiming_angle = worm_angle;
+            wm.direction = worm_dir;
+        }
+        state
+    }
+
+    // (c-wiring) An IDLE driven worm (no L/R input) ends the tick with
+    // animate=false and current_frame == angle_frame(aiming_angle, direction).
+    // Proves the update is wired at the end of the visible arm.
+    #[test]
+    fn process_frame_sets_idle_current_frame() {
+        let mut state = open_state(itof(20), 0);
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        let w = &state.worms[0];
+        assert!(!w.animate, "no L/R -> animate false");
+        assert_eq!(w.direction, 0);
+        assert_eq!(w.aiming_angle, itof(20));
+        assert_eq!(w.current_frame, 1, "angle_frame(20,0)=1, offset 0");
+        assert_eq!(
+            w.current_frame,
+            angle_frame(w.aiming_angle, w.direction),
+            "idle current_frame == angle_frame"
+        );
+    }
+
+    // (c-wiring) A MOVING driven worm (RIGHT held) ends the tick with animate=true
+    // and current_frame == angle_frame(post-move angle/dir) + the anim offset read
+    // from the POST-++cycles value. Pre-set cycles=7 -> the worm loop sees 8 ->
+    // (8&31)>>3 == 1 -> WORM_ANIM_TAB[1] == 7. This pins BOTH the animate wiring
+    // (walk site) AND the post-increment cycles snapshot.
+    #[test]
+    fn process_frame_sets_moving_current_frame() {
+        let mut state = open_state(itof(20), 0);
+        state.cycles = 7;
+        let right = {
+            let mut c = ControlState::new();
+            c.set(ControlState::RIGHT, true);
+            c
+        };
+        state.process_frame(&[right, ControlState::new()]);
+        let w = &state.worms[0];
+        assert!(w.animate, "RIGHT held -> animate true (worm.cpp:886)");
+        assert_eq!(w.direction, 1, "faced right");
+        // aiming_angle flipped: itof(128) - itof(20) = itof(108).
+        assert_eq!(w.aiming_angle, itof(108), "facing flip");
+        // angle_frame(108,1)=1; cycles now 8 -> tab[1]=7 -> current_frame 8.
+        assert_eq!(state.cycles, 8, "post-increment cycles");
+        assert_eq!(w.current_frame, 8, "angle_frame(108,1)=1 + tab[1]=7");
+        assert_eq!(
+            w.current_frame,
+            angle_frame(w.aiming_angle, w.direction) + WORM_ANIM_TAB[((state.cycles & 31) >> 3) as usize],
+            "moving current_frame == angle_frame + anim offset"
+        );
     }
 }

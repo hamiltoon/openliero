@@ -238,6 +238,70 @@ mod tests {
         assert_eq!(pool.len(), 2);
     }
 
+    // O3 — `spawn_reuse` mirrors C++ `ExactObjectList::NewObjectReuse`
+    // (`exactObjectList.hpp:57-67`) / `FastObjectList::NewObjectReuse`
+    // (`fastObjectList.hpp:35-44`): behaves like `spawn` while a free slot
+    // exists, but at capacity overwrites the LAST slot (index `capacity-1`) in
+    // place and returns it — `len` unchanged, no free, no swap.
+
+    #[test]
+    fn spawn_reuse_under_cap_matches_spawn() {
+        // Below capacity `spawn_reuse` takes the `GetFreeObject` branch: lowest
+        // free index, `len` increments — byte-identical to `spawn`.
+        let mut pool: Pool<i32> = Pool::new(4);
+        assert_eq!(pool.spawn_reuse(10), 0);
+        assert_eq!(pool.spawn_reuse(20), 1);
+        assert_eq!(pool.len(), 2);
+        let live: Vec<i32> = pool.iter().copied().collect();
+        assert_eq!(live, vec![10, 20]);
+    }
+
+    #[test]
+    fn spawn_reuse_full_pool_overwrites_last_slot_in_place() {
+        // Fill a full 600-slot pool (the C++ `nobjects` limit).
+        let mut pool: Pool<i32> = Pool::new(600);
+        for v in 0..600 {
+            assert_eq!(pool.spawn_reuse(v), v as usize);
+        }
+        assert_eq!(pool.len(), 600);
+
+        // At cap, `spawn_reuse` returns `limit-1` (matching C++ `&arr[limit-1]`),
+        // overwrites that slot's VALUE in place, and leaves `len` at the cap.
+        assert_eq!(pool.spawn_reuse(-1), 599);
+        assert_eq!(pool.len(), 600, "count stays at limit (no free/swap)");
+        assert_eq!(pool.get(599), Some(&-1), "last slot value replaced");
+        // No swap: the previous-to-last slot is untouched (a swap-remove would
+        // have moved a survivor here) and slot 0 is untouched.
+        assert_eq!(pool.get(598), Some(&598));
+        assert_eq!(pool.get(0), Some(&0));
+
+        // A second overwrite hits the same slot again — still no growth.
+        assert_eq!(pool.spawn_reuse(-2), 599);
+        assert_eq!(pool.len(), 600);
+        assert_eq!(pool.get(599), Some(&-2));
+    }
+
+    #[test]
+    fn spawn_vs_spawn_reuse_at_cap() {
+        // Contrast: `spawn` (C++ `NewObject`, `game.cpp:244-246`) bails with
+        // `None` at cap and leaves the pool unchanged, whereas `spawn_reuse`
+        // (C++ `NewObjectReuse`) always yields the last slot.
+        let mut pool: Pool<i32> = Pool::new(2);
+        pool.spawn_reuse(1);
+        pool.spawn_reuse(2);
+        assert_eq!(pool.len(), 2);
+
+        assert_eq!(pool.spawn(3), None, "NewObject returns None at cap");
+        assert_eq!(pool.len(), 2);
+        let before: Vec<i32> = pool.iter().copied().collect();
+        assert_eq!(before, vec![1, 2]);
+
+        assert_eq!(pool.spawn_reuse(3), 1, "NewObjectReuse overwrites limit-1");
+        assert_eq!(pool.len(), 2);
+        let after: Vec<i32> = pool.iter().copied().collect();
+        assert_eq!(after, vec![1, 3]);
+    }
+
     #[test]
     fn double_free_is_noop() {
         let mut pool: Pool<i32> = Pool::new(4);

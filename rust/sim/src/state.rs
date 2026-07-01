@@ -288,6 +288,34 @@ pub struct WormState {
     /// `Worm::leave_shell_timer` (`worm.hpp:253`): shell-drop countdown (inert;
     /// only `Worm::Fire` sets it, and gates a `rand()` branch — stays 0).
     pub leave_shell_timer: i32,
+
+    // --- Slice 5d T1 dead/respawn runtime fields (NOT hashed) --------------
+    // Written by the dead-worm `else` arm (`worm.cpp:431-450`) +
+    // `BeginRespawn`/`DoRespawning`. Cross-checked against `stateHash.hpp`:
+    // NONE of these appears in `HashGameState` (master) or `HashGameComponents`
+    // (component), so adding them leaves every slice 1-5c golden byte-identical.
+    // Defaults match a freshly-reset C++ worm (ctor + `ResetWorms`, game.cpp:155;
+    // `ResetWorms` does NOT touch these four, so they keep their ctor/in-class
+    // values).
+    /// `Worm::logic_respawn` (`worm.hpp:223`, an `IVec2`; here [`Vec2`] is the
+    /// `IVec2` port): the pixel-space drop-in cursor `BeginRespawn` seeds and
+    /// `DoRespawning` walks toward `Ftoi(pos) - 80`. Default `(0,0)`
+    /// (default-constructed `IVec2`). **Not hashed.**
+    pub logic_respawn: Vec2,
+    /// `Worm::ready` (`worm.hpp:234` `ready{false}`, but the ctor's initializer
+    /// list sets `ready(true)` — `worm.hpp:179` — and `ResetWorms` does NOT
+    /// reset it, so a freshly-reset worm is `ready == true`). Set true by the
+    /// dead arm's `PressedOnce(kFire)`; the `DoRespawning` completion gate reads
+    /// it then clears it. **Not hashed.**
+    pub ready: bool,
+    /// `Worm::make_sight_green` (`worm.hpp:236` `make_sight_green{false}`):
+    /// cleared by the death block; render-only sight tint. Default false.
+    /// **Not hashed.**
+    pub make_sight_green: bool,
+    /// `Worm::steerable_count` (`worm.hpp:267` `steerable_count{0}`): the
+    /// steerable-object accumulator the dead arm zeroes each tick. Default 0.
+    /// **Not hashed.**
+    pub steerable_count: i32,
 }
 
 /// `Worm::kKilledTimerInitial` (`worm.hpp:243`): the respawn countdown the worm
@@ -335,6 +363,14 @@ impl WormState {
             current_weapon: 0, // ResetWorms sets `current_weapon = 0` (game.cpp:164)
             fire_cone: 0,
             leave_shell_timer: 0,
+
+            // Slice 5d T1 dead/respawn runtime defaults (freshly-reset C++ worm;
+            // `ResetWorms` does not touch these, so they keep their ctor/in-class
+            // values). None hashed.
+            logic_respawn: Vec2::zero(),
+            ready: true, // ctor `ready(true)` (worm.hpp:179); ResetWorms keeps it
+            make_sight_green: false,
+            steerable_count: 0,
         }
     }
 
@@ -824,6 +860,18 @@ pub struct SimState {
     /// == 2` (frames 0=weapon, 1=health). Defaulted to zeros; the difftest assigns
     /// the TC's `constants.bonuses[i].sound`-equivalent expiry-object index.
     pub bonus_s_objects: [i32; 2],
+
+    /// C++ `Worm::settings->health` (`WormSettings::health{100}`, `worm.hpp:104`):
+    /// the per-worm max/reset health. The clamp `health = min(health,
+    /// settings->health)` (`worm.cpp:213`) caps every worm to it each tick, and
+    /// `DoRespawning` (5d T5) restores `health = settings->health` on respawn. The
+    /// oracle dumper never overrides `worm_settings[idx]->health`, so BOTH worms
+    /// use the default **100** — a single scalar suffices for bit-exactness. NOT
+    /// in the `new` arg list: defaulted to 100 (the C++ default) post-`new` — like
+    /// the blood/bonus consts — so every existing call site is unchanged and the
+    /// clamp is identity for slices 1-5c (health starts at 100 and never exceeds
+    /// it), keeping those goldens byte-identical. **Not hashed** (settings scalar).
+    pub settings_health: i32,
 }
 
 impl SimState {
@@ -937,6 +985,11 @@ impl SimState {
             bonus_bounce_mul: 0,
             bonus_bounce_div: 0,
             bonus_s_objects: [0, 0],
+            // Worm settings health: the C++ `WormSettings::health` default (100),
+            // which the dumper never overrides. Post-`new` default (like the blood
+            // consts) so no call site changes; the clamp is identity for slices
+            // 1-5c (worms start at 100, never exceed it) => priors byte-identical.
+            settings_health: 100,
         }
     }
 
@@ -2380,5 +2433,102 @@ mod tests {
             "a draw genuinely occurred (rand advanced off the post-seed 0)"
         );
         assert_eq!(state.cycles, 1, "cycles advances once per tick");
+    }
+
+    // ----- Slice 5d T1: clamp + lives gate + visible/dead arm split ---------
+    // `idle_state` builds TWO INVISIBLE worms (`two_worms` sets `visible: false`,
+    // `killed_timer: 150`, `lives: 5`, `health: 100`) via `SimState::new`
+    // (`settings_health` defaults to 100). The dead-worm `else` arm's
+    // `killed_timer` countdown is the cleanest non-hashed witness for the gate/
+    // split without needing a physics/gravity setup; all cases keep
+    // `killed_timer` at 150→149 so the `begin_respawn`/`do_respawning` stubs
+    // (reached only at `== 0` / `< 0`) are never hit.
+
+    #[test]
+    fn t1_health_clamp_runs_every_tick_outside_the_lives_gate() {
+        // worm.cpp:213 `health = min(health, settings->health)` runs BEFORE the
+        // lives gate (:215) — so it clamps even a `lives == 0` worm whose body is
+        // skipped. This pins the clamp OUTSIDE the gate (a stronger statement than
+        // "clamp runs"). settings_health defaults to 100.
+        let mut state = idle_state(1);
+        // Gate-closed (lives==0), invisible worm with above-max health: ONLY the
+        // clamp can touch it, and the skipped body must leave killed_timer frozen.
+        state.worms[0].lives = 0;
+        state.worms[0].health = 150;
+        assert!(!state.worms[0].visible);
+        // Full-health worm: the clamp is the identity.
+        state.worms[1].health = 100;
+
+        state.process_frame(&[]);
+
+        assert_eq!(
+            state.worms[0].health, 100,
+            "clamp caps to settings_health even with the lives gate closed"
+        );
+        assert_eq!(
+            state.worms[0].killed_timer, 150,
+            "gate closed (lives==0) => dead arm skipped, killed_timer frozen"
+        );
+        assert_eq!(
+            state.worms[1].health, 100,
+            "clamp is the identity for a full-health worm"
+        );
+    }
+
+    #[test]
+    fn t1_lives_gate_skips_the_whole_worm_body() {
+        // worm.cpp:215: in KillEmAll the whole `Worm::Process` body runs iff
+        // `lives > 0`. Witness via the dead-arm killed_timer countdown (invisible
+        // worm): it decrements with lives>0 and is frozen with lives==0. The
+        // lives>0 branch fails on the pre-restructure base (no dead arm), so this
+        // is non-vacuous.
+        let mut state = idle_state(2);
+        state.worms[0].lives = 5; // gate open
+        state.worms[1].lives = 0; // gate closed
+        assert!(!state.worms[0].visible && !state.worms[1].visible);
+        assert_eq!(state.worms[0].killed_timer, 150);
+        assert_eq!(state.worms[1].killed_timer, 150);
+
+        state.process_frame(&[]);
+
+        assert_eq!(
+            state.worms[0].killed_timer, 149,
+            "lives>0: the dead arm ran (killed_timer counted down)"
+        );
+        assert_eq!(
+            state.worms[1].killed_timer, 150,
+            "lives==0: the entire worm body was skipped (killed_timer frozen)"
+        );
+    }
+
+    #[test]
+    fn t1_dead_arm_pressed_once_fire_and_steerable_reset() {
+        // worm.cpp:433-437 dead arm: `steerable_count = 0`; `PressedOnce(kFire)`
+        // reads the Fire bit, CLEARS it (worm.hpp:187-191), and sets `ready` on a
+        // hit. Non-tautological: start ready=false + steerable_count=7 and drive
+        // Fire, so both the set and the clear are real edges.
+        let mut state = idle_state(3);
+        state.worms[0].lives = 5; // gate open, invisible => dead arm
+        state.worms[0].ready = false; // start not-ready so the set is a real edge
+        state.worms[0].steerable_count = 7; // must be zeroed each dead tick
+
+        let mut fire = ControlState::new();
+        fire.set(ControlState::FIRE, true);
+        // worm0 gets Fire; worm1 gets empty input (its dead arm just counts down).
+        state.process_frame(&[fire, ControlState::new()]);
+
+        assert!(state.worms[0].ready, "PressedOnce(kFire) set ready");
+        assert!(
+            !state.worms[0].control_states.get(ControlState::FIRE),
+            "PressedOnce(kFire) cleared the Fire bit (read-and-clear semantics)"
+        );
+        assert_eq!(
+            state.worms[0].steerable_count, 0,
+            "steerable_count zeroed each dead tick"
+        );
+        assert_eq!(
+            state.worms[0].killed_timer, 149,
+            "killed_timer counted down in the dead arm"
+        );
     }
 }

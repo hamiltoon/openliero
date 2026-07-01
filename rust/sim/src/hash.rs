@@ -243,6 +243,7 @@ mod tests {
             num_blood_colours: 0,
             first_blood_colour: 0,
             bobj_gravity: 0,
+            settings_health: 100,
             settings_max_bonuses: 0,
             bonus_drop_chance: 0,
             bonus_spawn_rect_w: 0,
@@ -378,6 +379,11 @@ mod tests {
             current_weapon: 0,
             fire_cone: 0,
             leave_shell_timer: 0,
+            // Slice-5d dead/respawn runtime fields — not hashed; defaults suffice.
+            logic_respawn: Vec2::zero(),
+            ready: true,
+            make_sight_green: false,
+            steerable_count: 0,
         }
     }
 

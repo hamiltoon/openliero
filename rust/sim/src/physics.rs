@@ -535,6 +535,12 @@ mod tests {
             current_weapon: 0,
             fire_cone: 0,
             leave_shell_timer: 0,
+            // Slice-5d dead/respawn runtime fields — not read by the physics
+            // pass; tick-0 defaults.
+            logic_respawn: Vec2::zero(),
+            ready: true,
+            make_sight_green: false,
+            steerable_count: 0,
         }
     }
 

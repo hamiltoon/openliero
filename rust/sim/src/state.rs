@@ -707,9 +707,7 @@ impl LevelSim {
     /// as C++ `common.materials[worm_sprite[...]]`). `CheckForSpecWormHit` (T2)
     /// calls this per silhouette pixel.
     pub fn worm_pixel(&self, pal: u8) -> bool {
-        // RED stub — real body lands in GREEN.
-        let _ = pal;
-        false
+        (self.material_flags[pal as usize] & MAT_WORM) != 0
     }
 }
 
@@ -736,9 +734,18 @@ pub const WORM_ANIM_TAB: [i32; 4] = [0, 7, 0, 14];
 /// The `>> 3` is an arithmetic right shift (Rust `i32 >> 3` matches C++ on a
 /// signed `int`), so a negative `x` floors toward −∞ before the clamp.
 pub fn angle_frame(aiming_angle: Fixed, direction: i32) -> i32 {
-    // RED stub — real body lands in GREEN.
-    let _ = (aiming_angle, direction);
-    0
+    let mut x = ftoi(aiming_angle) - 12;
+    if direction != 0 {
+        x -= 49;
+    }
+    // Arithmetic right shift on a signed int (Rust `i32 >> 3` == C++ on signed).
+    x >>= 3;
+    // C++ `if (x < 0) x = 0; else if (x > 6) x = 6;` — a plain [0, 6] clamp.
+    x = x.clamp(0, 6);
+    if direction != 0 {
+        x = 6 - x;
+    }
+    x
 }
 
 /// Port of the `current_frame` update at `worm.cpp:427-430`:
@@ -746,9 +753,8 @@ pub fn angle_frame(aiming_angle: Fixed, direction: i32) -> i32 {
 /// `cycles` is the POST-`++cycles` value (the worm loop runs after
 /// `game.cpp:357`). Result `∈ 0..=20`.
 pub fn compute_current_frame(aiming_angle: Fixed, direction: i32, animate: bool, cycles: i32) -> i32 {
-    // RED stub — real body lands in GREEN.
-    let _ = (aiming_angle, direction, animate, cycles);
-    0
+    let anim_frame = if animate { (cycles & 31) >> 3 } else { 0 };
+    angle_frame(aiming_angle, direction) + WORM_ANIM_TAB[anim_frame as usize]
 }
 
 /// Precompute the worm-sprite bank from `large_sprites`, mirroring C++
@@ -759,9 +765,47 @@ pub fn compute_current_frame(aiming_angle: Fixed, direction: i32, animate: bool,
 /// the colour-swap (`pix∈[30,34] → +9`). Returns an EMPTY bank when
 /// `large_sprites` lacks the 21 worm frames (slices that never load `large.tga`).
 fn build_worm_sprites(large: &SpriteSet) -> SpriteSet {
-    // RED stub — real body lands in GREEN.
-    let _ = large;
-    SpriteSet::default()
+    const FRAMES: i32 = 21;
+    // The worm frames are `large_sprites[16 .. 16+21]`. Empty / undersized banks
+    // (slices that never load `large.tga`) can't build it: return an empty bank
+    // (the T2 per-pixel test never runs for them, keeping their goldens intact).
+    if large.width != 16 || large.height != 16 || large.count < 16 + FRAMES {
+        return SpriteSet::default();
+    }
+    let count = 2 * 2 * FRAMES; // dir(2) * colour(2) * frames(21) == 84
+    let mut data = vec![0u8; (count as usize) * 256];
+    // Bank index for (f, dir, colour): f + dir*21 + colour*42 (== C++
+    // `WormSprite(f, dir, w) = SpritePtr(f + dir*7*3 + w*2*7*3)`).
+    let base = |f: i32, dir: i32, col: i32| ((f + dir * 21 + col * 42) as usize) * 256;
+    for i in 0..FRAMES {
+        let src = large.sprite((16 + i) as usize);
+        let d1c0 = base(i, 1, 0);
+        let d0c0 = base(i, 0, 0);
+        let d1c1 = base(i, 1, 1);
+        let d0c1 = base(i, 0, 1);
+        for y in 0..16usize {
+            for x in 0..16usize {
+                let pix = src[y * 16 + x];
+                // dir=1 colour 0: straight copy (common.cpp:517).
+                data[d1c0 + y * 16 + x] = pix;
+                // dir=0 colour 0: horizontal mirror; col 15 -> 0 (common.cpp:518-522).
+                if x == 15 {
+                    data[d0c0 + y * 16 + 15] = 0;
+                } else {
+                    data[d0c0 + y * 16 + (14 - x)] = pix;
+                }
+                // Colour swap for the w=1 sub-bank (common.cpp:524-525).
+                let swapped = if (30..=34).contains(&pix) { pix + 9 } else { pix };
+                data[d1c1 + y * 16 + x] = swapped;
+                if x == 15 {
+                    data[d0c1 + y * 16 + 15] = 0;
+                } else {
+                    data[d0c1 + y * 16 + (14 - x)] = swapped;
+                }
+            }
+        }
+    }
+    SpriteSet { width: 16, height: 16, count, data }
 }
 
 // ---------------------------------------------------------------------------
@@ -1662,6 +1706,18 @@ impl SimState {
                 ) {
                     deferred_kills.push(killer);
                 }
+
+                // 14. Update frame (worm.cpp:427-430) — at the VERY END of the
+                //     visible arm, AFTER the death block (so it runs even on the
+                //     death tick, where `worm_death` cleared `visible`). Reads the
+                //     POST-`++cycles` value (`*cycles`), matching C++: the worm
+                //     loop runs after `game.cpp:357`'s `++cycles`. `current_frame`
+                //     is unhashed but load-bearing — it selects the worm silhouette
+                //     the object loops' `CheckForSpecWormHit` (T2) reads NEXT tick
+                //     (the object loops run BEFORE the worm loop, so they see the
+                //     PREVIOUS tick's `current_frame` — the contact-tick contract).
+                w.current_frame =
+                    compute_current_frame(w.aiming_angle, w.direction, w.animate, *cycles);
             } else {
                 // Worm is dead (worm.cpp:431-450). None of this touches a hashed
                 // field except `killed_timer` (unhashed) and — on a Fire hit —

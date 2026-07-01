@@ -466,8 +466,8 @@ pub fn process_weapons(
 ///    *before* the `PressedOnce` reads below, the very first tick of a Change
 ///    hold consumes that tick's Left/Right press — so a fresh hold cycles on
 ///    tick 2 onward, not tick 1.
-/// 2. `fire_cone = 0`, `animate = false` (`worm.cpp:1072-1073`) — non-hashed;
-///    only `fire_cone` is tracked, `animate` is render-only (skipped).
+/// 2. `fire_cone = 0`, `animate = false` (`worm.cpp:1072-1073`) — both tracked,
+///    non-hashed (`animate` promoted from render-only in Slice 5' T1).
 /// 3. Loop-sound stop (`worm.cpp:1075-1077`) — SKIPPED (sound not hashed).
 /// 4. **Cycle gate** (`worm.cpp:1079`): `weapons[current_weapon].Available() ||
 ///    settings->load_change`. `Available()` is `loading_left == 0`
@@ -497,9 +497,10 @@ pub fn process_weapon_change(worm: &mut WormState, load_change: bool) {
         worm.key_change_pressed = true;
     }
 
-    // worm.cpp:1072 — fire_cone = 0. (animate = false at :1073 is render-only.)
-    // Also unconditional, before the gate.
+    // worm.cpp:1072-1073 — fire_cone = 0, animate = false (Slice 5' T1: animate
+    // promoted from render-only). Both unconditional, before the cycle gate.
     worm.fire_cone = 0;
+    worm.animate = false;
 
     // worm.cpp:1075-1077 — loop-sound stop: SKIPPED (sound not hashed).
 
@@ -557,7 +558,8 @@ pub fn process_weapon_change(worm: &mut WormState, load_change: bool) {
 ///   consumes one `rand(rframe)` (texture 7 `rframe=2`), so the dig advances the
 ///   RNG by exactly two draws. `CorrectShadow` is **OMITTED** (shadow=false,
 ///   render-only). The `else` (not both held) re-arms `able_to_dig = true`.
-/// * Idle `animate = false` (`worm.cpp:953-955`) — render-only, skipped.
+/// * Walk sites set `animate = true` (`worm.cpp:870,886`); idle `animate = false`
+///   (`worm.cpp:953-955`) — tracked, non-hashed (Slice 5' T1 promotion).
 ///
 /// `vel.x` arithmetic is `wrapping_*` to match C++ `int` semantics; the angle
 /// flip uses `itof`/`wrapping_sub` (same discipline as the aiming port). The dig
@@ -592,7 +594,8 @@ pub fn process_movement(
             }
             worm.direction = 0;
         }
-        // animate = true — render-only (skipped).
+        // worm.cpp:870 — animate = true (Slice 5' T1: promoted from render-only).
+        worm.animate = true;
     }
 
     // worm.cpp:873-887 — walk right.
@@ -607,6 +610,8 @@ pub fn process_movement(
             }
             worm.direction = 1;
         }
+        // worm.cpp:886 — animate = true (Slice 5' T1: promoted from render-only).
+        worm.animate = true;
     }
 
     // worm.cpp:889-951 — dig. Edge-triggered by `able_to_dig`.
@@ -656,7 +661,12 @@ pub fn process_movement(
         worm.able_to_dig = true;
     }
 
-    // worm.cpp:953-955 — idle animate = false (render-only, skipped).
+    // worm.cpp:953-955 — idle animate = false (Slice 5' T1: promoted from
+    // render-only). A SEPARATE `if` at the end of ProcessMovement, so a worm that
+    // walked this tick keeps animate=true and only a truly idle one clears it.
+    if !k_left && !k_right {
+        worm.animate = false;
+    }
 }
 
 #[cfg(test)]

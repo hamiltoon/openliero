@@ -12,7 +12,7 @@ use assets::level::LevelData;
 use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
 use assets::tc::Texture;
-use sim_core::fixed::Fixed;
+use sim_core::fixed::{ftoi, itof, Fixed};
 use sim_core::rng::Rand;
 use sim_core::tables::precompute_cossin;
 use sim_core::vec::Vec2;
@@ -883,6 +883,34 @@ pub struct SimState {
     /// block to `old_last_killed != last_killed_idx` (`worm.cpp:401`), feeding
     /// GameOfTag / stats. **Not hashed**; defaulted to `false` post-`new`.
     pub got_changed: bool,
+
+    // --- Slice 5d T4: `BeginRespawn`/`CheckRespawnPosition` constants ----------
+    // (`worm.cpp:711-742`, `game.cpp:611-650`). The level-reading respawn-position
+    // search reads these once the dead-arm countdown hits 0. Like the blood/bonus
+    // consts they are **defaulted (0)** here and assigned the real TC values by
+    // the difftest AFTER `new` (NO `SimState::new` signature change) — left at 0
+    // they are inert because `begin_respawn` is only reached when a worm dies and
+    // its `killed_timer` counts down to 0 (unreached for slices 1-5c, whose worms
+    // never die), so those goldens stay byte-identical. **None are hashed.**
+    /// C++ `LC(WormSpawnRectX)` (`common.c[CWormSpawnRectX]`, `worm.cpp:726`): the
+    /// x-offset added to the per-trial `rand(WormSpawnRectW)` candidate x. Real TC
+    /// value 5.
+    pub worm_spawn_rect_x: i32,
+    /// C++ `LC(WormSpawnRectY)` (`worm.cpp:727`): the y-offset added to the
+    /// per-trial `rand(WormSpawnRectH)` candidate y. Real TC value 5.
+    pub worm_spawn_rect_y: i32,
+    /// C++ `LC(WormSpawnRectW)` (`worm.cpp:726`): the bound of the per-trial
+    /// `rand(WormSpawnRectW)` x draw — **drawn FIRST** each trial. Real TC value 494.
+    pub worm_spawn_rect_w: i32,
+    /// C++ `LC(WormSpawnRectH)` (`worm.cpp:727`): the bound of the per-trial
+    /// `rand(WormSpawnRectH)` y draw — **drawn SECOND** each trial. Real TC value 340.
+    pub worm_spawn_rect_h: i32,
+    /// C++ `LC(WormMinSpawnDistLast)` (`game.cpp:619-620`): the reject radius around
+    /// the last-death position in `CheckRespawnPosition`. Real TC value 160.
+    pub worm_min_spawn_dist_last: i32,
+    /// C++ `LC(WormMinSpawnDistEnemy)` (`game.cpp:621-622`): the reject radius around
+    /// the live enemy position in `CheckRespawnPosition`. Real TC value 160.
+    pub worm_min_spawn_dist_enemy: i32,
 }
 
 impl SimState {
@@ -1006,6 +1034,17 @@ impl SimState {
             // when a worm dies (unreached for slices 1-5c) => priors identical.
             last_killed_idx: -1,
             got_changed: false,
+            // BeginRespawn/CheckRespawnPosition constants: defaulted (0). Left at 0
+            // begin_respawn is unreached (no worm dies in slices 1-5c), so the
+            // priors stay byte-identical; the difftest assigns the real TC values
+            // (`tc.constants.WormSpawnRect*`/`WormMinSpawnDist*`) after `new`
+            // (post-`new` pattern, like the blood consts).
+            worm_spawn_rect_x: 0,
+            worm_spawn_rect_y: 0,
+            worm_spawn_rect_w: 0,
+            worm_spawn_rect_h: 0,
+            worm_min_spawn_dist_last: 0,
+            worm_min_spawn_dist_enemy: 0,
         }
     }
 
@@ -1112,6 +1151,12 @@ impl SimState {
             settings_health,
             last_killed_idx,
             got_changed,
+            worm_spawn_rect_x,
+            worm_spawn_rect_y,
+            worm_spawn_rect_w,
+            worm_spawn_rect_h,
+            worm_min_spawn_dist_last,
+            worm_min_spawn_dist_enemy,
             ..
         } = self;
         let h_signed_recoil = *h_signed_recoil;
@@ -1135,6 +1180,12 @@ impl SimState {
         let bonus_bounce_mul = *bonus_bounce_mul;
         let bonus_bounce_div = *bonus_bounce_div;
         let settings_health = *settings_health;
+        let worm_spawn_rect_x = *worm_spawn_rect_x;
+        let worm_spawn_rect_y = *worm_spawn_rect_y;
+        let worm_spawn_rect_w = *worm_spawn_rect_w;
+        let worm_spawn_rect_h = *worm_spawn_rect_h;
+        let worm_min_spawn_dist_last = *worm_min_spawn_dist_last;
+        let worm_min_spawn_dist_enemy = *worm_min_spawn_dist_enemy;
         // The object loops read `cycles` as a value for the `cycles % delay` /
         // `cycles & 7` gates inside `nobject_process`. They must see the value left by
         // the PREVIOUS tick's increment (cycles=k-1 on tick k) — exactly as the C++
@@ -1358,10 +1409,16 @@ impl SimState {
         // at the end-of-tick fold (nothing in the worm body branches on it).
         let mut deferred_kills: Vec<usize> = Vec::new();
 
-        for (i, w) in worms.iter_mut().enumerate() {
+        // Index-based (not `iter_mut()`): the dead arm's `begin_respawn` reads the
+        // LIVE enemy worm `worms[i ^ 1].pos` at worm `i`'s turn — a second element
+        // of the same slice an `iter_mut()` `&mut` borrow could not reach. Indexing
+        // reborrows `worms` per access, so the enemy read and the self-mutation are
+        // both expressible. The visible arm rebinds `let w = &mut worms[i]` and is
+        // otherwise unchanged.
+        for i in 0..worms.len() {
             // Interleave: apply this worm's input (≈ `Unpack`), then Process it.
             if let Some(input) = inputs.get(i) {
-                w.control_states = *input;
+                worms[i].control_states = *input;
             }
 
             // Port of `Worm::Process` (worm.cpp:210-452). The C++ structure is:
@@ -1376,7 +1433,7 @@ impl SimState {
             // gate, so it caps even a gate-closed (lives==0) worm. Identity for
             // slices 1-5c (worms start at settings_health == 100 and never exceed
             // it), so priors stay byte-identical.
-            w.health = w.health.min(settings_health);
+            worms[i].health = worms[i].health.min(settings_health);
 
             // Game-mode / lives gate (worm.cpp:215). The full C++ condition is
             // `(mode != KillEmAll && mode != Scales) || lives > 0`; the openliero
@@ -1385,11 +1442,15 @@ impl SimState {
             // make the gate always-true — those branches stay present-but-guarded
             // (game_mode is unmodelled; the TC is always KillEmAll). Hash-neutral
             // for priors (lives > 0 always in 1-5c).
-            if w.lives <= 0 {
+            if worms[i].lives <= 0 {
                 continue;
             }
 
-            if w.visible {
+            if worms[i].visible {
+                // Rebind the per-worm `&mut` for the (unchanged) visible arm. Held
+                // only within this arm; the dead arm indexes `worms` directly so
+                // `begin_respawn` can also read the enemy slot.
+                let w = &mut worms[i];
                 // 2. reaction orchestration -> reacts (shared by tasks + physics).
                 let reacts = worm_reactions(level, w, physics);
 
@@ -1487,34 +1548,58 @@ impl SimState {
                 // `control_states` (the read-and-clear of the Fire bit); both are
                 // unreached for slices 1-5c, whose worms are all visible, so those
                 // goldens stay byte-identical.
-                w.steerable_count = 0;
+                worms[i].steerable_count = 0;
 
                 // PressedOnce(kFire) (worm.hpp:187-191): read the Fire bit, CLEAR
                 // it, and set `ready` when it was set. `ready` gates the
                 // `DoRespawning` completion (T5).
-                let fire = w.control_states.get(ControlState::FIRE);
-                w.control_states.set(ControlState::FIRE, false);
+                let fire = worms[i].control_states.get(ControlState::FIRE);
+                worms[i].control_states.set(ControlState::FIRE, false);
                 if fire {
-                    w.ready = true;
+                    worms[i].ready = true;
                 }
 
                 // killed_timer countdown (worm.cpp:439-449). The 150-tick dead
                 // phase is hash-silent (killed_timer is in NEITHER hash); the
                 // countdown is pinned only transitively through WHEN the
                 // BeginRespawn RNG burst lands.
-                if w.killed_timer > 0 {
-                    w.killed_timer -= 1;
+                if worms[i].killed_timer > 0 {
+                    worms[i].killed_timer -= 1;
                 }
-                // `killed_timer == 0 && !quick_sim` -> BeginRespawn. The dumper
-                // never sets quick_sim (game.hpp:153 `quick_sim{false}` default),
-                // so the guard is always open and omitted here. BeginRespawn is
-                // ported in Slice 5d T4 — STUB (unreachable until a worm dies).
-                if w.killed_timer == 0 {
-                    begin_respawn(w);
+                // `killed_timer == 0 && !game.quick_sim` -> BeginRespawn
+                // (worm.cpp:443). QUICK_SIM-GUARD DECISION: the sim does not model
+                // `quick_sim`, and the oracle dumper drives the unmodified
+                // `Worm::Process` with `Game::quick_sim{false}` (game.hpp:153, never
+                // overridden), so the `!quick_sim` term is a compile-time-constant
+                // `true` for every dumped tick. Rather than introduce an always-true
+                // named-const branch (dead code a reader must reason about, and a
+                // clippy hazard), the term is deliberately OMITTED and documented
+                // here: were quick_sim ever modelled, this branch would need
+                // `&& !quick_sim` re-added. The reads below (`killed_timer` fresh
+                // each `if`) mirror C++ so BeginRespawn (which sets `killed_timer =
+                // -1`) falls straight through into the `< 0` DoRespawning arm on the
+                // SAME tick — exactly as `worm.cpp:443-449`.
+                if worms[i].killed_timer == 0 {
+                    begin_respawn(
+                        worms,
+                        i,
+                        level,
+                        worm_spawn_rect_x,
+                        worm_spawn_rect_y,
+                        worm_spawn_rect_w,
+                        worm_spawn_rect_h,
+                        worm_min_spawn_dist_last,
+                        worm_min_spawn_dist_enemy,
+                        rand,
+                    );
                 }
-                // `killed_timer < 0` -> DoRespawning. Ported in T5 — STUB.
-                if w.killed_timer < 0 {
-                    do_respawning(w);
+                // `killed_timer < 0` -> DoRespawning (worm.cpp:447). Ported in
+                // Slice 5d T5 — STUB (unreachable in T4: the unit tests exercise
+                // `begin_respawn` directly and stop at `killed_timer == -1`, and no
+                // committed golden drives a full tick through `killed_timer == 0`
+                // until T5 lands `do_respawning`).
+                if worms[i].killed_timer < 0 {
+                    do_respawning(&mut worms[i]);
                 }
             }
         }
@@ -1529,13 +1614,104 @@ impl SimState {
     }
 }
 
-/// Stub for `Worm::BeginRespawn` (`worm.cpp:711-742`) — the level-reading RNG
-/// respawn-position search, ported in Slice 5d T4. UNREACHABLE in T1: it is
-/// entered only when `killed_timer == 0` in the dead arm, which requires a worm
-/// to have died (`visible == false` + a 150→0 countdown) — impossible while
-/// slices 1-5c keep every worm visible.
-fn begin_respawn(_worm: &mut WormState) {
-    unreachable!("BeginRespawn is ported in Slice 5d T4; unreachable until a worm dies");
+/// Port of `Worm::BeginRespawn` (`worm.cpp:711-742`) — the level-reading RNG
+/// respawn-position search, **the canonical Step-2 desync trap** (the trial count
+/// = f(live level pixels, live enemy pos)).
+///
+/// RNG order (the contract, verified against `worm.cpp:711-742`):
+/// 1. `temp = Ftoi(pos)` (the death pos, no rand); `logic_respawn = temp -
+///    (80,80)` (`:714-716`); `enemy = temp`, then iff `worms.size() == 2`
+///    `enemy = Ftoi(worms[index ^ 1].pos)` — the **LIVE enemy pos** read at THIS
+///    worm's turn in the loop (a desync input, no rand) (`:718-722`);
+/// 2. a `do { … } while (!CheckRespawnPosition(…))` trial loop (`:725-739`). Each
+///    trial draws **EXACTLY 2** values in this order: `rand(WormSpawnRectW)`
+///    **FIRST** (the candidate x, `:726`) **then** `rand(WormSpawnRectH)` (the
+///    candidate y, `:727`). The candidate pos is `Itof(SpawnRectX + x)` /
+///    `Itof(SpawnRectY + y)`;
+/// 3. a drop-down `while (Ftoi(pos.y)+4 < height && Mat(x, y+4).Background())
+///    pos.y += Itof(1)` (`:731-734`) — reads the LIVE level, draws **NO rand**;
+/// 4. `if (++trials >= 50000) break;` (`:736-738`) — the runaway guard checked
+///    BEFORE the while-condition;
+/// 5. the `while` re-evaluates `CheckRespawnPosition` (also rand-free): accept
+///    (`true` → `!true` exits) or reject (`false` → another trial);
+/// 6. `killed_timer = -1` on exit (`:741`).
+///
+/// `worms` is the whole slice (indexed, not an `iter_mut()` borrow) so the enemy
+/// read (`worms[index ^ 1]`) and the self-mutation (`worms[index]`) coexist.
+#[allow(clippy::too_many_arguments)]
+fn begin_respawn(
+    worms: &mut [WormState],
+    index: usize,
+    level: &LevelSim,
+    spawn_rect_x: i32,
+    spawn_rect_y: i32,
+    spawn_rect_w: i32,
+    spawn_rect_h: i32,
+    min_spawn_dist_last: i32,
+    min_spawn_dist_enemy: i32,
+    rand: &mut Rand,
+) {
+    // RED (Slice 5d T4): the port lands in GREEN. Consume the args so the stub
+    // type-checks; the T4 tests exercise this directly and must fail here first.
+    let _ = (
+        &worms,
+        index,
+        level,
+        spawn_rect_x,
+        spawn_rect_y,
+        spawn_rect_w,
+        spawn_rect_h,
+        min_spawn_dist_last,
+        min_spawn_dist_enemy,
+        &rand,
+    );
+    todo!("Slice 5d T4 GREEN: port worm.cpp:711-742 (BeginRespawn)")
+}
+
+/// Port of `CheckRespawnPosition` (`game.cpp:611-650`) — the **rand-free** accept
+/// test the `BeginRespawn` trial loop evaluates per candidate. Returns `true` to
+/// accept the candidate `(x, y)`, `false` to reject (forcing another trial).
+///
+/// Reject order (verified against `game.cpp:614-647`):
+/// 1. the min-distance rejects FIRST (`:619-624`): reject if within
+///    `WormMinSpawnDistLast` of the last-death pos **OR** within
+///    `WormMinSpawnDistEnemy` of the enemy;
+/// 2. then the `Rock()` box scan (`:626-647`): reject on any rock pixel in
+///    `[x-3, x+3) × [y-4, y+4)` (clamped to the level).
+///
+/// **C++ quirk mirrored faithfully (`game.cpp:614`):** `kDeltaX = old_x` — the
+/// last-position x "delta" is the raw `old_x`, **NOT** `old_x - x`. So the
+/// last-pos reject fires on the OLD x being near 0 (regardless of the candidate x)
+/// and never fires for a large `old_x` even if the candidate sits on the old spot.
+/// This is a genuine engine bug (the y term IS a real delta, `old_y - y`); the
+/// port reproduces it bit-for-bit, and the `Rock()` "special rock respawn bug"
+/// TODO (`game.cpp:642`) behaviour is likewise kept AS-IS, not "fixed".
+#[allow(clippy::too_many_arguments)]
+fn check_respawn_position(
+    level: &LevelSim,
+    x2: i32,
+    y2: i32,
+    old_x: i32,
+    old_y: i32,
+    x: i32,
+    y: i32,
+    min_spawn_dist_last: i32,
+    min_spawn_dist_enemy: i32,
+) -> bool {
+    // RED (Slice 5d T4): the port lands in GREEN. Consume the args so the stub
+    // type-checks; the T4 tests exercise this directly and must fail here first.
+    let _ = (
+        level,
+        x2,
+        y2,
+        old_x,
+        old_y,
+        x,
+        y,
+        min_spawn_dist_last,
+        min_spawn_dist_enemy,
+    );
+    todo!("Slice 5d T4 GREEN: port game.cpp:611-650 (CheckRespawnPosition)")
 }
 
 /// Stub for `Worm::DoRespawning` (`worm.cpp:755-809`) — the drop-in convergence
@@ -3314,4 +3490,265 @@ mod tests {
             "per-worm gib types => the two worms draw DIFFERENT amounts (not blood[6] for both)"
         );
     }
+
+    // ------------------------------------------------------------------------
+    // Slice 5d T4: BeginRespawn (worm.cpp:711-742) + CheckRespawnPosition
+    // (game.cpp:611-650) — the level+enemy-dependent respawn-position search,
+    // the canonical Step-2 desync trap. The RNG contract is 2 draws / trial
+    // (rand(W) THEN rand(H)); the trial count = f(level pixels, live enemy pos).
+    // ------------------------------------------------------------------------
+
+    // Test spawn-rect / min-dist consts. W != H so the per-trial draw ORDER
+    // (W FIRST, then H) is observable from the resulting candidate pos.
+    const TSPAWN_X: i32 = 100;
+    const TSPAWN_Y: i32 = 100;
+    const TSPAWN_W: i32 = 100;
+    const TSPAWN_H: i32 = 80;
+    const TMIN_LAST: i32 = 30;
+    const TMIN_ENEMY: i32 = 30;
+
+    // A flat level: material 0 everywhere with an all-zero flag table, so both
+    // `background()` (no drop-down) and `rock()` (empty Rock box) are false for
+    // every pixel. Tests paint individual cells as needed.
+    fn flat_level(width: i32, height: i32) -> LevelSim {
+        LevelSim {
+            width,
+            height,
+            material_id: vec![0u8; (width * height) as usize],
+            material_flags: [0u8; 256],
+        }
+    }
+
+    // A dead worm (visible=false) whose death position is the integer pixel
+    // `(px, py)`. `logic_respawn` is seeded with a sentinel begin_respawn must
+    // overwrite.
+    fn dead_worm_at(index: usize, px: i32, py: i32) -> WormState {
+        let mut w = WormState::from_init(&two_worms()[index]);
+        w.visible = false;
+        w.pos = Vec2::new(itof(px), itof(py));
+        w.logic_respawn = Vec2::new(-999, -999);
+        w.killed_timer = 0;
+        w
+    }
+
+    // Run begin_respawn on `worms[index]` with the shared test consts.
+    fn run_begin_respawn(worms: &mut [WormState], index: usize, level: &LevelSim, rand: &mut Rand) {
+        begin_respawn(
+            worms, index, level, TSPAWN_X, TSPAWN_Y, TSPAWN_W, TSPAWN_H, TMIN_LAST, TMIN_ENEMY, rand,
+        );
+    }
+
+    #[test]
+    fn t4_begin_respawn_one_trial_two_draws_w_then_h_and_sets_logic_respawn() {
+        // Open ground, enemy + last-pos both far: trial 1 is accepted immediately.
+        // Death pos (1000,1500) is large so the last-pos reject (kDeltaX = old_x,
+        // the C++ bug) stays FALSE (|1000| > TMIN_LAST); enemy (3000,3000) is far.
+        let level = flat_level(400, 400);
+        let mut worms = vec![dead_worm_at(0, 1000, 1500), dead_worm_at(1, 3000, 3000)];
+
+        // Reference stream: rand(W) FIRST, then rand(H). W != H pins the order.
+        let mut refr = seeded_rand(1234);
+        let cand_x = TSPAWN_X + refr.bound(TSPAWN_W as u32) as i32;
+        let cand_y = TSPAWN_Y + refr.bound(TSPAWN_H as u32) as i32;
+
+        let mut rand = seeded_rand(1234);
+        run_begin_respawn(&mut worms, 0, &level, &mut rand);
+
+        // logic_respawn = Ftoi(death) - (80,80).
+        assert_eq!(
+            worms[0].logic_respawn,
+            Vec2::new(1000 - 80, 1500 - 80),
+            "logic_respawn = death - (80,80)"
+        );
+        // EXACTLY 2 draws, in W-then-H order (RNG state matches the reference
+        // after bound(W) then bound(H)); a swapped order or a retry would diverge.
+        assert_eq!(rand.last(), refr.last(), "1-trial success => exactly 2 draws: rand(W) then rand(H)");
+        // pos = candidate 1 (accepted, no drop-down on flat ground).
+        assert_eq!(
+            worms[0].pos,
+            Vec2::new(itof(cand_x), itof(cand_y)),
+            "pos.x = Itof(X + rand(W)); pos.y = Itof(Y + rand(H))"
+        );
+        assert_eq!(worms[0].killed_timer, -1, "killed_timer = -1 on exit (:741)");
+    }
+
+    #[test]
+    fn t4_begin_respawn_enemy_too_close_forces_second_trial_four_draws() {
+        // Placing the LIVE enemy worm ON trial-1's candidate makes the enemy
+        // reject fire => a 2nd trial => 4 draws. Proves the enemy pos is read from
+        // `worms[index ^ 1]` (not a constant).
+        let level = flat_level(400, 400);
+        let mut refr = seeded_rand(77);
+        let c1x = TSPAWN_X + refr.bound(TSPAWN_W as u32) as i32;
+        let c1y = TSPAWN_Y + refr.bound(TSPAWN_H as u32) as i32;
+        let c2x = TSPAWN_X + refr.bound(TSPAWN_W as u32) as i32;
+        let c2y = TSPAWN_Y + refr.bound(TSPAWN_H as u32) as i32;
+        // `min_enemy = 0` => the enemy reject fires ONLY on the exact candidate
+        // (|dx| <= 0 && |dy| <= 0), so trial-1 (enemy sits on it) rejects while
+        // trial-2 clears as long as it is not pixel-identical to trial-1.
+        assert!((c1x, c1y) != (c2x, c2y), "fixture: trial-2 differs from trial-1");
+
+        // Death pos large => last-pos reject never fires. Enemy on candidate 1.
+        let mut worms = vec![dead_worm_at(0, 1000, 1500), dead_worm_at(1, c1x, c1y)];
+        let mut rand = seeded_rand(77);
+        begin_respawn(
+            &mut worms, 0, &level, TSPAWN_X, TSPAWN_Y, TSPAWN_W, TSPAWN_H, TMIN_LAST, 0, &mut rand,
+        );
+
+        assert_eq!(rand.last(), refr.last(), "2 trials => 4 draws (rand(W),rand(H) x2)");
+        assert_eq!(
+            worms[0].pos,
+            Vec2::new(itof(c2x), itof(c2y)),
+            "trial-1 rejected by the LIVE enemy pos; trial-2 accepted"
+        );
+        assert_eq!(worms[0].killed_timer, -1);
+    }
+
+    #[test]
+    fn t4_begin_respawn_rock_in_box_forces_second_trial() {
+        // A Rock() pixel inside trial-1's [x-3,x+3)x[y-4,y+4) box rejects it =>
+        // a 2nd trial. Proves the CheckRespawnPosition rock scan feeds the count.
+        let mut level = flat_level(400, 400);
+        let mut refr = seeded_rand(9);
+        let c1x = TSPAWN_X + refr.bound(TSPAWN_W as u32) as i32;
+        let c1y = TSPAWN_Y + refr.bound(TSPAWN_H as u32) as i32;
+        let c2x = TSPAWN_X + refr.bound(TSPAWN_W as u32) as i32;
+        let c2y = TSPAWN_Y + refr.bound(TSPAWN_H as u32) as i32;
+        // Rock pixel at (c1x, c1y) — inside trial-1's box, outside trial-2's box.
+        assert!(
+            !(c2x - 3 <= c1x && c1x < c2x + 3 && c2y - 4 <= c1y && c1y < c2y + 4),
+            "fixture: the rock must fall outside trial-2's box"
+        );
+        level.material_flags[9] = MAT_ROCK;
+        level.material_id[(c1x + c1y * level.width) as usize] = 9;
+
+        let mut worms = vec![dead_worm_at(0, 1000, 1500), dead_worm_at(1, 3000, 3000)];
+        let mut rand = seeded_rand(9);
+        run_begin_respawn(&mut worms, 0, &level, &mut rand);
+
+        assert_eq!(rand.last(), refr.last(), "rock reject => 2nd trial => 4 draws");
+        assert_eq!(worms[0].pos, Vec2::new(itof(c2x), itof(c2y)));
+    }
+
+    #[test]
+    fn t4_begin_respawn_dropdown_is_rand_free_and_moves_pos_down() {
+        // Floor level: rows [0, FLOOR) Background, rows [FLOOR, height) solid. Any
+        // candidate slides down until pos.y+4 hits the floor. The drop-down draws
+        // NO rand => still exactly 2 draws despite moving pos.y.
+        let width = 400;
+        let height = 250;
+        let floor = 200; // rows >= 200 are solid
+        let mut level = flat_level(width, height);
+        level.material_flags[8] = MAT_BACKGROUND;
+        for y in 0..floor {
+            for x in 0..width {
+                level.material_id[(x + y * width) as usize] = 8;
+            }
+        }
+        let mut refr = seeded_rand(5);
+        let c1x = TSPAWN_X + refr.bound(TSPAWN_W as u32) as i32;
+        let _c1y = TSPAWN_Y + refr.bound(TSPAWN_H as u32) as i32;
+
+        let mut worms = vec![dead_worm_at(0, 1000, 1900), dead_worm_at(1, 3000, 3000)];
+        let mut rand = seeded_rand(5);
+        run_begin_respawn(&mut worms, 0, &level, &mut rand);
+
+        assert_eq!(rand.last(), refr.last(), "drop-down draws NO rand => still 2 draws");
+        // Slid down: y+4 first hits solid at y == floor - 4.
+        assert_eq!(ftoi(worms[0].pos.y), floor - 4, "slid down to rest on the floor");
+        assert_eq!(ftoi(worms[0].pos.x), c1x, "x is unchanged by the drop-down");
+        assert_eq!(worms[0].killed_timer, -1);
+    }
+
+    #[test]
+    fn t4_begin_respawn_single_worm_enemy_defaults_to_death_pos() {
+        // Only ONE worm => `worms.len() != 2` => enemy = temp (the death pos), NOT
+        // a second worm. Death pos ON trial-1's candidate makes the enemy(=temp)
+        // clause reject it => a 2nd trial. Proves the `worms.size() == 2` gate and
+        // the enemy=temp fallback.
+        let level = flat_level(400, 400);
+        let mut refr = seeded_rand(21);
+        let c1x = TSPAWN_X + refr.bound(TSPAWN_W as u32) as i32;
+        let c1y = TSPAWN_Y + refr.bound(TSPAWN_H as u32) as i32;
+        let c2x = TSPAWN_X + refr.bound(TSPAWN_W as u32) as i32;
+        let c2y = TSPAWN_Y + refr.bound(TSPAWN_H as u32) as i32;
+        // `min_enemy = 0`: enemy(=death pos) rejects only the exact candidate.
+        assert!((c1x, c1y) != (c2x, c2y), "fixture: trial-2 differs from trial-1");
+
+        let mut worms = vec![dead_worm_at(0, c1x, c1y)];
+        let mut rand = seeded_rand(21);
+        begin_respawn(
+            &mut worms, 0, &level, TSPAWN_X, TSPAWN_Y, TSPAWN_W, TSPAWN_H, TMIN_LAST, 0, &mut rand,
+        );
+
+        assert_eq!(rand.last(), refr.last(), "len!=2: enemy=temp; trial-1 rejected => 4 draws");
+        assert_eq!(worms[0].pos, Vec2::new(itof(c2x), itof(c2y)));
+        assert_eq!(
+            worms[0].logic_respawn,
+            Vec2::new(c1x - 80, c1y - 80),
+            "logic_respawn still = death - (80,80)"
+        );
+    }
+
+    #[test]
+    fn t4_begin_respawn_trials_guard_breaks_at_50000() {
+        // A level that ALWAYS rejects (enemy blankets the whole spawn rect) makes
+        // the loop run until the `++trials >= 50000` guard breaks (:736-738) and
+        // still sets killed_timer = -1. Enemy huge min-dist so every candidate in
+        // [X, X+W) x [Y, Y+H) is within the enemy radius.
+        let level = flat_level(600, 600);
+        // Enemy in the middle of the spawn rect with a min-dist covering all of it.
+        let mut worms = vec![dead_worm_at(0, 1000, 1500), dead_worm_at(1, 150, 140)];
+        let big = 100_000; // radius >> the whole 100x80 spawn rect
+        let mut rand = seeded_rand(3);
+        begin_respawn(
+            &mut worms, 0, &level, TSPAWN_X, TSPAWN_Y, TSPAWN_W, TSPAWN_H, TMIN_LAST, big, &mut rand,
+        );
+        // 50000 trials x 2 draws each = 100000 draws consumed; loop broke, not hung.
+        assert_eq!(worms[0].killed_timer, -1, "killed_timer = -1 even on the guard break");
+    }
+
+    #[test]
+    fn t4_check_respawn_position_reject_clauses_and_raw_old_x_bug() {
+        // Big level so the box scan never clamps or reads OOB.
+        let level = flat_level(1400, 700);
+        // (a) last-pos reject uses the RAW old_x (C++ bug, game.cpp:614): old_x
+        // small (<= last) + old_y near y => reject, EVEN THOUGH candidate x is 990
+        // px from old_x. Enemy far.
+        assert!(
+            !check_respawn_position(&level, 9999, 9999, 10, 500, 1000, 505, 30, 30),
+            "kDeltaX = old_x (10) <= 30 && |old_y - y| = 5 <= 30 => reject despite x far apart"
+        );
+        // (b) the bug's tell: a LARGE old_x makes the last clause false even when
+        // the candidate sits 5 px from the old position => accepted.
+        assert!(
+            check_respawn_position(&level, 9999, 9999, 1000, 500, 1005, 505, 30, 30),
+            "old_x = 1000 > 30 => last clause false; enemy far; no rock => accept"
+        );
+        // (c) enemy reject: candidate within min_enemy of the enemy.
+        assert!(
+            !check_respawn_position(&level, 200, 200, 9999, 9999, 210, 205, 30, 30),
+            "|x2-x|=10, |y2-y|=5 <= 30 => enemy reject"
+        );
+        // (d) rock reject: a rock pixel inside the [x-3,x+3)x[y-4,y+4) box.
+        let mut rlevel = flat_level(1400, 700);
+        rlevel.material_flags[9] = MAT_ROCK;
+        rlevel.material_id[(200 + 200 * 1400) as usize] = 9; // (200,200), in the box
+        assert!(
+            !check_respawn_position(&rlevel, 9999, 9999, 9999, 9999, 200, 200, 30, 30),
+            "rock in the box => reject"
+        );
+        // (e) accept: clear of last (old_x large), enemy, and rock.
+        assert!(
+            check_respawn_position(&level, 9999, 9999, 9999, 9999, 200, 200, 30, 30),
+            "clear of last, enemy, and rock => accept"
+        );
+    }
+
+    // NOTE: no full-tick `process_frame` test drives worm 0 through the
+    // killed_timer 1 -> 0 transition here: per C++ (`worm.cpp:443-449`) the SAME
+    // tick that runs BeginRespawn (killed_timer -> -1) then falls through the
+    // `killed_timer < 0` arm into DoRespawning, which is still the T5 `unreachable!`
+    // stub. So T4 exercises begin_respawn DIRECTLY (above) and stops at
+    // killed_timer == -1; the full dead-arm drive lands with T5.
 }

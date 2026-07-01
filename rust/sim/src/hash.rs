@@ -262,6 +262,12 @@ mod tests {
             bonus_bounce_mul: 0,
             bonus_bounce_div: 0,
             bonus_s_objects: [0, 0],
+            worm_spawn_rect_x: 0,
+            worm_spawn_rect_y: 0,
+            worm_spawn_rect_w: 0,
+            worm_spawn_rect_h: 0,
+            worm_min_spawn_dist_last: 0,
+            worm_min_spawn_dist_enemy: 0,
         }
     }
 

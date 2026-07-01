@@ -1093,6 +1093,7 @@ impl SimState {
             bonus_s_objects,
             bonuses,
             cycles,
+            settings_health,
             ..
         } = self;
         let h_signed_recoil = *h_signed_recoil;
@@ -1115,6 +1116,7 @@ impl SimState {
         let bonus_gravity = *bonus_gravity;
         let bonus_bounce_mul = *bonus_bounce_mul;
         let bonus_bounce_div = *bonus_bounce_div;
+        let settings_health = *settings_health;
         // The object loops read `cycles` as a value for the `cycles % delay` /
         // `cycles & 7` gates inside `nobject_process`. They must see the value left by
         // the PREVIOUS tick's increment (cycles=k-1 on tick k) — exactly as the C++
@@ -1337,24 +1339,31 @@ impl SimState {
                 w.control_states = *input;
             }
 
-            // PARTIAL port of `Worm::Process` (worm.cpp:210-451). The full C++
-            // structure is:
+            // Port of `Worm::Process` (worm.cpp:210-452). The C++ structure is:
             //   health = min(health, settings_health);          // 213 — ALWAYS
             //   if ((mode != KillEmAll && mode != Scales) || lives > 0) {  // 215
             //     if (visible) { ...active-sim body (steps 2-11)... }      // 218
             //     else { steerable_count = 0; PressedOnce(kFire)->ready;   // 431-450
             //            --killed_timer; BeginRespawn; DoRespawning; }
             //   }
-            // We port ONLY the `if (visible)` active-simulation arm below. The
-            // health=min clamp (213), the game-mode/lives gate (215), and the
-            // entire dead-worm `else` arm (431-450) are DELIBERATELY UNPORTED:
-            // they are inert while no worm dies/respawns (health == settings_health,
-            // no kFire on an idle invisible worm, hash stays CONSTANT), so slices
-            // 1-4a match bit-exact. FORWARD-NOTE / latent bug: the first slice that
-            // drives a DEAD or respawning worm MUST port the `else` arm (killed_timer
-            // countdown + BeginRespawn/DoRespawning) AND the health clamp + lives
-            // gate — without it a Rust dead worm never counts down and never respawns
-            // (hash diverges). See slice-3 reko (settings_health + visible/dead split).
+
+            // Health clamp (worm.cpp:213) — ALWAYS, BEFORE the game-mode/lives
+            // gate, so it caps even a gate-closed (lives==0) worm. Identity for
+            // slices 1-5c (worms start at settings_health == 100 and never exceed
+            // it), so priors stay byte-identical.
+            w.health = w.health.min(settings_health);
+
+            // Game-mode / lives gate (worm.cpp:215). The full C++ condition is
+            // `(mode != KillEmAll && mode != Scales) || lives > 0`; the openliero
+            // TC mode is KillEmAll (and Scales folds the same way), so it reduces
+            // to `lives > 0`. Non-KillEmAll/Scales modes (e.g. GameOfTag) would
+            // make the gate always-true — those branches stay present-but-guarded
+            // (game_mode is unmodelled; the TC is always KillEmAll). Hash-neutral
+            // for priors (lives > 0 always in 1-5c).
+            if w.lives <= 0 {
+                continue;
+            }
+
             if w.visible {
                 // 2. reaction orchestration -> reacts (shared by tasks + physics).
                 let reacts = worm_reactions(level, w, physics);
@@ -1418,9 +1427,61 @@ impl SimState {
                         rand,
                     );
                 }
+            } else {
+                // Worm is dead (worm.cpp:431-450). None of this touches a hashed
+                // field except `killed_timer` (unhashed) and — on a Fire hit —
+                // `control_states` (the read-and-clear of the Fire bit); both are
+                // unreached for slices 1-5c, whose worms are all visible, so those
+                // goldens stay byte-identical.
+                w.steerable_count = 0;
+
+                // PressedOnce(kFire) (worm.hpp:187-191): read the Fire bit, CLEAR
+                // it, and set `ready` when it was set. `ready` gates the
+                // `DoRespawning` completion (T5).
+                let fire = w.control_states.get(ControlState::FIRE);
+                w.control_states.set(ControlState::FIRE, false);
+                if fire {
+                    w.ready = true;
+                }
+
+                // killed_timer countdown (worm.cpp:439-449). The 150-tick dead
+                // phase is hash-silent (killed_timer is in NEITHER hash); the
+                // countdown is pinned only transitively through WHEN the
+                // BeginRespawn RNG burst lands.
+                if w.killed_timer > 0 {
+                    w.killed_timer -= 1;
+                }
+                // `killed_timer == 0 && !quick_sim` -> BeginRespawn. The dumper
+                // never sets quick_sim (game.hpp:153 `quick_sim{false}` default),
+                // so the guard is always open and omitted here. BeginRespawn is
+                // ported in Slice 5d T4 — STUB (unreachable until a worm dies).
+                if w.killed_timer == 0 {
+                    begin_respawn(w);
+                }
+                // `killed_timer < 0` -> DoRespawning. Ported in T5 — STUB.
+                if w.killed_timer < 0 {
+                    do_respawning(w);
+                }
             }
         }
     }
+}
+
+/// Stub for `Worm::BeginRespawn` (`worm.cpp:711-742`) — the level-reading RNG
+/// respawn-position search, ported in Slice 5d T4. UNREACHABLE in T1: it is
+/// entered only when `killed_timer == 0` in the dead arm, which requires a worm
+/// to have died (`visible == false` + a 150→0 countdown) — impossible while
+/// slices 1-5c keep every worm visible.
+fn begin_respawn(_worm: &mut WormState) {
+    unreachable!("BeginRespawn is ported in Slice 5d T4; unreachable until a worm dies");
+}
+
+/// Stub for `Worm::DoRespawning` (`worm.cpp:755-809`) — the drop-in convergence
+/// and the lone `rand() & 1` aiming draw, ported in Slice 5d T5. UNREACHABLE in
+/// T1: entered only when `killed_timer < 0`, reachable only after `BeginRespawn`
+/// sets it to `-1`.
+fn do_respawning(_worm: &mut WormState) {
+    unreachable!("DoRespawning is ported in Slice 5d T5; unreachable until a worm dies");
 }
 
 #[cfg(test)]

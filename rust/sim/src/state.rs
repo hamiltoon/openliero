@@ -1484,6 +1484,20 @@ fn do_respawning(_worm: &mut WormState) {
     unreachable!("DoRespawning is ported in Slice 5d T5; unreachable until a worm dies");
 }
 
+/// Pre-death blood drip (`worm.cpp:355-367`) — RED stub (Slice 5d T2). Ported in
+/// the GREEN step; the no-op body draws nothing so the branch tests fail (RED)
+/// while the closed-gate test trivially holds.
+#[allow(clippy::too_many_arguments)]
+fn worm_pre_death_drip(
+    _w: &WormState,
+    _index: i32,
+    _settings_health: i32,
+    _nobject_types: &[NObjectType],
+    _rand: &mut Rand,
+    _nobjects: &mut Pool<NObject>,
+) {
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2591,5 +2605,176 @@ mod tests {
             state.worms[0].killed_timer, 149,
             "killed_timer counted down in the dead arm"
         );
+    }
+
+    // ----- Slice 5d T2: pre-death blood drip (worm.cpp:355-367) -------------
+    // The drip fires at the END of the visible arm while a worm is alive but
+    // under settings_health/4. RNG contract (verified against :355-367):
+    //   rand(health+6)            [outer gate]
+    //   on 0 -> rand(3)           [inner gate]
+    //   on 0 -> rand(3)           [sound index 18 + rand(3)]
+    //   then, within the OUTER gate (outside the sound gate):
+    //     nobject_types[6].Create1 = rand(dist*2) x2   [the blood spawn]
+    // Tests drive the standalone `worm_pre_death_drip` against a SEEDED Rand
+    // and replay a reference stream to pin the exact draw ORDER + COUNT (so
+    // an order swap / miscount / mis-nested gate is detectable — non-taut).
+
+    fn drip_worm(health: i32) -> WormState {
+        let mut w = WormState::from_init(&two_worms()[1]);
+        w.health = health;
+        w
+    }
+
+    // Blood is nobject_types[6]: distribution != 0 so Create1 draws two
+    // rand(dist*2) (x, y); start_frame <= 0 & color == 0 & color_bullets == 0
+    // => Create takes the color path (no extra draw). Exactly 2 draws / spawn.
+    fn blood_types() -> Vec<NObjectType> {
+        let mut v = vec![NObjectType::default(); 7];
+        v[6] = NObjectType {
+            distribution: 10000,
+            start_frame: 0,
+            color_bullets: 0,
+            ..Default::default()
+        };
+        v
+    }
+
+    fn seeded_rand(s: u32) -> Rand {
+        let mut r = Rand::new();
+        r.seed(s);
+        r
+    }
+
+    // A seed whose SECOND draw (after the forced-0 `bound(1)` outer roll on a
+    // health=-5 worm, `health+6 == 1`) has `bound(3) == 0` (inner gate open =>
+    // sound draw) or `!= 0` (inner gate closed => no sound draw).
+    fn seed_forcing_inner(inner_zero: bool) -> u32 {
+        for s in 0u32..2_000_000 {
+            let mut r = seeded_rand(s);
+            let _outer = r.bound(1); // health+6 == 1 => bound(1) is always 0
+            if (r.bound(3) == 0) == inner_zero {
+                return s;
+            }
+        }
+        panic!("no seed forces inner_zero = {inner_zero}");
+    }
+
+    // A seed whose FIRST `bound(m)` is non-zero (forces the outer gate CLOSED).
+    fn seed_forcing_outer_nonzero(m: u32) -> u32 {
+        for s in 0u32..2_000_000 {
+            let mut r = seeded_rand(s);
+            if r.bound(m) != 0 {
+                return s;
+            }
+        }
+        panic!("no seed forces a non-zero outer roll for m = {m}");
+    }
+
+    #[test]
+    fn t2_drip_gate_closed_at_or_above_quarter_health_draws_nothing() {
+        // health >= settings_health/4 (integer /): the whole drip is skipped —
+        // no draw, no spawn. settings_health=100 => quarter = 25; health=25 is
+        // NOT < 25 (the boundary), so the gate is closed. This pins the integer
+        // `/4` and the `<` (not `<=`).
+        let w = drip_worm(25);
+        let types = blood_types();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(7);
+        let before = rand.last();
+
+        worm_pre_death_drip(&w, 1, 100, &types, &mut rand, &mut pool);
+
+        assert_eq!(rand.last(), before, "closed gate draws NO rand");
+        assert_eq!(pool.len(), 0, "closed gate spawns nothing");
+    }
+
+    #[test]
+    fn t2_drip_nonzero_outer_draws_one_and_spawns_nothing() {
+        // health < settings_health/4 opens the outer gate; a NON-ZERO outer
+        // roll draws exactly ONE value (rand(health+6)) and spawns nothing (no
+        // inner, no sound, no Create1).
+        let health = 24; // 24 < 25; health+6 = 30
+        let seed = seed_forcing_outer_nonzero(30);
+        let w = drip_worm(health);
+        let types = blood_types();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(seed);
+
+        // Reference: exactly one bound(30), asserted non-zero (seed guard).
+        let mut refr = seeded_rand(seed);
+        let outer = refr.bound(30);
+        assert_ne!(outer, 0, "seed guard: the outer roll must be non-zero");
+
+        worm_pre_death_drip(&w, 1, 100, &types, &mut rand, &mut pool);
+
+        assert_eq!(rand.last(), refr.last(), "exactly ONE outer draw");
+        assert_eq!(pool.len(), 0, "non-zero outer => no blood spawn");
+    }
+
+    #[test]
+    fn t2_drip_zero_outer_nonzero_inner_spawns_without_sound() {
+        // Forced-0 outer (health=-5 => health+6 = 1 => bound(1) == 0 always)
+        // and a NON-ZERO inner roll: draws outer + inner, SKIPS the sound draw,
+        // then ALWAYS spawns blood (Create1 = 2 draws). This is the load-bearing
+        // case: the Create1 spawn sits INSIDE the outer gate but OUTSIDE the
+        // sound gate. Order: bound(1), bound(3), bound(20000), bound(20000).
+        let seed = seed_forcing_inner(false);
+        let w = drip_worm(-5);
+        let types = blood_types();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(seed);
+
+        let mut refr = seeded_rand(seed);
+        let outer = refr.bound(1);
+        assert_eq!(outer, 0, "health+6 == 1 => bound(1) is always 0 (forced outer)");
+        let inner = refr.bound(3);
+        assert_ne!(inner, 0, "seed guard: inner non-zero => no sound draw");
+        let _dx = refr.bound(20000); // Create1 x
+        let _dy = refr.bound(20000); // Create1 y
+
+        worm_pre_death_drip(&w, 1, 100, &types, &mut rand, &mut pool);
+
+        assert_eq!(
+            rand.last(),
+            refr.last(),
+            "draws outer + inner + Create1(x,y); NO sound draw"
+        );
+        assert_eq!(
+            pool.len(),
+            1,
+            "Create1 spawns inside the outer gate regardless of the inner/sound gate"
+        );
+    }
+
+    #[test]
+    fn t2_drip_zero_outer_zero_inner_draws_sound_then_spawns() {
+        // Forced-0 outer AND forced-0 inner: adds the sound draw (18 + rand(3))
+        // BEFORE Create1. Order: bound(1), bound(3), bound(3) [sound],
+        // bound(20000), bound(20000). The sound draw sits inside the inner gate;
+        // Create1 sits outside it (but inside the outer gate) => exactly ONE
+        // more draw than the no-sound case, plus the spawn.
+        let seed = seed_forcing_inner(true);
+        let w = drip_worm(-5);
+        let types = blood_types();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(seed);
+
+        let mut refr = seeded_rand(seed);
+        let outer = refr.bound(1);
+        assert_eq!(outer, 0, "forced outer 0");
+        let inner = refr.bound(3);
+        assert_eq!(inner, 0, "seed guard: inner == 0 opens the sound gate");
+        let _snd = 18 + refr.bound(3); // sound index draw (18 + rand(3))
+        let _dx = refr.bound(20000); // Create1 x
+        let _dy = refr.bound(20000); // Create1 y
+
+        worm_pre_death_drip(&w, 1, 100, &types, &mut rand, &mut pool);
+
+        assert_eq!(
+            rand.last(),
+            refr.last(),
+            "draws outer + inner + SOUND + Create1(x,y)"
+        );
+        assert_eq!(pool.len(), 1, "blood spawns after the sound draw");
     }
 }

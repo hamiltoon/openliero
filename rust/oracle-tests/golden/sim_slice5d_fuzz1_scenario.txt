@@ -1,0 +1,52 @@
+# Step 2 Slice 5d T9 — fixed-level multi-seed respawn FUZZ, VARIANT 1 of 4 (O21).
+#
+# Same engine surface as the 5d MILESTONE (worm-loop DEATH + RESPAWN goes live: worm0
+# fires EXPLOSIVES, air-bursts kill the low-health worm1, then after the 150-tick
+# killed_timer countdown worm1 runs BeginRespawn's level-reading RNG spawn search +
+# DoRespawning). The four T9 variants sit on the SAME physics_fall_test.lev but are
+# tuned so BeginRespawn takes a DIFFERENT bounded trial count each — proving the
+# Step-2 desync trap's *variance* is covered bit-exact vs the C++ oracle, not one
+# search replayed four times.
+#
+# === THE TRIAL-COUNT LEVER (game.cpp:611-650 CheckRespawnPosition) ===================
+# BeginRespawn's do/while draws `rand(WormSpawnRectW)`,`rand(WormSpawnRectH)` per trial
+# and loops until CheckRespawnPosition accepts. Its last-pos reject clause uses a RAW
+# `kDeltaX = old_x` (an engine BUG the port mirrors, game.cpp:614 / state.rs): it fires
+# only when `abs(death_x) <= WormMinSpawnDistLast(160)`. In the milestone worm1 dies at
+# x=115 (<=160) so EVERY floor candidate is rejected and the search caps at 50000 trials
+# — the SAME degenerate search regardless of seed. The T9 variants move both worms RIGHT
+# so worm1 dies at x>160, DISABLING the last-pos reject; the search is then governed only
+# by the enemy-distance band (`abs(enemy_x - cand_x) <= WormMinSpawnDistEnemy(160)`) plus
+# the live rand stream, so the realised trial count is small and VARIES with the killer's
+# x and the pre-death drip timing (worm1 health).
+#
+# VARIANT 1: worm0 x=235, worm1 x=200 (base +85), worm1 health 12. worm1 dies at x=200
+# (>160). Measured against the C++ oracle: death ~tick 87, BeginRespawn ~tick 237 with
+# **3 trials** (rng burst = 2*3 = 6 draws), reborn ~tick 292 — all inside the 360-tick
+# window. (Variants 2/3/4 give 7/2/6 trials => >=2 distinct trial counts collectively.)
+#
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics, UNCHANGED since 5c) and the Rust
+# difftest (sim_slice5d_fuzz.rs). Same grammar as slices 2..5d.
+seed 42
+level Levels/physics_fall_test.lev
+ticks 360
+max_bonuses 0
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# worm0 = KILLER (x=235, full health, EXPLOSIVES slot 0). worm1 = VICTIM (x=200 > 160,
+# grounded + visible, low health 12 < settings->health/4=25 so it drips then dies).
+worm 0  15400960 12779520 100 10 0   1
+worm 1  13107200 12845520  12 10 218 1
+weapon 0 EXPLOSIVES
+# worm0: raise the gun (Up ticks 13-20) then Fire tick 38 — the 5b kill sequence,
+# unchanged (the +85 shift preserves the relative fire geometry).
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 38 16 0
+# worm1: a single Fire PRESS at tick 150 (dead by then) to latch `ready` for DoRespawning.
+input 150 0 16

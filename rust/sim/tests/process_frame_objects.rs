@@ -359,9 +359,21 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
 
     let mut obj = pre_explode_wobj;
     assert_eq!(
-        wobject_process(&mut obj, &level_before, &dart, 0, &mut r2),
+        wobject_process(
+            &mut obj,
+            &level_before,
+            &dart,
+            0,
+            &mut worms2,
+            &mut nobjects2,
+            &s.nobject_types,
+            &s.worm_sprites,
+            &cossin,
+            s.blood,
+            &mut r2,
+        ),
         WObjectOutcome::Explode,
-        "the captured dart explodes on the floor"
+        "the captured dart explodes on the floor (empty worm list -> in-flight arm inert)"
     );
     blow_up(
         &dart,

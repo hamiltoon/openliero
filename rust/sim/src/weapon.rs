@@ -32,7 +32,7 @@ use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
 use crate::blit::draw_dirt_effect;
-use crate::nobject::nobject_create2;
+use crate::nobject::{check_for_spec_worm_hit, nobject_create2};
 use crate::pool::Pool;
 use crate::sobject::sobject_create;
 use crate::state::{LevelSim, NObject, SObject, WObject, WormState};
@@ -255,20 +255,33 @@ pub enum WObjectOutcome {
 /// trips loudly, or omitted because they need state the driver owns):
 /// steering (`shot_type` 2/3) and the laser do-loop, `mult_speed`, and
 /// object/particle trails are all `debug_assert`ed to their fan-shaped no-op
-/// values. The `collide_with_objects` impulse loop and
-/// the worm-hit loop need the object pools / worm list and draw no RNG under the
-/// 4a single-shot scenario (self-skip, worms out of range), so they are omitted
-/// here and land in 4b/4c with the driver. The `RemExp` early-explode block
+/// values. The `collide_with_objects` impulse loop needs the wobject/nobject
+/// pools and draws no RNG under the single-shot scenarios (self-skip), so it is
+/// omitted here and lands with the driver.
+///
+/// **The in-flight worm-hit arm (`weapon.cpp:287-326`) is now LIVE** (Slice-5′a
+/// T3, re-applying `fd33bbc`): after the timeout countdown a per-worm loop, gated
+/// by the per-pixel [`check_for_spec_worm_hit`] (T2), applies the vel-kick +
+/// `DoDamage` + **the blood fan BEFORE the hit-sound gate** (the load-bearing
+/// order — the OPPOSITE of the nobject arm) + the `worm_collide` explode/remove
+/// verdict. See the inline block for the exact RNG order. The `RemExp` early-explode block
 /// (`weapon.cpp:138-142`, gated on the `HRemExp` hack AND the weapon being the
 /// configurable `RemExpObject` LC slot) is likewise omitted: fan is not the
 /// `RemExpObject` weapon, so it is inert here (differential-proven over 93 ticks);
 /// port it when a slice exercises `RemExpObject`.
+#[allow(clippy::too_many_arguments)]
 pub fn wobject_process(
     obj: &mut WObject,
     level: &LevelSim,
     weapon: &Weapon,
     cycles: i32,
-    _rand: &mut Rand,
+    worms: &mut [WormState],
+    nobjects: &mut Pool<NObject>,
+    nobject_types: &[NObjectType],
+    worm_sprites: &SpriteSet,
+    cossin: &[Vec2; 128],
+    blood: i32,
+    rand: &mut Rand,
 ) -> WObjectOutcome {
     // Deferred-branch guards (4b/4c). Fan and dart satisfy every one (the dart
     // trips only the shot_type guard, now relaxed to admit ST_TYPE1); a config
@@ -353,9 +366,9 @@ pub fn wobject_process(
         }
     }
 
-    // The collide_with_objects impulse loop (weapon.cpp:212-232) and the worm-hit
-    // loop (287-326) go here in C++; omitted (driver-owned + inert for one shot;
-    // no RNG drawn under the scenario). See the doc-comment.
+    // The collide_with_objects impulse loop (weapon.cpp:212-232) goes here in C++;
+    // omitted (driver-owned + inert for one shot; no RNG drawn under the scenario).
+    // The worm-hit loop (weapon.cpp:287-326) is AFTER the timeout, below.
 
     // Boundary clamp (weapon.cpp:234-247). inew = Ftoi(pos + vel), computed ONCE
     // and reused by the collision test; the clamp below mutates pos, not inew.
@@ -429,6 +442,19 @@ pub fn wobject_process(
             do_explode = true;
         }
     }
+
+    // In-flight worm-hit loop (weapon.cpp:287-326) — NOT YET IMPLEMENTED (T3 RED).
+    // The extended signature is present so the `worm_hit_*` tests compile against
+    // the final shape, but the arm body lands in GREEN; these tests FAIL here.
+    let _ = (
+        &mut *worms,
+        &mut *nobjects,
+        nobject_types,
+        worm_sprites,
+        cossin,
+        blood,
+        &mut *rand,
+    );
 
     if do_explode {
         WObjectOutcome::Explode
@@ -586,7 +612,7 @@ pub fn blow_up(
 mod tests {
     use super::*;
     use crate::state::{
-        LevelSim, WeaponInit, WormInit, MAT_BACKGROUND, MAT_DIRT, MAT_ROCK, NUM_WEAPONS,
+        LevelSim, WeaponInit, WormInit, MAT_BACKGROUND, MAT_DIRT, MAT_ROCK, MAT_WORM, NUM_WEAPONS,
     };
     use sim_core::tables::precompute_cossin;
 
@@ -945,6 +971,40 @@ mod tests {
         }
     }
 
+    // Drives `wobject_process` with an EMPTY worm list so the T3 in-flight
+    // worm-hit arm is inert (no worm to hit): it never calls
+    // `check_for_spec_worm_hit` and draws no arm RNG. Preserves the pre-T3 5-arg
+    // call shape used by the flight / collision / timeout tests below, which pin
+    // the flight path in isolation. The arm itself is exercised by the
+    // `worm_hit_*` tests further down, which call `wobject_process` directly with
+    // a real worm + sprite bank.
+    fn proc_no_worms(
+        obj: &mut WObject,
+        level: &LevelSim,
+        weapon: &Weapon,
+        cycles: i32,
+        rand: &mut Rand,
+    ) -> WObjectOutcome {
+        let mut worms: [WormState; 0] = [];
+        let mut nobjects: Pool<NObject> = Pool::new(1);
+        let nobject_types: [NObjectType; 0] = [];
+        let worm_sprites = SpriteSet::default();
+        let cossin = precompute_cossin();
+        wobject_process(
+            obj,
+            level,
+            weapon,
+            cycles,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            rand,
+        )
+    }
+
     // ---- Step 1: movement + gravity -----------------------------------------
 
     #[test]
@@ -967,7 +1027,7 @@ mod tests {
 
         let mut expected = obj.pos;
         for tick in 0..3 {
-            let out = wobject_process(&mut obj, &level, &fan, 0, &mut rand);
+            let out = proc_no_worms(&mut obj, &level, &fan, 0, &mut rand);
             assert_eq!(out, WObjectOutcome::Keep, "tick {tick} keeps the object");
             expected = expected.add(vel);
             assert_eq!(obj.pos, expected, "pos advanced by vel on tick {tick}");
@@ -999,7 +1059,7 @@ mod tests {
                 ..WObject::default()
             };
             let mut rand = seeded();
-            wobject_process(&mut obj, &level, &w, 0, &mut rand);
+            proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
             obj
         };
 
@@ -1041,7 +1101,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        let out = wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        let out = proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
         assert_eq!(
             out,
             WObjectOutcome::Explode,
@@ -1063,7 +1123,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        let out = wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        let out = proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
         assert_eq!(out, WObjectOutcome::Keep, "free air -> Keep");
         assert_eq!(obj.vel.y, 1000, "air branch adds gravity to vel.y");
     }
@@ -1082,7 +1142,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        let out = wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        let out = proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
         assert_eq!(out, WObjectOutcome::Keep, "no expl_ground -> Keep");
         assert_eq!(
             obj.vel,
@@ -1112,7 +1172,7 @@ mod tests {
         };
         let mut rand = seeded();
         assert_eq!(
-            wobject_process(&mut at_zero, &level, &fan, 0, &mut rand),
+            proc_no_worms(&mut at_zero, &level, &fan, 0, &mut rand),
             WObjectOutcome::Explode,
             "time_left 0 -> explodes on this tick"
         );
@@ -1127,7 +1187,7 @@ mod tests {
         };
         let mut rand2 = seeded();
         assert_eq!(
-            wobject_process(&mut at_one, &level, &fan, 0, &mut rand2),
+            proc_no_worms(&mut at_one, &level, &fan, 0, &mut rand2),
             WObjectOutcome::Keep,
             "time_left 1 -> survives this tick"
         );
@@ -1156,7 +1216,7 @@ mod tests {
             ty: Some(fan.id),
             ..WObject::default()
         };
-        let out = wobject_process(&mut obj, &level, &fan, 0, &mut rand);
+        let out = proc_no_worms(&mut obj, &level, &fan, 0, &mut rand);
 
         assert_eq!(out, WObjectOutcome::Keep, "free flight keeps");
         assert_eq!(
@@ -1254,7 +1314,7 @@ mod tests {
         let mut exp_pos = obj.pos;
         let mut exp_vel = vel0;
         for tick in 0..5 {
-            let out = wobject_process(&mut obj, &level, &dart, 0, &mut rand);
+            let out = proc_no_worms(&mut obj, &level, &dart, 0, &mut rand);
             assert_eq!(
                 out,
                 WObjectOutcome::Keep,
@@ -1342,7 +1402,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        let out = wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        let out = proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
         assert_eq!(out, WObjectOutcome::Keep, "bounce -> Keep (no ground explode)");
         // vel.x = -vel.x * 30 / 100 = -65536*30/100 = -1966080/100 = -19660 (trunc).
         assert_eq!(obj.vel.x, -19660, "x probe: vel.x = -vel.x*bounce/100");
@@ -1365,7 +1425,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        let out = wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        let out = proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
         assert_eq!(out, WObjectOutcome::Keep, "bounce -> Keep");
         // vel.y = -vel.y*30/100 = -19660; vel.x = vel.x*4/5 = 0.
         assert_eq!(obj.vel.y, -19660, "y probe: vel.y = -vel.y*bounce/100");
@@ -1385,7 +1445,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
         assert_eq!(obj.vel.x, itof(-1), "bounce 100: vel.x = -vel.x (pure negate)");
         assert_eq!(obj.vel.y, 0, "bounce 100: vel.y untouched by x probe");
     }
@@ -1405,7 +1465,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
         assert_eq!(obj.vel, vel, "open air: no probe fires, vel unchanged");
     }
 
@@ -1424,7 +1484,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        wobject_process(&mut obj, &level, &w, 0, &mut rand);
+        proc_no_worms(&mut obj, &level, &w, 0, &mut rand);
         assert_eq!(rand.last(), last_before, "bounce draws no rng");
     }
 
@@ -1444,7 +1504,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        wobject_process(&mut obj, &level, &w, 8, &mut rand); // 8 & 7 == 0
+        proc_no_worms(&mut obj, &level, &w, 8, &mut rand); // 8 & 7 == 0
         assert_eq!(obj.cur_frame, 2, "vel.x>0, gate open: cur_frame 1 -> 2");
     }
 
@@ -1462,7 +1522,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        wobject_process(&mut obj, &level, &w, 8, &mut rand);
+        proc_no_worms(&mut obj, &level, &w, 8, &mut rand);
         assert_eq!(obj.cur_frame, 0, "wrap: cur_frame 3 -> ++4 > num_frames -> 0");
     }
 
@@ -1481,7 +1541,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        wobject_process(&mut a, &level, &w, 8, &mut rand);
+        proc_no_worms(&mut a, &level, &w, 8, &mut rand);
         assert_eq!(a.cur_frame, 0, "vel.x<0: cur_frame 1 -> 0");
 
         let mut b = WObject {
@@ -1492,7 +1552,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        wobject_process(&mut b, &level, &w, 8, &mut rand);
+        proc_no_worms(&mut b, &level, &w, 8, &mut rand);
         assert_eq!(b.cur_frame, 3, "underflow: cur_frame 0 -> --(-1)<0 -> num_frames");
     }
 
@@ -1510,7 +1570,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        wobject_process(&mut obj, &level, &w, 8, &mut rand);
+        proc_no_worms(&mut obj, &level, &w, 8, &mut rand);
         assert_eq!(obj.cur_frame, 2, "non-loop: ++ regardless of vel.x sign");
     }
 
@@ -1528,7 +1588,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        wobject_process(&mut obj, &level, &w, 5, &mut rand);
+        proc_no_worms(&mut obj, &level, &w, 5, &mut rand);
         assert_eq!(obj.cur_frame, 1, "cycles 5: gate closed, cur_frame frozen");
     }
 
@@ -1546,7 +1606,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        wobject_process(&mut obj, &level, &w, 8, &mut rand);
+        proc_no_worms(&mut obj, &level, &w, 8, &mut rand);
         assert_eq!(obj.cur_frame, 1, "num_frames 0: cur_frame never changes");
     }
 
@@ -1565,7 +1625,7 @@ mod tests {
             ty: Some(w.id),
             ..WObject::default()
         };
-        wobject_process(&mut obj, &level, &w, 8, &mut rand);
+        proc_no_worms(&mut obj, &level, &w, 8, &mut rand);
         assert_eq!(rand.last(), last_before, "animation draws no rng");
     }
 
@@ -2216,6 +2276,382 @@ mod tests {
             &mut sobjects,
             100,
             &mut rand,
+        );
+    }
+
+    // ====================================================================
+    // wobject in-flight worm-hit arm (weapon.cpp:287-326) — Task T3
+    // ====================================================================
+
+    // A 1-sprite worm bank (frame 0, dir 0, colour 0 -> bank index 0): 16x16, all
+    // transparent (palette 0) EXCEPT a single solid worm pixel (palette 5) at
+    // (cx=8, cy=8). `material_flags[5] = MAT_WORM`. Mirrors the T2 fixture in
+    // `nobject.rs` so the per-pixel gate lands the same way.
+    fn worm_hit_sprites() -> (SpriteSet, [u8; 256]) {
+        let mut data = vec![0u8; 16 * 16];
+        data[8 * 16 + 8] = 5;
+        let sprites = SpriteSet {
+            width: 16,
+            height: 16,
+            count: 1,
+            data,
+        };
+        let mut flags = [0u8; 256];
+        flags[5] = MAT_WORM;
+        (sprites, flags)
+    }
+
+    // A big air level carrying `flags` as its material_flags (the per-pixel gate
+    // reads `level.material_flags`). No solid cell anywhere, so the flight path is
+    // free — only the worm-hit arm is under test.
+    fn hit_level(flags: [u8; 256]) -> LevelSim {
+        LevelSim {
+            width: 1000,
+            height: 1000,
+            material_id: vec![0u8; 1000 * 1000],
+            material_flags: flags,
+        }
+    }
+
+    // A worm at pixel (px, py), visible, health 100, index 3, frame/dir 0, with a
+    // caller-set velocity so the blow-away kick is observable.
+    fn hit_worm(px: i32, py: i32, vel: Vec2) -> WormState {
+        let mut w = WormState::from_init(&WormInit {
+            index: 3,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit::default(); NUM_WEAPONS],
+            start_pos: Vec2::new(itof(px), itof(py)),
+            visible: true,
+        });
+        w.vel = vel;
+        w.current_frame = 0;
+        w.direction = 0;
+        w
+    }
+
+    // nobject_types[0..=6]; [6] is the blood type. start_frame 0 + time_to_explo_v
+    // 0 -> `nobject_create` draws nothing, so `Create2` draws EXACTLY rand(speed_v)
+    // + rand(dist*2)x2 = 3, plus the arm's rand(128) angle = 4 draws / particle.
+    fn blood_types() -> Vec<NObjectType> {
+        let mut v = vec![NObjectType::default(); 7];
+        v[6] = NObjectType {
+            id: 6,
+            speed: 100,
+            speed_v: 50,
+            distribution: 8,
+            ..Default::default()
+        };
+        v
+    }
+
+    // A dart-shaped hit weapon: hit_damage=5, blood_on_hit=10, blow_away=28. Flight
+    // knobs neutral (ST_NORMAL, no bounce/anim/trail/timeout) so only the arm runs.
+    fn hit_weapon(worm_collide: bool, worm_explode: bool) -> Weapon {
+        Weapon {
+            id: 9,
+            shot_type: ST_NORMAL,
+            bounce: 0,
+            mult_speed: 100,
+            gravity: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            time_to_explo: 0,
+            expl_ground: false,
+            hit_damage: 5,
+            blood_on_hit: 10,
+            blow_away: 28,
+            detect_distance: 4,
+            worm_collide,
+            worm_explode,
+            ..Default::default()
+        }
+    }
+
+    // Spawn the wobject so that AFTER the tick's `pos += vel` step it sits exactly
+    // on the worm's pixel (50,50): pre-move pos = (50,50) - vel.
+    fn hit_wobject(vel: Vec2) -> WObject {
+        WObject {
+            pos: Vec2::new(itof(50), itof(50)).sub(vel),
+            vel,
+            owner_idx: 1,
+            ty: Some(9),
+            time_left: 100,
+            ..WObject::default()
+        }
+    }
+
+    #[test]
+    fn worm_hit_draws_blood_fan_before_sound_gate() {
+        // On a per-pixel HIT with dart params the arm: kicks worm.vel, applies
+        // DoDamage(5) (health 100 -> 95), sprays the 10-particle blood fan FIRST,
+        // THEN runs the hit-sound gate. The blood-first ORDER is pinned by
+        // comparing the spawned nobjects against a reference built in blood-first
+        // draw order: a sound-first arm would draw rand(3) before the first
+        // rand(128) angle, shifting every blood velocity — the pool would diverge.
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        let weapon = hit_weapon(false, false);
+        let nobject_types = blood_types();
+        let blood = 100;
+
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let obj_pos = Vec2::new(itof(50), itof(50)); // post-move position
+
+        // --- Reference: replay the EXPECTED order (BLOOD FAN then SOUND gate). ---
+        let mut refr = seeded();
+        let mut ref_pool: Pool<NObject> = Pool::new(64);
+        let k_blood = 10 * blood / 100; // = 10
+        for _ in 0..k_blood {
+            let angle = refr.bound(128) as i32;
+            nobject_create2(
+                &nobject_types[6],
+                angle,
+                obj_vel.div(3),
+                obj_pos,
+                0,
+                3, // worm.index
+                &cossin,
+                &mut refr,
+                &mut ref_pool,
+            );
+        }
+        // hit-sound gate: hit_damage(5) > 0 && health(95) > 0 -> outer rand(3); on 0
+        // the inner rand(3) is always taken.
+        if refr.bound(3) == 0 {
+            refr.bound(3);
+        }
+
+        // --- Actual ---
+        let pre_vel = Vec2::new(itof(1), itof(1));
+        let mut worms = [hit_worm(50, 50, pre_vel)];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        let mut obj = hit_wobject(obj_vel);
+
+        let out = wobject_process(
+            &mut obj,
+            &level,
+            &weapon,
+            0,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            blood,
+            &mut rand,
+        );
+
+        assert_eq!(out, WObjectOutcome::Keep, "no worm_collide -> projectile lives");
+        assert_eq!(worms[0].health, 95, "DoDamage(5) applied to the hit worm");
+        assert_eq!(
+            worms[0].vel,
+            pre_vel.add(obj_vel.mul(28).div(100)),
+            "vel kicked by obj.vel * blow_away(28) / 100 (integer)"
+        );
+        // Exact draw count (positional): 10 blood particles (4 draws each) + the
+        // sound gate. A missing/extra draw shifts rand.last().
+        assert_eq!(
+            rand.last(),
+            refr.last(),
+            "exact draw count: 10*[rand(128)+Create2] + rand(3)(+inner on 0)"
+        );
+        assert_eq!(nobjects.len(), 10, "10 blood particles (blood_on_hit*blood/100)");
+        assert_eq!(nobjects.len(), ref_pool.len(), "blood count matches reference");
+        // ORDER pin: each blood nobject equals the blood-FIRST reference.
+        for i in 0..64 {
+            assert_eq!(
+                nobjects.get(i).copied(),
+                ref_pool.get(i).copied(),
+                "blood nobject slot {i} matches the blood-first reference (order)"
+            );
+        }
+    }
+
+    #[test]
+    fn worm_hit_no_hit_draws_nothing() {
+        // A per-pixel MISS (worm far from the wobject) leaves the worm untouched
+        // and draws no RNG / spawns no blood — the gate short-circuits on
+        // check_for_spec_worm_hit == false.
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        let weapon = hit_weapon(false, false);
+        let nobject_types = blood_types();
+
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let pre_vel = Vec2::new(itof(1), itof(1));
+        // Worm at (500,500); the wobject lands at (50,50) -> way out of the 16x16
+        // sprite window.
+        let mut worms = [hit_worm(500, 500, pre_vel)];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        rand.bound(777); // pre-advance so an accidental draw is detectable
+        let rng_before = rand.last();
+        let mut obj = hit_wobject(obj_vel);
+
+        let out = wobject_process(
+            &mut obj,
+            &level,
+            &weapon,
+            0,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(out, WObjectOutcome::Keep, "no hit -> keep");
+        assert_eq!(worms[0].health, 100, "no hit -> no DoDamage");
+        assert_eq!(worms[0].vel, pre_vel, "no hit -> no vel kick");
+        assert_eq!(rand.last(), rng_before, "no hit -> zero RNG drawn");
+        assert_eq!(nobjects.len(), 0, "no hit -> no blood");
+    }
+
+    #[test]
+    fn worm_hit_blow_away_only_kicks_vel_and_draws_no_rng() {
+        // The gate-difference pin (vs the sobject arm): a hit with hit_damage == 0,
+        // blood_on_hit == 0, blow_away > 0 kicks the worm's velocity but draws NO
+        // rng — the hit-sound gate's outer rand(3) is guarded by `hit_damage > 0`
+        // (short-circuit), and there is no blood fan.
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        let weapon = Weapon {
+            hit_damage: 0,
+            blood_on_hit: 0,
+            blow_away: 28,
+            ..hit_weapon(false, false)
+        };
+        let nobject_types = blood_types();
+
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let pre_vel = Vec2::new(itof(1), itof(1));
+        let mut worms = [hit_worm(50, 50, pre_vel)];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        rand.bound(999);
+        let rng_before = rand.last();
+        let mut obj = hit_wobject(obj_vel);
+
+        let out = wobject_process(
+            &mut obj,
+            &level,
+            &weapon,
+            0,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(out, WObjectOutcome::Keep);
+        assert_eq!(
+            worms[0].vel,
+            pre_vel.add(obj_vel.mul(28).div(100)),
+            "vel still kicked when hit_damage == 0"
+        );
+        assert_eq!(worms[0].health, 100, "hit_damage 0 -> no health change");
+        assert_eq!(
+            rand.last(),
+            rng_before,
+            "hit_damage 0 gates OFF the rand(3) sound draw; no blood -> zero RNG"
+        );
+        assert_eq!(nobjects.len(), 0, "blood_on_hit 0 -> no blood");
+    }
+
+    #[test]
+    fn worm_hit_worm_collide_explode_returns_explode_with_one_rand() {
+        // worm_collide + worm_explode: after the (empty) blood fan and the gated
+        // sound draw, the worm_collide branch draws exactly one rand(worm_collide)
+        // = rand(1) and, on the always-zero result, sets do_explode -> Explode.
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        // hit_damage 0 + blood 0 so the ONLY draw is the worm_collide rand(1).
+        let weapon = Weapon {
+            hit_damage: 0,
+            blood_on_hit: 0,
+            blow_away: 0,
+            ..hit_weapon(true, true)
+        };
+        let nobject_types = blood_types();
+
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let mut worms = [hit_worm(50, 50, Vec2::zero())];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        let mut refr = seeded();
+        refr.bound(1); // exactly one rand(1) for the worm_collide gate
+        let mut obj = hit_wobject(obj_vel);
+
+        let out = wobject_process(
+            &mut obj,
+            &level,
+            &weapon,
+            0,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(out, WObjectOutcome::Explode, "worm_collide + worm_explode -> Explode");
+        assert_eq!(rand.last(), refr.last(), "exactly one rand(worm_collide)=rand(1)");
+        assert_eq!(nobjects.len(), 0, "blood_on_hit 0 -> no blood");
+    }
+
+    #[test]
+    fn worm_hit_worm_collide_without_explode_returns_remove() {
+        // worm_collide set but worm_explode false: the branch sets do_remove only ->
+        // Remove (free without exploding).
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        let weapon = Weapon {
+            hit_damage: 0,
+            blood_on_hit: 0,
+            blow_away: 0,
+            ..hit_weapon(true, false)
+        };
+        let nobject_types = blood_types();
+
+        let obj_vel = Vec2::new(itof(3), itof(-2));
+        let mut worms = [hit_worm(50, 50, Vec2::zero())];
+        let mut nobjects: Pool<NObject> = Pool::new(64);
+        let mut rand = seeded();
+        let mut obj = hit_wobject(obj_vel);
+
+        let out = wobject_process(
+            &mut obj,
+            &level,
+            &weapon,
+            0,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(
+            out,
+            WObjectOutcome::Remove,
+            "worm_collide without worm_explode -> Remove"
         );
     }
 }

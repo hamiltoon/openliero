@@ -253,7 +253,7 @@ pub enum NObjectOutcome {
 /// T3) gates on. It only ever returns `true` where a solid worm pixel actually sits
 /// under the `±dist` window — a transparent sprite corner overlapping the box is a
 /// **miss**, where 5a's box over-approx wrongly reported a hit.
-fn check_for_spec_worm_hit(
+pub(crate) fn check_for_spec_worm_hit(
     worm: &WormState,
     x: i32,
     y: i32,
@@ -269,6 +269,13 @@ fn check_for_spec_worm_hit(
     // matches `SimState::worm_sprite`: frame + direction*21 + colour*42.
     let worm_sprite =
         worm_sprites.sprite((worm.current_frame + worm.direction * 21) as usize);
+    // Defensive: the C++ bank is ALWAYS 16x16 (`worm_sprites.Allocate(16,16,...)`),
+    // but a minimal test `SimState` (large_sprites < 37 frames) yields an EMPTY worm
+    // bank. With no 16x16 sprite there is no worm pixel to hit, so it is a miss —
+    // never triggered by real TC data (the full 84-sprite bank), so no golden moves.
+    if worm_sprite.len() < 16 * 16 {
+        return false;
+    }
     // :1171-1172 deltas relative to the worm sprite's top-left (offset +7,+5).
     let delta_x = x - ftoi(worm.pos.x) + 7;
     let delta_y = y - ftoi(worm.pos.y) + 5;

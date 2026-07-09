@@ -1010,6 +1010,29 @@ pub struct SimState {
     /// the TC's `constants.bonuses[i].sound`-equivalent expiry-object index.
     pub bonus_s_objects: [i32; 2],
 
+    // --- Slice 5'b T8: bonus-pickup constants (worm.cpp:287-322) --------------
+    // The per-pickup RNG-draw bounds + reload hack the visible-worm pickup block
+    // reads. Defaulted (0/false) here and assigned the real TC values AFTER `new`
+    // (NO `SimState::new` signature change), like the T2/T3 bonus consts. Left at
+    // the defaults the bonuses pool is empty (slices 1-5c never spawn a bonus a
+    // worm walks over), so the pickup block is inert and those goldens stay
+    // byte-identical. **None are hashed** (the draws they bound feed health/reload,
+    // which ARE hashed; the constants are inputs, not state).
+    /// C++ `LC(BonusHealthVar)` (`worm.cpp:295`): the bound of the health-bonus
+    /// `rand(BonusHealthVar)` heal-amount draw.
+    pub bonus_health_var: i32,
+    /// C++ `LC(BonusMinHealth)` (`worm.cpp:295`): the additive floor in the heal
+    /// amount `(rand(BonusHealthVar) + BonusMinHealth) * settings_health / 100`.
+    pub bonus_min_health: i32,
+    /// C++ `LC(BonusExplodeRisk)` (`worm.cpp:299`): the bound of the weapon-bonus
+    /// `rand(BonusExplodeRisk)` draw — ALWAYS drawn for a frame-0 bonus; `> 1`
+    /// reloads, `<= 1` spawns the booby sobject.
+    pub bonus_explode_risk: i32,
+    /// C++ `common.h[HBonusReloadOnly]` (`worm.cpp:302`): when set, the reload path
+    /// skips the weapon-type swap + `fire_cone = 0` and only clears `loading_left`.
+    /// False in the openliero TC.
+    pub h_bonus_reload_only: bool,
+
     /// C++ `Worm::settings->health` (`WormSettings::health{100}`, `worm.hpp:104`):
     /// the per-worm max/reset health. The clamp `health = min(health,
     /// settings->health)` (`worm.cpp:213`) caps every worm to it each tick, and
@@ -1179,6 +1202,14 @@ impl SimState {
             bonus_bounce_mul: 0,
             bonus_bounce_div: 0,
             bonus_s_objects: [0, 0],
+            // Bonus-pickup constants (worm.cpp:287-322): defaulted (0/false). Left at
+            // the defaults no bonus is ever picked up (the pool stays empty for slices
+            // 1-5c), so the pickup block is inert; the difftest assigns the real TC
+            // values after `new` (post-`new` pattern, like the blood/bonus consts).
+            bonus_health_var: 0,
+            bonus_min_health: 0,
+            bonus_explode_risk: 0,
+            h_bonus_reload_only: false,
             // Worm settings health: the C++ `WormSettings::health` default (100),
             // which the dumper never overrides. Post-`new` default (like the blood
             // consts) so no call site changes; the clamp is identity for slices
@@ -1311,6 +1342,10 @@ impl SimState {
             bonus_bounce_mul,
             bonus_bounce_div,
             bonus_s_objects,
+            bonus_health_var,
+            bonus_min_health,
+            bonus_explode_risk,
+            h_bonus_reload_only,
             bonuses,
             cycles,
             settings_health,
@@ -1344,6 +1379,10 @@ impl SimState {
         let bonus_gravity = *bonus_gravity;
         let bonus_bounce_mul = *bonus_bounce_mul;
         let bonus_bounce_div = *bonus_bounce_div;
+        let bonus_health_var = *bonus_health_var;
+        let bonus_min_health = *bonus_min_health;
+        let bonus_explode_risk = *bonus_explode_risk;
+        let h_bonus_reload_only = *h_bonus_reload_only;
         let settings_health = *settings_health;
         let worm_spawn_rect_x = *worm_spawn_rect_x;
         let worm_spawn_rect_y = *worm_spawn_rect_y;
@@ -1625,12 +1664,46 @@ impl SimState {
             }
 
             if worms[i].visible {
-                // Rebind the per-worm `&mut` for the (unchanged) visible arm. Held
-                // only within this arm; the dead arm indexes `worms` directly so
-                // `begin_respawn` can also read the enemy slot.
-                let w = &mut worms[i];
                 // 2. reaction orchestration -> reacts (shared by tasks + physics).
-                let reacts = worm_reactions(level, w, physics);
+                //    Computed with a scoped `&mut worms[i]` that ends before the
+                //    pickup, which needs the whole `&mut worms` slice.
+                let reacts = worm_reactions(level, &mut worms[i], physics);
+
+                // 2b. Bonus pickup (worm.cpp:287-322) — at the C++ `:285`→`:287`
+                //     point, AFTER the reaction-force block and BEFORE
+                //     ProcessSteerables. Reads `worms[i].pos` for the 11×11 AABB gate
+                //     (pos is stable across the loop) and may heal / reload / spawn a
+                //     booby sobject, freeing each picked-up bonus. Inert for slices
+                //     1-5c (the bonuses pool is empty), so their goldens stay
+                //     byte-identical. Needs `&mut worms` (booby `sobject_create`
+                //     touches every worm) so it runs with `w` un-bound.
+                crate::bonus::worm_pickup_bonuses(
+                    worms,
+                    i,
+                    bonuses,
+                    wobjects,
+                    nobjects,
+                    sobjects,
+                    weapons,
+                    nobject_types,
+                    sobject_types,
+                    level,
+                    cossin,
+                    large_sprites,
+                    textures,
+                    blood,
+                    settings_health,
+                    bonus_health_var,
+                    bonus_min_health,
+                    bonus_explode_risk,
+                    h_bonus_reload_only,
+                    rand,
+                );
+
+                // Rebind the per-worm `&mut` for the (unchanged) rest of the visible
+                // arm. Held only within this arm; the dead arm indexes `worms`
+                // directly so `begin_respawn` can also read the enemy slot.
+                let w = &mut worms[i];
 
                 // 3. process_steerables: no-op this slice (empty wobjects).
 

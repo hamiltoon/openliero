@@ -1,0 +1,145 @@
+# Step 2 Slice 5'b (T9) — HEALTH bonus WALK-ON (MILESTONE variant a). The pickup
+# block (`worm.cpp:287-322`, ported T8) goes LIVE in a full scenario: worm0, WOUNDED
+# (health 50 < settings->health 100), WALKS RIGHT along the floor and steps onto a
+# dropped HEALTH bonus (frame 1), which HEALS it. Read by BOTH the C++ dumper
+# (oracle_dump_sim_physics, UNCHANGED — it already drives the full `Worm::Process`
+# incl. the pickup block) and the Rust N-tick difftest.
+#
+# === HOW THE DROP + WALK-ON LINE UP (seed 29) ==========================================
+# With `max_bonuses 4` the per-tick bonus-drop roll (`game.cpp:359`) draws rand(1700)==0;
+# under seed 29 the first 0-roll lands at TICK 41, where `Game::CreateBonus` drops a
+# FRAME-1 (health) bonus at ix=199 (its rand-x), which then FALLS under `Bonus::Process`.
+# Walking draws NO rand, so the drop tick/position is a pure function of the seed and is
+# INDEPENDENT of worm0's placement/inputs — worm0 is free to be positioned to intercept.
+# worm0 starts at x=175 (LEFT of the bonus's ix=199) and walks RIGHT continuously; it
+# crosses into the bonus's 11x11 pickup box (`ipos.x +/-5`, `ipos.y +/-5`, all strict) at
+# TICK 87 — a genuine WALK-ON (worm0 moved 175->201 px), NOT a bonus dropped onto a frozen
+# worm. On that tick the health branch fires: `health < settings->health` opens the gate,
+# the bonus is Freed (pool 1->0), ONE rand(BonusHealthVar=51) is drawn and
+# DoHealingDirect((rand + BonusMinHealth=10) * 100 / 100) heals worm0 (50 -> capped 100).
+# The pool shrinks by 1, worm0 health JUMPS UP, and `rng` draws exactly the drop roll +
+# the one heal roll on that tick. No booby, no explosion, no carve.
+#
+# Control bits (7-bit ControlState): Up=1 Down=2 Left=4 Right=8 Fire=16 Change=32 Jump=64.
+seed 29
+# physics_fall_test.lev: open sky band over a solid Dirt floor at y=200px. Reused unchanged
+# from slices 2..5'a. The bonus lands in the clear sky (ix=199) and falls to the floor.
+level Levels/physics_fall_test.lev
+# Window: settle -> drop (41) -> fall -> WALK-ON heal (87) -> short flat tail.
+ticks 110
+# max_bonuses 4 opens the bonus-drop roll (as slice 5c). 0 would short-circuit it.
+max_bonuses 4
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# worm0 = WALKER: WOUNDED to health 50 at spawn (the dumper honors the scenario health,
+# set AFTER ResetWorms), grounded at x=175 (11468800 = 175<<16), the floor rest y from 5c.
+# worm1 = BYSTANDER: idle at the far LEFT edge (x=60), full health, VISIBLE + grounded —
+# it never moves, fires, or touches the bonus, so its hash column is FLAT.
+worm 0 11468800 12845520  50 10 0   1
+worm 1  3932160 12845520 100 10 218 1
+# worm0 walks Right (bit 8) every tick 0..104 — the continuous walk that carries it onto
+# the bonus at tick 87. (The dumper keys input <t> to the pass advancing t -> t+1.)
+input 0 8 0
+input 1 8 0
+input 2 8 0
+input 3 8 0
+input 4 8 0
+input 5 8 0
+input 6 8 0
+input 7 8 0
+input 8 8 0
+input 9 8 0
+input 10 8 0
+input 11 8 0
+input 12 8 0
+input 13 8 0
+input 14 8 0
+input 15 8 0
+input 16 8 0
+input 17 8 0
+input 18 8 0
+input 19 8 0
+input 20 8 0
+input 21 8 0
+input 22 8 0
+input 23 8 0
+input 24 8 0
+input 25 8 0
+input 26 8 0
+input 27 8 0
+input 28 8 0
+input 29 8 0
+input 30 8 0
+input 31 8 0
+input 32 8 0
+input 33 8 0
+input 34 8 0
+input 35 8 0
+input 36 8 0
+input 37 8 0
+input 38 8 0
+input 39 8 0
+input 40 8 0
+input 41 8 0
+input 42 8 0
+input 43 8 0
+input 44 8 0
+input 45 8 0
+input 46 8 0
+input 47 8 0
+input 48 8 0
+input 49 8 0
+input 50 8 0
+input 51 8 0
+input 52 8 0
+input 53 8 0
+input 54 8 0
+input 55 8 0
+input 56 8 0
+input 57 8 0
+input 58 8 0
+input 59 8 0
+input 60 8 0
+input 61 8 0
+input 62 8 0
+input 63 8 0
+input 64 8 0
+input 65 8 0
+input 66 8 0
+input 67 8 0
+input 68 8 0
+input 69 8 0
+input 70 8 0
+input 71 8 0
+input 72 8 0
+input 73 8 0
+input 74 8 0
+input 75 8 0
+input 76 8 0
+input 77 8 0
+input 78 8 0
+input 79 8 0
+input 80 8 0
+input 81 8 0
+input 82 8 0
+input 83 8 0
+input 84 8 0
+input 85 8 0
+input 86 8 0
+input 87 8 0
+input 88 8 0
+input 89 8 0
+input 90 8 0
+input 91 8 0
+input 92 8 0
+input 93 8 0
+input 94 8 0
+input 95 8 0
+input 96 8 0
+input 97 8 0
+input 98 8 0
+input 99 8 0
+input 100 8 0
+input 101 8 0
+input 102 8 0
+input 103 8 0
+input 104 8 0

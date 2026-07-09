@@ -83,7 +83,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 │   └─ ✅ 5d  death + respawn (BeginRespawn RNG-search; fuzzed)  MILESTONE GREEN (death→respawn 361 ticks bit-exact + 4-variant respawn fuzz {2,3,6,7} trials)
 ├─ 🔄 Slice 5′ (open-gate worm-hit follow-up)  decomposed 5′a + 5′b
 │   ├─ ✅ 5′a  per-pixel CheckForSpecWormHit + wobject/nobject in-flight worm-hit arms  MILESTONE GREEN (dart 71t + cannon-splinter 156t bit-exact, near-miss anti-box witness)
-│   └─ ⬜ 5′b  bonus pickup (health/weapon/booby) — closes 5c's deferral
+│   └─ ✅ 5′b  bonus pickup (health/weapon/booby) — closes 5c's deferral  MILESTONE GREEN (walk-on health heal 110t + weapon reload 90t bit-exact vs C++; booby unit-test-only)
 └─ ⬜ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match
 ```
 

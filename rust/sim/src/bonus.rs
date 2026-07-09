@@ -429,9 +429,10 @@ pub fn do_healing_direct(w: &mut WormState, amount: i32, settings_health: i32) {
 ///     sound-only and omitted.)
 ///   * `<= 1` → booby (`:314-318`): capture `Ftoi(bonus.x/y)`, `Free`, then
 ///     `sobject_types[0].Create(kBix, kBiy, index, nullptr)` via [`sobject_create`]
-///     (its own sound/dirt RNG cluster). The bonus pool is not threaded into
-///     `sobject_create`, so the deferred chain-loop stays tripwired there (only the
-///     normal create path is exercised here).
+///     (its own sound/dirt RNG cluster). The bonus pool is threaded through
+///     `sobject_create` (Slice 6 T3), so the booby's own chain-loop is live: a
+///     bonus in the booby's `detect_range` chains further. `Free` runs before the
+///     `Create`, so the just-picked bonus is never re-detected by the booby scan.
 ///
 /// The box test / `HBonus*` guards match the C++ exactly; the block is inert
 /// (empty pool) for slices 1-5c, keeping their goldens byte-identical.

@@ -36,9 +36,11 @@
 //! 5. **Crater** (`:209-210`): iff `dirt_effect >= 0`, [`draw_dirt_effect`] carves
 //!    the level and draws `rand(r_frame)` — the LAST cluster draw. `CorrectShadow`
 //!    is omitted (`settings->shadow = false`, O4).
-//! 6. **Bonus loop** (`:217-227`): empty pool in 4c ⇒ 0 draws; deferred (the
-//!    recursive `sobject_types[0].Create` would need the bonus pool + full
-//!    recursion).
+//! 6. **Bonus chain-loop** (`:217-227`): LIVE (Slice 6 T3). Each bonus inside the
+//!    `±detect_range` box is freed and replaced by a recursive
+//!    `sobject_types[0].Create` (the booby) at its `Ftoi(pos)`; the booby's own
+//!    cluster draws land HERE, at the C++ recursion point (after the crater).
+//!    Empty pool ⇒ 0 draws, so the priors stay byte-identical.
 //!
 //! ## The three load-bearing traps
 //!
@@ -97,9 +99,9 @@ pub enum SObjectOutcome {
 ///   the `rand(128)` blood fan (`nobject_types[6].Create2`) + the `rand(3)`
 ///   hit-sound gate. ScalesOfJustice redistribution stays mode-gated/deferred;
 /// * **chain_explosion** recursion in the wobjects loop — `debug_assert!`ed off (O9);
-/// * the **bonus loop** (`:217-227`) — omitted (needs the bonus pool + recursive
-///   `Create`); rand-neutral when no bonus sits in range, which the 4c fixture
-///   guarantees.
+/// * the **bonus chain-loop** (`:217-227`) — LIVE (Slice 6 T3): each in-range
+///   bonus is freed and replaced by a recursive `sobject_types[0].Create`
+///   (depth-first, terminating); rand-neutral when no bonus sits in range.
 #[allow(clippy::too_many_arguments)]
 pub fn sobject_create(
     ty: &SObjectType,
@@ -364,9 +366,50 @@ pub fn sobject_create(
         );
     }
 
-    // :217-227 bonus loop — omitted (needs the bonus pool + the recursive
-    // sobject_types[0].Create). Rand-neutral when no bonus sits in range, which
-    // the 4c fixture guarantees.
+    // :217-227 bonus chain-loop (Slice 6 T3 — deferral #1, closed). After the
+    // crater, walk `bonuses` in slot order and, for each whose `Ftoi(pos)` sits
+    // inside the ±detect_range box (STRICT on all four sides, :222), `Free` it
+    // THEN recursively spawn the booby `sobject_types[0]` at that pixel (:224-225).
+    //
+    // Depth-first order is the contract. An index-walk `0..capacity` restarted at
+    // each recursion level is order-identical to C++'s `bonuses.All()` Range
+    // recursion: the recursive `Create` scans a fresh Range from slot 0 (freed
+    // slots skipped), and this outer walk only advances forward, so every bonus is
+    // visited/freed at most once, in the same depth-first sequence. It terminates
+    // because a recursive `Create` is issued ONLY after a `Free`, bounding the
+    // recursion depth by the number of live bonuses. `Free` precedes the recursive
+    // `Create` so the child scan cannot re-detect the just-freed bonus (C++ order).
+    // `dr` snapshots detect_range once; the loop runs UNCONDITIONALLY (outside the
+    // `damage > 0` block), matching the C++ placement at the tail of `Create`.
+    for slot in 0..bonuses.capacity() {
+        let (kix, kiy) = match bonuses.get(slot) {
+            Some(b) => (ftoi(b.x), ftoi(b.y)),
+            None => continue,
+        };
+        if kix > x - dr && kix < x + dr && kiy > y - dr && kiy < y + dr {
+            bonuses.free(slot);
+            sobject_create(
+                &sobject_types[0],
+                kix,
+                kiy,
+                owner_idx,
+                worms,
+                wobjects,
+                weapons,
+                nobjects,
+                nobject_types,
+                level,
+                cossin,
+                large_sprites,
+                textures,
+                sobjects,
+                bonuses,
+                sobject_types,
+                blood,
+                rand,
+            );
+        }
+    }
 }
 
 /// Port of `SObject::Process` (`sobject.cpp:230-241`) — advance one sobject by
@@ -486,7 +529,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[],100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
         );
 
         // Obj init (:35-39): id = 2, x = 50-8, y = 50-8, cur_frame = 0,
@@ -523,7 +566,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[],100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
         );
 
         assert_eq!(rand.last(), 0, "start_sound < 0 -> no rand drawn at all");
@@ -566,7 +609,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[],100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
         );
 
         assert_eq!(worms[0].vel, Vec2::zero(), "out-of-range worm not nudged");
@@ -597,7 +640,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[],100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
         );
 
         // delta_x = 57-50 = 7 > 0 -> vel.x += blow_away * (8 - 7) = 3000.
@@ -693,7 +736,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[],blood, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], blood, &mut rand,
         );
 
         // Wound: health dropped by the clamped z = 2, stays > 0; not a kill, so
@@ -749,7 +792,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[],100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
         );
 
         assert_eq!(worms[0].health, 100, "out-of-range worm takes no damage");
@@ -782,7 +825,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[],0, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 0, &mut rand,
         );
 
         // Still wounded (DoDamage runs regardless of blood), but no blood nobjects.
@@ -851,7 +894,7 @@ mod tests {
 
         sobject_create(
             &ty, cx, cy, 3, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[],100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
         );
 
         // Exact total draw count + order: rand.last matches the reference iff the
@@ -899,7 +942,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[],100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
         );
 
         assert_eq!(rand.last(), expected_last, "no dirt -> no rand(8) drawn");
@@ -992,7 +1035,7 @@ mod tests {
         let mut rand = seeded();
         sobject_create(
             &ty, cx, cy, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &sprites, &textures, &mut sobjects, &mut Pool::<Bonus>::new(1), &[],100, &mut rand,
+            &mut level, &cossin, &sprites, &textures, &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
         );
 
         // (a) the carve's rand(2) is the LAST draw of the cluster.

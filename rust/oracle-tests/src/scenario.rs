@@ -13,6 +13,7 @@
 //! level       <path>                             # relative to the TC root
 //! ticks       <u32>
 //! max_bonuses <i32>                              # Settings::max_bonuses; absent => 0
+//! game_mode   <i32>                              # Settings::game_mode enum; absent => 0 (KillEmAll)
 //! worm        <index> <pos_x> <pos_y> <health> <lives> <stats_x> <visible>
 //! input       <tick> <worm0_7bit> <worm1_7bit>   # sparse; absent => 0
 //! weapon      <slot> <name> [ammo]               # override worm weapon slot (0..NUM_WEAPONS);
@@ -52,6 +53,11 @@ pub struct Scenario {
     /// (`game.cpp:359`). Absent => `0` (the roll short-circuits, drawing no rand, so
     /// scenarios without the directive stay byte-identical). Slice 5c sets it `> 0`.
     pub max_bonuses: i32,
+    /// C++ `Settings::game_mode` — the game-mode switch (`game.cpp:372-461`). Absent =>
+    /// `0` (`kGmKillEmAll`, the switch's `default: break` — inert, so scenarios without
+    /// the directive stay byte-identical). Accepted-and-defaulted so a future game-mode
+    /// scenario keeps the shared scenario file parsing on both sides (Slice 6, T0).
+    pub game_mode: i32,
     pub worms: Vec<ScenarioWorm>,
     /// Sparse per-tick input overrides: `tick -> (worm0_7bit, worm1_7bit)`.
     inputs: HashMap<u32, (u32, u32)>,
@@ -70,6 +76,7 @@ impl Scenario {
         let mut level: Option<String> = None;
         let mut ticks: Option<u32> = None;
         let mut max_bonuses: i32 = 0;
+        let mut game_mode: i32 = 0;
         let mut worms = Vec::new();
         let mut inputs = HashMap::new();
         let mut weapons: HashMap<usize, String> = HashMap::new();
@@ -109,6 +116,10 @@ impl Scenario {
                 "max_bonuses" => {
                     expect_args(n, key, &nums, 1)?;
                     max_bonuses = parse_at(0)? as i32;
+                }
+                "game_mode" => {
+                    expect_args(n, key, &nums, 1)?;
+                    game_mode = parse_at(0)? as i32;
                 }
                 "worm" => {
                     expect_args(n, key, &nums, 7)?;
@@ -169,6 +180,7 @@ impl Scenario {
             level: level.ok_or("missing `level`")?,
             ticks: ticks.ok_or("missing `ticks`")?,
             max_bonuses,
+            game_mode,
             worms,
             inputs,
             weapons,
@@ -370,6 +382,24 @@ input 5 16 0
     fn max_bonuses_wrong_arity_errors() {
         let err =
             Scenario::parse("seed 1\nlevel a.lev\nticks 1\nmax_bonuses\n").unwrap_err();
+        assert!(err.contains("expects 1 args"), "got: {err}");
+    }
+
+    #[test]
+    fn game_mode_defaults_to_zero_and_parses() {
+        // Absent `game_mode` => 0 (kGmKillEmAll; the switch is inert, prior scenarios
+        // unchanged).
+        let s = Scenario::parse(SAMPLE).expect("parses");
+        assert_eq!(s.game_mode, 0, "absent game_mode defaults to 0 (KillEmAll)");
+        // A Slice-6 game-mode scenario sets it explicitly (e.g. 1 = kGmGameOfTag).
+        let s = Scenario::parse("seed 1\nlevel a.lev\nticks 1\ngame_mode 1\n")
+            .expect("parses");
+        assert_eq!(s.game_mode, 1);
+    }
+
+    #[test]
+    fn game_mode_wrong_arity_errors() {
+        let err = Scenario::parse("seed 1\nlevel a.lev\nticks 1\ngame_mode\n").unwrap_err();
         assert!(err.contains("expects 1 args"), "got: {err}");
     }
 }

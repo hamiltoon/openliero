@@ -80,6 +80,14 @@ fn parse_golden(text: &str) -> Vec<GoldenTick> {
         .collect()
 }
 
+// IGNORED at Slice 6 T0: the golden was regenerated against the full-`ProcessFrame`
+// dumper, which now runs `Ninjarope::Process` (`game.cpp:368-370`) after the worm loop.
+// The scenario throws the rope at input tick 93 (`96 = Change|Jump`), so `sim_slice3.txt`
+// now diverges from tick 94 onward (ticks 0..=93 remain byte-identical — proven in the
+// T0 re-diff gate). The Rust `process_frame` does NOT yet run `ninjarope_process`; that
+// is Slice 6 T2, which ports the rope `Process` and un-ignores this test.
+// T2 un-ignores: rope Process not yet ported.
+#[ignore = "T2 un-ignores: rope Process not yet ported (golden now runs Ninjarope::Process; diverges from tick 94)"]
 #[test]
 fn sim_slice3_control_matches_cpp_oracle() {
     // --- Parse the scenario (single source of truth, shared with the C++ dumper).

@@ -1,33 +1,36 @@
 // Generates the golden record for the Rust sim slice-2 *per-tick physics*
 // differential test. Builds a real C++ `Game` (seed RNG, load a FIXED `.lev`, add
 // 2 worms, InitWeapons, ResetWorms), places the worms mid-air per a scenario file,
-// then drives them N ticks. Each tick runs a ProcessFrame *subset*: first the object
-// loops (sobjects -> wobjects -> nobjects -> bobjects, in `Game::ProcessFrame` order),
-// then the UNMODIFIED `worm->Process(game)` for each worm in `game.worms` order. It
-// dumps one hash record per tick (tick 0 plus one after each of the N passes => N+1
-// lines). Each line:
+// then drives them N ticks. Each tick runs the full `Game::ProcessFrame` TAIL: first
+// the object loops (sobjects -> wobjects -> nobjects -> bobjects, in `Game::ProcessFrame`
+// order), then the UNMODIFIED `worm->Process(game)` for each worm in `game.worms` order,
+// then (Slice 6) the ninjarope `Process` loop and the game-mode switch. It dumps one hash
+// record per tick (tick 0 plus one after each of the N passes => N+1 lines). Each line:
 //   `<tick> <HashGameState> <rng> <level> <worm0> <worm1> <bobjects> <bonuses>
 //    <sobjects> <nobjects> <wobjects>`
 // (tick decimal; every hash as %08x). See stateHash.hpp for the hashes.
 //
-// Why a ProcessFrame *subset* and NOT the full `Game::ProcessFrame`: ProcessFrame runs
-// the ninjarope / game-mode logic — Slice-6 ProcessFrame-integration concerns, not the
-// object+worm physics this oracle exercises. We DO run the object loops (so a fired
-// projectile advances) and we DO `++game.cycles` at the exact `game.cpp:357` point
-// (after the four object loops, before the worm loop) so the blood-trail / animation
-// gates that key on `cycles` are faithful (Slice 5b); we ALSO run the per-tick
-// bonus-drop roll (`game.cpp:359-362`) at that same point (Slice 5c), but GATED on the
-// scenario's `max_bonuses` directive (default 0). With `max_bonuses == 0` the roll
-// short-circuits (`max_bonuses > 0` is false) and draws NO rand, so scenarios without
-// the directive stay byte-identical; a scenario that sets `max_bonuses > 0` opens the
-// roll (and `Game::CreateBonus`). We still EXCLUDE the bonuses Process loop, ninjarope,
-// and the game-mode switch. Under empty input, full health, max_bonuses 0 and no
-// projectiles in flight, every RNG-drawing / pool-spawning branch is skipped and the
-// object pools are empty, so the loops are no-ops: `rand.last` stays 0 (the `rng`
-// column is a constant 0) and the level is never dug. `cycles` ADVANCES once per tick:
-// it folds into the master `HashGameState` (stateHash.hpp:19) but NOT into any
-// component hash, so it perturbs only the master column. The dumper must NOT call
-// ProcessFrame or GenerateFromSettings.
+// Why the full ProcessFrame TAIL and NOT the literal `Game::ProcessFrame`: this dumper
+// hand-rolls the frame so it can install a no-op StatsRecorder, run headless (no
+// viewports), and load a fixed level. It reproduces every HASHED / RNG-bearing step of
+// `Game::ProcessFrame` (game.cpp:267-471) in the exact C++ order: the bonuses Process
+// loop (Slice 5c), the object loops (so a fired projectile advances), `++game.cycles`
+// at the exact `game.cpp:357` point (after the four object loops, before the worm loop)
+// so the blood-trail / animation gates that key on `cycles` are faithful (Slice 5b), the
+// per-tick bonus-drop roll (`game.cpp:359-362`, GATED on `max_bonuses`, Slice 5c), the
+// worm Process loop, then (Slice 6) the ninjarope `Process` loop (`game.cpp:368-370`)
+// and the game-mode switch (`game.cpp:372-461`, defaulting to kGmKillEmAll =>
+// `default: break`). The three render/snapshot-only steps are OMITTED as provably
+// hash-inert (design §1): `--screen_flash` (in GameSnapshot, absent from HashGameState),
+// the viewport/spectator `shake` decrements and the `(cycles&1)` banner-y walk (both
+// iterate the empty viewport lists), and `ProcessViewports` + the `prev_control_states`
+// store (`prev_control_states` is not hashed; the Rust PressedOnce model subsumes the
+// edge). Under empty input, full health, max_bonuses 0 and no projectiles in flight,
+// every RNG-drawing / pool-spawning branch is skipped and the object pools are empty, so
+// the loops are no-ops: `rand.last` stays 0 (the `rng` column is a constant 0) and the
+// level is never dug. `cycles` ADVANCES once per tick: it folds into the master
+// `HashGameState` (stateHash.hpp:19) but NOT into any component hash, so it perturbs only
+// the master column. The dumper must NOT call ProcessFrame or GenerateFromSettings.
 //
 // Why a LOADED level, not GenerateFromSettings: random generation consumes RNG and
 // would move `rand.last` off 0; loading a fixed `.lev` keeps the run reproducible.
@@ -38,6 +41,8 @@
 //   ticks <N>
 //   max_bonuses <n>   (Settings::max_bonuses; default 0 => the bonus-drop roll
 //                      short-circuits and draws no rand; > 0 opens the roll, Slice 5c)
+//   game_mode <n>     (Settings::game_mode enum; default 0 = kGmKillEmAll => the
+//                      game-mode switch hits `default: break` and is inert, Slice 6)
 //   worm <idx> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
 //   input <tick> <worm0_7bit> <worm1_7bit>   (sparse; absent => 0; applied on the
 //                                              Process pass advancing <tick>-><tick>+1)
@@ -50,6 +55,7 @@
 // to stderr (does not affect the golden output). Built via the
 // OPENLIERO_BUILD_ORACLE_DUMP CMake option (see gen_sim_physics_golden.sh). Not part
 // of the default build.
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -102,6 +108,11 @@ struct Scenario {
   // short-circuits (no rand drawn), so scenarios without a `max_bonuses` directive stay
   // byte-identical. A scenario sets it > 0 to make the bonus pool live (Slice 5c).
   int max_bonuses = 0;
+  // Settings::game_mode for the game-mode switch (game.cpp:372-461). Default
+  // kGmKillEmAll (0) => the switch hits `default: break` and is inert, so scenarios
+  // without a `game_mode` directive stay byte-identical (Slice 6). A scenario sets it
+  // to exercise GameOfTag / Holdazone / ScalesOfJustice.
+  int game_mode = Settings::kGmKillEmAll;
 };
 
 std::vector<uint8_t> SlurpFile(std::string const& path) {
@@ -139,6 +150,8 @@ Scenario ParseScenario(char const* path) {
       ls >> s.ticks;
     } else if (key == "max_bonuses") {
       ls >> s.max_bonuses;
+    } else if (key == "game_mode") {
+      ls >> s.game_mode;
     } else if (key == "worm") {
       WormSpec w;
       ls >> w.index >> w.pos_x >> w.pos_y >> w.health >> w.lives >> w.stats_x >> w.visible;
@@ -203,7 +216,9 @@ int main(int argc, char** argv) {
   common->load(kTcRoot);
 
   auto settings = std::make_shared<Settings>();
-  settings->game_mode = Settings::kGmKillEmAll;
+  // Game-mode switch (game.cpp:372-461) is driven by the scenario's `game_mode`
+  // directive; default kGmKillEmAll (0) => `default: break` => inert (Slice 6).
+  settings->game_mode = scn.game_mode;
   settings->lives = scn.worms[0].lives;
   settings->loading_time = 0;
   // O4: omit CorrectShadow for the dirt-effect slices. CorrectShadow (blit.cpp:624,
@@ -395,6 +410,117 @@ int main(int argc, char** argv) {
       auto const& w = game.worms[idx];
       w->control_states.Unpack(idx < 2 ? in[idx] : 0);
       w->Process(game);
+    }
+
+    // Ninjarope Process loop (game.cpp:368-370), AFTER the worm loop and BEFORE the
+    // game-mode switch. The rope's `out` + `pos.{x,y}` are hashed (stateHash.hpp:47-49);
+    // a rope that is not out is inert (no motion, no RNG). On a dirt attach it draws
+    // `rand(128)` x11 and spawns 11 nobjects at the exact RNG position (ninjarope.cpp:
+    // 41-45) — so a rope-throwing scenario diverges from its first rope-out tick (Slice
+    // 6). Unmodified `Ninjarope::Process`, same as the C++ frame.
+    for (auto const& w : game.worms) {
+      w->ninjarope.Process(*w, game);
+    }
+
+    // Game-mode switch (game.cpp:372-461), AFTER the ninjarope loop. Verbatim from
+    // `Game::ProcessFrame` with `game.`-qualified members. Only hashed effects matter:
+    // GameOfTag / Holdazone `++timer`, Holdazone `SpawnZone` RNG. The scenario default
+    // kGmKillEmAll hits `default: break` => inert, so KillEmAll goldens are unaffected
+    // by this addition (Slice 6). The three render-only ProcessFrame steps that follow
+    // in C++ (`ProcessViewports`, the `prev_control_states` store) stay OMITTED as
+    // provably hash-inert (design §1).
+    switch (settings->game_mode) {
+      case Settings::kGmGameOfTag: {
+        bool some_invisible = false;
+        for (auto& worm : game.worms) {
+          if (!worm->visible) {
+            some_invisible = true;
+            break;
+          }
+        }
+
+        Worm* last_killed_by = game.WormByIdx(game.last_killed_idx);
+
+        if (!some_invisible && last_killed_by && (game.cycles % 70) == 0 &&
+            last_killed_by->timer < settings->time_to_lose) {
+          ++last_killed_by->timer;
+        }
+      } break;
+
+      case Settings::kGmHoldazone: {
+        // Alias `game.holdazone` so the body below is a verbatim copy of
+        // `Game::ProcessFrame` (game.cpp:390-458) — same line breaks / NOLINT pragmas.
+        auto& holdazone = game.holdazone;
+        int contender_idx = -1;
+        int contenders = 0;
+
+        for (auto const& w : game.worms) {
+          int const kX = Ftoi(w->pos.x);
+          int const kY = Ftoi(w->pos.y);
+
+          if (w->visible && holdazone.rect.Inside(kX, kY)) {
+            contender_idx = w->index;
+            ++contenders;
+          }
+        }
+
+        if (contenders == 0) {
+          contender_idx = holdazone.holder_idx;
+        }
+
+        if (contenders <= 1) {
+          if (contender_idx < 0 ||
+              (holdazone.contender_idx != contender_idx && holdazone.contender_frames != 0)) {
+            // NOLINTNEXTLINE(bugprone-inc-dec-in-conditions) — short-circuit-then-mutate is the entire point: only decrement when not already 0.
+            if (holdazone.contender_frames == 0 || --holdazone.contender_frames == 0) {
+              holdazone.contender_idx = contender_idx;
+              holdazone.holder_idx = -1;
+            }
+          } else {
+            holdazone.contender_idx = contender_idx;
+
+            // NOLINTBEGIN(bugprone-inc-dec-in-conditions) — guarded increment: only fire on the exact frame that crosses the capture threshold.
+            if (holdazone.contender_frames < Settings::kZoneCaptureTime &&
+                ++holdazone.contender_frames >= Settings::kZoneCaptureTime &&
+                holdazone.holder_idx != holdazone.contender_idx) {
+              // NOLINTEND(bugprone-inc-dec-in-conditions) New holder
+
+              int new_timeout = holdazone.timeout_left;
+              if (holdazone.contender_idx >= 0) {
+                new_timeout += settings->zone_timeout * 70 / 4;
+              } else {
+                new_timeout += settings->zone_timeout * 70 / 8;
+              }
+
+              holdazone.timeout_left = std::min(new_timeout, settings->zone_timeout * 70);
+
+              holdazone.holder_idx = holdazone.contender_idx;
+            }
+          }
+        }
+
+        bool dec = false;
+
+        if (holdazone.holder_idx >= 0) {
+          auto* holder = game.WormByIdx(holdazone.holder_idx);
+
+          if ((game.cycles % 70) == 0) {
+            ++holder->timer;
+          }
+
+          dec = true;
+        } else {
+          dec = (game.cycles % 4) == 0;
+        }
+
+        if (dec) {
+          if (--holdazone.timeout_left <= 0) {
+            game.SpawnZone();
+          }
+        }
+      } break;
+      default:
+        break;
     }
     dump(t + 1);
   }

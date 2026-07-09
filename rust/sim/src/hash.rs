@@ -378,6 +378,7 @@ mod tests {
             ninjarope: Ninjarope {
                 out: true,
                 pos: Vec2::new(11, -22),
+                ..Default::default()
             },
             index: 0,
             stats_x: 0,
@@ -451,6 +452,31 @@ mod tests {
         h = h.wrapping_mul(31).wrapping_add((-22i32) as u32); // pos.y
 
         assert_eq!(hash_game_state(&state), h);
+    }
+
+    // (c'') Hash-neutrality of the non-hashed Ninjarope dynamics fields (Slice 6
+    // T1): two states differing ONLY in `vel`/`attached`/`length`/`cur_len`/
+    // `anchor` must hash identically — the master hash reads only `out`/`pos`.
+    // This is what lets the throw write these fields without moving any golden.
+    #[test]
+    fn ninjarope_dynamics_fields_are_hash_neutral() {
+        let mut a = empty_state(0, 0, 200);
+        a.worms = vec![worm_fixture()];
+
+        let mut b = empty_state(0, 0, 200);
+        let mut wb = worm_fixture();
+        wb.ninjarope.vel = Vec2::new(9999, -8888);
+        wb.ninjarope.attached = !wb.ninjarope.attached;
+        wb.ninjarope.length = 4000;
+        wb.ninjarope.cur_len = 12345;
+        wb.ninjarope.anchor = Some(1);
+        b.worms = vec![wb];
+
+        assert_eq!(
+            hash_game_state(&a),
+            hash_game_state(&b),
+            "vel/attached/length/cur_len/anchor must not affect the master hash"
+        );
     }
 
     // (c') The per-worm component hash uses the documented SUBSET, in order:

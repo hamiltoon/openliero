@@ -129,13 +129,33 @@ impl ControlState {
 // Ninjarope
 // ---------------------------------------------------------------------------
 
-/// The worm's ninjarope. Tick-0 subset of C++ `Ninjarope` (`worm.hpp:19`): the
-/// hash reads `out` and `pos`. Later slices add `attached`/`length`/`vel`/...
+/// The worm's ninjarope. Mirrors C++ `Ninjarope` (`worm.hpp:19-30`). Only `out`
+/// and `pos` are hashed (`stateHash.hpp`); the dynamics fields
+/// (`vel`/`attached`/`length`/`cur_len`/`anchor`) are NOT hashed — they are the
+/// non-hashed state the throw (Slice 6 T1) and `Ninjarope::Process` (T2) read/
+/// write. Defaults match the C++ ctor: `out`/`attached` `false`, `anchor`
+/// `nullptr` (`None`), `pos`/`vel` zero; `length`/`cur_len` are uninitialised
+/// `int`s in C++ (only ever read after the throw sets `length`, so `0` is a safe,
+/// never-observed default here).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Ninjarope {
     /// Is the rope deployed? Hashed as its 0/1 int value.
     pub out: bool,
+    /// Rope tip position (16.16 fixed-point). Hashed.
     pub pos: Vec2,
+    /// Rope tip velocity (16.16 fixed-point). NOT hashed. Set at throw time from
+    /// `cossin[Ftoi(aiming_angle)] << NRThrowVel{X,Y}`; advanced by `Process` (T2).
+    pub vel: Vec2,
+    /// Is the rope anchored (to terrain or a worm)? NOT hashed. Throw clears it.
+    pub attached: bool,
+    /// Target rope length. NOT hashed. Throw sets `NRInitialLength`; the Change
+    /// +Up/Down adjust pulls/releases it, clamped to `[NRMinLength, NRMaxLength]`.
+    pub length: i32,
+    /// Current measured rope length. NOT hashed. Written only by `Process` (T2).
+    pub cur_len: i32,
+    /// The worm index the rope is attached to, or `None` (C++ `Worm* anchor`,
+    /// `nullptr`). NOT hashed. Written only by `Process` (T2).
+    pub anchor: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1718,8 +1738,9 @@ impl SimState {
                 // 5. aiming.
                 process_aiming(w, control);
 
-                // 6. tasks (jump reads reacts[kRfUp], writes vel.y BEFORE physics).
-                process_tasks(w, &reacts, control);
+                // 6. tasks (jump reads reacts[kRfUp], writes vel.y BEFORE physics;
+                //    the ninjarope throw reads cossin[Ftoi(aiming_angle)]).
+                process_tasks(w, &reacts, control, cossin);
 
                 // 7. weapons (delay_left countdown + shell drop on timer expiry).
                 process_weapons(

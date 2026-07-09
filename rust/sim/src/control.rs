@@ -256,47 +256,74 @@ pub fn process_aiming(worm: &mut WormState, c: &ControlConsts) {
 /// * **Change held** (`Pressed(kChange)`):
 ///   - If the rope is already out, C++ adjusts `ninjarope.length` by
 ///     `NRPullVel`/`NRReleaseVel` on Up/Down and clamps it to
-///     `[NRMinLength, NRMaxLength]`. **Skipped here (design doc OQ5):**
-///     `ninjarope.length` is *not* hashed and the rope's `Process` is not run
-///     this slice (rope frozen), so pull/release is a no-op on hashed state.
-///   - `PressedOnce(kJump)` throws the rope: sets `ninjarope.out = true`,
-///     `ninjarope.pos = pos`, and **clears the Jump bit** in `control_states`
-///     (the master hash reads `control_states.Pack()` post-`Process`). C++ also
-///     sets `attached = false`, plays a sound, and computes `ninjarope.vel`
-///     (via the `cossin_table`) and `ninjarope.length` — **all skipped**:
-///     `attached`/`vel`/`length` are not hashed and the cossin table is not
-///     pulled into this slice; only the hashed `out`/`pos` are written.
+///     `[NRMinLength, NRMaxLength]` (`worm.cpp:963-973`). `length` is non-hashed,
+///     so this moves no golden, but it is the state `Ninjarope::Process` (T2)
+///     reads — ported here (Slice 6 T1 un-skip, design doc OQ5). `Pressed`, not
+///     `PressedOnce`: it adjusts every held tick.
+///   - `PressedOnce(kJump)` throws the rope (`worm.cpp:975-986`): sets
+///     `ninjarope.out = true`, `attached = false`, `pos = pos`,
+///     `vel = (cossin[Ftoi(aiming_angle)].x << NRThrowVelX,
+///     cossin[..].y << NRThrowVelY)`, `length = NRInitialLength`, and **clears
+///     the Jump bit** in `control_states` (the master hash reads
+///     `control_states.Pack()` post-`Process`). Only `out`/`pos`/the Jump bit are
+///     hashed; `vel`/`attached`/`length` are non-hashed dynamics for T2. The
+///     `SoundNinjaropeThrow` play is omitted (sound not hashed).
 ///
 /// * **Change not held** (`else`):
 ///   - **Jump held** (`Pressed(kJump)`): retract the rope (`ninjarope.out =
-///     false`), then jump *iff* `(reacts[kRfUp] > 0 || AirJump) && (able_to_jump
-///     || MultiJump)` — apply `vel.y -= JumpForce` and clear `able_to_jump`.
+///     false`, `attached = false`), then jump *iff* `(reacts[kRfUp] > 0 ||
+///     AirJump) && (able_to_jump || MultiJump)` — apply `vel.y -= JumpForce` and
+///     clear `able_to_jump`.
 ///   - **Jump not held**: re-arm the jump (`able_to_jump = true`). This is the
 ///     set/clear edge: `able_to_jump` is true only after a tick with Jump
 ///     released, and the impulse clears it so holding Jump (sans `MultiJump`)
 ///     fires once.
 ///
-/// `vel.y` arithmetic is `wrapping_sub` to match C++ `int` semantics.
-pub fn process_tasks(worm: &mut WormState, reacts: &[i32; 4], c: &ControlConsts) {
+/// `vel.y`, the rope `length` adjust, and the throw `vel` shift are all
+/// `wrapping_*` to match C++ `int` semantics. `cossin` is the precomputed
+/// cos/sin table indexed by `Ftoi(aiming_angle)`.
+pub fn process_tasks(
+    worm: &mut WormState,
+    reacts: &[i32; 4],
+    c: &ControlConsts,
+    cossin: &[Vec2; 128],
+) {
     use crate::physics::RF_UP;
 
     if worm.control_states.get(ControlState::CHANGE) {
-        // Rope pull/release on Up/Down adjusts `ninjarope.length` here in C++.
-        // SKIPPED (design doc OQ5): `length` is non-hashed and the rope is frozen
-        // this slice, so pull/release touches no hashed state.
+        // worm.cpp:963-973 — rope pull/release while the rope is out. `Pressed`
+        // (held), not `PressedOnce`: adjusts every tick, then clamps.
+        if worm.ninjarope.out {
+            if worm.control_states.get(ControlState::UP) {
+                worm.ninjarope.length = worm.ninjarope.length.wrapping_sub(c.nr_pull_vel);
+            }
+            if worm.control_states.get(ControlState::DOWN) {
+                worm.ninjarope.length = worm.ninjarope.length.wrapping_add(c.nr_release_vel);
+            }
+            // std::max then std::min: clamp into [NRMinLength, NRMaxLength].
+            worm.ninjarope.length = worm.ninjarope.length.max(c.nr_min_length);
+            worm.ninjarope.length = worm.ninjarope.length.min(c.nr_max_length);
+        }
 
         if worm.control_states.pressed_once(ControlState::JUMP) {
-            // Throw the rope. Only the hashed fields are written:
+            // worm.cpp:975-986 — throw the rope.
             worm.ninjarope.out = true;
+            worm.ninjarope.attached = false;
+            // SoundNinjaropeThrow (worm.cpp:979) OMITTED: sound not hashed.
             worm.ninjarope.pos = worm.pos;
-            // SKIPPED (OQ5): attached=false, sound, ninjarope.vel (cossin_table),
-            // ninjarope.length = NRInitialLength — none are hashed.
+            // worm.cpp:982-983 — vel = cossin[Ftoi(aiming_angle)] << NRThrowVel{X,Y}.
+            let cs = cossin[ftoi(worm.aiming_angle) as usize];
+            worm.ninjarope.vel = Vec2::new(
+                cs.x.wrapping_shl(c.nr_throw_vel_x as u32),
+                cs.y.wrapping_shl(c.nr_throw_vel_y as u32),
+            );
+            worm.ninjarope.length = c.nr_initial_length;
         }
     } else {
         // Jump = remove ninjarope, jump.
         if worm.control_states.get(ControlState::JUMP) {
             worm.ninjarope.out = false;
-            // SKIPPED: attached = false (non-hashed).
+            worm.ninjarope.attached = false;
 
             if (reacts[RF_UP] > 0 || c.h_air_jump) && (worm.able_to_jump || c.h_multi_jump) {
                 worm.vel.y = worm.vel.y.wrapping_sub(c.jump_force);
@@ -991,7 +1018,7 @@ MultiJump = true
         w.control_states.press(ControlState::JUMP);
         let reacts = [0, 0, 1, 0]; // kRfUp = index 2 -> grounded
 
-        process_tasks(&mut w, &reacts, &c);
+        process_tasks(&mut w, &reacts, &c, &precompute_cossin());
         assert_eq!(w.vel.y, 1000 - 56064, "vel.y -= JumpForce");
         assert!(!w.able_to_jump, "impulse clears able_to_jump");
         assert!(!w.ninjarope.out, "jump branch retracts the rope");
@@ -1008,7 +1035,7 @@ MultiJump = true
         w.control_states.press(ControlState::JUMP);
         let reacts = [0, 0, 0, 0]; // not grounded
 
-        process_tasks(&mut w, &reacts, &c);
+        process_tasks(&mut w, &reacts, &c, &precompute_cossin());
         assert_eq!(w.vel.y, 1000, "airborne -> no impulse");
         assert!(w.able_to_jump, "able_to_jump untouched when gated");
         assert!(!w.ninjarope.out);
@@ -1025,7 +1052,7 @@ MultiJump = true
         w.control_states.press(ControlState::JUMP);
         let reacts = [0, 0, 1, 0]; // grounded
 
-        process_tasks(&mut w, &reacts, &c);
+        process_tasks(&mut w, &reacts, &c, &precompute_cossin());
         assert_eq!(w.vel.y, 1000, "not able_to_jump -> no impulse");
         assert!(!w.able_to_jump);
     }
@@ -1038,7 +1065,7 @@ MultiJump = true
         w.able_to_jump = false;
         // No keys held.
         let reacts = [0, 0, 1, 0];
-        process_tasks(&mut w, &reacts, &c);
+        process_tasks(&mut w, &reacts, &c, &precompute_cossin());
         assert!(w.able_to_jump, "Jump released -> able_to_jump re-armed");
     }
 
@@ -1055,19 +1082,19 @@ MultiJump = true
         let reacts = [0, 0, 1, 0]; // grounded throughout
 
         // Tick 1: Jump released.
-        process_tasks(&mut w, &reacts, &c);
+        process_tasks(&mut w, &reacts, &c, &precompute_cossin());
         assert!(w.able_to_jump, "tick1 re-arms");
         assert_eq!(w.vel.y, 0);
 
         // Tick 2: Jump held -> fires.
         w.control_states.press(ControlState::JUMP);
-        process_tasks(&mut w, &reacts, &c);
+        process_tasks(&mut w, &reacts, &c, &precompute_cossin());
         assert_eq!(w.vel.y, -56064, "tick2 fires the impulse");
         assert!(!w.able_to_jump, "tick2 clears able_to_jump");
 
         // Tick 3: Jump still held -> gated, no second impulse.
         w.control_states.press(ControlState::JUMP);
-        process_tasks(&mut w, &reacts, &c);
+        process_tasks(&mut w, &reacts, &c, &precompute_cossin());
         assert_eq!(w.vel.y, -56064, "tick3 gated: vel.y unchanged");
     }
 
@@ -1082,7 +1109,7 @@ MultiJump = true
         w.control_states.press(ControlState::JUMP);
         let reacts = [0, 0, 0, 0]; // airborne
 
-        process_tasks(&mut w, &reacts, &c);
+        process_tasks(&mut w, &reacts, &c, &precompute_cossin());
         assert_eq!(w.vel.y, -56064, "AirJump: jump off the ground");
         assert!(!w.able_to_jump);
     }
@@ -1097,7 +1124,7 @@ MultiJump = true
         w.control_states.press(ControlState::JUMP);
         let reacts = [0, 0, 1, 0]; // grounded
 
-        process_tasks(&mut w, &reacts, &c);
+        process_tasks(&mut w, &reacts, &c, &precompute_cossin());
         assert_eq!(w.vel.y, -56064, "MultiJump: fires despite !able_to_jump");
     }
 
@@ -1109,7 +1136,7 @@ MultiJump = true
         w.control_states.press(ControlState::CHANGE);
         w.control_states.press(ControlState::JUMP);
 
-        process_tasks(&mut w, &[0, 0, 0, 0], &c);
+        process_tasks(&mut w, &[0, 0, 0, 0], &c, &precompute_cossin());
         assert!(w.ninjarope.out, "throw sets out");
         assert_eq!(w.ninjarope.pos, Vec2::new(123, 456), "pos = worm.pos");
         // PressedOnce(kJump) consumed the Jump bit; Change stays set.
@@ -1139,7 +1166,7 @@ MultiJump = true
         w.control_states.press(ControlState::CHANGE);
         w.control_states.press(ControlState::JUMP);
 
-        process_tasks(&mut w, &[0, 0, 1, 0], &c); // grounded
+        process_tasks(&mut w, &[0, 0, 1, 0], &c, &precompute_cossin()); // grounded
         assert_eq!(w.vel, Vec2::new(7, 9), "throw doesn't apply jump impulse");
         assert!(w.able_to_jump, "throw doesn't touch able_to_jump");
     }
@@ -1150,9 +1177,98 @@ MultiJump = true
         let c = ControlConsts::default();
         let mut w = task_worm();
         w.control_states.press(ControlState::CHANGE);
-        process_tasks(&mut w, &[0, 0, 0, 0], &c);
+        process_tasks(&mut w, &[0, 0, 0, 0], &c, &precompute_cossin());
         assert!(!w.ninjarope.out, "no Jump -> no throw");
         assert_eq!(w.ninjarope.pos, Vec2::zero(), "pos untouched");
+    }
+
+    #[test]
+    fn ninjarope_throw_sets_vel_length_and_attached() {
+        // worm.cpp:982-986: the throw computes the non-hashed dynamics fields.
+        // vel = cossin[Ftoi(aiming_angle)] << NRThrowVel{X,Y} (== 2 each),
+        // length = NRInitialLength (4000), attached = false. Uses a known
+        // aiming_angle and folds the SAME cossin table the throw indexes.
+        let c = ControlConsts::default();
+        let cossin = precompute_cossin();
+        let mut w = task_worm();
+        w.aiming_angle = itof(70); // an in-range aim; Ftoi -> table index 70
+        w.ninjarope.attached = true; // must be cleared by the throw
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::JUMP);
+
+        process_tasks(&mut w, &[0, 0, 0, 0], &c, &cossin);
+
+        let cs = cossin[70];
+        assert_eq!(
+            w.ninjarope.vel,
+            Vec2::new(cs.x << 2, cs.y << 2),
+            "vel = cossin[Ftoi(angle)] << NRThrowVel X/Y"
+        );
+        assert_eq!(w.ninjarope.length, 4000, "length = NRInitialLength");
+        assert!(!w.ninjarope.attached, "throw clears attached");
+    }
+
+    #[test]
+    fn ninjarope_length_pull_release_and_clamps() {
+        // worm.cpp:963-973: while the rope is out and Change is held, Up pulls
+        // (length -= NRPullVel=24), Down releases (length += NRReleaseVel=24),
+        // then clamp to [NRMinLength=170, NRMaxLength=4000]. `Pressed`, not
+        // `PressedOnce`: each held tick adjusts.
+        let c = ControlConsts::default();
+        let cossin = precompute_cossin();
+
+        // Up pulls in.
+        let mut w = task_worm();
+        w.ninjarope.out = true;
+        w.ninjarope.length = 1000;
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::UP);
+        process_tasks(&mut w, &[0, 0, 0, 0], &c, &cossin);
+        assert_eq!(w.ninjarope.length, 976, "Up: length -= NRPullVel (1000-24)");
+
+        // Down releases out.
+        let mut w = task_worm();
+        w.ninjarope.out = true;
+        w.ninjarope.length = 1000;
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::DOWN);
+        process_tasks(&mut w, &[0, 0, 0, 0], &c, &cossin);
+        assert_eq!(
+            w.ninjarope.length, 1024,
+            "Down: length += NRReleaseVel (1000+24)"
+        );
+
+        // Pull below NRMinLength clamps up to 170.
+        let mut w = task_worm();
+        w.ninjarope.out = true;
+        w.ninjarope.length = c.nr_min_length; // 170; Up would take it to 146
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::UP);
+        process_tasks(&mut w, &[0, 0, 0, 0], &c, &cossin);
+        assert_eq!(w.ninjarope.length, 170, "clamped up to NRMinLength");
+
+        // Release above NRMaxLength clamps down to 4000.
+        let mut w = task_worm();
+        w.ninjarope.out = true;
+        w.ninjarope.length = c.nr_max_length; // 4000; Down would take it to 4024
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::DOWN);
+        process_tasks(&mut w, &[0, 0, 0, 0], &c, &cossin);
+        assert_eq!(w.ninjarope.length, 4000, "clamped down to NRMaxLength");
+    }
+
+    #[test]
+    fn ninjarope_length_adjust_skipped_when_rope_not_out() {
+        // worm.cpp:963 guards the pull/release on `ninjarope.out`. With the rope
+        // stowed, Change+Up leaves length untouched (no clamp either).
+        let c = ControlConsts::default();
+        let mut w = task_worm();
+        w.ninjarope.out = false;
+        w.ninjarope.length = 999;
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::UP);
+        process_tasks(&mut w, &[0, 0, 0, 0], &c, &precompute_cossin());
+        assert_eq!(w.ninjarope.length, 999, "rope stowed -> no length adjust");
     }
 
     #[test]
@@ -1165,7 +1281,7 @@ MultiJump = true
         w.ninjarope.pos = Vec2::new(5, 5);
         w.able_to_jump = false;
         w.control_states.press(ControlState::JUMP);
-        process_tasks(&mut w, &[0, 0, 0, 0], &c); // airborne, gated
+        process_tasks(&mut w, &[0, 0, 0, 0], &c, &precompute_cossin()); // airborne, gated
         assert!(!w.ninjarope.out, "retract even when jump impulse is gated");
     }
 

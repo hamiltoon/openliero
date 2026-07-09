@@ -13,6 +13,7 @@ use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
 use assets::tc::Texture;
 use sim_core::fixed::{ftoi, itof, Fixed};
+use sim_core::math::vector_length;
 use sim_core::rng::Rand;
 use sim_core::tables::precompute_cossin;
 use sim_core::vec::Vec2;
@@ -22,7 +23,9 @@ use crate::control::{
     process_aiming, process_movement, process_tasks, process_weapon_change, process_weapons,
     ControlConsts,
 };
-use crate::nobject::{nobject_create1, nobject_create2, nobject_process, NObjectOutcome};
+use crate::nobject::{
+    check_for_spec_worm_hit, nobject_create1, nobject_create2, nobject_process, NObjectOutcome,
+};
 use crate::physics::{worm_process_physics, worm_reactions, PhysicsConsts};
 use crate::pool::{BloodPool, Pool};
 use crate::sobject::{sobject_process, SObjectOutcome};
@@ -1900,6 +1903,214 @@ impl SimState {
         // in-place increment bit-for-bit in the hash.
         for killer in deferred_kills {
             worms[killer].kills += 1;
+        }
+
+        // Ninjarope loop (`game.cpp:368-370`), AFTER the worm loop and BEFORE the
+        // game-mode switch. Each worm's rope tip is advanced by `ninjarope_process`
+        // in `worms` index order — mirroring the C++ `for (auto& worm : worms)
+        // worm->ninjarope.Process(*worm, *this)`. Index-based (not `iter_mut()`) so a
+        // rope anchored to the OTHER worm can read/write `worms[anchor]` at the same
+        // time as its owner `worms[i]`. NO-OP on every worm whose rope is stowed
+        // (`out == false`), so slices 1-5' (no rope-out ticks) draw no rand and their
+        // goldens stay byte-identical; the only RNG here is the terrain-attach spray.
+        for i in 0..worms.len() {
+            ninjarope_process(
+                worms,
+                i,
+                level,
+                worm_sprites,
+                nobject_types,
+                cossin,
+                control,
+                rand,
+                nobjects,
+            );
+        }
+    }
+}
+
+/// Port of `Ninjarope::Process` (`ninjarope.cpp:7-82`) — advance one worm's rope
+/// tip by one tick. Called as a loop over `worms` AFTER the worm loop and BEFORE
+/// the game-mode switch (`game.cpp:368-370`).
+///
+/// `index` is the OWNER worm (C++ `owner`); the rope processed is
+/// `worms[index].ninjarope`. `worms` is the whole slice (indexed, not an
+/// `iter_mut()` borrow) so the anchor-worm read/write (`worms[anchor]`) and the
+/// owner mutation (`worms[index]`) coexist — mirroring [`begin_respawn`].
+///
+/// RNG order (the contract, `ninjarope.cpp:41-45`): the ONLY draws are the
+/// terrain-attach spray — **exactly 11 × [`rand(128)` → `nobject_types[2].Create2`]**,
+/// fired inside `!attached && Inside(ipos) && AnyDirt(ipos)`, AFTER `pos += vel`
+/// and the anchor scan. Every other path (open-air, rock edge, worm-anchor,
+/// detached-gravity) draws NOTHING; `check_for_spec_worm_hit` is rand-free.
+///
+/// Branch map (vs `ninjarope.cpp:10-81`):
+/// * `!out` → no-op, no rand (`:10`).
+/// * `pos += vel` (`:11`), `ipos = Ftoi(pos)` (`:13`).
+/// * anchor scan (`:15-23`): `anchor = None`, then the FIRST OTHER worm whose
+///   sprite `CheckForSpecWormHit(ipos, dist=1)` hits becomes `anchor` (index order).
+/// * `kDiff = pos - owner.pos` (`:25`); `kForce = ((kDiff.x << ShlX)/DivX,
+///   (kDiff.y << ShlY)/DivY)` (`:27-28`); `cur_len = (VectorLength(Ftoi(kDiff.x),
+///   Ftoi(kDiff.y)) + 1) << NRForceLenShl` (`:30`).
+/// * terrain (`:32-50`): `ipos` at/over the ±1 level edge OR `Mat(ipos).DirtRock()`.
+///   First attach latches `length = NRAttachLength`, `attached = true`, and — iff
+///   `Inside(ipos) && Mat(ipos).AnyDirt()` — sprays the 11×`rand(128)` type-2
+///   `Create2` at `pos` with the dug pixel's colour. Then `vel.Zero()`.
+/// * else-if worm-anchor (`:51-63`): first attach latches the same
+///   `length`/`attached`; if `cur_len > length` then `anchor.vel -= kForce/cur_len`;
+///   then `vel = anchor.vel`, `pos = anchor.pos`.
+/// * else detached (`:64-66`): `attached = false`.
+/// * tail (`:68-80`): if `attached` and `cur_len > length` then
+///   `owner.vel += kForce/cur_len`; else `vel.y += NinjaropeGravity` and, if
+///   `cur_len > length`, `vel -= kForce/cur_len`.
+///
+/// `kForce / cur_len` is a truncating per-component divide ([`Vec2::div`]); `cur_len`
+/// is `>= 16` (`(len+1) << 4`), never 0. The `<<`/`/` on `kDiff` are the raw C++
+/// `int` shift/divide (`wrapping_shl`/`wrapping_div`).
+#[allow(clippy::too_many_arguments)]
+fn ninjarope_process(
+    worms: &mut [WormState],
+    index: usize,
+    level: &LevelSim,
+    worm_sprites: &SpriteSet,
+    nobject_types: &[NObjectType],
+    cossin: &[Vec2; 128],
+    control: &ControlConsts,
+    rand: &mut Rand,
+    nobjects: &mut Pool<NObject>,
+) {
+    // :10 rope stowed -> no-op, no rand.
+    if !worms[index].ninjarope.out {
+        return;
+    }
+
+    // :11 pos += vel.
+    let vel = worms[index].ninjarope.vel;
+    worms[index].ninjarope.pos = worms[index].ninjarope.pos.add(vel);
+    let pos = worms[index].ninjarope.pos;
+
+    // :13 ipos = Ftoi(pos) (component arithmetic >> 16).
+    let ipos_x = ftoi(pos.x);
+    let ipos_y = ftoi(pos.y);
+
+    // :15-23 anchor scan: reset to None, then the FIRST OTHER worm (index order)
+    // whose sprite the tip is inside (`CheckForSpecWormHit(ipos, dist=1)`). Rand-free.
+    let mut anchor: Option<usize> = None;
+    for (j, worm) in worms.iter().enumerate() {
+        if j != index
+            && check_for_spec_worm_hit(worm, ipos_x, ipos_y, 1, worm_sprites, &level.material_flags)
+        {
+            anchor = Some(j);
+            break;
+        }
+    }
+    worms[index].ninjarope.anchor = anchor;
+
+    // :25 kDiff = pos - owner.pos.
+    let owner_pos = worms[index].pos;
+    let kdiff = pos.sub(owner_pos);
+
+    // :27-28 kForce = ((kDiff.x << ShlX) / DivX, (kDiff.y << ShlY) / DivY) — raw
+    // C++ `int` shift then truncating divide, per component.
+    let kforce = Vec2::new(
+        kdiff
+            .x
+            .wrapping_shl(control.nr_force_shl_x as u32)
+            .wrapping_div(control.nr_force_div_x),
+        kdiff
+            .y
+            .wrapping_shl(control.nr_force_shl_y as u32)
+            .wrapping_div(control.nr_force_div_y),
+    );
+
+    // :30 cur_len = (VectorLength(Ftoi(kDiff.x), Ftoi(kDiff.y)) + 1) << NRForceLenShl.
+    let cur_len = vector_length(ftoi(kdiff.x), ftoi(kdiff.y))
+        .wrapping_add(1)
+        .wrapping_shl(control.nr_force_len_shl as u32);
+    worms[index].ninjarope.cur_len = cur_len;
+
+    // :32-33 terrain-attach guard: ipos at/over the ±1 level edge OR a DirtRock
+    // pixel. The `||` short-circuits exactly as C++, so `dirt_rock` (which itself
+    // range-checks) is only probed when ipos is strictly inside [1, w-2]x[1, h-2].
+    let terrain = ipos_x <= 0
+        || ipos_x >= level.width - 1
+        || ipos_y <= 0
+        || ipos_y >= level.height - 1
+        || level.dirt_rock(ipos_x, ipos_y);
+
+    if terrain {
+        // :34-48 first attach latches length/attached and (iff over dirt) sprays.
+        if !worms[index].ninjarope.attached {
+            worms[index].ninjarope.length = control.nr_attach_length;
+            worms[index].ninjarope.attached = true;
+
+            // :38-47 Inside(ipos) && Mat(ipos).AnyDirt() -> 11x [rand(128) + type-2
+            // Create2] at `pos` with the dug pixel's colour. `any_dirt` has no inside
+            // gate, so the `&&` (Inside first) reproduces the nested C++ ifs.
+            if level.inside(ipos_x, ipos_y) && level.any_dirt(ipos_x, ipos_y) {
+                let k_pix = level.pixel(ipos_x, ipos_y);
+                let owner_index = worms[index].index;
+                for _ in 0..11 {
+                    // rand(128) is the Create2 `angle` argument — evaluated BEFORE the
+                    // call body (Create2's own draws), so bind it first to satisfy the
+                    // borrow checker while matching C++ argument-eval order.
+                    let angle = rand.bound(128) as i32;
+                    nobject_create2(
+                        &nobject_types[2],
+                        angle,
+                        Vec2::zero(),
+                        pos,
+                        k_pix,
+                        owner_index,
+                        cossin,
+                        rand,
+                        nobjects,
+                    );
+                }
+            }
+        }
+
+        // :50 vel.Zero().
+        worms[index].ninjarope.vel = Vec2::zero();
+    } else if let Some(a) = anchor {
+        // :52-56 first attach latches length/attached (no spray on a worm anchor).
+        if !worms[index].ninjarope.attached {
+            worms[index].ninjarope.length = control.nr_attach_length;
+            worms[index].ninjarope.attached = true;
+        }
+
+        // :58-60 if cur_len > length: anchor->vel -= kForce / cur_len.
+        let length = worms[index].ninjarope.length;
+        if cur_len > length {
+            worms[a].vel = worms[a].vel.sub(kforce.div(cur_len));
+        }
+
+        // :62-63 vel = anchor->vel (the value AFTER the -= above); pos = anchor->pos.
+        worms[index].ninjarope.vel = worms[a].vel;
+        worms[index].ninjarope.pos = worms[a].pos;
+    } else {
+        // :64-66 detached.
+        worms[index].ninjarope.attached = false;
+    }
+
+    // :68-80 the attached-vs-gravity tail.
+    if worms[index].ninjarope.attached {
+        // :71-72 if cur_len > length: owner.vel += kForce / cur_len.
+        let length = worms[index].ninjarope.length;
+        if cur_len > length {
+            worms[index].vel = worms[index].vel.add(kforce.div(cur_len));
+        }
+    } else {
+        // :75 vel.y += NinjaropeGravity.
+        worms[index].ninjarope.vel.y = worms[index]
+            .ninjarope
+            .vel
+            .y
+            .wrapping_add(control.ninjarope_gravity);
+        // :77-78 if cur_len > length: vel -= kForce / cur_len.
+        let length = worms[index].ninjarope.length;
+        if cur_len > length {
+            worms[index].ninjarope.vel = worms[index].ninjarope.vel.sub(kforce.div(cur_len));
         }
     }
 }
@@ -4686,5 +4897,264 @@ mod tests {
             angle_frame(w.aiming_angle, w.direction) + WORM_ANIM_TAB[((state.cycles & 31) >> 3) as usize],
             "moving current_frame == angle_frame + anim offset"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Ninjarope::Process (ninjarope.cpp:7-82) — branch-by-branch unit tests.
+    // -----------------------------------------------------------------------
+
+    /// A single worm at `pos` (fixed-point), visible, rope stowed.
+    fn nr_worm(index: i32, pos: Vec2, visible: bool) -> WormState {
+        WormState::from_init(&WormInit {
+            index,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit::default(); NUM_WEAPONS],
+            start_pos: pos,
+            visible,
+        })
+    }
+
+    /// A `width × height` all-background level (material 0 = background).
+    fn nr_level(width: i32, height: i32) -> LevelSim {
+        let mut material_flags = [0u8; 256];
+        material_flags[0] = MAT_BACKGROUND;
+        LevelSim {
+            width,
+            height,
+            material_id: vec![0u8; (width * height) as usize],
+            material_flags,
+        }
+    }
+
+    /// An `nobject_types` table whose slot 2 draws exactly ONE rand per `Create2`
+    /// (`speed_v = 0` ⇒ `rand(0)` still draws; no distribution/frame/explo jitter),
+    /// so 11 sprays == 11×(`rand(128)` + 1) == 22 draws.
+    fn nr_nobject_types() -> Vec<NObjectType> {
+        let mut v = vec![NObjectType::default(); 3];
+        v[2] = NObjectType {
+            id: 2,
+            ..Default::default()
+        };
+        v
+    }
+
+    /// A 16×16 ×84 worm-sprite bank filled with palette index `0x20`, which the
+    /// level flag table maps to `MAT_WORM` — so any window overlapping the sprite
+    /// is a `CheckForSpecWormHit` hit.
+    fn nr_worm_sprites() -> SpriteSet {
+        SpriteSet {
+            width: 16,
+            height: 16,
+            count: 84,
+            data: vec![0x20u8; 84 * 256],
+        }
+    }
+
+    // (a) out == false -> no-op, no rand.
+    #[test]
+    fn ninjarope_process_noop_when_not_out() {
+        let mut worms = vec![nr_worm(0, Vec2::new(itof(50), itof(50)), true)];
+        worms[0].ninjarope.out = false;
+        worms[0].ninjarope.pos = Vec2::new(itof(10), itof(10));
+        worms[0].ninjarope.vel = Vec2::new(itof(1), itof(1));
+        let level = nr_level(300, 300);
+        let sprites = SpriteSet::default();
+        let ntypes = nr_nobject_types();
+        let cossin = precompute_cossin();
+        let control = ControlConsts::default();
+        let mut rand = Rand::new();
+        rand.seed(1);
+        let before = rand.draws();
+        let mut nobjects = Pool::new(NOBJECT_CAPACITY);
+        ninjarope_process(
+            &mut worms, 0, &level, &sprites, &ntypes, &cossin, &control, &mut rand, &mut nobjects,
+        );
+        assert_eq!(worms[0].ninjarope.pos, Vec2::new(itof(10), itof(10)), "pos unchanged");
+        assert_eq!(worms[0].ninjarope.vel, Vec2::new(itof(1), itof(1)), "vel unchanged");
+        assert_eq!(rand.draws() - before, 0, "no rand drawn");
+        assert_eq!(nobjects.len(), 0, "no spawn");
+    }
+
+    // (b) rope over open air -> pos += vel, vel.y += NinjaropeGravity, owner vel
+    //     unchanged (cur_len <= length), no rand, stays detached.
+    #[test]
+    fn ninjarope_process_open_air_gravity_no_rand() {
+        let mut worms = vec![nr_worm(0, Vec2::new(itof(50), itof(50)), true)];
+        worms[0].ninjarope.out = true;
+        worms[0].ninjarope.pos = Vec2::new(itof(50), itof(50));
+        worms[0].ninjarope.vel = Vec2::new(itof(2), itof(3));
+        worms[0].ninjarope.attached = false;
+        worms[0].ninjarope.length = 450;
+        let level = nr_level(300, 300);
+        let sprites = SpriteSet::default();
+        let ntypes = nr_nobject_types();
+        let cossin = precompute_cossin();
+        let control = ControlConsts::default();
+        let mut rand = Rand::new();
+        rand.seed(1);
+        let before = rand.draws();
+        let mut nobjects = Pool::new(NOBJECT_CAPACITY);
+        ninjarope_process(
+            &mut worms, 0, &level, &sprites, &ntypes, &cossin, &control, &mut rand, &mut nobjects,
+        );
+        // pos += vel (detached branch never reassigns pos).
+        assert_eq!(worms[0].ninjarope.pos, Vec2::new(itof(52), itof(53)), "pos += vel");
+        // vel.y += NinjaropeGravity (1000); vel.x untouched.
+        assert_eq!(
+            worms[0].ninjarope.vel,
+            Vec2::new(itof(2), itof(3).wrapping_add(1000)),
+            "vel.y += NinjaropeGravity"
+        );
+        assert_eq!(worms[0].vel, Vec2::zero(), "owner vel unchanged (cur_len <= length)");
+        assert!(!worms[0].ninjarope.attached, "stays detached");
+        assert_eq!(worms[0].ninjarope.anchor, None, "no anchor");
+        assert_eq!(worms[0].ninjarope.cur_len, 64, "cur_len = (VectorLength(2,3)+1)<<4");
+        assert_eq!(rand.draws() - before, 0, "open air draws no rand");
+        assert_eq!(nobjects.len(), 0, "no spawn");
+    }
+
+    // (c) rope reaching DIRT -> attach latches, length = NRAttachLength, EXACTLY
+    //     11 × [rand(128) + type-2 Create2], then vel.Zero().
+    #[test]
+    fn ninjarope_process_dirt_attach_sprays_11() {
+        let mut worms = vec![nr_worm(0, Vec2::new(itof(50), itof(50)), true)];
+        worms[0].ninjarope.out = true;
+        worms[0].ninjarope.pos = Vec2::new(itof(52), itof(53));
+        worms[0].ninjarope.vel = Vec2::zero();
+        worms[0].ninjarope.attached = false;
+        worms[0].ninjarope.length = 9999;
+        let mut level = nr_level(300, 300);
+        // Dirt pixel (material 5 = dirt) at (52,53); pixel() reads material_id[idx].
+        level.material_flags[5] = MAT_DIRT;
+        level.material_id[(52 + 53 * 300) as usize] = 5;
+        let sprites = SpriteSet::default();
+        let ntypes = nr_nobject_types();
+        let cossin = precompute_cossin();
+        let control = ControlConsts::default();
+        let mut rand = Rand::new();
+        rand.seed(1);
+        let before = rand.draws();
+        let mut nobjects = Pool::new(NOBJECT_CAPACITY);
+        ninjarope_process(
+            &mut worms, 0, &level, &sprites, &ntypes, &cossin, &control, &mut rand, &mut nobjects,
+        );
+        assert!(worms[0].ninjarope.attached, "dirt attaches");
+        assert_eq!(worms[0].ninjarope.length, 450, "length = NRAttachLength");
+        assert_eq!(nobjects.len(), 11, "exactly 11 spray objects");
+        // Each iteration: rand(128) + Create2's single speed_v draw == 2; 11×2 == 22.
+        assert_eq!(rand.draws() - before, 22, "exactly 11 × [rand(128) + type-2 Create2]");
+        for o in nobjects.iter() {
+            assert_eq!(o.ty, Some(2), "spray is nobject_types[2]");
+            assert_eq!(o.owner_idx, 0, "owner_idx = owner.index");
+        }
+        assert_eq!(worms[0].ninjarope.vel, Vec2::zero(), "vel.Zero() after attach");
+    }
+
+    // (d) rope reaching ROCK (no AnyDirt), cur_len <= length -> attach, NO spray,
+    //     NO rand, owner vel unchanged.
+    #[test]
+    fn ninjarope_process_rock_attach_no_spray() {
+        let mut worms = vec![nr_worm(0, Vec2::new(itof(50), itof(50)), true)];
+        worms[0].ninjarope.out = true;
+        worms[0].ninjarope.pos = Vec2::new(itof(60), itof(60));
+        worms[0].ninjarope.vel = Vec2::zero();
+        worms[0].ninjarope.attached = false;
+        worms[0].ninjarope.length = 450;
+        let mut level = nr_level(300, 300);
+        level.material_flags[7] = MAT_ROCK;
+        level.material_id[(60 + 60 * 300) as usize] = 7;
+        let sprites = SpriteSet::default();
+        let ntypes = nr_nobject_types();
+        let cossin = precompute_cossin();
+        let control = ControlConsts::default();
+        let mut rand = Rand::new();
+        rand.seed(1);
+        let before = rand.draws();
+        let mut nobjects = Pool::new(NOBJECT_CAPACITY);
+        ninjarope_process(
+            &mut worms, 0, &level, &sprites, &ntypes, &cossin, &control, &mut rand, &mut nobjects,
+        );
+        assert!(worms[0].ninjarope.attached, "rock attaches");
+        assert_eq!(worms[0].ninjarope.length, 450, "length = NRAttachLength");
+        assert_eq!(nobjects.len(), 0, "rock does not spray (no AnyDirt)");
+        assert_eq!(rand.draws() - before, 0, "no rand on a rock attach");
+        assert_eq!(worms[0].vel, Vec2::zero(), "owner vel unchanged (cur_len <= length)");
+        assert_eq!(worms[0].ninjarope.vel, Vec2::zero(), "vel.Zero()");
+    }
+
+    // (f) attached tail with cur_len > length -> owner.vel += kForce/cur_len.
+    //     Uses a far ROCK attach (no spray) to isolate the tail.
+    #[test]
+    fn ninjarope_process_attached_tail_pulls_owner() {
+        let mut worms = vec![nr_worm(0, Vec2::new(itof(50), itof(50)), true)];
+        worms[0].ninjarope.out = true;
+        worms[0].ninjarope.pos = Vec2::new(itof(200), itof(50));
+        worms[0].ninjarope.vel = Vec2::zero();
+        worms[0].ninjarope.attached = false;
+        worms[0].ninjarope.length = 450;
+        let mut level = nr_level(300, 300);
+        level.material_flags[7] = MAT_ROCK;
+        level.material_id[(200 + 50 * 300) as usize] = 7;
+        let sprites = SpriteSet::default();
+        let ntypes = nr_nobject_types();
+        let cossin = precompute_cossin();
+        let control = ControlConsts::default();
+        let mut rand = Rand::new();
+        rand.seed(1);
+        let mut nobjects = Pool::new(NOBJECT_CAPACITY);
+        ninjarope_process(
+            &mut worms, 0, &level, &sprites, &ntypes, &cossin, &control, &mut rand, &mut nobjects,
+        );
+        // kDiff = (itof(150), 0); kForce.x = (150<<16 << 2)/3 = 13_107_200.
+        // cur_len = (VectorLength(150,0)+1)<<4 = 151<<4 = 2416; 2416 > 450.
+        // kForce/cur_len = 13_107_200 / 2416 = 5425.
+        assert_eq!(worms[0].ninjarope.cur_len, 2416, "cur_len = (150+1)<<4");
+        assert_eq!(worms[0].vel, Vec2::new(5425, 0), "owner.vel += kForce/cur_len");
+    }
+
+    // (e) worm-anchor branch: anchor.vel -= kForce/cur_len (cur_len > length),
+    //     rope vel = anchor.vel, rope pos = anchor.pos; attach latches.
+    #[test]
+    fn ninjarope_process_worm_anchor() {
+        let mut worms = vec![
+            nr_worm(0, Vec2::new(itof(100), itof(100)), true),
+            nr_worm(1, Vec2::new(itof(130), itof(100)), true),
+        ];
+        worms[0].ninjarope.out = true;
+        worms[0].ninjarope.pos = Vec2::new(itof(130), itof(100));
+        worms[0].ninjarope.vel = Vec2::zero();
+        worms[0].ninjarope.attached = false;
+        worms[0].ninjarope.length = 9999;
+        worms[1].vel = Vec2::zero();
+        let mut level = nr_level(300, 300);
+        level.material_flags[0x20] = MAT_WORM;
+        let sprites = nr_worm_sprites();
+        let ntypes = nr_nobject_types();
+        let cossin = precompute_cossin();
+        let control = ControlConsts::default();
+        let mut rand = Rand::new();
+        rand.seed(1);
+        let before = rand.draws();
+        let mut nobjects = Pool::new(NOBJECT_CAPACITY);
+        ninjarope_process(
+            &mut worms, 0, &level, &sprites, &ntypes, &cossin, &control, &mut rand, &mut nobjects,
+        );
+        assert_eq!(worms[0].ninjarope.anchor, Some(1), "anchored to the other worm");
+        assert!(worms[0].ninjarope.attached, "worm anchor attaches");
+        assert_eq!(worms[0].ninjarope.length, 450, "length = NRAttachLength");
+        assert_eq!(worms[0].ninjarope.cur_len, 496, "cur_len = (VectorLength(30,0)+1)<<4");
+        // kForce.x = (30<<16 << 2)/3 = 2_621_440; /496 = 5285.
+        assert_eq!(worms[1].vel, Vec2::new(-5285, 0), "anchor.vel -= kForce/cur_len");
+        assert_eq!(worms[0].ninjarope.vel, Vec2::new(-5285, 0), "rope vel = anchor.vel");
+        assert_eq!(
+            worms[0].ninjarope.pos,
+            Vec2::new(itof(130), itof(100)),
+            "rope pos = anchor.pos"
+        );
+        assert_eq!(worms[0].vel, Vec2::new(5285, 0), "owner.vel += kForce/cur_len");
+        assert_eq!(rand.draws() - before, 0, "worm anchor draws no rand");
+        assert_eq!(nobjects.len(), 0, "no spray on a worm anchor");
     }
 }

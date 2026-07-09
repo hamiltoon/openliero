@@ -80,14 +80,11 @@ fn parse_golden(text: &str) -> Vec<GoldenTick> {
         .collect()
 }
 
-// IGNORED at Slice 6 T0: the golden was regenerated against the full-`ProcessFrame`
-// dumper, which now runs `Ninjarope::Process` (`game.cpp:368-370`) after the worm loop.
-// The scenario throws the rope at input tick 93 (`96 = Change|Jump`), so `sim_slice3.txt`
-// now diverges from tick 94 onward (ticks 0..=93 remain byte-identical — proven in the
-// T0 re-diff gate). The Rust `process_frame` does NOT yet run `ninjarope_process`; that
-// is Slice 6 T2, which ports the rope `Process` and un-ignores this test.
-// T2 un-ignores: rope Process not yet ported.
-#[ignore = "T2 un-ignores: rope Process not yet ported (golden now runs Ninjarope::Process; diverges from tick 94)"]
+// Slice 6 T2: the golden was regenerated (T0) against the full-`ProcessFrame` dumper,
+// which runs `Ninjarope::Process` (`game.cpp:368-370`) after the worm loop. The scenario
+// throws the rope at input tick 93 (`96 = Change|Jump`) and it terrain-attaches (dirt
+// spray) around tick 95. `process_frame` now ports `ninjarope_process` (T2), so this
+// asserts the whole 146-tick run — the terrain-attach `rand(128)`×11 burst included.
 #[test]
 fn sim_slice3_control_matches_cpp_oracle() {
     // --- Parse the scenario (single source of truth, shared with the C++ dumper).
@@ -123,6 +120,13 @@ fn sim_slice3_control_matches_cpp_oracle() {
         std::fs::read(format!("{TC_ROOT}/{sub}/{id}.cfg"))
     })
     .expect("object configs load");
+
+    // INVARIANT (load-bearing for the ninjarope terrain-attach spray): the object
+    // tables are indexed by id. `Ninjarope::Process` sprays `nobject_types[2]`
+    // (`particle__disappearing`); if id != index that lookup reads the wrong type.
+    for (i, n) in objects.nobject_types.iter().enumerate() {
+        assert_eq!(n.id, i as i32, "nobject_type id must equal its index (got id {})", n.id);
+    }
 
     // weap_order: indices sorted by weapon name; id == index. Mirrors
     // Common::Precompute (common.cpp:492-499), exactly as slice 1/2.
@@ -164,8 +168,12 @@ fn sim_slice3_control_matches_cpp_oracle() {
         tc.hacks.SignedRecoil,
         large_sprites,
         tc.textures.clone(),
-        Vec::new(),
-        Vec::new(),
+        // The ninjarope terrain-attach spray reads `nobject_types[2]`; the spawned
+        // particles then run `NObject::Process` each tick. `sobject_types` is threaded
+        // for dumper symmetry (the spray type never creates one). Loaded from the same
+        // TC the C++ dumper's `common` holds.
+        objects.sobject_types.clone(),
+        objects.nobject_types.clone(),
         100,
         true,
         100,

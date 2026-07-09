@@ -76,6 +76,22 @@ pub struct ControlConsts {
     /// `NRThrowVelX` / `NRThrowVelY` — throw-velocity multipliers.
     pub nr_throw_vel_x: i32,
     pub nr_throw_vel_y: i32,
+    /// `NRAttachLength` — the rope length latched when it attaches (terrain or
+    /// worm). Read by `Ninjarope::Process` (T2, `ninjarope.cpp:35,53`).
+    pub nr_attach_length: i32,
+    /// `NinjaropeGravity` — the per-tick `vel.y` add on a detached (free-flying)
+    /// rope tip (`ninjarope.cpp:75`).
+    pub ninjarope_gravity: i32,
+    /// `NRForceShlX`/`NRForceDivX`/`NRForceShlY`/`NRForceDivY` — the per-component
+    /// rope-force shift/divide (`kForce = (kDiff.x << ShlX)/DivX`, …;
+    /// `ninjarope.cpp:27-28`).
+    pub nr_force_shl_x: i32,
+    pub nr_force_div_x: i32,
+    pub nr_force_shl_y: i32,
+    pub nr_force_div_y: i32,
+    /// `NRForceLenShl` — the shift applied to the measured length
+    /// (`cur_len = (VectorLength(...) + 1) << NRForceLenShl`; `ninjarope.cpp:30`).
+    pub nr_force_len_shl: i32,
 }
 
 impl Default for ControlConsts {
@@ -108,6 +124,13 @@ impl Default for ControlConsts {
             nr_release_vel: 24,
             nr_throw_vel_x: 2,
             nr_throw_vel_y: 2,
+            nr_attach_length: 450,
+            ninjarope_gravity: 1000,
+            nr_force_shl_x: 2,
+            nr_force_div_x: 3,
+            nr_force_shl_y: 2,
+            nr_force_div_y: 3,
+            nr_force_len_shl: 4,
         }
     }
 }
@@ -143,6 +166,13 @@ impl ControlConsts {
             nr_release_vel: c.NRReleaseVel,
             nr_throw_vel_x: c.NRThrowVelX,
             nr_throw_vel_y: c.NRThrowVelY,
+            nr_attach_length: c.NRAttachLength,
+            ninjarope_gravity: c.NinjaropeGravity,
+            nr_force_shl_x: c.NRForceShlX,
+            nr_force_div_x: c.NRForceDivX,
+            nr_force_shl_y: c.NRForceShlY,
+            nr_force_div_y: c.NRForceDivY,
+            nr_force_len_shl: c.NRForceLenShl,
         }
     }
 }
@@ -729,6 +759,13 @@ NRPullVel = 24
 NRReleaseVel = 24
 NRThrowVelX = 2
 NRThrowVelY = 2
+NRAttachLength = 450
+NinjaropeGravity = 1000
+NRForceShlX = 2
+NRForceDivX = 3
+NRForceShlY = 2
+NRForceDivY = 3
+NRForceLenShl = 4
 
 [hacks]
 AirJump = true

@@ -94,7 +94,16 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 │   ├─ ✅ 5′a  per-pixel CheckForSpecWormHit + wobject/nobject in-flight worm-hit arms  MILESTONE GREEN (dart 71t + cannon-splinter 156t bit-exact, near-miss anti-box witness)
 │   ├─ ✅ 5′b  bonus pickup (health/weapon/booby) — closes 5c's deferral  MILESTONE GREEN (walk-on health heal 110t + weapon reload 90t bit-exact vs C++; booby unit-test-only)
 │   └─ ✅ T10 moving-worms fuzz (slice-6 precondition)  GREEN (4 dart-duel variants, hits on MOVING worms at 7 frame×direction combos, 4×76t bit-exact; no sim change)
-└─ ⬜ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match
+└─ 🔄 Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match  (LAST slice — planned T0–T9)
+    ├─ ✅ T0  dumper → full ProcessFrame tail + re-diff gate (23/24 priors byte-identical; sim_slice3 regen @tick 94, prefix proven)
+    ├─ ✅ T1  ninjarope datamodel + throw un-skip (unhashed fields, NR* consts threaded)
+    ├─ ✅ T2  Ninjarope::Process ported + wired (sim_slice3 un-ignored, 146 ticks bit-exact; 11×rand(128) dirt-attach burst)
+    ├─ ⬜ T3  chain-loop (sobject → bonus re-trigger)
+    ├─ ⬜ T4  new_object_reuse for sobjects/wobjects
+    ├─ ⬜ T5  GameOfTag + Scales hooks + goldens (Holdazone deferred)
+    ├─ ⬜ T6  cossin disposition doc + truncation test
+    ├─ ⬜ T7–T8  >1000-tick fuzz (MILESTONE)
+    └─ ⬜ T9  step-2-wide broad review + PR #3 readiness
 ```
 
 | Level | Done |

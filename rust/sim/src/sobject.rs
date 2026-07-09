@@ -127,15 +127,13 @@ pub fn sobject_create(
     // carry no rand and the slot index is deterministic, so spawning here (with
     // the final constant fields) is equivalent to the C++ alloc-then-write split.
     // id + cur_frame are hashed; x (= x-8), y (= y-8), anim_delay are not.
-    sobjects
-        .spawn(SObject {
-            id: ty.id,
-            x: x - 8,
-            y: y - 8,
-            cur_frame: 0,
-            anim_delay: ty.anim_delay,
-        })
-        .expect("sobjects pool not full in 4c (NewObjectReuse overwrite deferred)");
+    sobjects.spawn_reuse(SObject {
+        id: ty.id,
+        x: x - 8,
+        y: y - 8,
+        cur_frame: 0,
+        anim_delay: ty.anim_delay,
+    });
 
     // :23-25 sound — the FIRST observable rand. Consumed even though `Play` is a
     // hashing no-op; the rand is the argument, evaluated before `Play`.

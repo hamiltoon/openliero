@@ -53,8 +53,9 @@ const ST_TYPE2: i32 = 3;
 /// Draws RNG in C++ order: spread `vel.x`, spread `vel.y` (only when
 /// `distribution != 0`), then the colour `rand(2)` on the `start_frame < 0` path,
 /// then `rand(time_to_explo_v)` (only when non-zero). Returns the spawned slot
-/// index (`Some` while the pool has room — always the case in 4a; the
-/// `NewObjectReuse` full-pool overwrite is deferred).
+/// index — always `Some` now: `Pool::spawn_reuse` mirrors C++
+/// `ExactObjectList::NewObjectReuse`, which overwrites the last slot in place
+/// once the 600-capacity `wobjects` pool is full instead of failing.
 ///
 /// The C++ stats calls (`DamagePotential`, `Shot`) and the stats-only
 /// `fired_by` / `has_hit` fields are no-ops and are omitted.
@@ -129,7 +130,7 @@ pub fn weapon_fire(
         obj.time_left -= rand.bound(weapon.time_to_explo_v as u32) as i32;
     }
 
-    wobjects.spawn(obj)
+    Some(wobjects.spawn_reuse(obj))
 }
 
 /// Port of `Worm::Fire` (`worm.cpp:1099-1148`).

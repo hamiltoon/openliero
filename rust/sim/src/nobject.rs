@@ -62,7 +62,7 @@ use crate::blit::{blit_image_on_map, draw_dirt_effect};
 use crate::bobject::create_bobject;
 use crate::pool::{BloodPool, Pool};
 use crate::sobject::sobject_create;
-use crate::state::{BObject, LevelSim, NObject, SObject, WObject, WormState, MAT_WORM};
+use crate::state::{Bonus, BObject, LevelSim, NObject, SObject, WObject, WormState, MAT_WORM};
 
 /// Port of `NObjectType::Create` (`nobject.cpp:7-39`) — the shared spawn core.
 ///
@@ -374,6 +374,7 @@ pub fn nobject_process(
     weapons: &[Weapon],
     nobjects: &mut Pool<NObject>,
     sobjects: &mut Pool<SObject>,
+    bonuses: &mut Pool<Bonus>,
     bobjects: &mut BloodPool<BObject>,
     cycles: i32,
     blood: i32,
@@ -627,6 +628,8 @@ pub fn nobject_process(
                 large_sprites,
                 textures,
                 sobjects,
+                bonuses,
+                sobject_types,
                 blood,
                 rand,
             );
@@ -1080,6 +1083,7 @@ mod tests {
             &[],
             nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             &mut bobjects,
             cycles,
             100,
@@ -1466,6 +1470,7 @@ mod tests {
             &[],
             nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             &mut bobjects,
             cycles,
             100,
@@ -1583,6 +1588,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             &mut bobjects,
             0,
             100,
@@ -1675,6 +1681,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             &mut bobjects,
             0,
             100,
@@ -1831,6 +1838,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             bobjects,
             cycles,
             100,
@@ -2047,6 +2055,7 @@ mod tests {
             &[],
             nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             &mut bobjects,
             0,
             blood,

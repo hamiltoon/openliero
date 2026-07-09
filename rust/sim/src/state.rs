@@ -1519,6 +1519,7 @@ impl SimState {
                         weapons,
                         nobjects,
                         sobjects,
+                        bonuses,
                         blood,
                         rand,
                     );
@@ -1563,6 +1564,7 @@ impl SimState {
                 weapons,
                 nobjects,
                 sobjects,
+                bonuses,
                 bobjects,
                 cycles_now,
                 blood,

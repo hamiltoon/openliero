@@ -35,7 +35,7 @@ use crate::blit::draw_dirt_effect;
 use crate::nobject::{check_for_spec_worm_hit, nobject_create2};
 use crate::pool::Pool;
 use crate::sobject::sobject_create;
-use crate::state::{LevelSim, NObject, SObject, WObject, WormState};
+use crate::state::{Bonus, LevelSim, NObject, SObject, WObject, WormState};
 
 // `Weapon::shot_type` enum values (`weapon.hpp:21`):
 // `enum { kStNormal, kStdType1, kStSteerable, kStdType2, kStLaser };`
@@ -596,6 +596,7 @@ pub fn blow_up(
     weapons: &[Weapon],
     nobjects: &mut Pool<NObject>,
     sobjects: &mut Pool<SObject>,
+    bonuses: &mut Pool<Bonus>,
     blood: i32,
     rand: &mut Rand,
 ) {
@@ -619,6 +620,8 @@ pub fn blow_up(
             large_sprites,
             textures,
             sobjects,
+            bonuses,
+            sobject_types,
             blood,
             rand,
         );
@@ -1805,6 +1808,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             100,
             &mut rand,
         );
@@ -1878,6 +1882,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             100,
             &mut rand,
         );
@@ -2064,6 +2069,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             100,
             &mut rand,
         );
@@ -2155,6 +2161,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             100,
             &mut rand,
         );
@@ -2240,6 +2247,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             100,
             &mut rand,
         );
@@ -2302,6 +2310,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             100,
             &mut rand,
         );
@@ -2343,6 +2352,7 @@ mod tests {
             &[],
             &mut nobjects,
             &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
             100,
             &mut rand,
         );

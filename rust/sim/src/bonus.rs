@@ -186,6 +186,8 @@ pub fn create_bonus(
                 large_sprites,
                 textures,
                 sobjects,
+                bonuses,
+                sobject_types,
                 blood,
                 rand,
             );
@@ -241,6 +243,7 @@ pub fn bonus_process(
     wobjects: &mut Pool<WObject>,
     nobjects: &mut Pool<NObject>,
     sobjects: &mut Pool<SObject>,
+    bonuses: &mut Pool<Bonus>,
     weapons: &[Weapon],
     nobject_types: &[NObjectType],
     sobject_types: &[SObjectType],
@@ -303,6 +306,8 @@ pub fn bonus_process(
             large_sprites,
             textures,
             sobjects,
+            bonuses,
+            sobject_types,
             blood,
             rand,
         );
@@ -362,6 +367,7 @@ pub fn process_bonuses(
             wobjects,
             nobjects,
             sobjects,
+            bonuses,
             weapons,
             nobject_types,
             sobject_types,
@@ -525,6 +531,8 @@ pub fn worm_pickup_bonuses(
                     large_sprites,
                     textures,
                     sobjects,
+                    bonuses,
+                    sobject_types,
                     blood,
                     rand,
                 );
@@ -1039,6 +1047,7 @@ mod tests {
         let nts: Vec<NObjectType> = Vec::new();
         let sts = sobject_types();
         let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut bonuses: Pool<Bonus> = Pool::new(99);
         let mut worms: Vec<WormState> = Vec::new();
         let weps = weapons(5);
         let outcome = bonus_process(
@@ -1049,6 +1058,7 @@ mod tests {
             &mut wobjects,
             &mut nobjects,
             &mut sobjects,
+            &mut bonuses,
             &weps,
             &nts,
             &sts,

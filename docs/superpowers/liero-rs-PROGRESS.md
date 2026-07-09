@@ -41,9 +41,13 @@ Then **Slice 5′b closed 5c's pickup deferral**: the bonus-pickup block (`worm.
 is live — two walk-on golden milestones bit-exact vs C++ on the first run (**health heal**
 pickup @tick 87/110t on a wounded worm, **weapon reload** @tick 67/90t with the booby
 discriminator health-flat guard; booby branch unit-test-pinned). Pure-Rust slice; slices
-1–5d + 5′a byte-identical. **All of 5′ is shipped to PR #3.**
-Next: the **moving-worms fuzz** (T10, slice-6 precondition) then
-Slice 6 (full ProcessFrame + game modes + chain-loop + >1000-tick fuzz).
+1–5d + 5′a byte-identical. **All of 5′ is shipped to PR #3.** Then the **moving-worms
+fuzz** (T10) landed: 4 DART-duel variants where both worms walk+fire, per-pixel hits on
+MOVING worms at 7 distinct `current_frame`×`direction` combos, all bit-exact — the
+slice-6 precondition, proving 5′a's sprite selection across frames/directions (no sim
+change needed).
+Next: **Slice 6** (full ProcessFrame + game modes + chain-loop + >1000-tick fuzz) —
+the LAST slice of step 2.
 
 ---
 
@@ -88,7 +92,8 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 │   └─ ✅ 5d  death + respawn (BeginRespawn RNG-search; fuzzed)  MILESTONE GREEN (death→respawn 361 ticks bit-exact + 4-variant respawn fuzz {2,3,6,7} trials)
 ├─ 🔄 Slice 5′ (open-gate worm-hit follow-up)  decomposed 5′a + 5′b
 │   ├─ ✅ 5′a  per-pixel CheckForSpecWormHit + wobject/nobject in-flight worm-hit arms  MILESTONE GREEN (dart 71t + cannon-splinter 156t bit-exact, near-miss anti-box witness)
-│   └─ ✅ 5′b  bonus pickup (health/weapon/booby) — closes 5c's deferral  MILESTONE GREEN (walk-on health heal 110t + weapon reload 90t bit-exact vs C++; booby unit-test-only)
+│   ├─ ✅ 5′b  bonus pickup (health/weapon/booby) — closes 5c's deferral  MILESTONE GREEN (walk-on health heal 110t + weapon reload 90t bit-exact vs C++; booby unit-test-only)
+│   └─ ✅ T10 moving-worms fuzz (slice-6 precondition)  GREEN (4 dart-duel variants, hits on MOVING worms at 7 frame×direction combos, 4×76t bit-exact; no sim change)
 └─ ⬜ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match
 ```
 

@@ -8,7 +8,7 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-01 · **Current focus:** Step 2, Slice 5 (remaining object
+> **Last updated:** 2026-07-09 · **Current focus:** Step 2, Slice 5 (remaining object
 > families) — **5a splinters + 5b damage+blood SHIPPED** (PR #3) and **5c bonuses
 > MILESTONE difftest GREEN** (`sim_slice5c_golden` matches the C++ master + all 9
 > components, all 501 ticks; the **`bonuses` pool goes live** — under seed 42 the per-tick
@@ -37,8 +37,13 @@ milestones bit-exact vs C++ on the first run: a **dart hits a worm's solid silho
 projectile sits in the worm's 16×16 box on transparent pixels and fires **nothing** (the
 anti-false-positive witness: a box would have fired — this pins the deferred `fd33bbc`
 blocker as FIXED). Pure-Rust slices, no C++ dumper change; slices 1–5d byte-identical.
-Next: **Slice 5′b** (bonus pickup, closing 5c's deferral) then the moving-worms fuzz and
-Slice 6 (full ProcessFrame + >1000-tick fuzz).
+Then **Slice 5′b closed 5c's pickup deferral**: the bonus-pickup block (`worm.cpp:287-322`)
+is live — two walk-on golden milestones bit-exact vs C++ on the first run (**health heal**
+pickup @tick 87/110t on a wounded worm, **weapon reload** @tick 67/90t with the booby
+discriminator health-flat guard; booby branch unit-test-pinned). Pure-Rust slice; slices
+1–5d + 5′a byte-identical. **All of 5′ is shipped to PR #3.**
+Next: the **moving-worms fuzz** (T10, slice-6 precondition) then
+Slice 6 (full ProcessFrame + game modes + chain-loop + >1000-tick fuzz).
 
 ---
 
@@ -91,6 +96,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 |---|---|
 | Rewrite track (steps 0–5) | **~47–54%** |
 | Step 2 (current) | **~78–82%** |
+| Slice 5′b (bonus pickup) | **✅ MILESTONE GREEN** (the 5c-deferred pickup block `worm.cpp:287-322` live: 11×11 AABB gate + health/weapon/booby branches, TC consts threaded unhashed; `sim_slice5prime_pickup_health` — a worm wounded to 50 **walks onto** a dropped health bonus, heals @tick 87/110t, pool 1→0 — and `sim_slice5prime_pickup_weapon` — walk-on reload @tick 67/90t, `ww` 3→2, health flat all ticks (the booby discriminator) — both master+9 components bit-exact vs C++ **first run**; booby branch pinned by RED-first unit tests with exact per-branch draw counts; pure-Rust slice, priors byte-identical; chain-loop → slice 6) |
 | Slice 5′a (per-pixel worm-hit + in-flight arms) | **✅ MILESTONE GREEN** (real per-pixel `CheckForSpecWormHit` replaces 5a's box; both **in-flight worm-hit arms** live — wobject **blood-before-sound**, nobject **sound-before-blood** (opposite RNG order, each golden-witnessed); `sim_slice5prime_golden` (dart, 71 ticks) + `sim_slice5prime_nobj_golden` (cannon splinter, 156 ticks) master+9 components bit-exact vs C++ **first run**; **near-miss ticks** (projectile in the 16×16 box on transparent pixels) fire **nothing** — the anti-box witness pinning `fd33bbc` as FIXED; pure-Rust slice, slices 1–5d byte-identical; **pickup → 5′b**) |
 | Slice 5d (death + respawn) | **✅ MILESTONE GREEN + fuzzed** (`sim_slice5d_golden` master+9 components **all 361 ticks bit-exact** vs C++; the **worm death→respawn path goes live** — worm1 (health 12) dies from the explosives blast @death-tick [`rng` bursts 120-blood+8-gib spray, `visible`→false, `lives`−1, worm0 `kills`+1], the invisible 150-tick `killed_timer` counts down to `BeginRespawn` @tick 237 [the level-reading RNG spawn search: `pos` JUMPS, trial-count `rng` burst], then `DoRespawning` completes @tick 304 [`visible`→true, `health`→100]; slices 1–5c stay byte-identical. **4-variant fixed-level respawn fuzz** exhibits distinct bounded trial counts {2,3,6,7} — the desync trap's variance proven vs the C++ oracle) |
 | Slice 5c (bonuses) | **✅ MILESTONE GREEN** (`sim_slice5c_golden` master+9 components 501 ticks; **`bonuses` pool live** — drop @tick 252 → falls/bounces under `Bonus::Process`, timer still counting at window end; worms clear (no pickup); spawn-flash `detectRange=0` ⇒ chain-loop inert & proven neutral; slices 1–5b byte-identical; pickup + chain-loop port deferred → slice 6) |

@@ -990,6 +990,67 @@ mod tests {
         assert_eq!(slot, Some(0), "spawn returns the slot index (Some in 4a)");
     }
 
+    // O3/T4 (Slice 6) — a full wobjects pool must overwrite, not panic/drop.
+    // Matches C++ `ExactObjectList::NewObjectReuse`: at cap it returns
+    // `&arr[Limit-1]`, overwriting that slot's value in place with `count` left
+    // at the limit (no free, no swap) — the same contract `Pool::spawn_reuse`
+    // already pins for nobjects/bobjects.
+    #[test]
+    fn weapon_fire_overwrites_last_slot_when_wobjects_pool_is_full() {
+        let cossin = precompute_cossin();
+        let fan = fan_weapon(7);
+        let mut pool: Pool<WObject> = Pool::new(600);
+        let mut rand = seeded();
+
+        // Fill the 600-capacity pool directly (bypassing Fire) with distinct
+        // owner_idx tags so the overwritten slot is unambiguous.
+        for i in 0..600 {
+            pool.spawn(WObject {
+                owner_idx: 1000 + i,
+                ..WObject::default()
+            });
+        }
+        assert_eq!(pool.len(), 600, "pool filled to cap");
+
+        // One more Fire call must NOT panic/drop: it overwrites the LAST slot
+        // (index 599), matching C++ `&arr[Limit - 1]`.
+        let slot = weapon_fire(
+            &fan,
+            32,
+            Vec2::zero(),
+            fan.speed,
+            Vec2::new(1, 2),
+            1,
+            &cossin,
+            &mut rand,
+            &mut pool,
+        );
+
+        assert_eq!(slot, Some(599), "NewObjectReuse overwrites limit-1");
+        assert_eq!(pool.len(), 600, "count stays at cap: overwrite, not append");
+        let overwritten = *pool.get(599).expect("slot 599 overwritten in place");
+        assert_eq!(
+            overwritten.owner_idx, 1,
+            "slot 599 now holds the new wobject (owner_idx = firing worm)"
+        );
+        assert_eq!(overwritten.ty, Some(7), "ty = weapon id, written on the overwrite too");
+
+        // No swap: slot 0 and the second-to-last slot are untouched.
+        assert_eq!(pool.get(0).expect("slot 0 unchanged").owner_idx, 1000);
+        assert_eq!(pool.get(598).expect("slot 598 unchanged").owner_idx, 1598);
+
+        // Iteration order after overwrite matches C++ `All()`: index order,
+        // still exactly 600 live entries, slot 599 now the new wobject.
+        let owners: Vec<i32> = pool.iter().map(|o| o.owner_idx).collect();
+        assert_eq!(owners.len(), 600);
+        assert_eq!(owners[0], 1000);
+        assert_eq!(owners[598], 1598);
+        assert_eq!(
+            owners[599], 1,
+            "overwritten slot sorts last in index-order iteration"
+        );
+    }
+
     // ====================================================================
     // wobject_process + blow_up (Task 2)
     // ====================================================================

@@ -573,6 +573,60 @@ mod tests {
         assert_eq!(sobjects.len(), 1, "sobject still spawned");
     }
 
+    // O3/T4 (Slice 6) — a full sobjects pool must overwrite, not panic. Matches
+    // C++ `ExactObjectList::NewObjectReuse`: at cap it returns `&arr[Limit-1]`,
+    // overwriting that slot's value in place with `count` left at the limit (no
+    // free, no swap) — the same contract `Pool::spawn_reuse` already pins for
+    // nobjects/bobjects.
+    #[test]
+    fn create_overwrites_last_slot_when_sobjects_pool_is_full() {
+        let cossin = precompute_cossin();
+        let ty = booby_silent(8); // start_sound < 0, damage 0 -> draws nothing
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+
+        // Fill the 700-capacity pool directly (bypassing Create) with distinct
+        // ids so the overwritten slot is unambiguous.
+        for i in 0..700 {
+            sobjects.spawn(SObject {
+                id: 1000 + i,
+                x: 0,
+                y: 0,
+                cur_frame: 0,
+                anim_delay: 0,
+            });
+        }
+        assert_eq!(sobjects.len(), 700, "pool filled to cap");
+
+        // One more Create call must NOT panic: it overwrites the LAST slot
+        // (index 699), matching C++ `&arr[Limit - 1]`.
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
+        );
+
+        assert_eq!(sobjects.len(), 700, "count stays at cap: overwrite, not append");
+        let overwritten = *sobjects.get(699).expect("slot 699 overwritten in place");
+        assert_eq!(overwritten.id, 0, "slot 699 now holds the new sobject (type id 0)");
+        assert_eq!(overwritten.x, 42, "obj.x = x - 8 written on the overwrite too");
+        assert_eq!(overwritten.y, 42, "obj.y = y - 8 written on the overwrite too");
+
+        // No swap: slot 0 and the second-to-last slot are untouched.
+        assert_eq!(sobjects.get(0).expect("slot 0 unchanged").id, 1000);
+        assert_eq!(sobjects.get(698).expect("slot 698 unchanged").id, 1698);
+
+        // Iteration order after overwrite matches C++ `All()`: index order,
+        // still exactly 700 live entries, slot 699 now the new sobject.
+        let ids: Vec<i32> = sobjects.iter().map(|o| o.id).collect();
+        assert_eq!(ids.len(), 700);
+        assert_eq!(ids[0], 1000);
+        assert_eq!(ids[698], 1698);
+        assert_eq!(ids[699], 0, "overwritten slot sorts last in index-order iteration");
+    }
+
     // ---- Step 2: worm loop inert (O10) --------------------------------------
 
     // A minimal worm at a given pixel position with a chosen health. vel starts

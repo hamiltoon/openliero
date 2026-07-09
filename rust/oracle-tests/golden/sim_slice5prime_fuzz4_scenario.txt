@@ -1,0 +1,72 @@
+# Step 2 Slice 5' T10 — MOVING-WORMS fuzz, VARIANT 4 of 4 (O21; slice-6 precondition).
+#
+# Same SYMMETRIC DART DUEL as variant 1 (see sim_slice5prime_fuzz1_scenario.txt for the
+# full rationale): both worms WALK (animate=true) and FIRE flat DARTs at each other on
+# tick 40; the crossing darts per-pixel-hit the opposing MOVING worm. The ONLY change is
+# the starting SPACING — an INTERMEDIATE gap (between variants 1 and 2). This variant
+# shares variant 2's current_frame bucket (cf2) but at a DIFFERENT tick and DIFFERENT
+# worm positions, so it is a genuinely distinct run (a position/RNG-stream lever, mirroring
+# how the 5d fuzz's fuzz3/fuzz4 share geometry yet differ in outcome) — not an idle copy.
+#
+# VARIANT 4: worm0 x=160, worm1 x=120 (gap 40px). Measured vs the C++ oracle: the darts
+# land ~tick 48 with the victims at current_frame 2 — hits at (cf2,dir0)+(cf2,dir1).
+# worm1 (health 60) survives its 2 wounds (-> 50).
+#
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics, UNCHANGED) and the Rust difftest.
+# Control bits: Up=1 Down=2 Left=4 Right=8 Fire=16.
+seed 42
+level Levels/physics_fall_test.lev
+ticks 75
+max_bonuses 0
+# worm0 = RIGHT duellist (x=160, dir0). worm1 = LEFT duellist (x=120, flips dir1).
+worm 0  10485760 12779520 100 10 0   1
+worm 1  7864320 12845520  60 10 218 1
+weapon 0 DART
+input 13 5 8
+input 14 5 9
+input 15 5 9
+input 16 5 9
+input 17 5 9
+input 18 5 9
+input 19 5 9
+input 20 5 9
+input 21 5 9
+input 22 5 9
+input 23 5 9
+input 24 5 9
+input 25 5 9
+input 26 5 9
+input 27 5 9
+input 28 5 9
+input 29 5 9
+input 30 5 9
+input 31 5 9
+input 32 5 9
+input 33 5 9
+input 34 5 9
+input 35 5 9
+input 36 5 9
+input 37 5 9
+input 38 5 9
+input 39 5 9
+input 40 20 24
+input 41 4 8
+input 42 4 8
+input 43 4 8
+input 44 4 8
+input 45 4 8
+input 46 4 8
+input 47 4 8
+input 48 4 8
+input 49 4 8
+input 50 4 8
+input 51 4 8
+input 52 4 8
+input 53 4 8
+input 54 4 8
+input 55 4 8
+input 56 4 8
+input 57 4 8
+input 58 4 8
+input 59 4 8
+input 60 4 8

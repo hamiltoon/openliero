@@ -43,6 +43,7 @@ name = "oracle-tests"
 version = "0.1.0"
 dependencies = [
  "assets",
+ "render",
  "sim",
  "sim-core",
 ]

@@ -121,6 +121,15 @@ impl Scenario {
                     expect_args(n, key, &nums, 1)?;
                     game_mode = parse_at(0)? as i32;
                 }
+                "render" => {
+                    // Opt-in render-layout directive for the shared scenario (Slice 3a).
+                    // The C++ dumper reads `<layout>` to pick the viewport arrangement and
+                    // emit the sidecar frame golden; the Rust frame-hash test hardcodes the
+                    // two-viewport player layout, so the arg is validated and ignored here.
+                    // Accepted (not rejected) so the shared scenario file parses on BOTH
+                    // sides — same discipline as `game_mode`/`max_bonuses` above.
+                    expect_args(n, key, &nums, 1)?;
+                }
                 "worm" => {
                     expect_args(n, key, &nums, 7)?;
                     let visible = match parse_at(6)? {

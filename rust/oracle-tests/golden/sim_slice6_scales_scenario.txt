@@ -1,0 +1,60 @@
+# Step 2 Slice 6 T5 scenario — SCALES OF JUSTICE (`game_mode 3`, kGmScalesOfJustice).
+# Scales is NOT a ProcessFrame case — it lives inside `Game::DoDamage`
+# (game.cpp:567-589), fired on every damage EVENT. When a worm is wounded, the
+# damage is redistributed as HEALING to the OTHER worm(s) via `DoHealingDirect`
+# (game.cpp:555-565). This scenario reuses the slice-5b EXPLOSIVES geometry: worm0
+# air-bursts blasts that WOUND worm1; because the damage source is worm0 (an enemy,
+# `by_idx == 0 != worm1.index`), the `else` arm heals the ATTACKER worm0 by the full
+# damage amount. worm0 spawns WOUNDED (health 50) so each heal is a visible health
+# RISE (it never crosses the 100 cap, so no life overflow).
+#
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics — UNCHANGED; it drives the
+# unmodified `Game::DoDamage`, whose Scales branch fires whenever
+# `settings->game_mode == kGmScalesOfJustice`, set from the scenario's `game_mode`)
+# and the Rust N-tick difftest (T5). The ONLY deltas vs the 5b scenario are the
+# `game_mode 3` directive and worm0's start health (100 -> 50).
+#
+# === WHY worm0's health RISES (the Scales witness) =================================
+#   * SHOT (identical to 5b): worm0 lands (~tick 13), raises the gun Up(1) ticks
+#     13-20, Fires(16) tick 38. Three explosives lob low-left, bounce, and air-burst
+#     at x~94/99/110 (~tick 90). Two blasts catch worm1 (x=115) inside their +/-20
+#     box; worm0 (x=150) is outside every box, so worm0 takes NO direct damage.
+#   * WOUND + REDISTRIBUTION: each catching blast calls `DoDamage(worm1, z,
+#     owner_idx=0)`. `do_damage_direct` drops worm1's health by `z`; then, because
+#     `game_mode == 3` and `by_idx(0) != worm1.index(1)`, `DoHealingDirect(worm0,
+#     z)` HEALS worm0 by the same `z`. So on the WOUND ticks worm1's `health` DROPS
+#     (100 -> ~82, as in 5b) AND worm0's `health` RISES from 50 by the same total
+#     (50 -> ~68). Both worms' `worm` component columns step on those exact ticks;
+#     worm0 stays <= 100 (no life overflow), worm1 stays > 0 (wounded, not killed).
+#   * RNG-NEUTRAL: the redistribution draws NO rand (DoHealingDirect is arithmetic
+#     only), so the `rng` column is IDENTICAL to the 5b run — the Scales delta shows
+#     up ONLY in the two `worm` columns (and the master), never in `rng`.
+#
+# Control bits (7-bit ControlState): Up=1 Down=2 Left=4 Right=8 Fire=16 Change=32 Jump=64.
+seed 42
+# physics_fall_test.lev: open sky band over a solid Dirt floor at y=200px, 504x350.
+level Levels/physics_fall_test.lev
+ticks 120
+max_bonuses 0
+# THE SLICE-6 DIRECTIVE: kGmScalesOfJustice (settings.hpp:51 enum index 3).
+game_mode 3
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# worm0 = SHOOTER, spawns WOUNDED at health 50 (so its heal is a visible rise under
+# the 100 cap). worm1 = TARGET at full health 100, VISIBLE + grounded from tick 0.
+# Positions identical to slice 5b (air-bursts land at x~94/99/110).
+worm 0  9830400 12779520  50 10 0   1
+worm 1  7536640 12845520 100 10 218 1
+# Override BOTH worms' slot 0 with EXPLOSIVES. worm0 fires it; worm1 stands and takes
+# the blasts (it never fires).
+weapon 0 EXPLOSIVES
+#
+# input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0)
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 38 16 0

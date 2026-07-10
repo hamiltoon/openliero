@@ -35,7 +35,7 @@ use crate::blit::draw_dirt_effect;
 use crate::nobject::{check_for_spec_worm_hit, nobject_create2};
 use crate::pool::Pool;
 use crate::sobject::sobject_create;
-use crate::state::{Bonus, LevelSim, NObject, SObject, WObject, WormState};
+use crate::state::{do_damage, Bonus, LevelSim, NObject, SObject, WObject, WormState};
 
 // `Weapon::shot_type` enum values (`weapon.hpp:21`):
 // `enum { kStNormal, kStdType1, kStSteerable, kStdType2, kStLaser };`
@@ -282,6 +282,8 @@ pub fn wobject_process(
     worm_sprites: &SpriteSet,
     cossin: &[Vec2; 128],
     blood: i32,
+    game_mode: u32,
+    settings_health: i32,
     rand: &mut Rand,
 ) -> WObjectOutcome {
     // Deferred-branch guards (4b/4c). Fan and dart satisfy every one (the dart
@@ -452,7 +454,10 @@ pub fn wobject_process(
     //   OPPOSITE order to the nobject arm (nobject.cpp:180 sound, then :188 blood).
     //   This asymmetry is load-bearing; the two C++ functions genuinely differ.
     let mut do_remove = false;
-    for worm in worms.iter_mut() {
+    // Index-based (not `iter_mut()`): the `:294` [`do_damage`] now heals the OTHER
+    // worms in Scales (game_mode 3), a second slice element the `iter_mut()` borrow
+    // could not reach. `check_for_spec_worm_hit` takes `&worms[w_idx]`.
+    for w_idx in 0..worms.len() {
         // :290-291 gate: ANY hit param non-zero AND a per-pixel sprite hit at the
         // wobject's fixed pos (Ftoi -> integer pixel), within detect_distance.
         if (weapon.hit_damage != 0
@@ -460,7 +465,7 @@ pub fn wobject_process(
             || weapon.blood_on_hit != 0
             || weapon.worm_collide)
             && check_for_spec_worm_hit(
-                worm,
+                &worms[w_idx],
                 ftoi(obj.pos.x),
                 ftoi(obj.pos.y),
                 weapon.detect_distance,
@@ -470,11 +475,12 @@ pub fn wobject_process(
         {
             // :292 vel-kick — the WOBJECT's vel * blow_away / 100 (integer,
             // truncating), added to the worm's vel. NO rand.
-            worm.vel = worm.vel.add(obj.vel.mul(weapon.blow_away).div(100));
+            worms[w_idx].vel =
+                worms[w_idx].vel.add(obj.vel.mul(weapon.blow_away).div(100));
 
-            // :294 DoDamage(worm, hit_damage, owner_idx) — RNG-free wound in
-            // normal mode; sets `last_killed_by_idx` only when it drops <= 0.
-            worm.do_damage(weapon.hit_damage, obj.owner_idx);
+            // :294 DoDamage(worm, hit_damage, owner_idx) — RNG-free wound; the Scales
+            // (game_mode 3) redistribution heals the other worm(s) (T5).
+            do_damage(worms, w_idx, weapon.hit_damage, obj.owner_idx, game_mode, settings_health);
             // :295-298 DamageDealt/Hit stats — no-op (has_hit unported).
 
             // :301-306 BLOOD FAN FIRST. kBloodAmount = blood_on_hit * blood / 100
@@ -492,7 +498,7 @@ pub fn wobject_process(
                     obj.vel.div(3),
                     obj.pos,
                     0,
-                    worm.index,
+                    worms[w_idx].index,
                     cossin,
                     rand,
                     nobjects,
@@ -504,7 +510,7 @@ pub fn wobject_process(
             // POST-DoDamage health). On `== 0` the INNER rand(3) is ALWAYS taken
             // (the C++ `NOTE: MUST be outside the unpredictable branch`); Play is a
             // render-only no-op (omitted), but the draws are the contract.
-            if weapon.hit_damage > 0 && worm.health > 0 && rand.bound(3) == 0 {
+            if weapon.hit_damage > 0 && worms[w_idx].health > 0 && rand.bound(3) == 0 {
                 let _k_snd = 18 + rand.bound(3) as i32;
                 // sound_player->Play(kSnd, &worm) — omitted (no sim/RNG).
             }
@@ -599,6 +605,8 @@ pub fn blow_up(
     sobjects: &mut Pool<SObject>,
     bonuses: &mut Pool<Bonus>,
     blood: i32,
+    game_mode: u32,
+    settings_health: i32,
     rand: &mut Rand,
 ) {
     // :89-92 create-on-explosion — BEFORE the dart's own dirt_effect (the order
@@ -624,6 +632,8 @@ pub fn blow_up(
             bonuses,
             sobject_types,
             blood,
+            game_mode,
+            settings_health,
             rand,
         );
     }
@@ -1134,6 +1144,8 @@ mod tests {
             &nobject_types,
             &worm_sprites,
             &cossin,
+            100,
+            0,
             100,
             rand,
         )
@@ -1872,6 +1884,8 @@ mod tests {
             &mut sobjects,
             &mut Pool::<Bonus>::new(1),
             100,
+            0,
+            100,
             &mut rand,
         );
 
@@ -1945,6 +1959,8 @@ mod tests {
             &mut nobjects,
             &mut sobjects,
             &mut Pool::<Bonus>::new(1),
+            100,
+            0,
             100,
             &mut rand,
         );
@@ -2133,6 +2149,8 @@ mod tests {
             &mut sobjects,
             &mut Pool::<Bonus>::new(1),
             100,
+            0,
+            100,
             &mut rand,
         );
 
@@ -2225,6 +2243,8 @@ mod tests {
             &mut sobjects,
             &mut Pool::<Bonus>::new(1),
             100,
+            0,
+            100,
             &mut rand,
         );
 
@@ -2311,6 +2331,8 @@ mod tests {
             &mut sobjects,
             &mut Pool::<Bonus>::new(1),
             100,
+            0,
+            100,
             &mut rand,
         );
 
@@ -2374,6 +2396,8 @@ mod tests {
             &mut sobjects,
             &mut Pool::<Bonus>::new(1),
             100,
+            0,
+            100,
             &mut rand,
         );
 
@@ -2415,6 +2439,8 @@ mod tests {
             &mut nobjects,
             &mut sobjects,
             &mut Pool::<Bonus>::new(1),
+            100,
+            0,
             100,
             &mut rand,
         );
@@ -2583,6 +2609,8 @@ mod tests {
             &worm_sprites,
             &cossin,
             blood,
+            0,
+            100,
             &mut rand,
         );
 
@@ -2645,6 +2673,8 @@ mod tests {
             &worm_sprites,
             &cossin,
             100,
+            0,
+            100,
             &mut rand,
         );
 
@@ -2691,6 +2721,8 @@ mod tests {
             &nobject_types,
             &worm_sprites,
             &cossin,
+            100,
+            0,
             100,
             &mut rand,
         );
@@ -2746,6 +2778,8 @@ mod tests {
             &worm_sprites,
             &cossin,
             100,
+            0,
+            100,
             &mut rand,
         );
 
@@ -2785,6 +2819,8 @@ mod tests {
             &nobject_types,
             &worm_sprites,
             &cossin,
+            100,
+            0,
             100,
             &mut rand,
         );

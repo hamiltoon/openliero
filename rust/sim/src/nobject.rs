@@ -62,7 +62,9 @@ use crate::blit::{blit_image_on_map, draw_dirt_effect};
 use crate::bobject::create_bobject;
 use crate::pool::{BloodPool, Pool};
 use crate::sobject::sobject_create;
-use crate::state::{Bonus, BObject, LevelSim, NObject, SObject, WObject, WormState, MAT_WORM};
+use crate::state::{
+    do_damage, Bonus, BObject, LevelSim, NObject, SObject, WObject, WormState, MAT_WORM,
+};
 
 /// Port of `NObjectType::Create` (`nobject.cpp:7-39`) — the shared spawn core.
 ///
@@ -380,6 +382,8 @@ pub fn nobject_process(
     blood: i32,
     num_blood_colours: i32,
     first_blood_colour: i32,
+    game_mode: u32,
+    settings_health: i32,
     rand: &mut Rand,
 ) -> NObjectOutcome {
     let mut bounced = false;
@@ -539,9 +543,12 @@ pub fn nobject_process(
     // NOTHING, and leaves the golden byte-identical.
     let mut do_remove = false;
     if !do_explode && ty.hit_damage > 0 {
-        for w in worms.iter_mut() {
+        // Index-based (not `iter_mut()`): the `:174` [`do_damage`] now heals the
+        // OTHER worms in Scales (game_mode 3), a second slice element the `iter_mut()`
+        // borrow could not reach. `check_for_spec_worm_hit` takes `&worms[w_idx]`.
+        for w_idx in 0..worms.len() {
             if check_for_spec_worm_hit(
-                w,
+                &worms[w_idx],
                 ftoi(obj.pos.x),
                 ftoi(obj.pos.y),
                 ty.detect_distance,
@@ -550,19 +557,19 @@ pub fn nobject_process(
             ) {
                 // :172 vel-kick — the NOBJECT's vel * blow_away / 100 (integer,
                 // truncating), added to the worm's vel. NO rand.
-                w.vel = w.vel.add(obj.vel.mul(ty.blow_away).div(100));
+                worms[w_idx].vel =
+                    worms[w_idx].vel.add(obj.vel.mul(ty.blow_away).div(100));
 
-                // :174 DoDamage(worm, hit_damage, owner_idx) — RNG-free wound in
-                // normal mode; sets `last_killed_by_idx` only on a kill. :177 stats
-                // no-op (has_hit unported).
-                w.do_damage(ty.hit_damage, obj.owner_idx);
+                // :174 DoDamage(worm, hit_damage, owner_idx) — RNG-free wound; the
+                // Scales (game_mode 3) redistribution heals the other worm(s) (T5).
+                do_damage(worms, w_idx, ty.hit_damage, obj.owner_idx, game_mode, settings_health);
 
                 // :180-186 HIT-SOUND GATE FIRST. The OUTER rand(3) is only drawn when
                 // `hit_damage > 0 && w.health > 0` (short-circuit — reading the
                 // POST-DoDamage health). On `== 0` the INNER rand(3) is ALWAYS taken
                 // (the C++ `NOTE: MUST be outside the unpredictable branch`); Play is
                 // render-only (omitted), but the draws are the contract.
-                if ty.hit_damage > 0 && w.health > 0 && rand.bound(3) == 0 {
+                if ty.hit_damage > 0 && worms[w_idx].health > 0 && rand.bound(3) == 0 {
                     let _k_snd = 18 + rand.bound(3) as i32;
                     // sound_player->Play(kSnd, &w) — omitted (no sim/RNG).
                 }
@@ -631,6 +638,8 @@ pub fn nobject_process(
                 bonuses,
                 sobject_types,
                 blood,
+                game_mode,
+                settings_health,
                 rand,
             );
         }
@@ -1089,6 +1098,8 @@ mod tests {
             100,
             0,
             0,
+            0,
+            100,
             rand,
         )
     }
@@ -1476,6 +1487,8 @@ mod tests {
             100,
             0,
             0,
+            0,
+            100,
             rand,
         )
     }
@@ -1594,6 +1607,8 @@ mod tests {
             100,
             0,
             0,
+            0,
+            100,
             &mut rand,
         );
 
@@ -1687,6 +1702,8 @@ mod tests {
             100,
             0,
             0,
+            0,
+            100,
             &mut rand,
         );
 
@@ -1844,6 +1861,8 @@ mod tests {
             100,
             num_blood_colours,
             first_blood_colour,
+            0,
+            100,
             rand,
         )
     }
@@ -2061,6 +2080,8 @@ mod tests {
             blood,
             0,
             0,
+            0,
+            100,
             rand,
         )
     }

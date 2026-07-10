@@ -102,6 +102,8 @@ pub fn create_bonus(
     h_bonus_only_weapon: bool,
     bonus_rand_timer: &[[i32; 2]; 2],
     weap_table: &[i32],
+    game_mode: u32,
+    settings_health: i32,
     rand: &mut Rand,
 ) {
     // :219 `if (bonuses.Size() >= settings->max_bonuses) return;` — no rand.
@@ -189,6 +191,8 @@ pub fn create_bonus(
                 bonuses,
                 sobject_types,
                 blood,
+                game_mode,
+                settings_health,
                 rand,
             );
             return;
@@ -255,6 +259,8 @@ pub fn bonus_process(
     bonus_bounce_mul: i32,
     bonus_bounce_div: i32,
     bonus_s_objects: &[i32; 2],
+    game_mode: u32,
+    settings_health: i32,
     rand: &mut Rand,
 ) -> BonusOutcome {
     // :9 y += vel_y.
@@ -309,6 +315,8 @@ pub fn bonus_process(
             bonuses,
             sobject_types,
             blood,
+            game_mode,
+            settings_health,
             rand,
         );
         // :31-33 free the bonus iff used.
@@ -350,6 +358,8 @@ pub fn process_bonuses(
     bonus_bounce_mul: i32,
     bonus_bounce_div: i32,
     bonus_s_objects: &[i32; 2],
+    game_mode: u32,
+    settings_health: i32,
     rand: &mut Rand,
 ) {
     for slot in 0..bonuses.capacity() {
@@ -379,6 +389,8 @@ pub fn process_bonuses(
             bonus_bounce_mul,
             bonus_bounce_div,
             bonus_s_objects,
+            game_mode,
+            settings_health,
             rand,
         ) {
             BonusOutcome::Keep => {
@@ -391,17 +403,28 @@ pub fn process_bonuses(
     }
 }
 
-/// Port of `Game::DoHealingDirect` (`game.cpp:555-565`), KillEmAll path — RNG-free.
+/// Port of `Game::DoHealingDirect` (`game.cpp:555-565`) — RNG-free, both arms.
 ///
-/// `w.health += amount`, then clamp to `settings_health` (the `else` arm). The
-/// `kGmScalesOfJustice` branch (which converts overflow health into extra lives)
-/// is present-but-guarded in the plan — the openliero TC is always KillEmAll, so
-/// only the clamp arm is modelled (`game_mode` is unmodelled in the sim). A
-/// negative `amount` is possible in general but the pickup only ever passes a
-/// non-negative heal.
-pub fn do_healing_direct(w: &mut WormState, amount: i32, settings_health: i32) {
+/// `w.health += amount`, then either (`kGmScalesOfJustice`, `game_mode == 3`)
+/// convert every whole `settings_health` of overflow into an extra life
+/// (`while health > settings_health { lives += 1; health -= settings_health }`,
+/// `:558-561`) OR (every other mode, the `else` arm) clamp to `settings_health`
+/// (`:563`). Slice 6 T5 made the Scales arm LIVE (it is reached from the
+/// `do_damage` redistribution and, in a Scales game, the bonus-pickup heal); for
+/// KillEmAll (`game_mode 0`) the clamp arm is identical to the prior port, so
+/// KillEmAll priors stay byte-identical. A negative `amount` is possible in
+/// general but the callers only ever pass a non-negative heal.
+pub fn do_healing_direct(w: &mut WormState, amount: i32, game_mode: u32, settings_health: i32) {
     w.health += amount;
-    w.health = w.health.min(settings_health);
+    // kGmScalesOfJustice == 3 (settings.hpp:51). Overflow health rolls into lives.
+    if game_mode == 3 {
+        while w.health > settings_health {
+            w.lives += 1;
+            w.health -= settings_health;
+        }
+    } else {
+        w.health = w.health.min(settings_health);
+    }
 }
 
 /// Port of the visible-worm **bonus pickup** block (`worm.cpp:287-322`) — runs in
@@ -452,6 +475,7 @@ pub fn worm_pickup_bonuses(
     large_sprites: &SpriteSet,
     textures: &[Texture],
     blood: i32,
+    game_mode: u32,
     settings_health: i32,
     bonus_health_var: i32,
     bonus_min_health: i32,
@@ -490,7 +514,7 @@ pub fn worm_pickup_bonuses(
                 let amount = (rand.bound(bonus_health_var as u32) as i32 + bonus_min_health)
                     * settings_health
                     / 100;
-                do_healing_direct(&mut worms[wi], amount, settings_health);
+                do_healing_direct(&mut worms[wi], amount, game_mode, settings_health);
             }
             // health >= settings_health: no free, NO rand.
         } else if bonus.frame == 0 {
@@ -535,6 +559,8 @@ pub fn worm_pickup_bonuses(
                     bonuses,
                     sobject_types,
                     blood,
+                    game_mode,
+                    settings_health,
                     rand,
                 );
             }
@@ -660,6 +686,8 @@ mod tests {
             h_only_weapon,
             &timer,
             weap_table,
+            0,
+            100,
             rand,
         );
         // Stash the flash sobject count via the pool the caller does NOT see; assert
@@ -841,6 +869,8 @@ mod tests {
             false,
             &[[100, 50], [200, 70]],
             &vec![0i32; 5],
+            0,
+            100,
             &mut rand,
         );
 
@@ -887,6 +917,8 @@ mod tests {
             false,
             &[[100, 50], [200, 70]],
             &vec![0i32; 5],
+            0,
+            100,
             &mut rand,
         );
 
@@ -1071,6 +1103,8 @@ mod tests {
             mul,
             div,
             &[7, 7],
+            0,
+            100,
             rand,
         );
         (outcome, sobjects)
@@ -1258,6 +1292,8 @@ mod tests {
             2,
             3,
             &[7, 7],
+            0,
+            100,
             &mut rand,
         );
 
@@ -1378,6 +1414,7 @@ mod tests {
             &cossin,
             &SpriteSet::default(),
             &[],
+            0,
             0,
             settings_health,
             health_var,

@@ -245,6 +245,8 @@ mod tests {
             first_blood_colour: 0,
             bobj_gravity: 0,
             settings_health: 100,
+            game_mode: 0,
+            time_to_lose: 600,
             last_killed_idx: -1,
             got_changed: false,
             settings_max_bonuses: 0,

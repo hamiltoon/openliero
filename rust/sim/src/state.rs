@@ -438,19 +438,63 @@ impl WormState {
         }
     }
 
-    /// Port of `Game::DoDamage` (`game.cpp:567-589`) — the **normal-mode**
-    /// (`kGmKillEmAll`) path. In every mode the function first runs
-    /// [`do_damage_direct`](WormState::do_damage_direct); the additional
-    /// `kGmScalesOfJustice` redistribution branch (`:570-587`, which heals the
-    /// other worms via `DoHealingDirect`) is **DEFERRED** — Slice 5b is normal
-    /// mode, so it is unreached. Bringing in game-mode plumbing 5b never needs
-    /// would be premature; when a SoJ slice lands it ports the redistribution
-    /// here. RNG-free.
-    pub fn do_damage(&mut self, amount: i32, by_idx: i32) {
-        self.do_damage_direct(amount, by_idx);
-        // kGmScalesOfJustice redistribution (game.cpp:570-587) DEFERRED — normal
-        // mode does nothing further. (No `DoHealingDirect` port: it is reachable
-        // only through that branch.)
+}
+
+/// Port of `Game::DoDamage` (`game.cpp:567-589`) — the WHOLE function, all modes.
+///
+/// A **slice-level** free function (not a `WormState` method) because the
+/// `kGmScalesOfJustice` redistribution reads/writes the OTHER worms, which a
+/// `&mut self` borrow cannot reach. `worms[w_idx]` is the wounded worm; `by_idx`
+/// is the damage source (the firing worm's index, or `< 0` for the environment).
+///
+/// 1. `do_damage_direct(amount, by_idx)` on the wounded worm (`:568`).
+/// 2. **Scales only** (`game_mode == 3`), and only on a real wound (`amount > 0`,
+///    `:570`): redistribute the damage as HEALING (`:571-586`):
+///    * **self / environmental** (`by_idx < 0 || by_idx == w.index`, `:572`):
+///      split `amount` across the OTHER worms by truncating integer division —
+///      `parts = worms.len() - 1`, `left = amount`, and per other worm (source
+///      order) `k = left / parts`, `DoHealingDirect(k)`, `parts -= 1`, `left -= k`
+///      (`:573-582`). With 2 worms this degenerates to a single full-`amount` heal.
+///    * **enemy fire** (`else`, `:584-585`): `DoHealingDirect(worms[by_idx],
+///      amount)` — the attacker is healed by the full damage it dealt.
+///
+/// The redistribution is RNG-free; its hashed effects are the other worms' `health`
+/// / `lives` (via [`crate::bonus::do_healing_direct`]'s Scales overflow-to-lives).
+/// For KillEmAll (`game_mode 0`) only step 1 runs, so KillEmAll priors are
+/// byte-identical. The loop compares by SLOT (`j != w_idx`, mirroring C++
+/// `other.get() != &w`); `left / parts` is never evaluated for a single worm (the
+/// body is skipped), so no divide-by-zero.
+pub fn do_damage(
+    worms: &mut [WormState],
+    w_idx: usize,
+    amount: i32,
+    by_idx: i32,
+    game_mode: u32,
+    settings_health: i32,
+) {
+    worms[w_idx].do_damage_direct(amount, by_idx);
+
+    if amount > 0 && game_mode == 3 {
+        let w_index = worms[w_idx].index;
+        if by_idx < 0 || by_idx == w_index {
+            let mut parts = worms.len() as i32 - 1;
+            let mut left = amount;
+            for j in 0..worms.len() {
+                if j != w_idx {
+                    let k = left / parts;
+                    crate::bonus::do_healing_direct(&mut worms[j], k, game_mode, settings_health);
+                    parts -= 1;
+                    left -= k;
+                }
+            }
+        } else {
+            crate::bonus::do_healing_direct(
+                &mut worms[by_idx as usize],
+                amount,
+                game_mode,
+                settings_health,
+            );
+        }
     }
 }
 
@@ -1068,6 +1112,25 @@ pub struct SimState {
     /// it), keeping those goldens byte-identical. **Not hashed** (settings scalar).
     pub settings_health: i32,
 
+    /// C++ `Settings::game_mode` (`settings.hpp:73`, enum `kGmKillEmAll=0,
+    /// kGmGameOfTag=1, kGmHoldazone=2, kGmScalesOfJustice=3`). Selects the
+    /// frame-tail game-mode switch (`game.cpp:372-461`, ported in
+    /// [`process_frame`]) AND the `Game::DoDamage`/`DoHealingDirect` Scales
+    /// redistribution (`game.cpp:567-589`, threaded to the damage sites). Defaulted
+    /// to `0` (`kGmKillEmAll`) post-`new` — the switch's `default: break` and the
+    /// non-Scales `do_damage`/`do_healing_direct` arms are inert, so every
+    /// KillEmAll scenario (slices 1-5') stays byte-identical. The difftest assigns
+    /// the scenario's `game_mode` after `new`. **Not hashed** (game-level scalar,
+    /// in neither the master nor the component fold); its hashed *effects* (timer /
+    /// health / lives) are what the goldens witness.
+    pub game_mode: u32,
+    /// C++ `Settings::time_to_lose` (`settings.hpp:71`, default `600`): the GameOfTag
+    /// "it"-timer cap. The frame-tail gate bumps `last_killed_by->timer` only while
+    /// `timer < time_to_lose` (`game.cpp:385`). The oracle dumper never overrides it
+    /// (it uses the `Settings` default), so this defaults to **600** post-`new` — no
+    /// scenario directive, mirroring the dumper. **Not hashed** (settings scalar).
+    pub time_to_lose: i32,
+
     /// C++ `Game::last_killed_idx` (`game.hpp`, default `-1`): the index of the
     /// most recently killed worm. Written by the death block (`worm.cpp:393-401`)
     /// and read by the GameOfTag "it"-transfer guard. **Not hashed** (game-level
@@ -1238,6 +1301,13 @@ impl SimState {
             // consts) so no call site changes; the clamp is identity for slices
             // 1-5c (worms start at 100, never exceed it) => priors byte-identical.
             settings_health: 100,
+            // Game mode (settings.hpp:73). Default kGmKillEmAll (0): the frame-tail
+            // switch hits `default: break` and the Scales `do_damage`/`do_healing`
+            // arms are inert, so KillEmAll priors (slices 1-5') stay byte-identical.
+            // The difftest assigns the scenario's `game_mode` after `new`. time_to_lose
+            // defaults to the C++ `Settings` value 600 (the dumper never overrides it).
+            game_mode: 0,
+            time_to_lose: 600,
             // Game-level kill bookkeeping (worm.cpp:393-401). C++ defaults:
             // last_killed_idx = -1, got_changed = false. Not hashed; written only
             // when a worm dies (unreached for slices 1-5c) => priors identical.
@@ -1372,6 +1442,8 @@ impl SimState {
             bonuses,
             cycles,
             settings_health,
+            game_mode,
+            time_to_lose,
             last_killed_idx,
             got_changed,
             worm_spawn_rect_x,
@@ -1407,6 +1479,8 @@ impl SimState {
         let bonus_explode_risk = *bonus_explode_risk;
         let h_bonus_reload_only = *h_bonus_reload_only;
         let settings_health = *settings_health;
+        let game_mode = *game_mode;
+        let time_to_lose = *time_to_lose;
         let worm_spawn_rect_x = *worm_spawn_rect_x;
         let worm_spawn_rect_y = *worm_spawn_rect_y;
         let worm_spawn_rect_w = *worm_spawn_rect_w;
@@ -1449,6 +1523,8 @@ impl SimState {
             bonus_bounce_mul,
             bonus_bounce_div,
             bonus_s_objects,
+            game_mode,
+            settings_health,
             rand,
         );
 
@@ -1498,6 +1574,8 @@ impl SimState {
                 worm_sprites,
                 cossin,
                 blood,
+                game_mode,
+                settings_health,
                 rand,
             ) {
                 WObjectOutcome::Keep => {
@@ -1521,6 +1599,8 @@ impl SimState {
                         sobjects,
                         bonuses,
                         blood,
+                        game_mode,
+                        settings_health,
                         rand,
                     );
                     wobjects.free(slot);
@@ -1570,6 +1650,8 @@ impl SimState {
                 blood,
                 num_blood_colours,
                 first_blood_colour,
+                game_mode,
+                settings_health,
                 rand,
             ) {
                 NObjectOutcome::Keep => {
@@ -1640,6 +1722,8 @@ impl SimState {
                 h_bonus_only_weapon,
                 bonus_rand_timer,
                 weap_table,
+                game_mode,
+                settings_health,
                 rand,
             );
         }
@@ -1677,14 +1761,14 @@ impl SimState {
             // it), so priors stay byte-identical.
             worms[i].health = worms[i].health.min(settings_health);
 
-            // Game-mode / lives gate (worm.cpp:215). The full C++ condition is
-            // `(mode != KillEmAll && mode != Scales) || lives > 0`; the openliero
-            // TC mode is KillEmAll (and Scales folds the same way), so it reduces
-            // to `lives > 0`. Non-KillEmAll/Scales modes (e.g. GameOfTag) would
-            // make the gate always-true — those branches stay present-but-guarded
-            // (game_mode is unmodelled; the TC is always KillEmAll). Hash-neutral
-            // for priors (lives > 0 always in 1-5c).
-            if worms[i].lives <= 0 {
+            // Game-mode / lives gate (worm.cpp:215). The full C++ condition to
+            // PROCESS the worm is `(mode != KillEmAll && mode != Scales) || lives >
+            // 0`; so the worm is SKIPPED iff `(mode == KillEmAll || mode == Scales)
+            // && lives <= 0`. GameOfTag (1) / Holdazone (2) make the gate always-true
+            // (a 0-lives worm is still processed — T5 ports this faithfully). For
+            // KillEmAll (0) / Scales (3) it reduces to the prior `lives <= 0` skip,
+            // so every prior (all game_mode 0) is byte-identical.
+            if (game_mode == 0 || game_mode == 3) && worms[i].lives <= 0 {
                 continue;
             }
 
@@ -1717,6 +1801,7 @@ impl SimState {
                     large_sprites,
                     textures,
                     blood,
+                    game_mode,
                     settings_health,
                     bonus_health_var,
                     bonus_min_health,
@@ -1927,6 +2012,50 @@ impl SimState {
                 rand,
                 nobjects,
             );
+        }
+
+        // Game-mode switch (game.cpp:372-461), AFTER the ninjarope loop and at the
+        // very end of the tick — the exact `Game::ProcessFrame` position. `game_mode`
+        // selects the arm (`settings.hpp:51` enum: 0 kGmKillEmAll, 1 kGmGameOfTag,
+        // 2 kGmHoldazone, 3 kGmScalesOfJustice). Only GameOfTag lives here; Scales is
+        // NOT a ProcessFrame case (it fires inside `do_damage`, `game.cpp:567-589` —
+        // ported at the damage sites), so it falls through to the no-op default
+        // exactly like KillEmAll. Holdazone is DEFERRED past Step 2 (JOHN-BESLUT #1,
+        // design §5): its `SpawnZone`/`SelectSpawn` are unported, so the arm is a
+        // documented `unimplemented!` — unreachable because no in-scope scenario sets
+        // `game_mode 2`. The three render-only ProcessFrame steps that follow in C++
+        // (`ProcessViewports`, the `prev_control_states` store) stay OMITTED as
+        // provably hash-inert (design §1), mirroring the dumper.
+        match game_mode {
+            // kGmGameOfTag (game.cpp:373-388): once per 70 cycles, while BOTH worms
+            // are visible and a worm has been killed, bump the "it"-worm's `timer`
+            // (hashed) — but never past `time_to_lose`. `*cycles` is the POST-`++cycles`
+            // value (incremented at game.cpp:357 above), matching C++ `game.cycles`.
+            // `WormByIdx(last_killed_idx)` is non-null iff `last_killed_idx >= 0`
+            // (game.hpp:113 only rejects `< 0`); the `< worms.len()` term is a safe
+            // upper bound (a set index is always a live worm, so it never differs).
+            // RNG-free — `timer` is the only mutation.
+            1 => {
+                let some_invisible = worms.iter().any(|w| !w.visible);
+                let lk = *last_killed_idx;
+                if !some_invisible
+                    && lk >= 0
+                    && (lk as usize) < worms.len()
+                    && (*cycles % 70) == 0
+                    && worms[lk as usize].timer < time_to_lose
+                {
+                    worms[lk as usize].timer += 1;
+                }
+            }
+            // kGmHoldazone (game.cpp:390-458): DEFERRED past Step 2 (JOHN-BESLUT #1).
+            // `SpawnZone`/`SelectSpawn` + the `holdazone` state are unported; no
+            // in-scope scenario sets `game_mode 2`, so this arm is never reached.
+            2 => unimplemented!(
+                "Holdazone (game_mode 2) SpawnZone/SelectSpawn deferred past Step 2 (JOHN-BESLUT #1)"
+            ),
+            // kGmKillEmAll (0) + kGmScalesOfJustice (3): the switch's `default: break`
+            // (Scales' redistribution lives in `do_damage`, not here). No-op.
+            _ => {}
         }
     }
 }
@@ -5158,5 +5287,151 @@ mod tests {
         assert_eq!(worms[0].vel, Vec2::new(5285, 0), "owner.vel += kForce/cur_len");
         assert_eq!(rand.draws() - before, 0, "worm anchor draws no rand");
         assert_eq!(nobjects.len(), 0, "no spray on a worm anchor");
+    }
+
+    // ============ T5: GameOfTag frame-tail gate (game.cpp:373-388) ==============
+    // The switch bumps `WormByIdx(last_killed_idx)->timer` once per 70 cycles while
+    // BOTH worms are visible, a kill has happened (`last_killed_idx >= 0`), and the
+    // timer is below `time_to_lose`. `*cycles` is the POST-`++cycles` value. RNG-free;
+    // `timer` is hashed. `open_state` gives two visible, full-health, grounded worms.
+
+    #[test]
+    fn gametag_gate_bumps_it_timer_on_cycle_70_multiple() {
+        let mut state = open_state(itof(20), 0);
+        state.game_mode = 1; // kGmGameOfTag
+        state.last_killed_idx = 1; // worm1 is "it"
+        state.cycles = 69; // after ++cycles -> 70, (70 % 70) == 0
+        let before = state.rand.draws();
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert_eq!(state.cycles, 70, "++cycles ran to the 70-boundary");
+        assert_eq!(state.worms[1].timer, 1, "the it-worm's timer bumps on a 70-cycle tick");
+        assert_eq!(state.worms[0].timer, 0, "the non-it worm's timer is untouched");
+        assert_eq!(state.rand.draws(), before, "the GameOfTag gate is RNG-free");
+    }
+
+    #[test]
+    fn gametag_gate_silent_off_cycle_invisible_or_no_kill() {
+        // (a) off a 70-cycle boundary: no bump.
+        let mut state = open_state(itof(20), 0);
+        state.game_mode = 1;
+        state.last_killed_idx = 1;
+        state.cycles = 5; // -> 6, not a multiple of 70
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert_eq!(state.worms[1].timer, 0, "no bump off a 70-cycle boundary");
+
+        // (b) a worm invisible: `some_invisible` short-circuits the gate.
+        let mut state = open_state(itof(20), 0);
+        state.game_mode = 1;
+        state.last_killed_idx = 1;
+        state.cycles = 69;
+        state.worms[0].visible = false;
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert_eq!(state.worms[1].timer, 0, "an invisible worm blocks the bump");
+
+        // (c) no kill yet (`last_killed_idx < 0`): WormByIdx is null -> no bump.
+        let mut state = open_state(itof(20), 0);
+        state.game_mode = 1;
+        state.last_killed_idx = -1;
+        state.cycles = 69;
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert_eq!(state.worms[1].timer, 0, "no kill -> no it-worm -> no bump");
+    }
+
+    #[test]
+    fn gametag_gate_respects_time_to_lose_cap() {
+        let mut state = open_state(itof(20), 0);
+        state.game_mode = 1;
+        state.last_killed_idx = 1;
+        state.cycles = 69;
+        state.time_to_lose = 3;
+        state.worms[1].timer = 3; // `timer < time_to_lose` is false at the cap
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert_eq!(state.worms[1].timer, 3, "timer at time_to_lose does not bump");
+    }
+
+    #[test]
+    fn gametag_gate_inert_in_other_modes() {
+        // KillEmAll (0): the switch hits `default: break`, no bump even at a
+        // 70-boundary with a kill recorded — the priors-safety guarantee.
+        let mut state = open_state(itof(20), 0);
+        state.game_mode = 0;
+        state.last_killed_idx = 1;
+        state.cycles = 69;
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert_eq!(state.worms[1].timer, 0, "KillEmAll never bumps the timer");
+    }
+
+    // ============ T5: Scales DoDamage redistribution (game.cpp:567-589) ==========
+    // In Scales (game_mode 3) a real wound heals the OTHER worm(s) via
+    // DoHealingDirect (game.cpp:555-565): enemy fire heals the attacker by the full
+    // amount (:584-585); self / environmental damage splits the amount across the
+    // others (:572-583). RNG-free; `health` / `lives` are hashed. `do_damage` is the
+    // slice-level free function.
+
+    fn scales_worms(h0: i32, h1: i32) -> Vec<WormState> {
+        let inits = two_worms();
+        let mut ws: Vec<WormState> = inits.iter().map(WormState::from_init).collect();
+        ws[0].health = h0;
+        ws[0].visible = true;
+        ws[1].health = h1;
+        ws[1].visible = true;
+        ws
+    }
+
+    #[test]
+    fn scales_enemy_fire_heals_the_attacker() {
+        // worm0 (idx 0) wounds worm1 (idx 1) by 18. Scales heals worm0 by 18.
+        let mut ws = scales_worms(50, 100);
+        let (l0, l1) = (ws[0].lives, ws[1].lives);
+        do_damage(&mut ws, 1, 18, 0, 3, 100);
+        assert_eq!(ws[1].health, 82, "the wounded worm drops by the damage");
+        assert_eq!(ws[0].health, 68, "the attacker (other worm) heals by the full amount");
+        assert_eq!((ws[0].lives, ws[1].lives), (l0, l1), "no life change below the cap");
+    }
+
+    #[test]
+    fn scales_self_or_environmental_damage_splits_across_the_others() {
+        // Environmental (`by_idx < 0`) damage to worm1 heals every OTHER worm; with
+        // two worms that is worm0 by `left/parts == amount` (parts == 1).
+        let mut ws = scales_worms(50, 100);
+        do_damage(&mut ws, 1, 18, -1, 3, 100);
+        assert_eq!(ws[1].health, 82);
+        assert_eq!(ws[0].health, 68, "the sole other worm gets left/parts == full amount");
+
+        // Self damage (`by_idx == w.index`) takes the same split branch.
+        let mut ws = scales_worms(50, 100);
+        do_damage(&mut ws, 1, 18, 1, 3, 100);
+        assert_eq!(ws[0].health, 68, "self damage also heals the other worm");
+    }
+
+    #[test]
+    fn scales_heal_overflows_into_lives() {
+        // worm0 near full: 95 + 18 = 113 > 100 -> +1 life, health wraps to 13
+        // (DoHealingDirect Scales arm, game.cpp:558-561).
+        let mut ws = scales_worms(95, 100);
+        let lives0 = ws[0].lives;
+        do_damage(&mut ws, 1, 18, 0, 3, 100);
+        assert_eq!(ws[0].lives, lives0 + 1, "overflow health rolls into a life");
+        assert_eq!(ws[0].health, 13, "113 - 100 == 13 after the overflow");
+    }
+
+    #[test]
+    fn scales_no_redistribution_in_killemall() {
+        // game_mode 0: `do_damage` is `do_damage_direct` only; the other worm is
+        // untouched (the priors-safety guarantee for the shared damage sites).
+        let mut ws = scales_worms(50, 100);
+        do_damage(&mut ws, 1, 18, 0, 0, 100);
+        assert_eq!(ws[1].health, 82, "the wounded worm still drops");
+        assert_eq!(ws[0].health, 50, "KillEmAll never heals the other worm");
+    }
+
+    #[test]
+    fn scales_zero_damage_no_redistribution() {
+        // amount == 0: `do_damage_direct` is a no-op and the redistribution is gated
+        // out (`amount > 0`), so no worm changes.
+        let mut ws = scales_worms(50, 100);
+        do_damage(&mut ws, 1, 0, 0, 3, 100);
+        assert_eq!(ws[1].health, 100);
+        assert_eq!(ws[0].health, 50, "no heal when amount == 0");
     }
 }

@@ -69,7 +69,7 @@ use sim_core::vec::Vec2;
 use crate::blit::draw_dirt_effect;
 use crate::nobject::nobject_create2;
 use crate::pool::Pool;
-use crate::state::{Bonus, LevelSim, NObject, SObject, WObject, WormState};
+use crate::state::{do_damage, Bonus, LevelSim, NObject, SObject, WObject, WormState};
 
 /// The verdict a single [`sobject_process`] pass returns to the driver
 /// (Task 4/5), mirroring the `Free(this)` tail of C++ `SObject::Process`
@@ -121,6 +121,8 @@ pub fn sobject_create(
     bonuses: &mut Pool<Bonus>,
     sobject_types: &[SObjectType],
     blood: i32,
+    game_mode: u32,
+    settings_health: i32,
     rand: &mut Rand,
 ) {
     // :19 NewObjectReuse + :35-39 field init. Allocated first; the field writes
@@ -150,31 +152,41 @@ pub fn sobject_create(
         // --- 7a. Per-worm loop (:48-114). In 4c every worm is out of range, so
         // the box test is false and nothing runs. Box test + blow-away nudges
         // (no rand) ported; the `w.health > 0` damage arm deferred (O10).
-        for w in worms.iter_mut() {
-            let kwix = ftoi(w.pos.x);
-            let kwiy = ftoi(w.pos.y);
+        // Index-based (not `iter_mut()`): the `w.health > 0` damage arm now calls the
+        // slice-level [`do_damage`] (game.cpp:567-589), whose Scales redistribution
+        // heals the OTHER worms — a second element of `worms` an `iter_mut()` borrow
+        // could not reach. Indexing reborrows `worms` per access. Every field read
+        // that was `w.<f>` becomes `worms[w_idx].<f>`; the blow-away nudges + the
+        // blood/sound draws are otherwise unchanged (identical RNG order).
+        for w_idx in 0..worms.len() {
+            let kwix = ftoi(worms[w_idx].pos.x);
+            let kwiy = ftoi(worms[w_idx].pos.y);
 
             // :54-55 range gate (strict on all four sides).
             if kwix < x + dr && kwix > x - dr && kwiy < y + dr && kwiy > y - dr {
                 // :56-67 x blow-away nudge (gated `abs(vel.x) < Itof(2)`, no rand).
                 let delta_x = kwix - x;
                 let power_x = dr - delta_x.abs();
-                if w.vel.x.abs() < itof(2) {
+                if worms[w_idx].vel.x.abs() < itof(2) {
                     if delta_x > 0 {
-                        w.vel.x = w.vel.x.wrapping_add(ty.blow_away.wrapping_mul(power_x));
+                        worms[w_idx].vel.x =
+                            worms[w_idx].vel.x.wrapping_add(ty.blow_away.wrapping_mul(power_x));
                     } else {
-                        w.vel.x = w.vel.x.wrapping_sub(ty.blow_away.wrapping_mul(power_x));
+                        worms[w_idx].vel.x =
+                            worms[w_idx].vel.x.wrapping_sub(ty.blow_away.wrapping_mul(power_x));
                     }
                 }
 
                 // :69-80 y blow-away nudge (symmetric).
                 let delta_y = kwiy - y;
                 let power_y = dr - delta_y.abs();
-                if w.vel.y.abs() < itof(2) {
+                if worms[w_idx].vel.y.abs() < itof(2) {
                     if delta_y > 0 {
-                        w.vel.y = w.vel.y.wrapping_add(ty.blow_away.wrapping_mul(power_y));
+                        worms[w_idx].vel.y =
+                            worms[w_idx].vel.y.wrapping_add(ty.blow_away.wrapping_mul(power_y));
                     } else {
-                        w.vel.y = w.vel.y.wrapping_sub(ty.blow_away.wrapping_mul(power_y));
+                        worms[w_idx].vel.y =
+                            worms[w_idx].vel.y.wrapping_sub(ty.blow_away.wrapping_mul(power_y));
                     }
                 }
 
@@ -195,9 +207,10 @@ pub fn sobject_create(
 
                 // :92-112 the LIVE worm-damage arm (5b/O10 turned ON). Gated on
                 // `w.health > 0`; draws RNG, so the order is the contract.
-                if w.health > 0 {
-                    // :93 DoDamage(w, z, owner_idx) — RNG-free wound (normal mode).
-                    w.do_damage(z, owner_idx);
+                if worms[w_idx].health > 0 {
+                    // :93 DoDamage(w, z, owner_idx) — RNG-free wound; the Scales
+                    // (game_mode 3) redistribution heals the other worm(s) (T5).
+                    do_damage(worms, w_idx, z, owner_idx, game_mode, settings_health);
                     // :94 DamageDealt stat — omitted (no sim/RNG).
 
                     // :96 kBloodAmount = settings.blood * power_sum / 100 (trunc).
@@ -217,10 +230,10 @@ pub fn sobject_create(
                             nobject_create2(
                                 &nobject_types[6],
                                 k_angle,
-                                w.vel.div(3),
-                                w.pos,
+                                worms[w_idx].vel.div(3),
+                                worms[w_idx].pos,
                                 0,
-                                w.index,
+                                worms[w_idx].index,
                                 cossin,
                                 rand,
                                 nobjects,
@@ -404,6 +417,8 @@ pub fn sobject_create(
                 bonuses,
                 sobject_types,
                 blood,
+                game_mode,
+                settings_health,
                 rand,
             );
         }
@@ -527,7 +542,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
         );
 
         // Obj init (:35-39): id = 2, x = 50-8, y = 50-8, cur_frame = 0,
@@ -564,7 +579,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
         );
 
         assert_eq!(rand.last(), 0, "start_sound < 0 -> no rand drawn at all");
@@ -603,7 +618,7 @@ mod tests {
         // (index 699), matching C++ `&arr[Limit - 1]`.
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
         );
 
         assert_eq!(sobjects.len(), 700, "count stays at cap: overwrite, not append");
@@ -661,7 +676,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
         );
 
         assert_eq!(worms[0].vel, Vec2::zero(), "out-of-range worm not nudged");
@@ -692,7 +707,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
         );
 
         // delta_x = 57-50 = 7 > 0 -> vel.x += blow_away * (8 - 7) = 3000.
@@ -788,7 +803,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], blood, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], blood, 0, 100, &mut rand,
         );
 
         // Wound: health dropped by the clamped z = 2, stays > 0; not a kill, so
@@ -844,7 +859,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
         );
 
         assert_eq!(worms[0].health, 100, "out-of-range worm takes no damage");
@@ -877,7 +892,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 0, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 0, 0, 100, &mut rand,
         );
 
         // Still wounded (DoDamage runs regardless of blood), but no blood nobjects.
@@ -946,7 +961,7 @@ mod tests {
 
         sobject_create(
             &ty, cx, cy, 3, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
         );
 
         // Exact total draw count + order: rand.last matches the reference iff the
@@ -994,7 +1009,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
         );
 
         assert_eq!(rand.last(), expected_last, "no dirt -> no rand(8) drawn");
@@ -1087,7 +1102,7 @@ mod tests {
         let mut rand = seeded();
         sobject_create(
             &ty, cx, cy, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &sprites, &textures, &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, &mut rand,
+            &mut level, &cossin, &sprites, &textures, &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
         );
 
         // (a) the carve's rand(2) is the LAST draw of the cluster.
@@ -1289,7 +1304,7 @@ mod tests {
         sobject_create(
             &parent, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &[],
             &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects,
-            &mut bonuses, &sts, 100, &mut rand,
+            &mut bonuses, &sts, 100, 0, 100, &mut rand,
         );
 
         assert_eq!(bonuses.len(), 0, "the in-range bonus was freed (:224)");
@@ -1327,7 +1342,7 @@ mod tests {
         sobject_create(
             &parent, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &[],
             &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects,
-            &mut bonuses, &sts, 100, &mut rand,
+            &mut bonuses, &sts, 100, 0, 100, &mut rand,
         );
 
         assert_eq!(bonuses.len(), 1, "out-of-range bonus NOT freed");
@@ -1361,7 +1376,7 @@ mod tests {
         sobject_create(
             &parent, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &[],
             &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects,
-            &mut bonuses, &sts, 100, &mut rand,
+            &mut bonuses, &sts, 100, 0, 100, &mut rand,
         );
 
         assert_eq!(bonuses.len(), 1, "exactly one bonus freed");
@@ -1397,7 +1412,7 @@ mod tests {
         sobject_create(
             &parent, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &[],
             &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects,
-            &mut bonuses, &sts, 100, &mut rand,
+            &mut bonuses, &sts, 100, 0, 100, &mut rand,
         );
 
         // Termination: the call returned (no infinite loop) and every bonus is gone.
@@ -1461,7 +1476,7 @@ mod tests {
         sobject_create(
             &parent, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &[],
             &mut level, &cossin, &sprites, &textures, &mut sobjects,
-            &mut bonuses, &sts, 100, &mut rand,
+            &mut bonuses, &sts, 100, 0, 100, &mut rand,
         );
 
         assert_eq!(bonuses.len(), 0, "the in-range bonus was freed");

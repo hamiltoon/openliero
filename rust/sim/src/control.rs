@@ -535,10 +535,12 @@ pub fn process_weapons(
 ///    first-tick Release latch and `fire_cone = 0`) run *unconditionally, before*
 ///    the gate (`worm.cpp:1065-1072`).
 /// 5. **`PressedOnce(kLeft)`** (`worm.cpp:1080-1087`): decrement `current_weapon`,
-///    wrapping below 0 to `kSelectableWeapons - 1` (== `NUM_WEAPONS - 1`), and
-///    clear the Left bit. `hotspot_x/y` are render-only (skipped).
+///    wrapping below 0 to `kSelectableWeapons - 1` (== `NUM_WEAPONS - 1`), clear
+///    the Left bit, and set `hotspot_x/y = Ftoi(pos)` (`worm.cpp:1085-1086`) —
+///    a render-only anchor for the laser draw, absent from both hashes (Slice 3b T0).
 /// 6. **`PressedOnce(kRight)`** (`worm.cpp:1089-1096`): increment `current_weapon`,
-///    wrapping at `kSelectableWeapons` back to 0, and clear the Right bit.
+///    wrapping at `kSelectableWeapons` back to 0, clear the Right bit, and set
+///    `hotspot_x/y = Ftoi(pos)` (`worm.cpp:1094-1095`, render-only).
 ///
 /// The `Unpack`-each-tick degeneration (design doc, *Control-state mutation*):
 /// the driver re-`Unpack`s `control_states` from the scripted input every tick,
@@ -571,7 +573,10 @@ pub fn process_weapon_change(worm: &mut WormState, load_change: bool) {
             if worm.current_weapon < 0 {
                 worm.current_weapon = NUM_WEAPONS as i32 - 1;
             }
-            // hotspot_x/y = Ftoi(pos) — render-only, not hashed; skipped.
+            // worm.cpp:1085-1086 — hotspot = Ftoi(pos). Render-only (NOT hashed);
+            // the viewport's laser draw reads it (viewport.cpp:509-510).
+            worm.hotspot_x = ftoi(worm.pos.x);
+            worm.hotspot_y = ftoi(worm.pos.y);
         }
 
         // worm.cpp:1089-1096 — PressedOnce(Right): cycle up, wrap to 0.
@@ -580,6 +585,9 @@ pub fn process_weapon_change(worm: &mut WormState, load_change: bool) {
             if worm.current_weapon >= NUM_WEAPONS as i32 {
                 worm.current_weapon = 0;
             }
+            // worm.cpp:1094-1095 — hotspot = Ftoi(pos). Render-only (NOT hashed).
+            worm.hotspot_x = ftoi(worm.pos.x);
+            worm.hotspot_y = ftoi(worm.pos.y);
         }
     }
 }

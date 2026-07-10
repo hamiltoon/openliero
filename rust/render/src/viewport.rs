@@ -150,6 +150,8 @@ mod tests {
             steerable_count: 0,
             current_frame: 0,
             animate: false,
+            hotspot_x: 0,
+            hotspot_y: 0,
         }
     }
 

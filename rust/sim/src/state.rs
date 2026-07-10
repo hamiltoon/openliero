@@ -361,6 +361,25 @@ pub struct WormState {
     /// (`worm.cpp:870,886`), `false` at the idle/fire sites (`worm.cpp:954,
     /// 1073`). Gates `current_frame`'s anim offset only. **Not hashed.**
     pub animate: bool,
+
+    // --- Slice 3b T0: laser-sight / laser-beam origin (NOT hashed) ---------
+    // Render-only pixel-space anchor read by the viewport's laser/laser-sight
+    // draw (`viewport.cpp:509-510`, `spectatorviewport.cpp:635-636`). Absent
+    // from BOTH `HashGameState` and `HashGameComponents` (verified against
+    // `stateHash.hpp` / `hash.rs`), so adding it leaves every prior
+    // `sim_slice*` golden byte-identical — the same "hash-silent render field"
+    // family as `current_frame`/`animate` above. Set at the weapon-cycle sites
+    // (`worm.cpp:1085,1094`); the laser-sight `ProcessSight` write
+    // (`worm.cpp:1207-1208`) lands when `ProcessSight` is ported.
+    /// `Worm::hotspot_x` (`worm.hpp:225`): laser-sight / laser-beam origin in
+    /// pixel space. Set to `Ftoi(pos)` on a weapon cycle (`worm.cpp:1085,1094`)
+    /// and, once `ProcessSight` is ported, to `Ftoi(temp)` by the laser-sight
+    /// arm (`worm.cpp:1207`). Read only by the renderer (`viewport.cpp:509`).
+    /// **Not hashed.**
+    pub hotspot_x: i32,
+    /// `Worm::hotspot_y` (`worm.hpp:225`), see [`hotspot_x`](Self::hotspot_x).
+    /// **Not hashed.**
+    pub hotspot_y: i32,
 }
 
 /// `Worm::kKilledTimerInitial` (`worm.hpp:243`): the respawn countdown the worm
@@ -422,6 +441,11 @@ impl WormState {
             // Not hashed.
             current_frame: 0,
             animate: false,
+
+            // Slice 3b T0 laser hotspots: `worm.hpp:225` in-class `{0}` default.
+            // Render-only, not hashed.
+            hotspot_x: 0,
+            hotspot_y: 0,
         }
     }
 
@@ -5039,6 +5063,53 @@ mod tests {
             angle_frame(w.aiming_angle, w.direction) + WORM_ANIM_TAB[((state.cycles & 31) >> 3) as usize],
             "moving current_frame == angle_frame + anim offset"
         );
+    }
+
+    // (T0, Slice 3b) `hotspot_x`/`hotspot_y` are render-only (`worm.hpp:225`) and
+    // hash-neutral. A worm that cycles its weapon sets `hotspot = Ftoi(pos)`
+    // (`worm.cpp:1085,1094`); the value is read only by the renderer
+    // (`viewport.cpp:509-510`), so carrying it must leave BOTH folds byte-identical.
+    // This test is the Rust-side proof of the OHASHADE (non-hashed render field)
+    // discipline; the standing sim re-diff gate (`cargo test --workspace`) proves
+    // the whole determinism series is unmoved.
+    #[test]
+    fn hotspot_is_render_only_and_hash_neutral() {
+        use crate::hash::{hash_components, hash_game_state};
+        use sim_core::fixed::ftoi;
+
+        // A worm holding Change+Right cycles the weapon on the SECOND tick: the
+        // first change-tick Releases L/R and latches `key_change_pressed`
+        // (`worm.cpp:1065-1070`), so no cycle fires on tick 1; the cycle site
+        // (`worm.cpp:1089-1095`) then sets `hotspot = Ftoi(pos)` on tick 2.
+        let mut state = open_state(itof(20), 0);
+        let change_right = {
+            let mut c = ControlState::new();
+            c.set(ControlState::CHANGE, true);
+            c.set(ControlState::RIGHT, true);
+            c
+        };
+
+        // Tick 1: latch only. hotspot stays at its `from_init` default (0).
+        state.process_frame(&[change_right, ControlState::new()]);
+        assert_eq!(state.worms[0].hotspot_x, 0, "tick1 latch: no cycle -> hotspot unset");
+        assert_eq!(state.worms[0].hotspot_y, 0, "tick1 latch: no cycle -> hotspot unset");
+
+        // Tick 2: PressedOnce(Right) cycles the weapon -> hotspot = Ftoi(pos).
+        state.process_frame(&[change_right, ControlState::new()]);
+        let w = &state.worms[0];
+        assert_eq!(w.hotspot_x, ftoi(w.pos.x), "hotspot_x == Ftoi(pos.x) (worm.cpp:1094)");
+        assert_eq!(w.hotspot_y, ftoi(w.pos.y), "hotspot_y == Ftoi(pos.y) (worm.cpp:1095)");
+        assert_ne!(w.hotspot_x, 0, "non-vacuous: the field is actually populated");
+
+        // Hash-neutrality: `hotspot_*` is absent from BOTH folds. Mutating it to
+        // arbitrary values must leave `hash_game_state` (master) AND
+        // `hash_components` (per-component) byte-identical.
+        let master_before = hash_game_state(&state);
+        let components_before = hash_components(&state);
+        state.worms[0].hotspot_x = 0x7fff_ffff;
+        state.worms[0].hotspot_y = -0x0123_4567;
+        assert_eq!(hash_game_state(&state), master_before, "hotspot absent from master hash");
+        assert_eq!(hash_components(&state), components_before, "hotspot absent from component hash");
     }
 
     // -----------------------------------------------------------------------

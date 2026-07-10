@@ -402,6 +402,9 @@ mod tests {
             steerable_count: 0,
             current_frame: 0,
             animate: false,
+            // Slice 3b T0 render-only hotspots — not hashed; defaults suffice.
+            hotspot_x: 0,
+            hotspot_y: 0,
         }
     }
 

@@ -1,6 +1,6 @@
 # Step 3 — Rendering: overview / altitude decisions
 
-Status: **draft for review** · 2026-07-10
+Status: **active** · 2026-07-10 · slice **3a SHIPPED** (see *Slice ordering* below); 3b–3f pending
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 3 — Rendering" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-07-10-liero-rs-step3-cpp-render-pipeline-map.md` (C++ map, cited as **render-map §N**)
@@ -267,9 +267,9 @@ frame golden) is an explicit deferral; adjudicate its priority at step end.
 Each slice accumulates on branch `liero-rs-step-3`. Each states its done-when and
 what it *proves*.
 
-- **3a — render-crate foundation.** `Bitmap` (ARGB8888/pitch/clip), per-frame palette
-  build (reset→RotateFrom→pack; LightUp ported but inert until a flash occurs),
-  `DrawLevel` Classic path, the two-viewport 320×200 player layout with
+- **3a — render-crate foundation. ✅ SHIPPED (2026-07-10).** `Bitmap` (ARGB8888/pitch/clip),
+  per-frame palette build (reset→RotateFrom→pack; LightUp ported but inert until a flash
+  occurs), `DrawLevel` Classic path, the two-viewport 320×200 player layout with
   `Viewport::Process` centering (shake-RNG branch present but inert), the FNV-1a
   frame hash + harness, and the C++ dumper's opt-in `render` directive emitting the
   terrain-only draw. **Proves:** the first pixel-exact terrain frame, the palette
@@ -277,6 +277,14 @@ what it *proves*.
   **Done-when:** `render_slice3a.txt` matches C++ tick-for-tick over a
   palette-cycling scenario; sim re-diff + joint `state_hash` unchanged. (Companion
   spec: `slice3a-render-foundation-design.md`.)
+  **RESULT:** done-when met — `render_slice3a_golden` matches C++ **tick-for-tick** (all
+  27 frame hashes + the total accumulator bit-exact, first run); **RotateFrom proven
+  observable** (frame hash constant within each 8-tick window, flipping exactly on the
+  `cycles>>3` boundaries @8/16/24); **isolation triple-proven** (`state_hash` Rust == the
+  sidecar column == the pre-existing sim golden); **re-diff gate GREEN** (all 29 prior sim
+  goldens byte-identical). Deferrals carried: Modern `ColorMode` arms, steerable centering
+  (→3b), Rust-parser layout-token value validation, a `fade=31` boundary test; LightUp/
+  shake/laser-sight RNG present-but-inert until 3b.
 
 - **3b — shadow + sprite pass.** Two-pass world block: shadow pass (bonuses/objects/
   worms/ninjarope/blood) then sprite pass (objects, worm sprites, ninjarope, fire

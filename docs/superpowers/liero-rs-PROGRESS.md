@@ -8,12 +8,27 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-10 · **🎉 STEP 2 COMPLETE** — the full deterministic sim core
-> is ported and bit-exact vs the C++ oracle (all of `ProcessFrame`: worms, weapons, all
-> object families, ninjarope, bonuses+pickup, death/respawn, GameOfTag+Scales; proven by
-> 24 goldens + 5 fuzz variants × 1500 ticks = 7505 frames of master+9-component hash
-> parity, incl. 2 real sim bugs the final fuzz caught and fixed). PR #3 is ready — merge
-> is John's call. Next: Step 3 (Bevy rendering) and/or RL/self-play.
+> **Last updated:** 2026-07-10 · **🖼️ STEP 3 STARTED — slice 3a shipped: the first
+> pixel-exact terrain frame vs the C++ oracle.** A new **Bevy-free `render` crate** stands
+> up the CPU renderer: `Bitmap` (ARGB8888, pitch-in-pixels, clip), the per-frame palette
+> build (reset→RotateFrom→LightUp→pal32 pack, Classic 6-bit VGA), `DrawLevel` (Classic arm),
+> the 320×200 **two-viewport** player layout (`Viewport::process` centering/clamp, shake-RNG
+> present-but-inert), a reduced `frame::draw`, and the FNV-1a **frame hash** + `FadeChannel`.
+> The C++ dumper gained an **opt-in `render player` directive** emitting a sidecar frame
+> golden (`<tick> <frame_hash> <state_hash>` + a running total) — the **re-diff gate is
+> GREEN** (all 29 prior sim goldens regenerate byte-identical; the opt-in gate line-reviewed
+> watertight). 🎯 **MILESTONE:** `render_slice3a_golden` matches C++ **tick-for-tick** — all
+> 27 frame hashes + the total accumulator bit-exact, and it **matched on the first run**.
+> RotateFrom (palette-cycling) is proven **observable**: the hash holds constant inside each
+> 8-tick window and flips exactly on the `cycles>>3` boundaries @8/16/24. **Triple isolation
+> proof:** the `state_hash` (Rust == the sidecar column == the pre-existing sim golden) is
+> untouched by rendering. Step 3 lands on **PR #4** (branch `liero-rs-step-3`, accumulating);
+> remaining slices 3b–3f. Next: **3b** (shadow + sprite pass).
+> Prior: **🎉 STEP 2 COMPLETE** — the full deterministic sim core is ported and bit-exact vs
+> the C++ oracle (all of `ProcessFrame`: worms, weapons, all object families, ninjarope,
+> bonuses+pickup, death/respawn, GameOfTag+Scales; proven by 24 goldens + 5 fuzz variants ×
+> 1500 ticks = 7505 frames of master+9-component hash parity, incl. 2 real sim bugs the final
+> fuzz caught and fixed). **PR #3 merged into master.**
 > Historik: Step 2, Slice 5 (remaining object
 > families) — **5a splinters + 5b damage+blood SHIPPED** (PR #3) and **5c bonuses
 > MILESTONE difftest GREEN** (`sim_slice5c_golden` matches the C++ master + all 9
@@ -57,19 +72,20 @@ the LAST slice of step 2.
 
 ---
 
-## 🔁 Rewrite track — faithful port (~55–60%)
+## 🔁 Rewrite track — faithful port (~60%)
 
 Strangler-style: the C++ engine is the oracle, every piece differential-tested
-bit-for-bit before moving on. Steps 0–1 merged; the deterministic sim core
-(step 2, the hardest part) is ~half done; the Bevy-facing steps 3–5 not started.
+bit-for-bit before moving on. Steps 0–2 merged (the deterministic sim core — the
+hardest part — is bit-exact vs C++); step 3 (rendering) has **started**, with slice 3a
+shipping the first pixel-exact terrain frame; steps 4–5 not started.
 
 ```
-REWRITE (steg 0–5)                                          ~55–60%
+REWRITE (steg 0–5)                                          ~60%
 ├─ ✅ Step 0  sim-core primitives (RNG/fixed/vec/math/tables)   DONE — merged (PR #1)
 ├─ ✅ Step 1  asset IO, slices 1a–1e (level/palette/sprites/    DONE — merged (PR #2)
 │             tc.cfg/objects/WAV)
-├─ ✅ Step 2  deterministic sim core (PR #3)                    COMPLETE — awaiting merge  ◀── YOU ARE HERE
-├─ ⬜ Step 3  Bevy rendering / window (reproduce the SDL3 view) not started
+├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
+├─ 🔨 Step 3  Bevy rendering / window (reproduce the SDL3 view) IN PROGRESS — 3a shipped (PR #4)  ◀── YOU ARE HERE
 ├─ ⬜ Step 4  input + replay (.lrp) playback                    not started
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
@@ -115,8 +131,10 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~55–60%** |
-| Step 2 | **✅ COMPLETE** (all slices bit-exact; PR #3 awaiting merge) |
+| Rewrite track (steps 0–5) | **~60%** |
+| Step 3 (rendering) | **🔨 IN PROGRESS** (slice 3a shipped; PR #4 accumulating) |
+| Slice 3a (render foundation) | **✅ SHIPPED** (🎯 first pixel-exact **terrain** frame vs C++: `render_slice3a_golden` — all 27 frame hashes + total accumulator bit-exact, **first run**; Bevy-free `render` crate: `Bitmap`/palette build (RotateFrom/LightUp/pal32)/`DrawLevel` Classic/two-viewport `Viewport::process`/FNV-1a hash+`FadeChannel`; C++ dumper's opt-in `render player` directive → sidecar frame golden, **re-diff gate GREEN** (29 priors byte-identical); **RotateFrom observable** — hash constant per 8-tick window, flips on `cycles>>3` @8/16/24; **triple isolation proof** — `state_hash` Rust == sidecar == sim golden, untouched by rendering) |
+| Step 2 | **✅ COMPLETE** (all slices bit-exact; merged in PR #3) |
 | Slice 5′b (bonus pickup) | **✅ MILESTONE GREEN** (the 5c-deferred pickup block `worm.cpp:287-322` live: 11×11 AABB gate + health/weapon/booby branches, TC consts threaded unhashed; `sim_slice5prime_pickup_health` — a worm wounded to 50 **walks onto** a dropped health bonus, heals @tick 87/110t, pool 1→0 — and `sim_slice5prime_pickup_weapon` — walk-on reload @tick 67/90t, `ww` 3→2, health flat all ticks (the booby discriminator) — both master+9 components bit-exact vs C++ **first run**; booby branch pinned by RED-first unit tests with exact per-branch draw counts; pure-Rust slice, priors byte-identical; chain-loop → slice 6) |
 | Slice 5′a (per-pixel worm-hit + in-flight arms) | **✅ MILESTONE GREEN** (real per-pixel `CheckForSpecWormHit` replaces 5a's box; both **in-flight worm-hit arms** live — wobject **blood-before-sound**, nobject **sound-before-blood** (opposite RNG order, each golden-witnessed); `sim_slice5prime_golden` (dart, 71 ticks) + `sim_slice5prime_nobj_golden` (cannon splinter, 156 ticks) master+9 components bit-exact vs C++ **first run**; **near-miss ticks** (projectile in the 16×16 box on transparent pixels) fire **nothing** — the anti-box witness pinning `fd33bbc` as FIXED; pure-Rust slice, slices 1–5d byte-identical; **pickup → 5′b**) |
 | Slice 5d (death + respawn) | **✅ MILESTONE GREEN + fuzzed** (`sim_slice5d_golden` master+9 components **all 361 ticks bit-exact** vs C++; the **worm death→respawn path goes live** — worm1 (health 12) dies from the explosives blast @death-tick [`rng` bursts 120-blood+8-gib spray, `visible`→false, `lives`−1, worm0 `kills`+1], the invisible 150-tick `killed_timer` counts down to `BeginRespawn` @tick 237 [the level-reading RNG spawn search: `pos` JUMPS, trial-count `rng` burst], then `DoRespawning` completes @tick 304 [`visible`→true, `health`→100]; slices 1–5c stay byte-identical. **4-variant fixed-level respawn fuzz** exhibits distinct bounded trial counts {2,3,6,7} — the desync trap's variance proven vs the C++ oracle) |
@@ -126,6 +144,34 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 | Slice 4 (weapon lifecycle) | **✅ SHIPPED** (4a + 4b + 4c + 4d all bit-exact vs C++) |
 | Slice 4c | **✅ SHIPPED** (sobjects/nobjects pools live + carving DrawDirtEffect, master+9 components bit-exact 91 ticks vs C++, on PR #3) |
 | Slice 4d | **✅ SHIPPED** (dig + shell-drop/landing-blit + reload + load_change; HANDGUN, master+9 components bit-exact 126 ticks vs C++; `BlitImageOnMap` + small-sprite bank added) |
+
+---
+
+### Step 3 — Rendering (🔨 IN PROGRESS · PR #4)
+
+Port the C++ CPU-bitmap renderer into a **Bevy-free `render` crate**, pixel-gated by an
+FNV-1a **frame hash** differential-tested against C++ over the reused Step 2 scenarios
+(Classic color mode). The authoritative frame is the CPU `Bitmap`; Bevy only presents it
+(not bit-gated). Six slices accumulate on branch `liero-rs-step-3`.
+
+```
+├─ ✅ 3a  render-crate foundation — Bitmap/palette-build/DrawLevel/Viewport/frame-hash   SHIPPED
+│         🎯 FIRST pixel-exact TERRAIN frame vs C++: render_slice3a_golden — all 27 frame
+│         hashes + total accumulator bit-exact (matched first run); RotateFrom proven
+│         observable (hash constant per 8-tick window, flips on cycles>>3 @8/16/24); C++
+│         dumper opt-in `render player` directive → sidecar frame golden, re-diff gate GREEN
+│         (29 priors byte-identical); triple isolation proof (state_hash untouched)
+├─ ⬜ 3b  shadow + sprite pass — two-pass world block; LightUp/shake/laser-sight RNG go live
+├─ ⬜ 3c  Bevy window (native) — FixedUpdate sim tick, CPU buffer → Image → Sprite/Camera2d
+├─ ⬜ 3d  headless screenshot CLI + in-repo run-skill (change → screenshot → judge, no GPU)
+├─ ⬜ 3e  HUD / font / bars / minimap — the full player view, pixel-gated
+└─ ⬜ 3f  wasm bring-up — WebGL2 build to C++ emscripten parity
+```
+
+**Deferrals carried from 3a:** Modern `ColorMode` (unimplemented `match` arms), steerable
+centering (→3b), layout-token value validation in the Rust parser (inert until more layouts
+exist), a `fade=31` boundary test; `LightUp`/shake/laser-sight RNG are present-but-inert
+until 3b makes them live.
 
 ---
 
@@ -155,4 +201,5 @@ not count toward the rewrite %.
 
 Subagent-driven: per-task implement + two-stage review (spec + quality), a broad
 whole-slice review before each push, all bit-exact vs the C++ oracle. PR #3
-accumulates all of step 2 and is merged only when the whole step is complete.
+accumulated all of step 2 (merged); PR #4 accumulates all of step 3 (rendering)
+and is merged only when the whole step is complete.

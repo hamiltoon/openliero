@@ -16,6 +16,7 @@
 //! convention (`bitmap.rs`). All T1-T5 blits carry `pal: &Pal32`.
 
 use crate::bitmap::{Bitmap, Pal32, Rect};
+use crate::shadow_query::ShadowQuery;
 use assets::sprite::SpriteSet;
 
 /// `macros.hpp:3-22` CLIP_IMAGE: clamp a `w x h` blit at `(x,y)` to `clip`,
@@ -111,10 +112,55 @@ pub fn blit_image_trans(
     }
 }
 
+/// `blit.cpp:433-460` BlitShadowImage: for every source index `c != 0`, paint
+/// `shadow.shadowed_argb(x+dx, y+dy)` **iff** it is non-zero. Shares the same
+/// `CLIP_IMAGE` clamp as `blit_image`. Unlike `blit_image`, the value written is
+/// a **raw ARGB** from the shadow query (darkened terrain), not `pal[c]` — the
+/// sprite pixel is only a *stencil* deciding WHERE a shadow may land; the colour
+/// comes from the level.
+///
+/// Because the query reads the level (not the screen), this blit is
+/// **idempotent**: two overlapping shadow blits over the same cell both read the
+/// same terrain material and write the same darkened value — no double-darkening
+/// (`shadow_query.hpp:8-15`). The write goes straight to the (already clipped)
+/// pixel, matching the C++ `*rowdest = kShadowed`.
+///
+/// Signature follows the T1 sprite convention (`&SpriteSet` + `frame`, source
+/// `pitch == width`); the C++ takes a raw `PalIdx*` + explicit `width,height`.
+pub fn blit_shadow_image(
+    scr: &mut Bitmap,
+    shadow: &ShadowQuery,
+    spr: &SpriteSet,
+    frame: usize,
+    x: i32,
+    y: i32,
+) {
+    let pitch = spr.width;
+    let (x, y, w, h, src) = match clip_image(scr.clip, x, y, spr.width, spr.height, pitch) {
+        Some(v) => v,
+        None => return,
+    };
+    let mem = spr.sprite(frame);
+    let scr_pitch = scr.pitch;
+    for dy in 0..h {
+        for dx in 0..w {
+            let c = mem[(src + dy * pitch + dx) as usize];
+            if c != 0 {
+                let sh = shadow.shadowed_argb(x + dx, y + dy);
+                if sh != 0 {
+                    scr.pixels[((y + dy) * scr_pitch + (x + dx)) as usize] = sh;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitmap::{Bitmap, Rect};
+    use crate::bitmap::{Bitmap, ColorMode, Rect};
+    use crate::shadow_query::{ShadowQuery, MAT_SEE_SHADOW};
+    use sim::state::LevelSim;
 
     const SENTINEL: u32 = 0xDEAD_BEEF;
 
@@ -218,5 +264,97 @@ mod tests {
         assert_eq!(b.pixels[0 * 4 + 2], 0xFF00_0001, "(2,0) local (1,0) checker on");
         assert_eq!(b.pixels[1 * 4 + 1], 0xFF00_0001, "(1,1) local (0,1) checker on");
         assert_eq!(b.pixels[1 * 4 + 2], SENTINEL, "(2,1) local (1,1) checker off");
+    }
+
+    // ----- blit_shadow_image (T2) -----
+
+    // 2x2 level. (0,0) material 20 SeeShadow; (1,0) material 30 NOT SeeShadow;
+    // (0,1),(1,1) material 0 (not flagged). pal ramp so pal[m] reveals m.
+    fn shadow_lvl() -> LevelSim {
+        let mut material_id = vec![0u8; 4];
+        material_id[0] = 20; // (0,0)
+        material_id[1] = 30; // (1,0)
+        let mut material_flags = [0u8; 256];
+        material_flags[20] = MAT_SEE_SHADOW;
+        LevelSim { width: 2, height: 2, material_id, material_flags }
+    }
+
+    fn shadow_query<'a>(lvl: &'a LevelSim, pal: &'a Pal32) -> ShadowQuery<'a> {
+        ShadowQuery {
+            level: lvl,
+            pal32: pal,
+            world_offset_x: 0,
+            world_offset_y: 0,
+            mode: ColorMode::Classic,
+            cycles: 0,
+        }
+    }
+
+    #[test]
+    fn blit_shadow_image_stencils_shadow_and_respects_hole() {
+        // 2x2 sprite [1,0 / 1,1]: index 0 at (1,0) is a hole.
+        //   screen(0,0) sprite=1, level(0,0) SeeShadow 20 -> writes pal[24].
+        //   screen(1,0) sprite=0 (hole) -> untouched even though level(1,0)...
+        //                                  (which isn't SeeShadow anyway).
+        //   screen(0,1) sprite=1, level(0,1) material 0 not SeeShadow -> nothing.
+        //   screen(1,1) sprite=1, level(1,1) material 0 not SeeShadow -> nothing.
+        let pal = ramp_pal();
+        let lvl = shadow_lvl();
+        let q = shadow_query(&lvl, &pal);
+        let spr = sprite(2, 2, vec![1, 0, 1, 1]);
+        let mut b = filled(2, 2); // clip = full
+        blit_shadow_image(&mut b, &q, &spr, 0, 0, 0);
+        assert_eq!(b.pixels[0], 0xFF00_0000 | 24, "(0,0) SeeShadow -> pal[20+4]");
+        assert_eq!(b.pixels[1], SENTINEL, "(1,0) sprite hole -> untouched");
+        assert_eq!(b.pixels[2], SENTINEL, "(0,1) not SeeShadow -> untouched");
+        assert_eq!(b.pixels[3], SENTINEL, "(1,1) not SeeShadow -> untouched");
+    }
+
+    #[test]
+    fn blit_shadow_image_solid_over_nonseeshadow_writes_nothing() {
+        // Solid sprite pixel over the NOT-SeeShadow cell (1,0) writes nothing.
+        let pal = ramp_pal();
+        let lvl = shadow_lvl();
+        let q = shadow_query(&lvl, &pal);
+        let spr = sprite(1, 1, vec![1]);
+        let mut b = filled(2, 2);
+        blit_shadow_image(&mut b, &q, &spr, 0, 1, 0); // target screen (1,0)
+        assert_eq!(b.pixels[1], SENTINEL, "solid over non-SeeShadow cell -> nothing");
+    }
+
+    #[test]
+    fn blit_shadow_image_is_idempotent_reads_level_not_screen() {
+        // Two overlapping shadow blits over the SeeShadow cell (0,0) write the
+        // SAME darkened value both times — the query reads the level, so there
+        // is no double-darkening (the second blit does not shadow the first's
+        // output). Matches C++ BlitShadowImage reading ShadowedArgb off level.
+        let pal = ramp_pal();
+        let lvl = shadow_lvl();
+        let q = shadow_query(&lvl, &pal);
+        let spr = sprite(1, 1, vec![1]);
+        let mut b = filled(2, 2);
+        blit_shadow_image(&mut b, &q, &spr, 0, 0, 0);
+        let after_first = b.pixels[0];
+        blit_shadow_image(&mut b, &q, &spr, 0, 0, 0);
+        assert_eq!(b.pixels[0], after_first, "second shadow blit is idempotent");
+        assert_eq!(b.pixels[0], 0xFF00_0000 | 24, "still the single-darkened value");
+    }
+
+    #[test]
+    fn blit_shadow_image_clips_like_blit_image() {
+        // Sprite at (0,0), clip = [1,2)x[0,2): only screen (1,y) survives clip.
+        // But (1,0) level material 30 is not SeeShadow, so still nothing writes;
+        // this pins that CLIP_IMAGE is applied (no OOB, no left-column write).
+        let pal = ramp_pal();
+        let lvl = shadow_lvl();
+        let q = shadow_query(&lvl, &pal);
+        let spr = sprite(2, 2, vec![1, 1, 1, 1]);
+        let mut b = filled(2, 2);
+        b.clip = Rect::new(1, 0, 2, 2);
+        blit_shadow_image(&mut b, &q, &spr, 0, 0, 0);
+        assert_eq!(b.pixels[0], SENTINEL, "(0,0) clipped out (left of clip)");
+        assert_eq!(b.pixels[2], SENTINEL, "(0,1) clipped out");
+        assert_eq!(b.pixels[1], SENTINEL, "(1,0) inside clip but not SeeShadow");
+        assert_eq!(b.pixels[3], SENTINEL, "(1,1) inside clip but not SeeShadow");
     }
 }

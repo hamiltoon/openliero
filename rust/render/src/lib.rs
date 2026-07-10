@@ -13,4 +13,5 @@ pub mod frame;
 pub mod hash;
 pub mod level_draw;
 pub mod palette;
+pub mod shadow_query;
 pub mod viewport;

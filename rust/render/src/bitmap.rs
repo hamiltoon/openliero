@@ -47,6 +47,17 @@ impl Rect {
         let dy = y - self.y1;
         dx >= 0 && dx < self.width() && dy >= 0 && dy < self.height()
     }
+
+    /// `rect.hpp:83-84`: `Encloses(vx,vy) { return Inside(vx,vy); }`. In C++
+    /// `Encloses` is an **exact alias** of `Inside` — both are half-open
+    /// `[x1,x2) x [y1,y2)` (verified against `math/rect.hpp:77-84`; there is NO
+    /// inclusive/half-open divergence between the two). The nobject/bobject
+    /// pixel gate (`viewport.cpp:358,391,493,587`) calls `Encloses`; the wobject
+    /// pixel uses `Inside` (`:338`). Kept as a distinct method purely so each
+    /// call site can be ported verbatim to the C++ name it used.
+    pub fn encloses(&self, x: i32, y: i32) -> bool {
+        self.inside(x, y)
+    }
 }
 
 /// ARGB8888 surface. `bitmap.hpp:12-24`.
@@ -81,6 +92,25 @@ impl Bitmap {
     pub fn set_pixel(&mut self, x: i32, y: i32, idx: u8, pal: &Pal32) {
         if self.clip.inside(x, y) {
             self.pixels[(y * self.pitch + x) as usize] = pal[idx as usize];
+        }
+    }
+
+    /// `bitmap.hpp:48` `GetPixel`: raw ARGB read at `y*pitch + x`, **unchecked**
+    /// (no clip, no palette) — the C++ returns a reference straight into the
+    /// buffer. Caller guarantees `(x,y)` is in bounds. Used by the shadow/object
+    /// pixel paths that read a screen pixel back as ARGB.
+    pub fn get_pixel(&self, x: i32, y: i32) -> u32 {
+        self.pixels[(y * self.pitch + x) as usize]
+    }
+
+    /// Clip-gated **raw ARGB** write at `y*pitch + x`. Same clip discipline as
+    /// [`set_pixel`](Bitmap::set_pixel) (`bitmap.hpp:50-54`) but with a
+    /// pre-resolved ARGB value instead of a palette index — the shadow/object
+    /// draw paths compute their colour as ARGB (darkened terrain, blended
+    /// blood) and must write it directly, not through `pal32`.
+    pub fn put_argb(&mut self, x: i32, y: i32, argb: u32) {
+        if self.clip.inside(x, y) {
+            self.pixels[(y * self.pitch + x) as usize] = argb;
         }
     }
 
@@ -165,6 +195,45 @@ mod tests {
         b.clip = Rect::new(1, 1, 2, 2); // narrow clip must NOT limit fill
         b.fill(9, &pal);
         assert!(b.pixels.iter().all(|&p| p == 0xFF00_0009), "Fill is whole-buffer");
+    }
+
+    #[test]
+    fn get_pixel_is_unchecked_raw_argb_and_uses_pitch() {
+        // pitch != w so a wrong `w`-vs-`pitch` index is caught.
+        let mut b = Bitmap {
+            w: 4,
+            h: 3,
+            pitch: 6,
+            pixels: vec![0u32; 6 * 3],
+            clip: Rect::new(0, 0, 4, 3),
+            cycles: 0,
+        };
+        b.pixels[1 * 6 + 2] = 0x1234_5678; // (2,1) at y*pitch + x
+        assert_eq!(b.get_pixel(2, 1), 0x1234_5678, "raw ARGB read via pitch");
+    }
+
+    #[test]
+    fn put_argb_is_clip_gated_and_writes_raw() {
+        let mut b = Bitmap::new(4, 4);
+        b.clip = Rect::new(1, 1, 3, 3);
+        b.put_argb(0, 0, 0xAABB_CCDD); // outside clip -> dropped
+        b.put_argb(2, 2, 0xAABB_CCDD); // inside clip -> kept, no palette
+        assert_eq!(b.pixels[0], 0, "outside-clip put_argb dropped");
+        assert_eq!(b.pixels[2 * 4 + 2], 0xAABB_CCDD, "inside-clip raw ARGB kept");
+    }
+
+    #[test]
+    fn encloses_is_exact_alias_of_inside() {
+        // rect.hpp:83-84 — Encloses == Inside, half-open on both axes.
+        let r = Rect::new(1, 2, 4, 5); // [1,4) x [2,5)
+        for x in -1..6 {
+            for y in 0..7 {
+                assert_eq!(r.encloses(x, y), r.inside(x, y), "encloses must equal inside at ({x},{y})");
+            }
+        }
+        assert!(r.encloses(1, 2), "inclusive lower corner");
+        assert!(!r.encloses(4, 2), "exclusive right edge (half-open)");
+        assert!(!r.encloses(1, 5), "exclusive bottom edge (half-open)");
     }
 
     #[test]

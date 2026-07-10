@@ -244,6 +244,7 @@ mod tests {
             num_blood_colours: 0,
             first_blood_colour: 0,
             bobj_gravity: 0,
+            laser_weapon: 0,
             settings_health: 100,
             game_mode: 0,
             time_to_lose: 600,

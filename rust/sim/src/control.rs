@@ -734,6 +734,148 @@ pub fn process_movement(
     }
 }
 
+/// Port of `CheckForWormHit` (`worm.cpp:1150-1160`): the per-pixel silhouette
+/// test against the FIRST worm that is not `own_index`, in index order — exactly
+/// as C++ `return`s on the first `&worms[i] != own_worm` (it does NOT scan past
+/// that worm; with only two worms this is the single enemy). Rand-free: it reads
+/// only worm sprites + material flags via [`check_for_spec_worm_hit`].
+fn check_for_worm_hit(
+    worms: &[WormState],
+    own_index: usize,
+    x: i32,
+    y: i32,
+    dist: i32,
+    worm_sprites: &SpriteSet,
+    material_flags: &[u8; 256],
+) -> bool {
+    for (j, worm) in worms.iter().enumerate() {
+        if j != own_index {
+            return crate::nobject::check_for_spec_worm_hit(
+                worm,
+                x,
+                y,
+                dist,
+                worm_sprites,
+                material_flags,
+            );
+        }
+    }
+    false
+}
+
+/// Port of `Worm::ProcessSight` (`worm.cpp:1190-1212`) — the render-only laser
+/// sight. Called once per visible worm from [`SimState::process_frame`], AT the
+/// `worm.cpp:346` point (after physics, before the change/movement gate).
+///
+/// **Hash-neutral by construction:** it writes ONLY the non-hashed
+/// `make_sight_green` / `hotspot_x` / `hotspot_y` fields and draws NO `rand`. The
+/// walk *reads* the level materials and the enemy worm's silhouette
+/// ([`check_for_worm_hit`]); it never mutates hashed state, so enabling a laser
+/// sight leaves every component + master hash byte-identical.
+///
+/// The sight is drawn iff the current weapon slot is `Available()`
+/// (`loading_left == 0`) AND (the weapon has the `laser_sight` flag OR its type
+/// index equals `laser_weapon - 1`, `LC(LaserWeapon) - 1`) (`worm.cpp:1196`).
+/// `ww.ty` is the weapon's index in `weapons` (== C++
+/// `ww.type - common.weapons.data()`). The `weapons.get(..)` is defensive: real
+/// TC data always populates the slot's type (C++ dereferences `*ww.type`
+/// unconditionally), but the sim's minimal test harnesses may pass an empty
+/// `weapons` table — an out-of-range index there is treated as "no `laser_sight`
+/// flag" (the same never-in-real-data guard as [`check_for_spec_worm_hit`]'s
+/// empty-bank check). The `ty == laser_weapon - 1` arm needs no table.
+///
+/// When armed, it walks pixel-by-pixel along `cossin[Ftoi(aiming_angle)]` from a
+/// point 6 steps ahead of `pos` (minus one pixel in `y`), continuing while the
+/// sample is in-bounds, over `Background`, and no enemy worm has been hit
+/// (`worm.cpp:1200-1205`, a do-while so it always steps at least once). The final
+/// sample point becomes `hotspot` (`worm.cpp:1207-1208`). When not armed, it just
+/// clears `make_sight_green` (`worm.cpp:1210`).
+///
+/// `worms` is `&mut` (not a single `&mut WormState`) because the walk must read
+/// the OTHER worms' silhouettes while writing this worm's sight fields; only
+/// `worms[index]` is mutated.
+#[allow(clippy::too_many_arguments)]
+pub fn process_sight(
+    worms: &mut [WormState],
+    index: usize,
+    weapons: &[Weapon],
+    cossin: &[Vec2; 128],
+    level: &LevelSim,
+    worm_sprites: &SpriteSet,
+    laser_weapon: i32,
+) {
+    // worm.cpp:1193-1194 — the current weapon slot + its type (`ww`, `w`).
+    let cw = worms[index].current_weapon as usize;
+    let ww = worms[index].weapons[cw];
+
+    // worm.cpp:1196 — Available() (loading_left == 0) AND (laser_sight flag OR the
+    // slot IS the designated LaserWeapon `LC(LaserWeapon) - 1`).
+    let armed = ww.available()
+        && (ww
+            .ty
+            .and_then(|ty| weapons.get(ty as usize))
+            .is_some_and(|w| w.laser_sight)
+            || ww.ty == Some(laser_weapon - 1));
+
+    if armed {
+        // worm.cpp:1197 — kDir = cossin_table[Ftoi(aiming_angle)]. `Ftoi(aiming_angle)`
+        // can be exactly 128 here: `ProcessSight` runs (worm.cpp:346) AFTER
+        // `ProcessAiming` but BEFORE `ProcessMovement`, and the facing-flip in the
+        // PREVIOUS tick's `ProcessMovement` (`worm.cpp:864-865,880-881`,
+        // `Itof(128) - aiming_angle`) can leave `aiming_angle == Itof(128)` when it
+        // was 0 — a value `ProcessAiming`'s clamp does NOT correct because that clamp
+        // is gated on `aiming_speed != 0` (`worm.cpp:1009`). C++ then indexes the
+        // 128-entry `cossin_table[128]` OUT OF BOUNDS (benign UB feeding only the
+        // non-hashed sight fields). The Rust table is periodic mod 128 (built with
+        // `& 0x7f`, `math.cpp:91`), so we mask the index: a no-op for the in-range
+        // `0..=127` and mapping the degenerate `128 -> 0` (the mathematically
+        // equivalent direction) instead of panicking. Hash-neutral either way —
+        // `hotspot`/`make_sight_green` are unhashed.
+        let k_dir = cossin[(ftoi(worms[index].aiming_angle) & 0x7f) as usize];
+        // worm.cpp:1198 — temp = (pos.x + kDir.x*6, pos.y + kDir.y*6 - Itof(1)).
+        let mut temp = worms[index].pos.add(k_dir.mul(6));
+        temp.y = temp.y.wrapping_sub(itof(1));
+
+        // worm.cpp:1200-1205 — do { temp += kDir; make_sight_green =
+        // CheckForWormHit(Ftoi(temp), 0, this); } while (in-bounds && Background &&
+        // !make_sight_green). A do-while, so it always steps at least once. The
+        // `Background()` read (`LevelSim::background`) is in-bounds only; the four
+        // bounds terms short-circuit before it, exactly as C++ `&&` does.
+        loop {
+            // :1201
+            temp = temp.add(k_dir);
+            // :1202 — CheckForWormHit(Ftoi(temp.x), Ftoi(temp.y), 0, this).
+            let hit = check_for_worm_hit(
+                worms,
+                index,
+                ftoi(temp.x),
+                ftoi(temp.y),
+                0,
+                worm_sprites,
+                &level.material_flags,
+            );
+            worms[index].make_sight_green = hit;
+            // :1203-1205 while(...) — break when the do-while condition is false.
+            if !(temp.x >= 0
+                && temp.y >= 0
+                && temp.x < itof(level.width)
+                && temp.y < itof(level.height)
+                && level.background(ftoi(temp.x), ftoi(temp.y))
+                && !hit)
+            {
+                break;
+            }
+        }
+
+        // worm.cpp:1207-1208 — hotspot = Ftoi(temp) (the sight origin; render-only).
+        worms[index].hotspot_x = ftoi(temp.x);
+        worms[index].hotspot_y = ftoi(temp.y);
+    } else {
+        // worm.cpp:1210 — no sight this tick.
+        worms[index].make_sight_green = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

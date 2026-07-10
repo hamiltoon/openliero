@@ -165,6 +165,21 @@ pub fn worm_fire(
     worm.fire_cone = w.fire_cone;
 
     // kFiring = cossin[angle] * (detect_distance + 5) + pos - (0, Itof(1)).
+    //
+    // `cossin[128]` OOB (deferral #3): an un-aimed worm with `aiming_angle == 0`
+    // that walk-flips to `dir1` keeps the mirrored `Itof(128)`, so `Ftoi` here
+    // would read `cossin[128]` — one past this 128-entry table. C++ reads that
+    // as UB; Rust panics (index out of bounds). Found by the slice-5′ T10 fuzz
+    // (`.superpowers/sdd/step2-slice5prime-task-T10-report.md:51-66`) via a
+    // hand-driven dumper path that sets `aiming_angle = 0` directly. It is
+    // UNREACHABLE in the slice-6 ProcessFrame fuzz: worms there are seeded DEAD
+    // and respawn through `DoRespawning`, which sets `aiming_angle ∈ {32, 96}`
+    // (`worm.cpp:799-805`, never 0); the dir-flip maps `32 <-> 96` and the aim
+    // clamp holds `[64,116]`, so `Ftoi(aiming_angle)` stays in `[12,116]` and
+    // never reaches 128 (design §8,
+    // `docs/superpowers/specs/2026-07-09-liero-rs-step2-slice6-full-processframe-design.md`).
+    // JOHN-BESLUT #3 (2026-07-09): defer the residual hardening (a clamp/guard
+    // on `Ftoi(aiming_angle)`) past Step 2 — comment only, no behavior change.
     let angle = ftoi(worm.aiming_angle);
     let firing_pos = cossin[angle as usize]
         .mul(w.detect_distance + 5)

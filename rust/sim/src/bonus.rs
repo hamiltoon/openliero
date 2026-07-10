@@ -1622,4 +1622,52 @@ mod tests {
         assert_eq!(worms[0].health, h2, "both heals applied on the running health");
         assert_eq!(bonuses.len(), 0, "both bonuses freed");
     }
+
+    // ---- (g) health bonus heal amount TRUNCATES when settings_health % 100 != 0
+    // (deferral #4, worm.cpp:295) --------------------------------------------
+    //
+    // Every other pickup test above uses `settings_health = 100`, where
+    // `x * 100 / 100 == x` for any `x` — the identity hides the fact that
+    // `DoHealingDirect`'s amount is computed with a TRUNCATING integer divide,
+    // `(rand(BonusHealthVar) + BonusMinHealth) * settings_health / 100`
+    // (`worm.cpp:295`). This test uses `settings_health = 150` and hand-picks
+    // `min_health` so the numerator is odd, forcing a genuine non-integer
+    // quotient that a floating/rounded divide would resolve differently.
+    //
+    // Hand-derivation (SEED = 0x5151, the module's fixed seed):
+    //   - first draw: `rand.bound(health_var=20)` == 2 (verified directly against
+    //     the same seeded `Rand` below, same as every other test in this module).
+    //   - amount = (rand=2 + min_health=31) * settings_health=150 / 100
+    //            = 33 * 150 / 100 = 4950 / 100
+    //            = 49 remainder 50           <- truncating integer divide: 49
+    //     A floating/rounded divide gives 4950 / 100 = 49.5, which rounds to 50
+    //     (both "round half up" and "round half to even" land on 50, since 50 is
+    //     even) — one off from the truncated 49, so this assertion is non-vacuous.
+    //   - ex_health = (start=10 + amount=49).min(settings_health=150) = 59.
+    #[test]
+    fn health_bonus_heal_amount_truncates_when_settings_health_not_multiple_of_100() {
+        let settings_health = 150;
+        let health_var = 20;
+        let min_health = 31; // rand(2) + 31 = 33, odd -> *150/100 truncates.
+        let start = 10;
+        let mut worms = vec![pickup_worm(100, 100, start)];
+        let mut bonuses: Pool<Bonus> = Pool::new(99);
+        bonuses.spawn(bonus_at(100, 100, 1, 0));
+        let mut rand = seeded();
+
+        // Confirm the hand-derivation's premise: the first draw is 2.
+        let mut refr = seeded();
+        assert_eq!(refr.bound(health_var as u32), 2, "seed precondition for the hand-derivation");
+
+        run_pickup(
+            &mut worms, 0, &mut bonuses, &mut rand, &weapons(5), settings_health, health_var,
+            min_health, 1000, false,
+        );
+
+        // Hand-derived, hardcoded (not recomputed with the same `/` the source
+        // uses) so a regression to rounded/floating division would be caught:
+        // (2 + 31) * 150 / 100 = 4950 / 100 = 49 (truncated, NOT 50 = rounded).
+        assert_eq!(worms[0].health, 59, "start=10 + truncated amount=49, clamped to 150");
+        assert_eq!(bonuses.len(), 0, "the health bonus was freed");
+    }
 }

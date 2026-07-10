@@ -55,8 +55,27 @@
 // to stderr (does not affect the golden output). Built via the
 // OPENLIERO_BUILD_ORACLE_DUMP CMake option (see gen_sim_physics_golden.sh). Not part
 // of the default build.
+//
+// Opt-in render sidecar (Slice 3a). A scenario MAY add one directive:
+//   render <layout>   (only `player` is accepted)
+// When PRESENT, the dumper additionally builds a headless `Renderer` + two
+// framehash-layout `Viewport`s and, right after each `dump(tick)`, renders the
+// REDUCED terrain-only frame (palette rebuild -> Fill(0) -> per-viewport
+// Process + DrawLevel — a subset of `Game::Draw`, deliberately NOT HUD/shadow/
+// sprite/minimap, matching the Rust `frame::draw`) and writes a sidecar frame
+// golden to argv[4]: one `<tick> <frame_hash_hex16> <state_hash_hex8>` line per
+// tick plus a final `total <n> <acc_hex16>`. The frame hash is FNV-1a over the
+// ARGB back buffer with the composition fade (0 on tick 0 => black, 33 => identity
+// after), exactly as framehash_main.cpp. When the directive is ABSENT (every
+// existing scenario) the render block is fully gated off: no `Renderer` is
+// constructed, nothing is drawn, no sidecar is opened, and the argv[2] sim output
+// is BYTE-IDENTICAL to before. The render path reads only `game.level`, worms and
+// `game.cycles` and never touches `game.rand` / sim state, so it is provably
+// hash-inert on the sim column — the re-diff gate over the existing sim goldens
+// stays empty.
 #include <algorithm>
 #include <array>
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -71,6 +90,8 @@
 #include "common.hpp"
 #include "filesystem.hpp"
 #include "game.hpp"
+#include "gfx/blit.hpp"
+#include "gfx/renderer.hpp"
 #include "io/stream.hpp"
 #include "level.hpp"
 #include "math.hpp"
@@ -78,10 +99,22 @@
 #include "settings.hpp"
 #include "stateHash.hpp"
 #include "stats_recorder.hpp"
+#include "viewport.hpp"
 #include "weapon.hpp"
 #include "worm.hpp"
 
 namespace {
+
+// FNV-1a frame-hash constants + the composition fade, copied verbatim from
+// framehash_main.cpp:26-34 so the sidecar frame hash matches the reference hasher.
+constexpr uint64_t kFnvOffset = 1469598103934665603ULL;
+constexpr uint64_t kFnvPrime = 1099511628211ULL;
+
+uint64_t FnvByte(uint64_t h, uint8_t b) { return (h ^ b) * kFnvPrime; }
+
+uint8_t FadeChannel(uint8_t v, int amount) {
+  return amount >= 32 ? v : static_cast<uint8_t>((v * amount) >> 5);
+}
 
 struct WormSpec {
   int index = 0;
@@ -113,6 +146,9 @@ struct Scenario {
   // without a `game_mode` directive stay byte-identical (Slice 6). A scenario sets it
   // to exercise GameOfTag / Holdazone / ScalesOfJustice.
   int game_mode = Settings::kGmKillEmAll;
+  // Opt-in render layout (Slice 3a). Empty => the render path is fully off and the
+  // sim output stays byte-identical. Only `player` is accepted (two-viewport 320x200).
+  std::string render_layout;
 };
 
 std::vector<uint8_t> SlurpFile(std::string const& path) {
@@ -152,6 +188,12 @@ Scenario ParseScenario(char const* path) {
       ls >> s.max_bonuses;
     } else if (key == "game_mode") {
       ls >> s.game_mode;
+    } else if (key == "render") {
+      ls >> s.render_layout;
+      if (s.render_layout != "player") {
+        std::fprintf(stderr, "unknown render layout: %s\n", s.render_layout.c_str());
+        std::exit(1);
+      }
     } else if (key == "worm") {
       WormSpec w;
       ls >> w.index >> w.pos_x >> w.pos_y >> w.health >> w.lives >> w.stats_x >> w.visible;
@@ -202,7 +244,8 @@ int ResolveWeapon(Common const& common, std::string const& name) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: oracle_dump_sim_physics <scenario.txt> <out.txt> [seed]\n");
+    std::fprintf(stderr,
+                 "usage: oracle_dump_sim_physics <scenario.txt> <out.txt> [seed] [frames.txt]\n");
     return 1;
   }
   Scenario const scn = ParseScenario(argv[1]);
@@ -318,6 +361,67 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // ---- Opt-in render (Slice 3a). Absent render_layout => nothing below runs and the
+  // sim output stays byte-identical (the re-diff gate). The sidecar path is argv[4]. ----
+  std::unique_ptr<Renderer> renderer;
+  std::vector<std::unique_ptr<Viewport>> viewports;
+  std::FILE* frames = nullptr;
+  uint64_t frames_acc = kFnvOffset;  // FNV offset seed (framehash_main.cpp:110).
+  int frame_count = 0;
+  if (!scn.render_layout.empty()) {
+    if (argc < 5) {
+      std::fprintf(stderr, "render scenario needs a 4th arg (frames sidecar path)\n");
+      return 1;
+    }
+    frames = std::fopen(argv[4], "w");
+    if (!frames) {
+      std::fprintf(stderr, "cannot open %s\n", argv[4]);
+      return 1;
+    }
+    renderer = std::make_unique<Renderer>();
+    renderer->Init(320, 200);
+    renderer->LoadPalette(*common);  // Origpal = common.exepal (Classic).
+    // Two viewports, framehash layout (framehash_main.cpp:92-95).
+    viewports.push_back(std::make_unique<Viewport>(Rect(0, 0, 158, 158), game.worms[0]->index));
+    viewports.push_back(
+        std::make_unique<Viewport>(Rect(160, 0, 158 + 160, 158), game.worms[1]->index));
+  }
+
+  // Renders the REDUCED terrain-only frame (a subset of Game::Draw — matches the Rust
+  // frame::draw), hashes it, and appends one sidecar line. Reads only level/worms/cycles,
+  // never game.rand or sim state, so the sim output is untouched (design §6).
+  auto render_and_hash = [&](int tick) {
+    // Palette build order (game.cpp:171-183): reset -> RotateFrom -> UpdatePal32.
+    renderer->pal = renderer->Origpal();
+    for (auto const& w : common->color_anim) {
+      renderer->pal.RotateFrom(renderer->Origpal(), w.from, w.to, game.cycles >> 3);
+    }
+    // screen_flash == 0 in 3a -> no LightUp.
+    renderer->UpdatePal32();
+    Fill(renderer->bmp, 0);
+    for (auto const& vp : viewports) {
+      vp->Process(game);
+      renderer->bmp.clip_rect = vp->rect;
+      renderer->bmp.cycles = game.cycles;
+      IVec2 const off = vp->rect.Ul() - IVec2(vp->x, vp->y);
+      DrawLevel(renderer->bmp, game.level, off.x, off.y);
+    }
+    renderer->bmp.clip_rect = Rect(0, 0, renderer->bmp.w, renderer->bmp.h);
+    int const fade = (tick == 0) ? 0 : 33;  // frame 0 black, then identity.
+    uint64_t h = kFnvOffset;
+    for (int y = 0; y < renderer->bmp.h; ++y) {
+      for (int x = 0; x < renderer->bmp.w; ++x) {
+        uint32_t const c = renderer->bmp.GetPixel(x, y);
+        h = FnvByte(h, FadeChannel((c >> 16) & 0xFF, fade));
+        h = FnvByte(h, FadeChannel((c >> 8) & 0xFF, fade));
+        h = FnvByte(h, FadeChannel(c & 0xFF, fade));
+      }
+    }
+    frames_acc = (frames_acc ^ h) * kFnvPrime;
+    ++frame_count;
+    std::fprintf(frames, "%d %016" PRIx64 " %08x\n", tick, h, HashGameState(game));
+  };
+
   bool const trace = std::getenv("OL_PHYS_TRACE") != nullptr;
 
   auto dump = [&](int tick) {
@@ -337,6 +441,7 @@ int main(int argc, char** argv) {
 
   // Tick 0: the proven start state, before any motion.
   dump(0);
+  if (renderer) render_and_hash(0);
 
   // Drive N ticks: apply scripted input, Process each worm in game.worms order,
   // then dump. The input for the pass advancing tick t -> t+1 is keyed on t.
@@ -523,6 +628,12 @@ int main(int argc, char** argv) {
         break;
     }
     dump(t + 1);
+    if (renderer) render_and_hash(t + 1);
+  }
+
+  if (frames) {
+    std::fprintf(frames, "total %d %016" PRIx64 "\n", frame_count, frames_acc);
+    std::fclose(frames);
   }
 
   std::fclose(out);

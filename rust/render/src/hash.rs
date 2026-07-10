@@ -121,4 +121,55 @@ mod tests {
         };
         assert_eq!(hash_frame(&a, 33), hash_frame(&b, 33), "alpha dropped");
     }
+
+    #[test]
+    fn hash_frame_addresses_by_pitch_not_w() {
+        use crate::bitmap::{Bitmap, Rect};
+        // Known values for the 2x2 "used" pixels (row-major).
+        let p00 = 0xFF01_0203u32;
+        let p10 = 0xFF04_0506u32;
+        let p01 = 0xFF07_0809u32;
+        let p11 = 0xFF0A_0B0Cu32;
+        // Distinct "dead" column values (x=2,3) that must NOT influence the hash.
+        let dead0 = 0xFFDE_ADBEu32;
+        let dead1 = 0xFFDE_ADBFu32;
+        let dead2 = 0xFFDE_ADC0u32;
+        let dead3 = 0xFFDE_ADC1u32;
+
+        // a: logical 2x2 bitmap backed by a pitch=4 buffer (2 dead columns per row).
+        let a = Bitmap {
+            w: 2,
+            h: 2,
+            pitch: 4,
+            pixels: vec![
+                p00, p10, dead0, dead1, // row 0: used, used, dead, dead
+                p01, p11, dead2, dead3, // row 1: used, used, dead, dead
+            ],
+            clip: Rect::new(0, 0, 2, 2),
+            cycles: 0,
+        };
+        // b: same 2x2 "used" pixels, but pitch == w (no dead columns).
+        let b = Bitmap {
+            w: 2,
+            h: 2,
+            pitch: 2,
+            pixels: vec![p00, p10, p01, p11],
+            clip: Rect::new(0, 0, 2, 2),
+            cycles: 0,
+        };
+        assert_eq!(
+            hash_frame(&a, 33),
+            hash_frame(&b, 33),
+            "dead columns beyond w (pitch-w padding) must not affect the hash"
+        );
+
+        // Sanity: the equality above isn't vacuous — changing a USED pixel changes the hash.
+        let mut b_changed = b.clone();
+        b_changed.pixels[3] = 0xFF00_0000; // p11 -> a different value
+        assert_ne!(
+            hash_frame(&a, 33),
+            hash_frame(&b_changed, 33),
+            "hash must discriminate on used-pixel changes"
+        );
+    }
 }

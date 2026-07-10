@@ -8,7 +8,13 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-09 · **Current focus:** Step 2, Slice 5 (remaining object
+> **Last updated:** 2026-07-10 · **🎉 STEP 2 COMPLETE** — the full deterministic sim core
+> is ported and bit-exact vs the C++ oracle (all of `ProcessFrame`: worms, weapons, all
+> object families, ninjarope, bonuses+pickup, death/respawn, GameOfTag+Scales; proven by
+> 24 goldens + 5 fuzz variants × 1500 ticks = 7505 frames of master+9-component hash
+> parity, incl. 2 real sim bugs the final fuzz caught and fixed). PR #3 is ready — merge
+> is John's call. Next: Step 3 (Bevy rendering) and/or RL/self-play.
+> Historik: Step 2, Slice 5 (remaining object
 > families) — **5a splinters + 5b damage+blood SHIPPED** (PR #3) and **5c bonuses
 > MILESTONE difftest GREEN** (`sim_slice5c_golden` matches the C++ master + all 9
 > components, all 501 ticks; the **`bonuses` pool goes live** — under seed 42 the per-tick
@@ -51,18 +57,18 @@ the LAST slice of step 2.
 
 ---
 
-## 🔁 Rewrite track — faithful port (~35–45%)
+## 🔁 Rewrite track — faithful port (~55–60%)
 
 Strangler-style: the C++ engine is the oracle, every piece differential-tested
 bit-for-bit before moving on. Steps 0–1 merged; the deterministic sim core
 (step 2, the hardest part) is ~half done; the Bevy-facing steps 3–5 not started.
 
 ```
-REWRITE (steg 0–5)                                          ~35–45%
+REWRITE (steg 0–5)                                          ~55–60%
 ├─ ✅ Step 0  sim-core primitives (RNG/fixed/vec/math/tables)   DONE — merged (PR #1)
 ├─ ✅ Step 1  asset IO, slices 1a–1e (level/palette/sprites/    DONE — merged (PR #2)
 │             tc.cfg/objects/WAV)
-├─ 🔄 Step 2  deterministic sim core (PR #3)                    ~78–82%   ◀── YOU ARE HERE
+├─ ✅ Step 2  deterministic sim core (PR #3)                    COMPLETE — awaiting merge  ◀── YOU ARE HERE
 ├─ ⬜ Step 3  Bevy rendering / window (reproduce the SDL3 view) not started
 ├─ ⬜ Step 4  input + replay (.lrp) playback                    not started
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
@@ -71,7 +77,7 @@ REWRITE (steg 0–5)                                          ~35–45%
 > Everything above EXISTS in the original openliero — this track reproduces it in
 > Rust (new engine/idioms = modernization, not new game functionality).
 
-### Step 2 — deterministic sim core (~78–82%)
+### Step 2 — deterministic sim core (✅ COMPLETE)
 
 Six slices, each differential-tested against a per-tick `HashGameState` /
 `HashGameComponents` oracle.
@@ -85,31 +91,32 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 │   ├─ ✅ 4b  terrain destruction — greenball / DrawDirtEffect   SHIPPED (level hash live, 91 ticks bit-exact)
 │   ├─ ✅ 4c  explosion sobjects + nobjects — dart               SHIPPED (sobjects/nobjects live + carving, 91 ticks bit-exact)
 │   └─ ✅ 4d  slice-3/4 deferrals (dig, reload, shell-drop+land, load_change)  SHIPPED (handgun, master+9 components bit-exact 126 ticks vs C++)
-├─ 🔄 Slice 5  remaining object families — decomposed 5a–5d
+├─ ✅ Slice 5  remaining object families — decomposed 5a–5d
 │   ├─ ✅ 5a  splinters (cannon → medium_explosion + 5 splinters)  SHIPPED (PR #3, 131 ticks bit-exact)
 │   ├─ ✅ 5b  worm damage + blood (O10)  SHIPPED (PR #3, explosives wound → blood → live bobjects, 121 ticks; cycles live)
 │   ├─ ✅ 5c  bonuses (CreateBonus + bonus-drop roll + Bonus::Process)  MILESTONE GREEN (bonus drops/falls/bounces, 501 ticks; pickup + chain-loop deferred)
 │   └─ ✅ 5d  death + respawn (BeginRespawn RNG-search; fuzzed)  MILESTONE GREEN (death→respawn 361 ticks bit-exact + 4-variant respawn fuzz {2,3,6,7} trials)
-├─ 🔄 Slice 5′ (open-gate worm-hit follow-up)  decomposed 5′a + 5′b
+├─ ✅ Slice 5′ (open-gate worm-hit follow-up)  decomposed 5′a + 5′b
 │   ├─ ✅ 5′a  per-pixel CheckForSpecWormHit + wobject/nobject in-flight worm-hit arms  MILESTONE GREEN (dart 71t + cannon-splinter 156t bit-exact, near-miss anti-box witness)
 │   ├─ ✅ 5′b  bonus pickup (health/weapon/booby) — closes 5c's deferral  MILESTONE GREEN (walk-on health heal 110t + weapon reload 90t bit-exact vs C++; booby unit-test-only)
 │   └─ ✅ T10 moving-worms fuzz (slice-6 precondition)  GREEN (4 dart-duel variants, hits on MOVING worms at 7 frame×direction combos, 4×76t bit-exact; no sim change)
-└─ 🔄 Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match  (LAST slice — planned T0–T9)
+└─ ✅ Slice 6  full ProcessFrame + game modes + >1000-tick fuzz match  COMPLETE — STEP 2 DONE
     ├─ ✅ T0  dumper → full ProcessFrame tail + re-diff gate (23/24 priors byte-identical; sim_slice3 regen @tick 94, prefix proven)
     ├─ ✅ T1  ninjarope datamodel + throw un-skip (unhashed fields, NR* consts threaded)
     ├─ ✅ T2  Ninjarope::Process ported + wired (sim_slice3 un-ignored, 146 ticks bit-exact; 11×rand(128) dirt-attach burst)
-    ├─ ⬜ T3  chain-loop (sobject → bonus re-trigger)
-    ├─ ⬜ T4  new_object_reuse for sobjects/wobjects
-    ├─ ⬜ T5  GameOfTag + Scales hooks + goldens (Holdazone deferred)
-    ├─ ⬜ T6  cossin disposition doc + truncation test
-    ├─ ⬜ T7–T8  >1000-tick fuzz (MILESTONE)
-    └─ ⬜ T9  step-2-wide broad review + PR #3 readiness
+    ├─ ✅ T3  chain-loop (sobject → bonus re-trigger; closes the 5c borrow-conflict deferral)
+    ├─ ✅ T4  new_object_reuse for sobjects/wobjects (+ blood pool via T7b)
+    ├─ ✅ T5  GameOfTag + Scales ported with goldens (gametag 431t, scales 121t bit-exact; Holdazone deferred past step 2)
+    ├─ ✅ T6  cossin disposition doc + pickup truncation test
+    ├─ ✅ T7+T7b  5 fuzz scenarios ×1500 ticks + the 2 sim bugs the fuzz caught FIXED (bazooka obj_trail; blood-pool NewObjectReuse)
+    ├─ ✅ T8  fuzz difftest MILESTONE (5×1501 ticks, 7505 frames, master+9 components bit-exact; deferral #7 empirically closed)
+    └─ ✅ T9  step-2-wide broad review: READY — step 2 COMPLETE (merge = John's call)
 ```
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~47–54%** |
-| Step 2 (current) | **~78–82%** |
+| Rewrite track (steps 0–5) | **~55–60%** |
+| Step 2 | **✅ COMPLETE** (all slices bit-exact; PR #3 awaiting merge) |
 | Slice 5′b (bonus pickup) | **✅ MILESTONE GREEN** (the 5c-deferred pickup block `worm.cpp:287-322` live: 11×11 AABB gate + health/weapon/booby branches, TC consts threaded unhashed; `sim_slice5prime_pickup_health` — a worm wounded to 50 **walks onto** a dropped health bonus, heals @tick 87/110t, pool 1→0 — and `sim_slice5prime_pickup_weapon` — walk-on reload @tick 67/90t, `ww` 3→2, health flat all ticks (the booby discriminator) — both master+9 components bit-exact vs C++ **first run**; booby branch pinned by RED-first unit tests with exact per-branch draw counts; pure-Rust slice, priors byte-identical; chain-loop → slice 6) |
 | Slice 5′a (per-pixel worm-hit + in-flight arms) | **✅ MILESTONE GREEN** (real per-pixel `CheckForSpecWormHit` replaces 5a's box; both **in-flight worm-hit arms** live — wobject **blood-before-sound**, nobject **sound-before-blood** (opposite RNG order, each golden-witnessed); `sim_slice5prime_golden` (dart, 71 ticks) + `sim_slice5prime_nobj_golden` (cannon splinter, 156 ticks) master+9 components bit-exact vs C++ **first run**; **near-miss ticks** (projectile in the 16×16 box on transparent pixels) fire **nothing** — the anti-box witness pinning `fd33bbc` as FIXED; pure-Rust slice, slices 1–5d byte-identical; **pickup → 5′b**) |
 | Slice 5d (death + respawn) | **✅ MILESTONE GREEN + fuzzed** (`sim_slice5d_golden` master+9 components **all 361 ticks bit-exact** vs C++; the **worm death→respawn path goes live** — worm1 (health 12) dies from the explosives blast @death-tick [`rng` bursts 120-blood+8-gib spray, `visible`→false, `lives`−1, worm0 `kills`+1], the invisible 150-tick `killed_timer` counts down to `BeginRespawn` @tick 237 [the level-reading RNG spawn search: `pos` JUMPS, trial-count `rng` burst], then `DoRespawning` completes @tick 304 [`visible`→true, `health`→100]; slices 1–5c stay byte-identical. **4-variant fixed-level respawn fuzz** exhibits distinct bounded trial counts {2,3,6,7} — the desync trap's variance proven vs the C++ oracle) |

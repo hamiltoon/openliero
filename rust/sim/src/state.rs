@@ -2650,15 +2650,19 @@ fn worm_death(
     w.fire_cone = 0;
     w.ninjarope.out = false;
 
-    // :384-391 lives. KillEmAll: `--lives` (:390). The Scales branch
+    // :384-391 lives. KillEmAll: `--lives` (:390). The Scales death branch
     // (`while health <= 0 { health += settings->health; --lives }`, :385-388) is
-    // the unmodelled alternate — game_mode is not modelled and the TC is always
-    // KillEmAll (see the T1 gate comment), so it is guarded-by-absence.
+    // UNPORTED — deferred past step 2: game_mode IS modelled since slice-6 T5,
+    // but no committed Scales scenario kills a worm, so the branch is unreached
+    // (the sim_slice6_scales golden wounds without killing).
     w.lives -= 1;
 
     // :393-401 last_killed_idx / got_changed bookkeeping (no rand; unhashed).
-    // The GameOfTag guard at :396-398 is always true outside GameOfTag, so in
-    // KillEmAll `game.last_killed_idx = index` unconditionally.
+    // The GameOfTag multi-kill guard at :396-398 is UNPORTED — deferred past
+    // step 2: the assignment below matches C++ whenever the guard evaluates
+    // true, which holds for the first kill (last_killed_idx starts at -1) and
+    // always outside GameOfTag; the committed gametag golden has exactly one
+    // kill, so the divergent second-kill path is unreached.
     let old_last_killed = *last_killed_idx;
     *last_killed_idx = index;
     *got_changed = old_last_killed != *last_killed_idx;

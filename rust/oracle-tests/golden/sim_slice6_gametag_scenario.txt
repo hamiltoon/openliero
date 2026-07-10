@@ -1,0 +1,71 @@
+# Step 2 Slice 6 T5 scenario — GAME OF TAG (`game_mode 1`, kGmGameOfTag). The
+# frame-tail switch (game.cpp:373-388) bumps the "it"-worm's `timer` once per 70
+# cycles, but ONLY while BOTH worms are visible AND a kill has been recorded
+# (`last_killed_idx >= 0`). This scenario MANUFACTURES exactly that state, reusing
+# the slice-5d death+respawn geometry: worm0 air-bursts EXPLOSIVES that kill worm1,
+# worm1 goes invisible for its 150-tick killed_timer + respawn, then flips visible
+# again — and from the first 70-cycle boundary where BOTH are visible, worm1's
+# `timer` (hashed) starts ticking up.
+#
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics — UNCHANGED; the game-mode
+# switch is already ported in the dumper's ProcessFrame tail, driven by the
+# scenario's `game_mode`, T0) and the Rust N-tick difftest (T5). Same grammar as
+# slices 3/4/5. The ONLY delta vs the 5d scenario is the `game_mode 1` directive.
+#
+# === WHY worm1's timer BUMPS (the GameOfTag witness) ================================
+#   * KILL (identical to 5d): worm0 lands (~tick 13), raises the gun Up(1) ticks
+#     13-20, Fires(16) tick 38. Three explosives lob low-left, bounce, crawl, and
+#     air-burst at x~94/99/110 (~tick 90). worm1 starts at health 12 (< the death
+#     threshold), so the FIRST catching blast drives it health <= 0 => the DEATH
+#     block runs: `--lives` (10 -> 9), `visible=false`, `killed_timer=150`, and the
+#     kill bookkeeping sets `game.last_killed_idx = 1` (worm1 is the dead worm ==
+#     "it"). `got_changed` latches (old -1 != 1).
+#   * DEAD WINDOW (~90..~245): worm1 invisible => `some_invisible` TRUE => the
+#     GameOfTag gate is CLOSED; the 70-cycle boundaries at cycles 140/210 draw NO
+#     bump. worm1's hashed state is frozen at death.
+#   * RESPAWN (~tick 245): killed_timer hits 0 => BeginRespawn spawn search +
+#     DoRespawning convergence + `rand()&1`; worm1 flips `visible=true` with health
+#     restored (GameOfTag `--lives` path, NOT the Scales overflow). worm1 needs
+#     `ready` — its single Fire(16) at tick 150 (while dead) latches it.
+#   * TIMER BUMPS (the witness): once BOTH worms are visible again, the frame-tail
+#     gate at every `cycles % 70 == 0` bumps `WormByIdx(last_killed_idx=1)->timer`
+#     while `timer < time_to_lose` (600, the Settings default — the dumper never
+#     overrides it). With `ticks 360` the post-respawn 70-boundaries at cycles 280
+#     and 350 each add 1, so worm1's `timer` climbs 0 -> 1 -> 2 and its `worm1`
+#     component column STEPS UP on those exact ticks. worm0 is never "it", so its
+#     timer stays 0.
+#
+# Control bits (7-bit ControlState): Up=1 Down=2 Left=4 Right=8 Fire=16 Change=32 Jump=64.
+seed 42
+# physics_fall_test.lev: open sky band over a solid Dirt floor at y=200px, 504x350.
+level Levels/physics_fall_test.lev
+# Window sized so the full kill -> 150-tick countdown -> respawn (settles ~tick 328)
+# -> the post-respawn BOTH-visible 70-cycle boundaries at cycles 350 AND 420 both
+# land, giving a two-step timer witness (0 -> 1 at 350, 1 -> 2 at 420).
+ticks 430
+max_bonuses 0
+# THE SLICE-6 DIRECTIVE: kGmGameOfTag (settings.hpp:51 enum index 1). The dumper +
+# the Rust difftest both parse the raw int and set Settings::game_mode.
+game_mode 1
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# worm0 = KILLER (full health, EXPLOSIVES); worm1 = VICTIM (health 12 so one blast
+# kills it), both grounded + visible from tick 0. Positions identical to slice 5d.
+worm 0  9830400 12779520 100 10 0   1
+worm 1  7536640 12845520  12 10 218 1
+# Override BOTH worms' slot 0 with EXPLOSIVES. worm0 fires it; worm1's tick-150 Fire
+# only latches `ready` while dead.
+weapon 0 EXPLOSIVES
+#
+# input <tick> <worm0_7bit> <worm1_7bit>
+# worm0: raise the gun (Up ticks 13-20) then Fire tick 38 — the 5d/5b kill sequence.
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 38 16 0
+# worm1: a single Fire PRESS at tick 150 (dead by then) to latch `ready` for DoRespawning.
+input 150 0 16

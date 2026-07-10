@@ -1,0 +1,121 @@
+# Step 2 Slice 3 scenario — two worms, FULL worm->Process under SCRIPTED input.
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics, unchanged from slice 2) and
+# the Rust N-tick test. Same grammar as slice 2 plus `input <tick> <w0> <w1>` lines.
+#
+# Control bits (7-bit ControlState, see worm.hpp Control enum):
+#   Up=1  Down=2  Left=4  Right=8  Fire=16  Change=32  Jump=64
+#
+# HARD CONSTRAINTS (keep the run RNG- and level-pristine — see the slice-3 design
+# doc "RNG decision"). The implementer has verified every input line below obeys:
+#   * NEVER set Left(4) and Right(8) together on the same worm/tick  -> no dig ->
+#     no rand(), no terrain write (level hash stays constant).
+#   * NEVER set Fire(16) on any worm/tick -> no Worm::Fire -> no recoil/ammo/rand().
+#   * Both worms stay health 100, visible 1, in-bounds (so no death/smoke rand()).
+# Composite values used: 32=Change, 33=Change|Up, 34=Change|Down, 36=Change|Left,
+# 40=Change|Right, 64=Jump, 96=Change|Jump. None combines Left+Right; none sets 16.
+seed 42
+# physics_fall_test.lev: open sky band (Background mat 130) over a solid floor at
+# y=200px (Dirt mat 12); lets the worms fall, land (grounded => reacts[kRfUp] > 0),
+# then jump. Reused unchanged from slice 2.
+level Levels/physics_fall_test.lev
+ticks 145
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# pos_*: 16.16 fixed-point (Itof(px) = px << 16 = px * 65536). Both worms start a
+# few px above the floor (different x AND y so the two hashes diverge) and settle
+# grounded within ~13 ticks; they then stay grounded for the input phases so the
+# COMPONENT hash is static while aiming/weapon-change/ninjarope move the MASTER hash.
+worm 0  9830400 12779520 100 10 0   1
+worm 1 22937600 12648448 100 10 218 1
+#
+# === Phase layout (tick : w0 action / w1 action) =============================
+# 0-15   settle (empty)               : fall + land, arm able_to_jump
+# 16-25  w0 walk Right(8)             / w1 aim Down(2)
+# 26-29  decay (empty / w1 aim Up)
+# 30-53  w0 aim Up(1) then Down(2)    / w1 aim Up / walk Left / walk Right
+# 54-67  w0 walk Left(4)              / w1 walk Right(8) then decay
+# 68-92  weapon change: w0 Change|Right/Left holds, w1 mirrored Change|Left/Right
+# 93-97  ninjarope throw(96) + length(Up/Down) + retract(Jump 64)
+# 98     arm able_to_jump (empty)
+# 99     Jump(64): both worms jump while grounded (vel.y kicks negative)
+# 100-145 trailing (empty): jump arc up and back down
+#
+# input <tick> <worm0_7bit> <worm1_7bit>
+input 16 8 2
+input 17 8 2
+input 18 8 2
+input 19 8 2
+input 20 8 2
+input 21 8 2
+input 22 8 2
+input 23 8 2
+input 24 8 2
+input 25 8 2
+input 26 0 2
+input 27 0 2
+input 28 0 1
+input 29 0 1
+input 30 1 1
+input 31 1 1
+input 32 1 1
+input 33 1 1
+input 34 1 1
+input 35 1 1
+input 36 1 1
+input 37 1 1
+input 38 1 1
+input 39 1 1
+input 40 1 4
+input 41 1 4
+input 42 2 4
+input 43 2 4
+input 44 2 4
+input 45 2 4
+input 46 2 4
+input 47 2 4
+input 48 2 4
+input 49 2 4
+input 50 2 0
+input 51 2 0
+input 52 2 0
+input 53 2 0
+input 54 4 8
+input 55 4 8
+input 56 4 8
+input 57 4 8
+input 58 4 8
+input 59 4 8
+input 60 4 8
+input 61 4 8
+input 62 4 8
+input 63 4 8
+input 68 40 36
+input 69 40 36
+input 70 40 36
+input 71 40 36
+input 72 40 36
+input 73 40 36
+input 74 40 36
+input 75 32 32
+input 76 32 32
+input 77 32 32
+input 78 32 32
+input 79 32 32
+input 80 36 40
+input 81 36 40
+input 82 36 40
+input 83 36 40
+input 84 36 40
+input 85 32 32
+input 86 32 32
+input 87 32 32
+input 88 32 32
+input 89 32 32
+input 90 32 32
+input 91 32 32
+input 92 32 32
+input 93 96 96
+input 94 34 33
+input 95 34 33
+input 96 34 33
+input 97 64 64
+input 99 64 64

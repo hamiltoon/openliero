@@ -1,0 +1,109 @@
+# Step 2 Slice 5'a scenario (MILESTONE setup) — the per-pixel in-flight wobject
+# worm-hit arm (weapon.cpp:287-326) goes LIVE. worm0 FIRES the open-gate DART; the
+# single descending dart projectile SKIMS LOW-LEFT and its pixel path CROSSES worm1's
+# SOLID silhouette. On the ONE tick the dart's fixed pixel lands on a WORM-material
+# pixel, the per-pixel `CheckForSpecWormHit` (worm.cpp:1162-1188) opens the arm's gate:
+# vel-kick + `DoDamage(5)` + the 10-blood fan + the `rand(3)` hit-sound gate. worm1
+# starts at health 50 so the ONE hit WOUNDS it to 45 WITHOUT killing (the death path is
+# 5d's, already proven). This resurrects the discarded 5b DART geometry (ledger :477,:482)
+# with worm1 moved INTO the flight corridor so the dart hits it IN FLIGHT (5b placed worm1
+# past the impact so only the ground explosion touched it).
+#
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics — UNCHANGED since 5c; it already
+# drives the unmodified `WObject::Process`, so the in-flight arm needs NO dumper edit) and
+# the Rust N-tick difftest (T6). Same grammar as slice 3/4a/4b/4c/5a/5b/5c/5d.
+#
+# === THE PER-PIXEL DISCRIMINATION WITNESS (contact + near-miss in ONE run) ============
+# The dart's `detect_distance = 0`, so `CheckForSpecWormHit` scans a SINGLE pixel per
+# tick: the arm fires iff that pixel is a WORM-material pixel of worm1's 16x16 sprite.
+# worm1's frame-0/dir-0 silhouette is SOLID only in rows 1-8, cols ~5-11 (upper-centre);
+# the rest of the 16x16 box is TRANSPARENT. As the dart transits worm1's box it lands on:
+#   * tick 41 dart(145,195) -> sprite(12,4) TRANSPARENT -> NEAR-MISS (box would fire).
+#   * tick 42 dart(142,195) -> sprite( 9,4) TRANSPARENT -> NEAR-MISS (box would fire).
+#   * tick 43 dart(140,195) -> sprite( 8,4) SOLID      -> CONTACT: the ONLY tick the arm
+#             fires. health 50->45, vel kicked, 10 blood (type 6) spawn, `rng` BURSTS
+#             (10*[rand(128)+Create2 4 draws] + the rand(3) gate ~= 41 draws).
+#   * ticks 45,46,47 dart(136..131,195) -> sprite(cols 15..10, row 4) TRANSPARENT ->
+#             NEAR-MISS (the dart, still in worm1's box, grazes transparent pixels).
+# A 16x16 BOX over-approximation (5a's retired `check_for_spec_worm_hit`) would fire on
+# EVERY tick the dart's pixel is in-bounds (41-47), draining worm1 far below 45 and
+# spraying ~7 fans. The SINGLE clean -5 + one 10-blood fan is the direct proof that the
+# per-pixel predicate discriminates solid from transparent — the anti-false-positive
+# witness that pins the fd33bbc / 5b-T5b blocker as FIXED.
+#
+# After the contact the dart keeps flying (`worm_collide=false` => not removed) LOW-LEFT
+# off the corridor and never reaches dirt within the window (no `large`/`small_explosion`
+# sobject spawns: `sobjects` stays EMPTY), so the ONLY worm-damage event is the single
+# in-flight per-pixel hit — the milestone surface in isolation, no explosion mixing.
+#
+# === Phase layout (tick : action) — TUNED against the golden ==========================
+# 0-12    settle (empty)   : worm0 falls, lands (~tick 13); worm1 already at rest, IDLE
+#                            (no input => animate=false => current_frame 0 constant).
+# 13-39   worm0 Up(1)      : raise the gun ~27 ticks for the flat-left skim.
+# 40      worm0 Fire(16)   : the single dart lobs LOW-LEFT; `rng` FLAT (DART Fire = 0 rand:
+#                            distribution=0, timeToExplo=0, splinterAmount=0, recoil=0).
+# 41-42   NEAR-MISS        : dart enters worm1's box at TRANSPARENT pixels -> arm does
+#                            NOTHING; `rng`/`worm1`/`nobjects` FLAT.
+# 43      CONTACT + WOUND  : dart's pixel lands on a SOLID worm pixel -> arm fires: worm1
+#                            health 50->45, vel kicked; 10 blood (type 6) -> `nobjects`
+#                            jumps to 10; `rng` BURSTS; `bobjects` begins to drip.
+# 44-47   NEAR-MISS/exit   : dart still around worm1's box on transparent pixels -> no
+#                            further hit; worm1 health FLAT at 45.
+# 48-70   trailing         : dart flies off LOW-LEFT (no explosion); the 10 blood nobjects
+#                            drip/fall/land + the `bobjects` pool settles; worm1 alive at 45.
+# Control bits (7-bit ControlState): Up=1 Down=2 Left=4 Right=8 Fire=16 Change=32 Jump=64.
+seed 42
+# physics_fall_test.lev: open sky band (Background mat 130) over a solid Dirt floor at
+# y=200px (mat 12), level 504x350. Reused unchanged from slices 2/3/4a/4b/4c/5a/5b/5c/5d.
+level Levels/physics_fall_test.lev
+# Window covers fire -> near-miss -> contact -> blood drain, with margin; the dart never
+# explodes in-window so there is no late crater/edge burst.
+ticks 70
+# max_bonuses 0 (default): no bonus interaction — the in-flight per-pixel worm-hit is the
+# only new surface. Keeps the bonus-drop roll short-circuited (no rand) as in slices 1-5b.
+max_bonuses 0
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# pos_*: 16.16 fixed-point (Itof(px) = px<<16). worm0 = SHOOTER: grounded falling start
+# (x=150, y=195), full health 100, DART slot 0. worm1 = VICTIM: at its floor REST pos
+# (x=140, y=12845520 == ~196px), VISIBLE + grounded + IDLE from tick 0, health 50 (so the
+# single 5-damage hit wounds to 45, comfortably alive). x=140 sits INSIDE the dart's
+# flight corridor (between worm0 x=150 and the low-left skim) so the dart crosses worm1's
+# silhouette IN FLIGHT.
+worm 0  9830400 12779520 100 10 0   1
+worm 1  9175040 12845520  50 10 218 1
+# `weapon <slot> <name>`: override BOTH worms' slot 0 with DART (name in dart.cfg), full
+# ammo. worm0 fires it; worm1 never fires (it stands idle and takes the single hit).
+# DART: hit_damage=5, blood_on_hit=10, blow_away=28, detect_distance=0, worm_collide=false,
+# distribution=0, recoil=0, splinterAmount=0 (the open-gate weapon the arm needs).
+weapon 0 DART
+#
+# input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0; it stands and takes the hit)
+# worm0: raise the gun (Up ticks 13-39) then Fire tick 40 — the skim that crosses worm1.
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 21 1 0
+input 22 1 0
+input 23 1 0
+input 24 1 0
+input 25 1 0
+input 26 1 0
+input 27 1 0
+input 28 1 0
+input 29 1 0
+input 30 1 0
+input 31 1 0
+input 32 1 0
+input 33 1 0
+input 34 1 0
+input 35 1 0
+input 36 1 0
+input 37 1 0
+input 38 1 0
+input 39 1 0
+input 40 16 0

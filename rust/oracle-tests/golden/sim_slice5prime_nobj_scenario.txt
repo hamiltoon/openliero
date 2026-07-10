@@ -1,0 +1,133 @@
+# Step 2 Slice 5'a T7 scenario — the per-pixel IN-FLIGHT *NOBJECT* worm-hit arm
+# (nobject.cpp:166-203) goes LIVE. This is the MIRROR of T5/T6's wobject arm: the
+# nobject arm draws its RNG in the OPPOSITE order — the HIT-SOUND GATE FIRST
+# (rand(3); on 0 also rand(3)) THEN the blood fan — whereas the wobject arm (dart,
+# T6) draws blood-then-sound. This golden is the named milestone that pins that
+# LJUD-FÖRE-BLOD (sound-before-blood) asymmetry bit-exact.
+#
+# worm0 FIRES the CANNON. Its shell arcs flat-LEFT (aim high enough to fly ~14px
+# ABOVE worm1's head, clearing it — NOT a wobject hit) and strikes the LEFT WALL at
+# (2,179), where `medium_explosion` (createOnExp) spawns + BlowUpObject scatters 5
+# SPLINTERS (`particle__small_damage`, nobject_types[3]: hit_damage=2,
+# detect_distance=0, worm_destroy=true). One splinter flies back EAST at worm-height
+# and its single fixed pixel transits worm1's 16x16 SOLID silhouette. On the ONE tick
+# that pixel lands on a WORM-material pixel, the per-pixel `CheckForSpecWormHit`
+# (worm.cpp:1162-1188) opens the NOBJECT arm: vel-kick + `DoDamage(2)` + the
+# rand(3) hit-sound gate FIRST + the 1-blood fan (blood_on_hit=1) SECOND, then —
+# because `worm_destroy=true && !worm_explode` — the splinter is FREED WITHOUT
+# exploding (so NO small_explosion spawns on worm1; the wound is a clean isolated
+# -2). worm1 starts at health 50 -> 48 (wounded, comfortably alive; the death path
+# is 5d's).
+#
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics — UNCHANGED since 5c; it
+# already drives the unmodified `NObject::Process`, so the in-flight arm needs NO
+# dumper edit) and the Rust N-tick difftest (sim_slice5prime_nobj_golden.rs). Same
+# grammar as slice 3/4a/4b/4c/5a/5b/5c/5d/5prime.
+#
+# === THE PER-PIXEL DISCRIMINATION WITNESS (near-miss + contact in ONE run) =========
+# The splinter's `detect_distance = 0`, so `CheckForSpecWormHit` scans a SINGLE pixel
+# per tick: the arm fires iff that pixel is a WORM-material pixel of worm1's sprite.
+# As the east-bound splinter transits worm1's box it grazes the box's TRANSPARENT
+# pixels for SIX ticks before landing on a solid one:
+#   * ticks 140-145 splinter in worm1's box at sprite-local (0,1)->(5,5), all
+#             TRANSPARENT -> NEAR-MISS (a 16x16 box over-approx WOULD fire on every
+#             one of these six ticks). `rng`/`worm1`/health FLAT.
+#   * tick 146 splinter's pixel lands on a SOLID worm pixel -> CONTACT: the ONLY tick
+#             the arm fires. health 50->48, vel kicked, the sound gate + 1-blood fan
+#             draw a small `rng` BURST (sound-FIRST), the splinter is freed
+#             (worm_destroy), 1 blood (type 6) nobject spawns.
+# A 16x16 BOX over-approximation (5a's retired `check_for_spec_worm_hit`) would fire
+# on EVERY one of ticks 140-146, draining worm1 far below 48. The SINGLE clean -2,
+# with `rng` FLAT across the six near-miss ticks, is the direct proof the per-pixel
+# predicate discriminates solid from transparent — the anti-false-positive witness,
+# now exercised through the NOBJECT arm (the wobject arm was T6's).
+#
+# The medium_explosion + the OTHER splinters' small_explosions all fall near the LEFT
+# WALL (x<=16), >= 12px from worm1 (x=28, outside detect_range=14), so the ONLY
+# worm-damage event is the single per-pixel nobject in-flight hit — the milestone
+# surface in isolation. worm0 (x=150, recoiling EAST) is never touched either.
+#
+# === Phase layout (tick : action) — TUNED against the golden ======================
+# 0-12    settle (empty)   : worm0 falls, lands (~tick 13); worm1 already at rest,
+#                            IDLE (no input => animate=false => current_frame const).
+# 13-46   worm0 Up(1)      : raise the gun ~34 ticks for a flat-LEFT high skim that
+#                            clears worm1's head.
+# 47      worm0 Fire(16)   : the single cannon shell lobs flat-LEFT; `rng` +2 (CANNON
+#                            Fire = 2 distribution draws).
+# 48-121  shell in flight  : the shell flies LEFT at y~177 (ABOVE worm1's y191 sprite
+#                            top -> NO wobject hit), toward the left wall.
+# 122-123 EXPLODE at wall  : shell hits the left wall (2,179) -> medium_explosion +
+#                            5 splinters; `rng` JUMPS; `sobjects`/`nobjects` go live;
+#                            the terrain carves near the wall.
+# 124-145 splinter transit : one splinter flies EAST at worm-height; ticks 140-145 it
+#                            grazes worm1's TRANSPARENT box pixels -> NO fire.
+# 146     CONTACT + WOUND  : splinter pixel lands on a SOLID worm pixel -> the NOBJECT
+#                            arm fires: worm1 health 50->48, vel kicked; sound gate +
+#                            1 blood (type 6); the splinter is freed (worm_destroy).
+# 147-155 trailing         : worm1 alive at 48; the blood/debris settle; splinter
+#                            small_explosions near the wall finish.
+# Control bits (7-bit ControlState): Up=1 Down=2 Left=4 Right=8 Fire=16 Change=32 Jump=64.
+seed 42
+# physics_fall_test.lev: open sky band (Background mat 130) over a solid Dirt floor at
+# y=200px (mat 12), level 504x350. Reused unchanged from slices 2..5prime.
+level Levels/physics_fall_test.lev
+# Window covers fire -> flight -> wall explosion -> splinter transit -> contact ->
+# short drain, with margin.
+ticks 155
+# max_bonuses 0 (default): no bonus interaction — the in-flight per-pixel NOBJECT
+# worm-hit is the only new surface.
+max_bonuses 0
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# pos_*: 16.16 fixed-point (Itof(px) = px<<16). worm0 = SHOOTER: grounded falling
+# start (x=150, y=195), full health 100, CANNON slot 0. worm1 = VICTIM: at its floor
+# REST pos (x=28, y=12845520 == ~196px), VISIBLE + grounded + IDLE from tick 0,
+# health 50 (so the single 2-damage hit wounds to 48, comfortably alive). x=28 sits
+# WEST of the shooter, BELOW the shell's high flight path (shell clears its head) and
+# EAST of the wall explosion (outside its detect range) — in the east-bound splinter's
+# worm-height corridor so exactly one splinter crosses worm1's silhouette IN FLIGHT.
+worm 0  9830400 12779520 100 10 0   1
+worm 1  1835008 12845520  50 10 218 1
+# `weapon <slot> <name>`: override BOTH worms' slot 0 with CANNON (name in cannon.cfg),
+# full ammo. worm0 fires it; worm1 never fires (it stands idle and takes the hit).
+# CANNON: splinterAmount=5, splinterType=particle__small_damage, createOnExp=
+# medium_explosion, wormCollide=true (the shell clears worm1), gravity=700.
+weapon 0 CANNON
+#
+# input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0; it stands and takes the hit)
+# worm0: raise the gun (Up ticks 13-46) then Fire tick 47 — the high skim that clears
+# worm1 and lands at the wall, whose splinters spray back onto worm1.
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 21 1 0
+input 22 1 0
+input 23 1 0
+input 24 1 0
+input 25 1 0
+input 26 1 0
+input 27 1 0
+input 28 1 0
+input 29 1 0
+input 30 1 0
+input 31 1 0
+input 32 1 0
+input 33 1 0
+input 34 1 0
+input 35 1 0
+input 36 1 0
+input 37 1 0
+input 38 1 0
+input 39 1 0
+input 40 1 0
+input 41 1 0
+input 42 1 0
+input 43 1 0
+input 44 1 0
+input 45 1 0
+input 46 1 0
+input 47 16 0

@@ -1,0 +1,119 @@
+# Step 2 Slice 5b scenario (RE-SCOPED to EXPLOSIVES) — worm0 FIRES the EXPLOSIVES; the
+# 3 spread projectiles bounce + crawl LOW-LEFT and AIR-BURST just above the dirt floor,
+# each spawning a `large_explosion` sobject (createOnExp). Two of the blasts catch the
+# now-VISIBLE + grounded + stationary worm1 inside their detectRange=20 box, so the
+# sobject per-worm damage loop WOUNDS worm1, spraying blood nobjects (type 6) that drip
+# the `bobjects` blood pool LIVE for the first time. worm0 stays clear (out of every
+# blast's +/-20 box). worm1 is wounded but SURVIVES (death is a later slice). Read by
+# BOTH the C++ dumper (oracle_dump_sim_physics, slice-5b T0 build = base StatsRecorder so
+# a worm-hit does not crash headless + `++cycles` at the game.cpp:357 point) and the Rust
+# N-tick test. Same grammar as slice 3/4a/4b/4c/5a.
+#
+# === WHY EXPLOSIVES (the closed-gate re-scope, Controller Option B) ==================
+# 5b is re-scoped from the dart to a CLOSED-GATE, splinter-free weapon so the ONLY
+# worm-damage path is the sobject explosion AABB — deferring the per-pixel
+# `CheckForSpecWormHit` (the in-flight wobject/nobject worm-hit arms) to a follow-up.
+#   * CLOSED GATE: explosives has `hitDamage=0, blowAway=0, bloodOnHit=0,
+#     wormCollide=false` => the wobject in-flight worm-hit gate (weapon.cpp:290) NEVER
+#     opens => C++ skips the in-flight hit AND the Rust (which omits it) matches. No
+#     in-flight hit => no per-pixel test, no box over-approximation issue.
+#   * `splinterAmount=0` => NO splinter nobjects => the nobject worm-hit deferral is
+#     never reached => no panic, no per-pixel issue.
+#   * The ONLY worm-damage path is the `large_explosion` sobject per-worm loop
+#     (sobject.cpp:47-115, a SIMPLE AABB on Ftoi(worm.pos), NOT CheckForSpecWormHit),
+#     LIVE since T2. The wobject FLIGHT physics it needs (bounce + the num_frames
+#     animation) landed in T4a (commit 2274c24), so explosives now FLIES in Rust.
+#
+# Control bits (7-bit ControlState, see worm.hpp Control enum):
+#   Up=1  Down=2  Left=4  Right=8  Fire=16  Change=32  Jump=64
+#
+# Aiming: identical geometry to slice 4c/5a's worm0. Under seed 42 worm0 spawns facing
+# LEFT; resting aim points DOWN into the dirt. Holding Up(1) ticks 13-20 (~8 ticks)
+# raises the gun a little; firing tick 38 throws the 3 explosives projectiles into a
+# flat-LEFT lob that hugs the floor, bounces (bounce=30), crawls low-left, and air-bursts
+# at ~timeToExplo. worm0 has recoil=0, so it stays frozen at its grounded rest after
+# firing (its component column is CONSTANT once landed).
+#
+# THE EXPLOSIVES (weapons/explosives.cfg, name=EXPLOSIVES): parts=3 (3 projectiles),
+# distribution=16000 (spread rand per part), gravity=1000, bounce=30, timeToExplo=55 +
+# timeToExploV=10 (air-burst with a per-part timeout rand), shotType=0 (kStdNormal),
+# startFrame=88 + numFrames=3 (the projectile ANIMATES — cur_frame advances on
+# (cycles&7)==0, RNG-free, T4a), recoil=0 (worm0 does NOT recoil), leaveShells=0,
+# dirtEffect=-1 (the PROJECTILE carves nothing; the large_explosion does), no obj/part
+# trails. createOnExp="large_explosion" (sobject id 0). So **EXPLOSIVES Fire DOES draw
+# rand** (spread rand(distribution) + the timeToExploV timeout rand, per part) — `rng`
+# JUMPS at the Fire tick, stays moving while the 3 projectiles fly/bounce, then JUMPS
+# again at each air-burst (sound + worm blood + dirt-throw + crater).
+#
+# THE EXPLOSION (sobjects/large_explosion.cfg, id 0): startSound=exp2 + numSounds=4 =>
+# sound rand(4); damage=15, detectRange=20 (a BIG radius — forgiving to catch worm1),
+# blowAway=3000; dirtEffect=0 (>=0 so DrawDirtEffect still CARVES a crater); numFrames=15,
+# animDelay=2 (the sobject lives ~30 ticks => `sobjects` moves many ticks). The per-worm
+# loop (sobject.cpp:47-115): worm1 center (x=115) lands INSIDE the +/-20 box of two of the
+# three blasts (x≈94/99/110), so power_x = 20-|delta_x|, power_sum = (power_x+power_y)/2,
+# z = damage*power_sum/detect_range = 15*power_sum/20 (>=1 => worm1 health DROPS), the
+# blow-away kicks worm1's velocity, and kBloodAmount = blood*power_sum/100 blood nobjects
+# (type 6) spawn [rand(128) + Create2]. worm1 stays health > 0 (3 blasts x <=15 => <=45;
+# wounded, not killed). The blood nobjects then drip the `bobjects` blood pool, which is
+# NON-EMPTY from the first cycles%10==0 tick after blood spawns (the headline of 5b: first
+# live blood pool). worm0 (x=150) is >=40px from every blast center, far outside the +/-20
+# boxes => it takes NO damage.
+#
+# HARD CONSTRAINTS (verified in the golden):
+#   * NEVER set Left(4) and Right(8) together on the same worm/tick. worm0 only ever sets
+#     Up / Fire; worm1 gets NO input (it stands and takes the blasts).
+#   * worm1 is VISIBLE + grounded + stationary at its floor rest pos from tick 0, so it
+#     draws NO RNG and its component hash is CONSTANT until the FIRST blast catches it
+#     (then it is wounded + blown). worm0 stays OUTSIDE every +/-20 detect box: worm0's
+#     column is UNCHANGED at the blast ticks (no self-damage), health 100 every tick.
+#   * worm1 health stays > 0 EVERY tick (3 blasts of <=15; wounded, not killed).
+#   * The air-bursts CARVE (large_explosion dirtEffect=0) and overlap AnyDirt, so
+#     `nobjects` spawn (dirt debris type 13 + blood type 6) and the `level` carves.
+#   * Caps: `bobjects` stays far under the 700 cap and `nobjects` far under the 600 cap.
+seed 42
+# physics_fall_test.lev: open sky band (Background mat 130) over a solid floor at y=200px
+# (Dirt mat 12), level 504x350. Reused unchanged from slices 2/3/4a/4b/4c/5a.
+level Levels/physics_fall_test.lev
+ticks 120
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# pos_*: 16.16 fixed-point (Itof(px) = px<<16). worm0 reuses the grounded falling start
+# (x=150, y=195) and settles by ~tick 17 — same as 4c/5a. worm1 is VISIBLE and placed AT
+# its floor REST position (x=115, y=12845520 == ~196px) so it is already grounded and
+# motionless from tick 0; the 3 air-bursts land at x≈94/99/110 — two within worm1's +/-20
+# box, none within worm0's.
+worm 0  9830400 12779520 100 10 0   1
+worm 1  7536640 12845520 100 10 218 1
+# `weapon <slot> <name>`: override BOTH worms' slot <slot> with the named weapon, full
+# ammo, ready to fire. Slot 0 == the dumper's current_weapon. explosives.cfg name=EXPLOSIVES.
+weapon 0 EXPLOSIVES
+#
+# === Phase layout (tick : worm0 action) — VERIFIED against the golden ==============
+# 0-12   settle (empty)        : worm0 falls, lands grounded (~tick 13); worm1 already at
+#                                rest (flat column).
+# 13-20  Up(1)                 : raise the gun ~8 ticks for the flat-left lob.
+# 21-37  hold (empty)          : worm0 holds its raised aim, grounded + still.
+# 38     Fire(16)  -> SHOT     : 3 explosives projectiles lob LOW-LEFT; `rng` JUMPS
+#                                (spread + timeout rand x3); wobjects non-empty as they
+#                                fly + bounce; the projectiles ANIMATE; worm1 still flat.
+# ~90-94 AIR-BURSTS + WOUND    : the projectiles air-burst at x≈94/99/110 -> 3x
+#                                large_explosion. `rng` JUMPS (sound + worm1 blood +
+#                                dirt-throw + crater); `level` carves; `sobjects`
+#                                non-empty; `nobjects` non-empty (blood type 6 + dirt
+#                                type 13); `worm1` column CHANGES (health 100->88->82,
+#                                vel kicked) and stays >0; `bobjects` NON-EMPTY from the
+#                                first drip tick (first live blood pool); worm0 column
+#                                UNCHANGED (out of every box).
+# 95-120 trailing              : sobjects animate then free; worm1 slides + settles
+#                                (alive); blood nobjects + bobjects drip/fall/land; the
+#                                carved level persists.
+#
+# input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0; it stands and takes the blasts)
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 38 16 0

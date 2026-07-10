@@ -1,0 +1,101 @@
+# Step 2 Slice 5' T10 — MOVING-WORMS fuzz, VARIANT 1 of 4 (O21; slice-6 precondition).
+#
+# The 5'a MILESTONE (sim_slice5prime_scenario.txt) landed the per-pixel in-flight
+# worm-hit arm on an IDLE victim: worm1 stood still at frame-0/dir-0, so every hit was
+# read against the SAME cf0/dir0 silhouette. T10 is the coverage the idle-victim
+# milestone cannot give: BOTH worms WALK (animate=true) and FIRE open-gate DARTs at each
+# other, so the per-pixel `CheckForSpecWormHit` reads the victim's sprite at a MOVING
+# `current_frame`/`direction` — the direct guard for the `animate`/`current_frame`
+# promotion (design O-A risk). The four T10 variants sit on the SAME physics_fall_test.lev
+# but are spaced so the hits land at DIFFERENT anim-cycle buckets (=> different
+# `current_frame`) and, because each worm faces its opponent, at BOTH directions.
+#
+# === THE SYMMETRIC DART DUEL ==========================================================
+# worm1 (LEFT) and worm0 (RIGHT) face each other and both raise the gun ~27 ticks to the
+# FLAT skim (like the milestone shooter) so each dart SKIMS at worm height (y~195) toward
+# the opponent instead of plunging into the floor (a low/steep dart ground-explodes next
+# to the worms — blast falloff, NOT the per-pixel arm; the flat raise keeps the surface
+# ISOLATED to the in-flight per-pixel hit). Both fire on tick 40; the two darts cross in
+# the gap and each per-pixel-hits the opposing worm while it is WALKING:
+#   * worm0 (dir0, facing LEFT, walking left)  is hit by worm1's rightward dart.
+#   * worm1 (dir1, facing RIGHT, walking right) is hit by worm0's leftward dart.
+# Both worms are animate=true at the hit (a genuine walk-frame silhouette, not the idle
+# cf0/dir0), each takes a clean DoDamage(5) + 10-blood fan, and both SURVIVE (no death /
+# respawn mixes in — that path is 5d's, already proven). worm1 starts at health 60 so its
+# 2 clean wounds leave it comfortably alive.
+#
+# Both worms genuinely MOVE (they hold a walk direction the whole window, animate=true)
+# and both FIRE (each DART wobject spawns, ammo decrements) — "both worms move and fire",
+# verbatim from the plan. Whichever RNG the blood fans draw is asserted bit-exact vs C++.
+#
+# VARIANT 1: worm0 x=155, worm1 x=125 (gap 30px). Measured against the C++ oracle: both
+# darts land ~tick 45 with the victims at current_frame 9 (anim bucket 1, kWormAnimTab
+# offset 7 over angle_frame 2) — hits at (cf9,dir0) [worm0] and (cf9,dir1) [worm1].
+# (Variants 2/3/4 shift the gap so hits land at cf2/cf17/cf2 => collectively >=2 distinct
+# current_frame/direction combos, the T10 coverage requirement.)
+#
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics, UNCHANGED since 5c — it already
+# drives the unmodified WObject::Process worm-hit loop, weapon.cpp:287-326, so the
+# moving-worm hit needs NO dumper edit) and the Rust difftest (sim_slice5prime_fuzz.rs).
+# Same grammar as slices 2..5d. Control bits: Up=1 Down=2 Left=4 Right=8 Fire=16.
+seed 42
+level Levels/physics_fall_test.lev
+ticks 75
+max_bonuses 0
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# worm0 = RIGHT duellist (x=155, dir0 faces LEFT), full health, DART slot 0.
+# worm1 = LEFT  duellist (x=125, flips dir1 to face RIGHT), health 60 (2 wounds -> 50).
+worm 0  10158080 12779520 100 10 0   1
+worm 1  8192000 12845520  60 10 218 1
+weapon 0 DART
+# worm0: Up+Left(5) raise-flat while walking left (dir0); tick40 Left+Fire(20); then
+#        Left(4) keep walking. worm1: Right(8) flip dir1; Up+Right(9) raise-flat while
+#        walking right; tick40 Right+Fire(24); then Right(8) keep walking.
+input 13 5 8
+input 14 5 9
+input 15 5 9
+input 16 5 9
+input 17 5 9
+input 18 5 9
+input 19 5 9
+input 20 5 9
+input 21 5 9
+input 22 5 9
+input 23 5 9
+input 24 5 9
+input 25 5 9
+input 26 5 9
+input 27 5 9
+input 28 5 9
+input 29 5 9
+input 30 5 9
+input 31 5 9
+input 32 5 9
+input 33 5 9
+input 34 5 9
+input 35 5 9
+input 36 5 9
+input 37 5 9
+input 38 5 9
+input 39 5 9
+input 40 20 24
+input 41 4 8
+input 42 4 8
+input 43 4 8
+input 44 4 8
+input 45 4 8
+input 46 4 8
+input 47 4 8
+input 48 4 8
+input 49 4 8
+input 50 4 8
+input 51 4 8
+input 52 4 8
+input 53 4 8
+input 54 4 8
+input 55 4 8
+input 56 4 8
+input 57 4 8
+input 58 4 8
+input 59 4 8
+input 60 4 8

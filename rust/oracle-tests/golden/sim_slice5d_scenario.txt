@@ -1,0 +1,104 @@
+# Step 2 Slice 5d scenario (MILESTONE setup) — the worm-loop DEATH + RESPAWN path goes
+# LIVE. worm0 FIRES the EXPLOSIVES exactly as slice 5b; the low-left air-bursts spawn
+# `large_explosion` sobjects whose per-worm damage loop (sobject.cpp:47-115) WOUNDS the
+# now-VISIBLE + grounded worm1 — but this time worm1 starts at health `12` (below
+# `settings->health/4 = 25`), so (a) the pre-death BLOOD DRIP (worm.cpp:355-367) fires on
+# the pre-explosion ticks and (b) the FIRST blast (~12 dmg, per 5b) drives worm1's health
+# `<= 0` => the DEATH BLOCK (worm.cpp:369-426: death sound + `--lives` + worm0 `kills++` +
+# `visible=false` + `killed_timer=150` + the 120-blood + 8-gib spray). After a 150-tick
+# `killed_timer` countdown the dead-worm `else` arm (worm.cpp:431-450) runs `BeginRespawn`
+# (worm.cpp:711-742 — the level-reading RNG spawn search, the Step-2 desync trap) then
+# `DoRespawning` (worm.cpp:755-809 — the drop-in convergence + the lone `rand()&1` aiming
+# draw), and worm1 flips `visible` back to `true` with `health` restored to 100.
+#
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics — UNCHANGED since 5c; it already
+# drives the unmodified `Worm::Process`, `quick_sim==false`, `blood==100`, so death/respawn
+# needs NO dumper edit) and the Rust N-tick difftest (T8). Same grammar as slice
+# 3/4a/4b/4c/5a/5b/5c.
+#
+# === WHY THIS SCENARIO KILLS THEN RESPAWNS ==========================================
+#   * KILL geometry is IDENTICAL to slice 5b: worm0 lands (~tick 13), raises the gun with
+#     Up(1) ticks 13-20, and Fires(16) tick 38. The 3 explosives projectiles lob LOW-LEFT,
+#     bounce (bounce=30), crawl, and air-burst at x≈94/99/110 (~tick 90), each spawning a
+#     `large_explosion` (id 0, damage=15, detectRange=20). Two blasts catch worm1's center
+#     (x=115) inside their +/-20 box. In 5b worm1 (health 100) survived at 82; here worm1
+#     starts at 12, so the FIRST catching blast takes it to health <= 0 => it DIES.
+#   * PRE-DEATH DRIP: worm1 health 12 < 25 from tick 0, so on every pre-explosion tick the
+#     visible arm's tail (worm.cpp:355) rolls `rand(health+6)`; the ~1/18 hits fire the
+#     drip (`rand(3)` [+ maybe `rand(3)` sound] + blood `Create1` x/y draws), so `rng`
+#     TICKS sparsely on the pre-death ticks and the `bobjects` blood pool drips early. This
+#     is the drip WITNESS (worm.cpp:355-367 live).
+#   * RESPAWN readiness: `DoRespawning` only completes when `ready` is set. worm1 gets a
+#     single Fire(16) press at tick 150 (long after death ~tick 90, long before BeginRespawn
+#     ~tick 240). While DEAD, the else arm's `if (PressedOnce(kFire)) ready = true`
+#     (worm.cpp:433) latches `ready` (worm1 is dead => the Fire does NOT shoot its weapon).
+#     `ready` persists until `DoRespawning` consumes it at the convergence-complete tick.
+#   * BOUNDED BeginRespawn: WormSpawnRect is the whole level (X5 Y5 W494 H340). Both worms
+#     sit on the LEFT (x=115/150, y≈196), so `CheckRespawnPosition`'s reject box
+#     (WormMinSpawnDist{Last,Enemy}=160, rejecting only positions within 160px in BOTH axes
+#     of the death pos AND of the enemy) excludes just the lower-left; most of the level is
+#     a valid spawn => the do/while finds one in a FEW trials (each trial draws 2 rand:
+#     `rand(W)` then `rand(H)`). physics_fall_test.lev is open sky over a Dirt floor (no
+#     Rock), so the drop-down + Rock-scan accept. => the `rng` BURST at BeginRespawn is
+#     narrow (the trial-count witness) and worm1 `pos` JUMPS to the new spawn.
+#   * UNDER CAP (O3 not exercised here): ONE death sprays kMax=120*blood/100=120 blood
+#     (type 6) + 8 worm-gibs (type index) ≈ 128 + the damage-blood ≈ <150 nobjects, well
+#     under the 600 pool cap, so `new_object_reuse` overwrite never fires in the milestone.
+#
+# === Phase layout (tick : action) — TUNED against the golden (OL_PHYS_TRACE) ==========
+# 0-12    settle (empty)     : worm0 falls, lands (~tick 13); worm1 already at rest.
+# 1-89    worm1 drip         : worm1 health 12 < 25 => sparse pre-death drip rolls; `rng`
+#                              ticks sparsely; `bobjects` drips early.
+# 13-20   worm0 Up(1)        : raise the gun ~8 ticks for the flat-left lob.
+# 38      worm0 Fire(16)     : 3 explosives projectiles lob LOW-LEFT; `rng` JUMPS.
+# ~90     AIR-BURST + DEATH  : blast catches worm1 (health 12 -> <=0) => DEATH BLOCK: `rng`
+#                              BURSTS (death sound + 120 blood + 8 gib draws); worm1
+#                              health<=0, visible->false, lives-- ; worm0 kills++ ;
+#                              `nobjects` non-empty (blood+gibs+dirt); `level` carves.
+# 91-239  dead countdown     : `killed_timer` 150->0 (hash-silent); worm1 hashed state
+#                              frozen (health<=0, visible=false, pos at death); `rng` flat
+#                              except draining object loops; `nobjects` drains.
+# 150     worm1 Fire(16)     : PressedOnce => `ready=true` (worm1 dead, no shot fired).
+# ~240    BeginRespawn       : killed_timer hits 0 => level-reading RNG spawn search; `rng`
+#                              BURSTS (2*trials — the trial-count witness); worm1 `pos`
+#                              JUMPS to the new spawn; killed_timer=-1.
+# ~241..  DoRespawning        : logic_respawn converges 4px/tick toward pos-80; when within
+#                              +/-5 AND `ready`: dirt carve (`level` moves) + `rand()&1`
+#                              aiming draw + visible=true + health=100. worm1 REBORN.
+# Control bits (7-bit ControlState): Up=1 Down=2 Left=4 Right=8 Fire=16 Change=32 Jump=64.
+seed 42
+# physics_fall_test.lev: open sky band (Background mat 130) over a solid Dirt floor at
+# y=200px (mat 12), level 504x350. Reused unchanged from slices 2/3/4a/4b/4c/5a/5b/5c.
+level Levels/physics_fall_test.lev
+# Window sized so the full fire -> death -> 150-tick countdown -> BeginRespawn ->
+# DoRespawning respawn cycle completes with margin (verified: worm1 visible->true again).
+ticks 360
+# max_bonuses 0 (default): no bonus interaction — the death/respawn path is the only new
+# surface. Keeps the bonus-drop roll short-circuited (no rand) as in slices 1-5b.
+max_bonuses 0
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# pos_*: 16.16 fixed-point. worm0 = KILLER: grounded falling start (x=150, y=195), full
+# health 100, EXPLOSIVES slot 0. worm1 = VICTIM: at its floor REST pos (x=115, y≈196),
+# VISIBLE + grounded + stationary from tick 0, LOW health 12 (< settings->health/4=25).
+# Identical positions to slice 5b so the air-bursts land at x≈94/99/110 (two within
+# worm1's +/-20 box).
+worm 0  9830400 12779520 100 10 0   1
+worm 1  7536640 12845520  12 10 218 1
+# `weapon <slot> <name>`: override BOTH worms' slot 0 with EXPLOSIVES (name in
+# explosives.cfg), full ammo, ready to fire. worm0 fires it; worm1 never fires while alive
+# (it dies first) and its tick-150 Fire only latches `ready` while dead.
+weapon 0 EXPLOSIVES
+#
+# input <tick> <worm0_7bit> <worm1_7bit>
+# worm0: raise the gun (Up ticks 13-20) then Fire tick 38 — the 5b kill sequence.
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 38 16 0
+# worm1: a single Fire PRESS at tick 150 (dead by then) to latch `ready` for DoRespawning.
+input 150 0 16

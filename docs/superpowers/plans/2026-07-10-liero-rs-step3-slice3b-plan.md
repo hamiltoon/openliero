@@ -61,7 +61,8 @@ Step-2 parallel-build lesson) — but it is planned as an ordinary task here.
   *separate*, **default-seeded** `sim_core::rng::Rand`, **one instance per viewport**, **never**
   `game.rand`. It lives for the whole render session (seeded once at viewport construction, state
   accumulates across ticks). `DrawLaserSight` draws `rand(5)` per stepped Bresenham pixel and, iff
-  that is 0, a `rand(2)` (write `pal32[rand(2)+83]`). The shake branch (`viewport.cpp:49-52`) draws
+  that is 0 AND the pixel is inside the clip, a `rand(2)` (write `pal32[rand(2)+83]`; off-clip
+  zero-pixels draw nothing further — corrected post-T3-review). The shake branch (`viewport.cpp:49-52`) draws
   **two** `rand` off the same viewport RNG, gated `shake>0`. Viewport 0 is fully processed+drawn
   before viewport 1; each worm with a visible laser-sight advances **this viewport's** rand in
   `game.worms` order. Reproduce seed + instance + order or laser/shake frames diverge (overview
@@ -534,9 +535,11 @@ materials 252-255 would push `kP+4 >= 256`, so the query returns the *unshifted*
 `c = -(d>>1)`. **The loop steps BEFORE the body** — so the **start pixel is skipped** and the **end
 pixel is the terminator** (`cx != to_x` / `cy != to_y` exits without drawing it). Off-by-one here
 diverges every line primitive. `DrawLaserSight` (`blit.cpp:693-703`) is the **RNG trap**: per stepped
-pixel it draws `rand(5)` (always, 1 draw); **iff that == 0** it draws a second `rand(2)` and writes
-`pal32[rand(2)+83]` at `(cx,cy)` if `clip.Inside`. So the per-pixel draw count is 1 or 2,
-data-dependent — the Bresenham path length and the RNG sequence *jointly* determine the frame. This is
+pixel it draws `rand(5)` (always, 1 draw); **iff that == 0 AND `clip.Inside(cx,cy)`** it draws a
+second `rand(2)` and writes `pal32[rand(2)+83]` (corrected post-T3-review: the `rand(2)` sits inside
+the Inside-controlled assignment, so off-clip zero-pixels draw nothing further). So the per-pixel
+draw count is 1 or 2,
+data-dependent — the Bresenham path length, the clip, and the RNG sequence *jointly* determine the frame. This is
 the whole proof that the viewport RNG is live and reproduced exactly.
 
 **Steps**
@@ -626,18 +629,20 @@ the whole proof that the viewport RNG is live and reproduced exactly.
           let clip = scr.clip; let pitch = scr.pitch;
           do_line(fx, fy, tx, ty, |cx, cy| {
               if rand.bound(5) == 0 {
-                  let idx = rand.bound(2) as i32 + 83;
-                  if clip.inside(cx, cy) { scr.pixels[(cy*pitch+cx) as usize] = pal[idx as usize]; }
+                  if clip.inside(cx, cy) {
+                      let idx = rand.bound(2) as i32 + 83;
+                      scr.pixels[(cy*pitch+cx) as usize] = pal[idx as usize];
+                  }
               }
           });
       }
       ```
-      > **RNG-order subtlety:** the `rand(2)` is drawn **before** the `clip.Inside` test in C++
-      > (`blit.cpp:700`: `ptr[..] = scr.pal32[rand(2)+83]` — the `rand(2)` evaluates regardless of
-      > whether the write lands, because the index is computed inside the assignment that is only
-      > reached after `rand(5)==0`). So: when `rand(5)==0`, `rand(2)` is **always** drawn, even for an
-      > off-clip pixel. Match the code above (draw `rand(2)` unconditionally once `rand(5)==0`, THEN
-      > clip-gate only the write). Pin an off-clip zero-pixel in the test to lock this.
+      > **RNG-order subtlety (CORRECTED post-review):** in C++ (`blit.cpp:700`) the assignment
+      > `ptr[..] = scr.pal32[rand(2)+83]` is the statement controlled by `if (clip.Inside(cx, cy))`,
+      > so `rand(2)` evaluates **only when the pixel is inside the clip**. An off-clip pixel with
+      > `rand(5)==0` draws NOTHING beyond the `rand(5)`. (This plan originally claimed the opposite —
+      > the T3 review caught it; the code above reflects the correct order.) Pin with a test where a
+      > clip excluding the whole span yields only the `rand(5)` draws (fewer total draws than full clip).
 - [ ] **GREEN (blit_image_r):** port `blit.cpp:344-373` — draws only where `shadow.pixel_at(x+dx,
       y+dy)` is in the half-open water range `[160,168)`. Add a hand-level test (cells in and out of
       range). Uses `clip_image`.
@@ -647,7 +652,8 @@ the whole proof that the viewport RNG is live and reproduced exactly.
 - [ ] Run `cargo test -p render blit` — all PASS. `cargo build -p render`.
 - [ ] Reviewer (Opus): `do_line` start-skipped/end-terminator/major-axis/`c=-(d>>1)` exact; all four
       line drawers use `Inside`; `draw_ninjarope` pre-increments color before plot; `draw_laser_sight`
-      draws `rand(5)` always and `rand(2)` unconditionally-once-zero (before the clip test); water
+      draws `rand(5)` always and `rand(2)` ONLY when the pixel is inside the clip (corrected — see
+      the RNG-order note above); water
       range half-open `[160,168)`; fire-cone thresholds strictly `>` and offsets subtract.
 - [ ] **Commit:**
       - `git add rust/render/src/blit.rs`

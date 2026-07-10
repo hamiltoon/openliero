@@ -1,0 +1,59 @@
+# Step 3 Slice 3a — terrain-only player-layout frame-hash scenario.
+# Static worms (no input) so the ONLY per-frame change is palette RotateFrom.
+#
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics, slice-3a build = opt-in
+# `render player` directive + sidecar frame golden) and the Rust frame-hash test.
+# Same grammar as the sim slices, plus the new `render <layout>` directive.
+#
+# === WHY THIS PROVES RotateFrom (the slice's open question #1) ================
+# The reduced frame is TERRAIN-ONLY (palette rebuild -> Fill(0) -> per-viewport
+# DrawLevel; no HUD/shadow/sprite/minimap). So the frame hash can only move if a
+# drawn LEVEL pixel's ARGB changes between ticks. With zero input and frozen worms
+# the level bytes never change, so the sole moving part is the per-frame palette
+# build: `pal = Origpal; for each color_anim: pal.RotateFrom(Origpal, from, to,
+# cycles>>3)` (game.cpp:171-183). RotateFrom cycles the palette entries in a range
+# by `dist = (cycles>>3) % count`, so a drawn pixel whose material index sits in a
+# color_anim range changes color exactly on each `cycles>>3` boundary (ticks 8, 16,
+# 24), and is otherwise constant. tc.cfg color_anim ranges: 129-131, 133-136,
+# 152-159, 168-171.
+#
+# physics_fall_test.lev is built from exactly TWO material indices (gen_physics_level.py):
+#   * sky  = 130 (rows 0-199) — a Background material; ALSO palette index 130, which
+#            lands INSIDE color_anim range 129-131. The exepal entries there are all
+#            distinct: 129=(104,104,248) 130=(144,144,244) 131=(184,184,244), so as
+#            RotateFrom rotates 129..131 the sky's ARGB visibly changes.
+#   * dirt = 12  (rows 200-349) — NOT in any color_anim range, so it is constant.
+# RotateFrom over 129-131 (count=3): dist = (cycles>>3) % 3 selects sky index 130's
+# source entry: dist 0 -> src[130], dist 1 -> src[129], dist 2 -> src[131]. Hence:
+#   tick 0        : composition fade=0 -> whole surface black (fixed constant)
+#   ticks 1-7     : cycles>>3=0, dist 0 -> src[130]  (HASH A)
+#   ticks 8-15    : cycles>>3=1, dist 1 -> src[129]  (HASH B, != A)
+#   ticks 16-23   : cycles>>3=2, dist 2 -> src[131]  (HASH C, != B)
+#   ticks 24-26   : cycles>>3=3, dist 0 -> src[130]  (HASH A again — the boundary at
+#                                                     24 flips C -> A, a visible change)
+#
+# === WHY INVISIBLE WORMS (visible 0) =========================================
+# The empirical requirement is that the frame hash be CONSTANT inside each 8-tick
+# window and MOVE only on the boundary. That needs the drawn window to be pixel-
+# stable between ticks. Two levers make it robustly stable here:
+#   1. `visible 0`: Worm::Process is gated `if (visible)` (worm.cpp), so an invisible
+#      worm runs NO physics — it never falls, so it can never drift the viewport
+#      center. (A visible worm placed in the sky would fall under gravity and shift
+#      the window every tick, moving the hash for non-palette reasons.)
+#   2. Both worms sit HIGH in the sky (py=60, above the viewport half-height 79), so
+#      each 158x158 viewport window lies entirely in the sky band (rows 0-157 < 200)
+#      and is a UNIFORM field of index 130. A uniform field is invariant to the
+#      camera's horizontal ScrollTo pan, so the residual camera motion of an
+#      invisible worm's ScrollTo is hash-inert; only the palette rotation remains.
+# There are no `input` lines: the scenario is fully static.
+seed 42
+level Levels/physics_fall_test.lev
+ticks 26
+render player
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# pos_*: 16.16 fixed-point (Itof(px) = px<<16). Both worms are INVISIBLE and frozen
+# high in the sky so each viewport window is a uniform sky (index 130) field.
+#   worm0: px=100 py=60  -> 100<<16=6553600  60<<16=3932160
+#   worm1: px=250 py=60  -> 250<<16=16384000 60<<16=3932160
+worm 0  6553600 3932160 100 10 0   0
+worm 1 16384000 3932160 100 10 218 0

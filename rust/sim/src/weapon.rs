@@ -35,7 +35,7 @@ use crate::blit::draw_dirt_effect;
 use crate::nobject::{check_for_spec_worm_hit, nobject_create2};
 use crate::pool::Pool;
 use crate::sobject::sobject_create;
-use crate::state::{do_damage, Bonus, LevelSim, NObject, SObject, WObject, WormState};
+use crate::state::{do_damage, Bonus, ControlState, LevelSim, NObject, SObject, WObject, WormState};
 
 // `Weapon::shot_type` enum values (`weapon.hpp:21`):
 // `enum { kStNormal, kStdType1, kStSteerable, kStdType2, kStLaser };`
@@ -43,6 +43,7 @@ const ST_NORMAL: i32 = 0;
 const ST_TYPE1: i32 = 1;
 const ST_STEERABLE: i32 = 2;
 const ST_TYPE2: i32 = 3;
+const ST_LASER: i32 = 4;
 
 /// Port of `Weapon::Fire` (`weapon.cpp:16-76`): spawn one projectile.
 ///
@@ -288,42 +289,40 @@ pub enum WObjectOutcome {
 #[allow(clippy::too_many_arguments)]
 pub fn wobject_process(
     obj: &mut WObject,
-    level: &LevelSim,
+    level: &mut LevelSim,
     weapon: &Weapon,
+    weapons: &[Weapon],
     cycles: i32,
     worms: &mut [WormState],
+    wobjects: &mut Pool<WObject>,
     nobjects: &mut Pool<NObject>,
     nobject_types: &[NObjectType],
+    sobjects: &mut Pool<SObject>,
+    sobject_types: &[SObjectType],
+    bonuses: &mut Pool<Bonus>,
     worm_sprites: &SpriteSet,
+    large_sprites: &SpriteSet,
+    textures: &[Texture],
     cossin: &[Vec2; 128],
     blood: i32,
     game_mode: u32,
     settings_health: i32,
     rand: &mut Rand,
 ) -> WObjectOutcome {
-    // Deferred-branch guards (4b/4c). Fan and dart satisfy every one (the dart
-    // trips only the shot_type guard, now relaxed to admit ST_TYPE1); a config
-    // that would take an un-ported branch fails loudly in debug builds.
-    // ST_NORMAL and ST_TYPE1 (the dart) share an identical per-tick flight: the
-    // C++ Process do-while body runs once for any non-laser, and the only
-    // shot_type-specific branches are the steering ones (2/3) and the laser loop
-    // guard (4) — ST_TYPE1 takes none of them and draws no rng (weapon.cpp:144-167,
-    // 336). ST_TYPE2/STEERABLE/laser STAY deferred.
+    // Deferred-branch guards. shot_type 0/1/2/3 are all ported now: ST_NORMAL/
+    // ST_TYPE1 share the plain flight; ST_STEERABLE (2) and ST_TYPE2 (3, e.g.
+    // BAZOOKA) run the steering block below. Only the laser do-loop (shot_type 4)
+    // stays deferred. `mult_speed` and the `obj_trail` spawn are LIVE (T7b); the
+    // particle-trail spawn stays deferred (no fired weapon in this TC uses it —
+    // bazooka's part_trail_obj = -1). A config that would take an un-ported branch
+    // fails loudly in debug builds.
     debug_assert!(
-        weapon.shot_type == ST_NORMAL || weapon.shot_type == ST_TYPE1,
-        "steerable/type2/laser Process branches deferred (4b/4c)"
-    );
-    debug_assert!(
-        weapon.mult_speed == 100,
-        "mult_speed Process branch deferred (4b/4c)"
-    );
-    debug_assert!(
-        weapon.obj_trail_type < 0,
-        "object-trail spawn deferred (4b/4c)"
+        weapon.shot_type != ST_LASER,
+        "laser do-loop Process branch deferred"
     );
     debug_assert!(
         weapon.part_trail_obj < 0,
-        "particle-trail spawn deferred (4b/4c)"
+        "particle-trail spawn deferred (no fired weapon uses it)"
     );
 
     let mut do_explode = false;
@@ -333,6 +332,35 @@ pub fn wobject_process(
 
     // pos += vel.
     obj.pos = obj.pos.add(obj.vel);
+
+    // Steering (weapon.cpp:148-167) — LIVE (T7b). ST_STEERABLE (2) blends `vel`
+    // toward the cur_frame direction, boosting by add_speed while the VISIBLE owner
+    // holds Up: `vel = (vel*8 + new_vel)/9`. ST_TYPE2 (3, e.g. BAZOOKA) adds a
+    // constant add_speed accel along cur_frame, then a distribution scatter (bazooka
+    // distribution = 0 -> NO rand). For shot_type 2/3 `Weapon::Fire` set cur_frame to
+    // the firing angle (0..127), so cossin[cur_frame] is the aim direction. This
+    // mutates `vel` ONLY — `pos` is unchanged, so the obj_trail / explosion position
+    // below is the post-`pos+=vel` value regardless of steering. Truncating `/100`,
+    // `/9`. The two distribution draws use the SAME `rand(dist*2) - dist` sign form
+    // as `weapon_fire`; their order (x then y) is the RNG contract.
+    if weapon.shot_type == ST_STEERABLE {
+        let kdir = cossin[obj.cur_frame as usize];
+        let mut new_vel = kdir.mul(weapon.speed).div(100);
+        let owner = &worms[obj.owner_idx as usize];
+        if owner.visible && owner.control_states.get(ControlState::UP) {
+            new_vel = new_vel.add(kdir.mul(weapon.add_speed).div(100));
+        }
+        obj.vel = obj.vel.mul(8).add(new_vel).div(9);
+    } else if weapon.shot_type == ST_TYPE2 {
+        let kdir = cossin[obj.cur_frame as usize];
+        obj.vel = obj.vel.add(kdir.mul(weapon.add_speed).div(100));
+        if weapon.distribution != 0 {
+            let dist = weapon.distribution;
+            let max = (dist * 2) as u32;
+            obj.vel.x = obj.vel.x.wrapping_add((rand.bound(max) as i32).wrapping_sub(dist));
+            obj.vel.y = obj.vel.y.wrapping_add((rand.bound(max) as i32).wrapping_sub(dist));
+        }
+    }
 
     // Bounce (weapon.cpp:169-190) — SAME pattern as the nobject bounce
     // (nobject.rs:300-324). Natural C++ guard `bounce > 0` (skipped for fan/dart,
@@ -384,6 +412,57 @@ pub fn wobject_process(
         }
     }
 
+    // mult_speed (weapon.cpp:192-194) — LIVE (T7b). `vel *= mult_speed/100` when it
+    // is not 100 (bazooka = 100, so inert). Truncating `/100`. No rand.
+    if weapon.mult_speed != 100 {
+        obj.vel = obj.vel.mul(weapon.mult_speed).div(100);
+    }
+
+    // Object trail (weapon.cpp:196-199) — LIVE (T7b). Every `obj_trail_delay` cycles
+    // spawn `sobject_types[obj_trail_type]` at the CURRENT integer pos (after
+    // pos+=vel+steering+bounce+mult_speed, BEFORE the boundary clamp / explosion).
+    // The gate reads `cycles` — the SAME pre-`++cycles` snapshot the animation gate
+    // uses (the driver runs the object loops before `++cycles`), matching C++
+    // `game.cycles % obj_trail_delay`. This is the BAZOOKA smoke trail
+    // (hellraider_smoke, sobject 3): its `Create` draws NO rand (start_sound < 0,
+    // damage 0, dirt_effect -1, detect_range 0 -> the bonus loop can never match), so
+    // the shared RNG stream is untouched — but the sobject IS added to the pool.
+    // Dropping it was the T7 fuzz divergence: at the first bazooka explosion the
+    // sobjects SET differs (missing the id-3 trail) while RNG/nobjects/wobjects still
+    // match, then the master hash desyncs and cascades. The spawn precedes the tick's
+    // explosion, so on an exploding tick the pool order is [trail, create_on_exp] —
+    // exactly the C++ order. `obj` is the driver's by-value copy, so `wobjects` still
+    // holds this wobject's stale slot; `sobject_create` only walks `wobjects` in its
+    // `damage > 0` arm (skipped by the RNG-neutral trail sobjects), so passing the
+    // pool here is inert for the trail. `obj_trail_delay` is > 0 for any weapon with
+    // `obj_trail_type >= 0` (bazooka = 4), so the `%` never divides by zero.
+    if weapon.obj_trail_type >= 0 && cycles % weapon.obj_trail_delay == 0 {
+        sobject_create(
+            &sobject_types[weapon.obj_trail_type as usize],
+            ftoi(obj.pos.x),
+            ftoi(obj.pos.y),
+            obj.owner_idx,
+            worms,
+            wobjects,
+            weapons,
+            nobjects,
+            nobject_types,
+            level,
+            cossin,
+            large_sprites,
+            textures,
+            sobjects,
+            bonuses,
+            sobject_types,
+            blood,
+            game_mode,
+            settings_health,
+            rand,
+        );
+    }
+
+    // The particle-trail spawn (weapon.cpp:201-210) goes here in C++; deferred (no
+    // fired weapon in this TC has part_trail_obj >= 0 — bazooka = -1; guarded above).
     // The collide_with_objects impulse loop (weapon.cpp:212-232) goes here in C++;
     // omitted (driver-owned + inert for one shot; no RNG drawn under the scenario).
     // The worm-hit loop (weapon.cpp:287-326) is AFTER the timeout, below.
@@ -1149,17 +1228,81 @@ mod tests {
         let nobject_types: [NObjectType; 0] = [];
         let worm_sprites = SpriteSet::default();
         let cossin = precompute_cossin();
+        // T7b widened the signature: obj_trail/steering need the sobject-spawn deps.
+        // The flight/collision/timeout tests use synthetic weapons with
+        // obj_trail_type = -1, so `sobject_create` never runs and these empty pools /
+        // slices are never touched. `level` is cloned to a local `&mut` so the flight
+        // tests keep passing `&level`.
+        let mut level = level.clone();
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bonuses: Pool<Bonus> = Pool::new(1);
+        let large_sprites = SpriteSet::default();
         wobject_process(
             obj,
-            level,
+            &mut level,
             weapon,
+            &[],
             cycles,
             &mut worms,
+            &mut wobjects,
             &mut nobjects,
             &nobject_types,
+            &mut sobjects,
+            &[],
+            &mut bonuses,
             &worm_sprites,
+            &large_sprites,
+            &[],
             &cossin,
             100,
+            0,
+            100,
+            rand,
+        )
+    }
+
+    // Drives `wobject_process` with a REAL worm list + sprite bank (for the T3
+    // in-flight worm-hit arm tests). Supplies the T7b obj_trail/steering deps as
+    // empty pools/slices: the hit weapons all have obj_trail_type = -1, so
+    // `sobject_create` never runs and these are inert. `level` is cloned to a local
+    // `&mut` so the call sites keep passing `&level`.
+    #[allow(clippy::too_many_arguments)]
+    fn proc_hit(
+        obj: &mut WObject,
+        level: &LevelSim,
+        weapon: &Weapon,
+        worms: &mut [WormState],
+        nobjects: &mut Pool<NObject>,
+        nobject_types: &[NObjectType],
+        worm_sprites: &SpriteSet,
+        cossin: &[Vec2; 128],
+        blood: i32,
+        rand: &mut Rand,
+    ) -> WObjectOutcome {
+        let mut level = level.clone();
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bonuses: Pool<Bonus> = Pool::new(1);
+        let large_sprites = SpriteSet::default();
+        wobject_process(
+            obj,
+            &mut level,
+            weapon,
+            &[],
+            0,
+            worms,
+            &mut wobjects,
+            nobjects,
+            nobject_types,
+            &mut sobjects,
+            &[],
+            &mut bonuses,
+            worm_sprites,
+            &large_sprites,
+            &[],
+            cossin,
+            blood,
             0,
             100,
             rand,
@@ -2613,19 +2756,16 @@ mod tests {
         let mut rand = seeded();
         let mut obj = hit_wobject(obj_vel);
 
-        let out = wobject_process(
+        let out = proc_hit(
             &mut obj,
             &level,
             &weapon,
-            0,
             &mut worms,
             &mut nobjects,
             &nobject_types,
             &worm_sprites,
             &cossin,
             blood,
-            0,
-            100,
             &mut rand,
         );
 
@@ -2677,18 +2817,15 @@ mod tests {
         let rng_before = rand.last();
         let mut obj = hit_wobject(obj_vel);
 
-        let out = wobject_process(
+        let out = proc_hit(
             &mut obj,
             &level,
             &weapon,
-            0,
             &mut worms,
             &mut nobjects,
             &nobject_types,
             &worm_sprites,
             &cossin,
-            100,
-            0,
             100,
             &mut rand,
         );
@@ -2726,18 +2863,15 @@ mod tests {
         let rng_before = rand.last();
         let mut obj = hit_wobject(obj_vel);
 
-        let out = wobject_process(
+        let out = proc_hit(
             &mut obj,
             &level,
             &weapon,
-            0,
             &mut worms,
             &mut nobjects,
             &nobject_types,
             &worm_sprites,
             &cossin,
-            100,
-            0,
             100,
             &mut rand,
         );
@@ -2782,18 +2916,15 @@ mod tests {
         refr.bound(1); // exactly one rand(1) for the worm_collide gate
         let mut obj = hit_wobject(obj_vel);
 
-        let out = wobject_process(
+        let out = proc_hit(
             &mut obj,
             &level,
             &weapon,
-            0,
             &mut worms,
             &mut nobjects,
             &nobject_types,
             &worm_sprites,
             &cossin,
-            100,
-            0,
             100,
             &mut rand,
         );
@@ -2824,18 +2955,15 @@ mod tests {
         let mut rand = seeded();
         let mut obj = hit_wobject(obj_vel);
 
-        let out = wobject_process(
+        let out = proc_hit(
             &mut obj,
             &level,
             &weapon,
-            0,
             &mut worms,
             &mut nobjects,
             &nobject_types,
             &worm_sprites,
             &cossin,
-            100,
-            0,
             100,
             &mut rand,
         );
@@ -2845,5 +2973,171 @@ mod tests {
             WObjectOutcome::Remove,
             "worm_collide without worm_explode -> Remove"
         );
+    }
+
+    // ---- T7b: shot_type-3 steering + obj_trail spawn (BAZOOKA) ---------------
+
+    // A minimal RNG-neutral trail sobject (shaped like hellraider_smoke): start_sound
+    // < 0, damage 0, dirt_effect -1, detect_range 0 -> `sobject_create` draws NO rand
+    // and only appends the sobject (the bonus loop can never match at range 0).
+    fn trail_sobject(id: i32) -> SObjectType {
+        SObjectType {
+            id,
+            start_sound: -1,
+            num_sounds: 0,
+            anim_delay: 4,
+            start_frame: 64,
+            num_frames: 4,
+            detect_range: 0,
+            damage: 0,
+            blow_away: 0,
+            dirt_effect: -1,
+            ..Default::default()
+        }
+    }
+
+    // A BAZOOKA-shaped weapon: shot_type 3 (ST_TYPE2) steering with add_speed, an
+    // obj_trail every 4 cycles, no timeout / ground-explode so a flight tick just
+    // steers + trails. add_speed exaggerated so the steer term is unmistakable.
+    fn steer_trail_weapon() -> Weapon {
+        Weapon {
+            id: 1,
+            shot_type: ST_TYPE2,
+            speed: 200,
+            add_speed: 300,
+            distribution: 0,
+            bounce: 0,
+            mult_speed: 100,
+            gravity: 0,
+            expl_ground: false,
+            time_to_explo: 0,
+            num_frames: 0,
+            obj_trail_type: 0,
+            obj_trail_delay: 4,
+            part_trail_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    // Drive `wobject_process` with a real sobjects pool + trail sobject type, no
+    // worms (the in-flight arm is inert), on an all-air level (free flight).
+    #[allow(clippy::too_many_arguments)]
+    fn proc_trail(
+        obj: &mut WObject,
+        weapon: &Weapon,
+        cycles: i32,
+        cossin: &[Vec2; 128],
+        sobjects: &mut Pool<SObject>,
+        sobject_types: &[SObjectType],
+        rand: &mut Rand,
+    ) -> WObjectOutcome {
+        let mut level = air_level();
+        let mut worms: [WormState; 0] = [];
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut nobjects: Pool<NObject> = Pool::new(4);
+        let nobject_types: [NObjectType; 0] = [];
+        let mut bonuses: Pool<Bonus> = Pool::new(1);
+        let worm_sprites = SpriteSet::default();
+        let large_sprites = SpriteSet::default();
+        wobject_process(
+            obj,
+            &mut level,
+            weapon,
+            &[],
+            cycles,
+            &mut worms,
+            &mut wobjects,
+            &mut nobjects,
+            &nobject_types,
+            sobjects,
+            sobject_types,
+            &mut bonuses,
+            &worm_sprites,
+            &large_sprites,
+            &[],
+            cossin,
+            100,
+            0,
+            100,
+            rand,
+        )
+    }
+
+    #[test]
+    fn shot_type3_steers_velocity_and_spawns_obj_trail_on_delay_cycle() {
+        // BAZOOKA (shot_type 3): after pos+=vel, `vel += cossin[cur_frame]*add_speed
+        // /100`; and every obj_trail_delay cycles a trail sobject is appended at the
+        // CURRENT integer pos. Both were DEFERRED before T7b (the fuzz divergence) —
+        // this test is RED on the old code (no steer -> vel unchanged; no trail ->
+        // empty sobjects; in a debug build the old shot_type debug_assert panics).
+        let cossin = precompute_cossin();
+        let weapon = steer_trail_weapon();
+        let sobject_types = vec![trail_sobject(0)];
+
+        let start_pos = Vec2::new(itof(100), itof(200));
+        let start_vel = Vec2::new(itof(2), itof(1));
+        let mut obj = WObject {
+            pos: start_pos,
+            vel: start_vel,
+            cur_frame: 32, // == cossin index (Fire set cur_frame = firing angle)
+            owner_idx: 0,
+            ty: Some(1),
+            time_left: 0,
+            ..WObject::default()
+        };
+        let mut sobjects: Pool<SObject> = Pool::new(700);
+        let mut rand = seeded();
+
+        // cycles = 4 -> 4 % obj_trail_delay(4) == 0 -> the trail fires.
+        let out = proc_trail(&mut obj, &weapon, 4, &cossin, &mut sobjects, &sobject_types, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep, "free flight -> Keep");
+
+        // pos advanced by the ORIGINAL vel; steering then adjusts vel only.
+        assert_eq!(obj.pos, start_pos.add(start_vel), "pos advanced by original vel");
+        let expected_vel = start_vel.add(cossin[32].mul(300).div(100));
+        assert_eq!(
+            obj.vel, expected_vel,
+            "shot_type 3 adds cossin[cur_frame]*add_speed/100 to vel"
+        );
+        assert_ne!(obj.vel, start_vel, "steering MUST change vel (RED on the deferred branch)");
+
+        // obj_trail: exactly one trail sobject at Ftoi(pos) - 8 (the sobject_create
+        // centre->top-left offset), id 0, cur_frame 0. RNG-neutral.
+        assert_eq!(sobjects.len(), 1, "obj_trail spawns one sobject on the delay cycle");
+        let s = *sobjects.get(0).expect("trail sobject in slot 0");
+        assert_eq!(s.id, 0, "trail sobject id");
+        assert_eq!(s.cur_frame, 0, "fresh trail sobject cur_frame = 0");
+        assert_eq!(s.x, ftoi(obj.pos.x) - 8, "trail x = Ftoi(pos.x) - 8");
+        assert_eq!(s.y, ftoi(obj.pos.y) - 8, "trail y = Ftoi(pos.y) - 8");
+        assert_eq!(
+            rand.last(),
+            0,
+            "RNG-neutral trail + zero-distribution steer: no rand drawn this tick"
+        );
+    }
+
+    #[test]
+    fn obj_trail_skips_off_delay_cycle() {
+        // cycles % obj_trail_delay != 0 -> NO trail spawn (the delay gate).
+        let cossin = precompute_cossin();
+        let weapon = steer_trail_weapon();
+        let sobject_types = vec![trail_sobject(0)];
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(200)),
+            vel: Vec2::new(itof(2), itof(1)),
+            cur_frame: 32,
+            owner_idx: 0,
+            ty: Some(1),
+            time_left: 0,
+            ..WObject::default()
+        };
+        let mut sobjects: Pool<SObject> = Pool::new(700);
+        let mut rand = seeded();
+
+        // cycles = 5 -> 5 % 4 != 0 -> no trail.
+        proc_trail(&mut obj, &weapon, 5, &cossin, &mut sobjects, &sobject_types, &mut rand);
+        assert_eq!(sobjects.len(), 0, "no trail spawn when cycles % delay != 0");
+        // Steering still applied (independent of the trail gate).
+        assert_ne!(obj.vel, Vec2::new(itof(2), itof(1)), "steering runs every flight tick");
     }
 }

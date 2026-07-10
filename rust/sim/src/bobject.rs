@@ -33,9 +33,14 @@ use crate::state::{BObject, LevelSim};
 /// the result is only stored, never read by [`bobject_process`]).
 ///
 /// The blood-trail caller passes the spraying nobject's `pos` and `vel / 4`
-/// (`nobject.cpp:96`). A full pool (the C++ `NewObjectReuse` slot-0 reuse, O3) is
-/// deferred: under the faithful 1/10 blood-trail cadence the pool stays well under
-/// its 700 cap, so a `None` spawn (drop) is unreachable here.
+/// (`nobject.cpp:96`). When the 700-slot pool is FULL, C++ `NewObjectReuse`
+/// overwrites the last live particle in place (`&arr[limit-1]`) rather than
+/// dropping the spawn — so a busy multi-object frame keeps replacing `bobjects[699]`
+/// each new blood. The T7 fuzz (variant 1, the blood pool fills to 700/700) surfaced
+/// this: dropping the spawn (the old `spawn`, which returns `None` at cap) left
+/// `bobjects[699]` stale while C++ kept overwriting it, diverging the bobjects hash
+/// while the RNG stayed in sync (the colour draw fires either way). Use
+/// [`BloodPool::spawn_reuse`] to match C++ exactly.
 pub fn create_bobject(
     bobjects: &mut BloodPool<BObject>,
     pos: Vec2,
@@ -47,8 +52,8 @@ pub fn create_bobject(
     // :12 color = rand(NumBloodColours) + FirstBloodColour. Load-bearing DRAW;
     // colour value render-only (not hashed).
     let color = rand.bound(num_blood_colours as u32) as i32 + first_blood_colour;
-    // :10-14 NewObjectReuse, then write pos/vel. Pool-full reuse deferred (O3).
-    let _ = bobjects.spawn(BObject { pos, vel, color });
+    // :10-14 NewObjectReuse (overwrite the last slot when full), then write pos/vel.
+    bobjects.spawn_reuse(BObject { pos, vel, color });
 }
 
 /// Port of `BObject::Process` (`bobject.cpp:17-49`) — advance one blood particle by
@@ -188,6 +193,46 @@ mod tests {
         let b = *bobjects.iter().next().unwrap();
         assert_eq!(b.vel, quarter, "carries vel/4");
         assert_ne!(b.vel, nob_vel, "not the undivided vel");
+    }
+
+    // ---- T7b: full-pool NewObjectReuse overwrite (blood storm at cap) ---------
+
+    #[test]
+    fn create_bobject_overwrites_last_slot_when_pool_is_full() {
+        // C++ `CreateBObject` uses `FastObjectList::NewObjectReuse`: once the pool is
+        // FULL it returns `&arr[limit-1]` and overwrites that last particle IN PLACE
+        // (count stays at cap) — it never drops the spawn. The old Rust port used
+        // `spawn` (returns None at cap -> DROP), which left `bobjects[limit-1]` stale
+        // while C++ kept replacing it. The T7 fuzz (variant 1, blood pool 700/700)
+        // caught it as a bobjects-hash divergence with the RNG still in sync. This
+        // test fills a small pool, then spawns once more: len must stay at cap and the
+        // last slot must hold the NEW blood (RED on the old `spawn`/drop path).
+        let mut bobjects: BloodPool<BObject> = BloodPool::new(3);
+        for i in 0..3 {
+            bobjects.spawn(BObject {
+                pos: Vec2::new(itof(i), itof(i)),
+                vel: Vec2::zero(),
+                color: 0,
+            });
+        }
+        assert_eq!(bobjects.len(), 3, "pool filled to cap");
+
+        let mut rand = seeded();
+        let new_pos = Vec2::new(itof(99), itof(88));
+        create_bobject(&mut bobjects, new_pos, Vec2::new(itof(1), itof(2)), 9, 80, &mut rand);
+
+        assert_eq!(
+            bobjects.len(),
+            3,
+            "len stays at cap: NewObjectReuse overwrites, never appends/drops"
+        );
+        let last = *bobjects.iter().last().expect("last live blood");
+        assert_eq!(
+            last.pos, new_pos,
+            "the last slot now holds the NEW blood (overwrite in place, not dropped)"
+        );
+        // The colour roll fires whether or not the pool is full.
+        assert_ne!(rand.last(), 0, "colour rand(NumBloodColours) still drawn at cap");
     }
 
     // ---- bobject_process: background -> gravity, stays, no rand --------------

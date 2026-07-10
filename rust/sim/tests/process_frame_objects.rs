@@ -358,16 +358,29 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
     let mut sobjects2: Pool<SObject> = Pool::new(700);
 
     let mut obj = pre_explode_wobj;
+    // T7b widened the signature (obj_trail/steering deps). The dart has
+    // obj_trail_type = -1 and shot_type 1, so the new branches are inert; pass a
+    // mutable clone of the pre-explode level (dart's Process only READS terrain) plus
+    // empty weapons/bonus deps.
+    let mut level_wp = level_before.clone();
+    let mut bonuses2: Pool<sim::state::Bonus> = Pool::new(1);
     assert_eq!(
         wobject_process(
             &mut obj,
-            &level_before,
+            &mut level_wp,
             &dart,
+            &[],
             0,
             &mut worms2,
+            &mut wobjects2,
             &mut nobjects2,
             &s.nobject_types,
+            &mut sobjects2,
+            &s.sobject_types,
+            &mut bonuses2,
             &s.worm_sprites,
+            &s.large_sprites,
+            &s.textures,
             &cossin,
             s.blood,
             0,

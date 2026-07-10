@@ -174,6 +174,25 @@ impl<T> BloodPool<T> {
         Some(idx)
     }
 
+    /// Appends `value`, or — when the pool is **full** — overwrites the last live
+    /// object in place, returning its slot index. Mirrors C++
+    /// `FastObjectList::NewObjectReuse` (`fastObjectList.hpp:35-44`): at `count ==
+    /// limit` it returns `&arr[limit-1]`, so `count` stays at the cap (no free, no
+    /// swap) and the last slot's value is replaced. This is the spawn path
+    /// `Game::CreateBObject` (`bobject.cpp:10`) uses, so a full blood pool keeps
+    /// overwriting its last particle exactly as C++ does — never dropping the spawn.
+    pub fn spawn_reuse(&mut self, value: T) -> usize {
+        if self.arr.len() == self.capacity {
+            let last = self.capacity - 1;
+            self.arr[last] = value;
+            last
+        } else {
+            let idx = self.arr.len();
+            self.arr.push(value);
+            idx
+        }
+    }
+
     /// Frees the object at `index` via swap-remove: the last live object takes
     /// its place. Matches C++ `Free(ptr)` (`*ptr = arr[--count]`).
     pub fn free(&mut self, index: usize) {

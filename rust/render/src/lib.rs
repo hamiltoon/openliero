@@ -8,6 +8,7 @@
 //! arm, the two-viewport 320x200 player layout, and the frame hash. Shadows,
 //! sprites, HUD, minimap arrive in 3b/3e.
 pub mod bitmap;
+pub mod blit;
 pub mod frame;
 pub mod hash;
 pub mod level_draw;

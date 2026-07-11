@@ -24,32 +24,21 @@
 
 #![allow(dead_code)] // each test binary uses a subset of the shared surface.
 
-use assets::object::Objects;
+use std::path::Path;
+
 use assets::palette::Palette;
 use assets::sprite::SpriteSet;
-use assets::tc::{ColorAnim, TcConfig};
+use assets::tc::ColorAnim;
 use oracle_tests::scenario::Scenario;
-use sim::control::ControlConsts;
 use sim::hash::hash_game_state;
-use sim::physics::PhysicsConsts;
-use sim::state::{ControlState, SimState, WeaponId, WeaponInit, WormInit, NUM_WEAPONS};
+use sim::state::{ControlState, SimState};
 use sim_core::fixed::itof;
-use sim_core::vec::Vec2;
 
 use render::bitmap::Bitmap;
-use render::fire_cone::build_fire_cone_sprites;
 use render::frame::Scene;
 use render::viewport::Viewport;
 
 const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
-
-fn load_sprites(file: &str, w: i32, h: i32, count: i32) -> SpriteSet {
-    let bytes = std::fs::read(format!("{TC_ROOT}/sprites/{file}")).unwrap_or_else(|e| {
-        panic!("read sprites/{file}: {e}");
-    });
-    let tga = assets::sprite::Tga::load(&bytes).unwrap_or_else(|_| panic!("{file} parses"));
-    SpriteSet::from_tga(&tga, w, h, count).unwrap_or_else(|_| panic!("{file} sprite bank"))
-}
 
 /// One parsed frame-sidecar line: `<tick> <frame_hash_hex16> <state_hash_hex8>`.
 pub struct FrameLine {
@@ -131,104 +120,22 @@ fn build(name: &str) -> Built {
     let scenario = Scenario::parse(&scenario_text).expect("scenario parses");
     assert_eq!(scenario.seed, 42, "3b scenarios all use seed 42");
 
-    // Origpal = small.tga's embedded palette (C++ common.exepal), as in 3a.
-    let small_bytes =
-        std::fs::read(format!("{TC_ROOT}/sprites/small.tga")).expect("read small.tga");
-    let small_tga = assets::sprite::Tga::load(&small_bytes).expect("small.tga parses");
-    let origpal = small_tga.palette.clone();
-
-    let lev_bytes = std::fs::read(format!("{TC_ROOT}/{}", scenario.level))
-        .unwrap_or_else(|e| panic!("read {}: {e}", scenario.level));
-    let level = assets::level::load(&lev_bytes).expect("level loads");
-    let tc_bytes = std::fs::read(format!("{TC_ROOT}/tc.cfg")).expect("read tc.cfg");
-    let tc = TcConfig::load(&tc_bytes).expect("tc.cfg parses");
-    let color_anim = tc.color_anim.clone();
-    let objects = Objects::load(&tc.types, |sub, id| {
-        std::fs::read(format!("{TC_ROOT}/{sub}/{id}.cfg"))
-    })
-    .expect("object configs load");
-
-    // weap_order: indices sorted by weapon name; id == index (Common::Precompute).
-    let mut weap_order: Vec<usize> = (0..objects.weapons.len()).collect();
-    weap_order.sort_by(|&a, &b| objects.weapons[a].name.cmp(&objects.weapons[b].name));
-    let settings_weapons = [1u32; NUM_WEAPONS];
-    let mut resolved = WormInit::resolve_weapons(&objects, &weap_order, &settings_weapons);
-
-    // Override slot 0 with the scenario's `weapon 0 <name>` (FAN/DART/RIFLE),
-    // applied to BOTH worms — mirrors the C++ dumper's ResolveWeapon (5b-style).
-    let weapon_name = scenario
-        .weapon(0)
-        .expect("3b scenario has a `weapon 0 <name>` directive");
-    let weapon_idx = objects
-        .weapons
-        .iter()
-        .position(|w| w.name == weapon_name)
-        .unwrap_or_else(|| panic!("weapon {weapon_name:?} present in TC weapon table"));
-    resolved[0] = WeaponInit {
-        ty: Some(weapon_idx as WeaponId),
-        ammo: objects.weapons[weapon_idx].ammo,
-    };
-
-    let worms_init: Vec<WormInit> = scenario
-        .worms
-        .iter()
-        .map(|w| WormInit {
-            index: w.index,
-            health: w.health,
-            lives: w.lives,
-            stats_x: w.stats_x,
-            weapons: resolved,
-            start_pos: Vec2::new(w.pos_x, w.pos_y),
-            visible: w.visible,
-        })
-        .collect();
-
-    let mut state = SimState::new(
-        &level,
-        &worms_init,
-        scenario.seed,
-        &tc.materials,
-        objects.weapons.clone(),
-        PhysicsConsts::from_tc(&tc),
-        ControlConsts::from_tc(&tc),
-        tc.hacks.SignedRecoil,
-        load_sprites("large.tga", 16, 16, 110),
-        tc.textures.clone(),
-        objects.sobject_types.clone(),
-        objects.nobject_types.clone(),
-        0,
-        true,
-        100,
-    );
-    // TC scalars defaulted to 0 by `new` (as in 3a/5b) — the blood/spawn consts.
-    state.num_blood_colours = tc.constants.NumBloodColours;
-    state.first_blood_colour = tc.constants.FirstBloodColour;
-    state.bobj_gravity = tc.constants.BObjGravity;
-    state.small_sprites = load_sprites("small.tga", 7, 7, 130);
-    state.worm_spawn_rect_x = tc.constants.WormSpawnRectX;
-    state.worm_spawn_rect_y = tc.constants.WormSpawnRectY;
-    state.worm_spawn_rect_w = tc.constants.WormSpawnRectW;
-    state.worm_spawn_rect_h = tc.constants.WormSpawnRectH;
-    state.worm_min_spawn_dist_last = tc.constants.WormMinSpawnDistLast;
-    state.worm_min_spawn_dist_enemy = tc.constants.WormMinSpawnDistEnemy;
-    state.game_mode = scenario.game_mode as u32;
-
-    // NOTE: killed_timer is left at its `WormInit` default (150) — the camera
-    // stays pinned at (0,0). Resetting it would centre the viewport and diverge.
-
-    let fire_cone = build_fire_cone_sprites(&state.large_sprites);
+    // The tick-0 load path now lives in the Bevy-free `scenario` crate (T0). This
+    // harness owns only the golden reads + the render surface; everything from the
+    // origpal read through the fire-cone bank is `scenario::load`, verbatim.
+    let loaded = scenario::load(Path::new(TC_ROOT), &scenario);
 
     Built {
         scenario,
-        state,
-        viewports: Viewport::player_layout(),
+        state: loaded.state,
+        viewports: loaded.viewports,
         bmp: Bitmap::new(320, 200),
-        origpal,
-        color_anim,
-        fire_cone,
-        nr_begin: tc.constants.NRColourBegin,
-        nr_end: tc.constants.NRColourEnd,
-        laser_weapon: tc.constants.LaserWeapon,
+        origpal: loaded.scene.origpal,
+        color_anim: loaded.scene.color_anim,
+        fire_cone: loaded.scene.fire_cone,
+        nr_begin: loaded.scene.nr_begin,
+        nr_end: loaded.scene.nr_end,
+        laser_weapon: loaded.scene.laser_weapon,
     }
 }
 

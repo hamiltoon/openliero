@@ -44,6 +44,7 @@ version = "0.1.0"
 dependencies = [
  "assets",
  "render",
+ "scenario",
  "sim",
  "sim-core",
 ]
@@ -71,6 +72,16 @@ name = "render"
 version = "0.1.0"
 dependencies = [
  "assets",
+ "sim",
+ "sim-core",
+]
+
+[[package]]
+name = "scenario"
+version = "0.1.0"
+dependencies = [
+ "assets",
+ "render",
  "sim",
  "sim-core",
 ]

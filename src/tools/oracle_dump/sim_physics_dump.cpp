@@ -50,29 +50,46 @@
 //                                  named weapon from `common->weapons`, full ammo,
 //                                  ready to fire; optional 3rd token is an opt-in
 //                                  low-ammo override to reach the reload branch quickly)
+//   render <layout>               (Slice 3a; only `player` — enables the render sidecar)
+//   render_shadow                 (Slice 3b; draw-time settings->shadow flip, draw window)
+//   render_shake <tick> <vp> <amount>  (Slice 3b; draw-time viewports[vp]->shake inject)
+//   render_flash <tick> <amount>       (Slice 3b; draw-time LightUp screen_flash inject)
 //
 // Diagnostic: set env OL_PHYS_TRACE=1 to also print per-tick pos/vel for both worms
 // to stderr (does not affect the golden output). Built via the
 // OPENLIERO_BUILD_ORACLE_DUMP CMake option (see gen_sim_physics_golden.sh). Not part
 // of the default build.
 //
-// Opt-in render sidecar (Slice 3a). A scenario MAY add one directive:
-//   render <layout>   (only `player` is accepted)
-// When PRESENT, the dumper additionally builds a headless `Renderer` + two
-// framehash-layout `Viewport`s and, right after each `dump(tick)`, renders the
-// REDUCED terrain-only frame (palette rebuild -> Fill(0) -> per-viewport
-// Process + DrawLevel — a subset of `Game::Draw`, deliberately NOT HUD/shadow/
-// sprite/minimap, matching the Rust `frame::draw`) and writes a sidecar frame
-// golden to argv[4]: one `<tick> <frame_hash_hex16> <state_hash_hex8>` line per
-// tick plus a final `total <n> <acc_hex16>`. The frame hash is FNV-1a over the
-// ARGB back buffer with the composition fade (0 on tick 0 => black, 33 => identity
-// after), exactly as framehash_main.cpp. When the directive is ABSENT (every
-// existing scenario) the render block is fully gated off: no `Renderer` is
-// constructed, nothing is drawn, no sidecar is opened, and the argv[2] sim output
-// is BYTE-IDENTICAL to before. The render path reads only `game.level`, worms and
-// `game.cycles` and never touches `game.rand` / sim state, so it is provably
-// hash-inert on the sim column — the re-diff gate over the existing sim goldens
-// stays empty.
+// Opt-in render sidecar (Slice 3a base + Slice 3b full world). A scenario MAY add:
+//   render <layout>          (only `player` is accepted)
+//   render_shadow            (draw-time only: flip settings->shadow for the draw window)
+//   render_shake <tick> <vp> <amount>   (draw-time only: inject viewports[vp]->shake)
+//   render_flash <tick> <amount>        (draw-time only: inject the LightUp screen_flash)
+// When `render` is PRESENT, the dumper additionally builds a headless `Renderer` + two
+// framehash-layout `Viewport`s and, right after each `dump(tick)`, renders the FULL WORLD
+// frame (the world subset of `Game::Draw`, game.cpp:170-198, + the two-pass
+// `Viewport::Draw` world block, viewport.cpp:196-590) — palette rebuild (with the injected
+// screen_flash -> LightUp) -> Fill(0) -> per viewport Process -> clip -> DrawLevel ->
+// shadow pass (if settings->shadow) -> sprite pass -> restore clip. This mirrors the Rust
+// `frame::draw` 1:1; HUD/minimap/name-labels/holdazone/banners/AI-debug are OMITTED
+// (deferred to 3e / never dumped). It writes a sidecar frame golden to argv[4]: one
+// `<tick> <frame_hash_hex16> <state_hash_hex8>` line per tick plus a final `total <n>
+// <acc_hex16>`. The frame hash is FNV-1a over the ARGB back buffer with the composition
+// fade (0 on tick 0 => black, 33 => identity after), exactly as framehash_main.cpp.
+//
+// When the `render` directive is ABSENT (every existing sim scenario) the render block is
+// fully gated off: no `Renderer` is constructed, nothing is drawn, no sidecar is opened,
+// and the argv[2] sim output is BYTE-IDENTICAL to before. The render path reads only the
+// level/objects/worms/cycles and the PER-VIEWPORT RNG (laser sight + shake); it never
+// touches `game.rand` and never mutates sim state. The three opt-in draw-time injections
+// are provably sim-neutral: `render_shadow` flips settings->shadow AFTER the tick's sim
+// Process already ran (so it never reaches CorrectShadow) and restores it before the next
+// Process; `render_shake` sets/restores viewports[vp]->shake around a single Process (the
+// reduced dumper's viewports are never wired into ProcessViewports, so the sim never reads
+// it); `render_flash` feeds only the palette LightUp (screen_flash lives in GameSnapshot,
+// absent from HashGameState). Hence the re-diff gate over the existing sim goldens stays
+// empty, and the terrain-only render_slice3a golden regenerates byte-identical (invisible
+// worms + empty pools => the full world block paints exactly the terrain-only frame).
 #include <algorithm>
 #include <array>
 #include <cinttypes>
@@ -90,8 +107,10 @@
 #include "common.hpp"
 #include "filesystem.hpp"
 #include "game.hpp"
+#include "constants.hpp"
 #include "gfx/blit.hpp"
 #include "gfx/renderer.hpp"
+#include "gfx/shadow_query.hpp"
 #include "io/stream.hpp"
 #include "level.hpp"
 #include "math.hpp"
@@ -149,6 +168,23 @@ struct Scenario {
   // Opt-in render layout (Slice 3a). Empty => the render path is fully off and the
   // sim output stays byte-identical. Only `player` is accepted (two-viewport 320x200).
   std::string render_layout;
+  // Opt-in draw-time shadow flip (Slice 3b, spec O2). When true, render_and_hash
+  // temporarily sets `settings->shadow = true` for the DRAW window only (restored
+  // immediately after, AFTER the tick's sim Process already ran — so the flip never
+  // reaches CorrectShadow, and the sim output stays byte-identical). Absent => the
+  // draw-time shadow pass is gated off exactly as before.
+  bool render_shadow = false;
+  // Opt-in draw-only screen-shake injection (Slice 3b, spec O4). tick -> {vp -> amount}.
+  // render_and_hash sets `viewports[vp]->shake = Itof(amount)` BEFORE that viewport's
+  // Process for the matching tick (so the shake branch, viewport.cpp:49-52, draws its
+  // two rand off the viewport RNG), then restores it. Sim untouched — the reduced
+  // dumper's viewports are never wired into ProcessViewports.
+  std::map<int, std::map<int, int>> render_shake;
+  // Opt-in draw-only screen-flash injection (Slice 3b, spec O4). tick -> amount.
+  // Passed as the `LightUp` argument into the per-tick palette build (game.cpp:179-181)
+  // for the matching tick only. Sim untouched (screen_flash lives in GameSnapshot,
+  // absent from HashGameState).
+  std::map<int, int> render_flash;
 };
 
 std::vector<uint8_t> SlurpFile(std::string const& path) {
@@ -194,6 +230,22 @@ Scenario ParseScenario(char const* path) {
         std::fprintf(stderr, "unknown render layout: %s\n", s.render_layout.c_str());
         std::exit(1);
       }
+    } else if (key == "render_shadow") {
+      // Draw-time shadow flip (Slice 3b). 0 args — presence flips the draw window.
+      s.render_shadow = true;
+    } else if (key == "render_shake") {
+      // render_shake <tick> <vp> <amount> — draw-only shake injection (Slice 3b).
+      int tick = 0;
+      int vp = 0;
+      int amount = 0;
+      ls >> tick >> vp >> amount;
+      s.render_shake[tick][vp] = amount;
+    } else if (key == "render_flash") {
+      // render_flash <tick> <amount> — draw-only screen-flash injection (Slice 3b).
+      int tick = 0;
+      int amount = 0;
+      ls >> tick >> amount;
+      s.render_flash[tick] = amount;
     } else if (key == "worm") {
       WormSpec w;
       ls >> w.index >> w.pos_x >> w.pos_y >> w.health >> w.lives >> w.stats_x >> w.visible;
@@ -387,25 +439,355 @@ int main(int argc, char** argv) {
         std::make_unique<Viewport>(Rect(160, 0, 158 + 160, 158), game.worms[1]->index));
   }
 
-  // Renders the REDUCED terrain-only frame (a subset of Game::Draw — matches the Rust
-  // frame::draw), hashes it, and appends one sidecar line. Reads only level/worms/cycles,
-  // never game.rand or sim state, so the sim output is untouched (design §6).
+  // Renders the FULL world block (the world subset of Game::Draw, game.cpp:170-198, plus
+  // the two-pass Viewport::Draw world block, viewport.cpp:196-590), hashes it, and appends
+  // one sidecar line. This is the C++ mirror of the Rust `frame::draw` (render/src/frame.rs):
+  // palette build (with the injected screen_flash -> LightUp) -> Fill(0) -> per viewport
+  // Process -> clip -> DrawLevel at kOffs -> shadow pass (if settings->shadow) -> sprite
+  // pass -> restore clip. HUD/minimap/name-labels/holdazone/banners/AI-debug are OMITTED
+  // (deferred to 3e / never dumped), exactly as the Rust side omits them. The path reads
+  // only level/objects/worms/cycles and the per-viewport RNG (laser sight + shake); it
+  // never touches game.rand or mutates sim state, so the sim output is untouched (design
+  // §6). The render_shadow flip window and the render_shake/render_flash injections carry
+  // no sim mutation (spec O2/O4).
   auto render_and_hash = [&](int tick) {
-    // Palette build order (game.cpp:171-183): reset -> RotateFrom -> UpdatePal32.
+    // `common` reference so the viewport.cpp world block below (and the LC(...) macro,
+    // constants.hpp:191 = common.c[C##name]) reads verbatim; shadows the captured
+    // shared_ptr for the lambda body only.
+    Common& common = *game.common;
+
+    // Draw-time shadow flip (spec O2): the tick's sim Process already ran, so this never
+    // reaches CorrectShadow. Restored below, before the next tick's sim Process.
+    bool const saved_shadow = game.settings->shadow;
+    if (scn.render_shadow) game.settings->shadow = true;
+
+    // Draw-only screen-flash injection (spec O4). Absent for this tick => 0 => no LightUp.
+    int screen_flash = 0;
+    {
+      auto const it = scn.render_flash.find(tick);
+      if (it != scn.render_flash.end()) screen_flash = it->second;
+    }
+
+    // Palette build order (game.cpp:171-183): reset -> RotateFrom -> LightUp (if flash) ->
+    // UpdatePal32. Mirrors the Rust build_palette(.., screen_flash).
     renderer->pal = renderer->Origpal();
-    for (auto const& w : common->color_anim) {
+    for (auto const& w : common.color_anim) {
       renderer->pal.RotateFrom(renderer->Origpal(), w.from, w.to, game.cycles >> 3);
     }
-    // screen_flash == 0 in 3a -> no LightUp.
+    if (screen_flash > 0) {
+      renderer->pal.LightUp(screen_flash);  // game.cpp:179-181
+    }
     renderer->UpdatePal32();
-    Fill(renderer->bmp, 0);
-    for (auto const& vp : viewports) {
+    Fill(renderer->bmp, 0);  // game.cpp:189
+
+    for (std::size_t vi = 0; vi < viewports.size(); ++vi) {
+      auto const& vp = viewports[vi];
+
+      // Draw-only shake injection (spec O4). shake is `fixed`, so inject Itof(amount) and
+      // the shake branch (viewport.cpp:47-52) recovers the pixel amount via Ftoi. Set
+      // BEFORE Process (which reads it), restored immediately after so the next viewport /
+      // tick starts clean and the sim never sees it.
+      fixed const saved_shake = vp->shake;
+      {
+        auto const tit = scn.render_shake.find(tick);
+        if (tit != scn.render_shake.end()) {
+          auto const vit = tit->second.find(static_cast<int>(vi));
+          if (vit != tit->second.end()) vp->shake = Itof(vit->second);
+        }
+      }
       vp->Process(game);
+      vp->shake = saved_shake;
+
       renderer->bmp.clip_rect = vp->rect;
       renderer->bmp.cycles = game.cycles;
-      IVec2 const off = vp->rect.Ul() - IVec2(vp->x, vp->y);
-      DrawLevel(renderer->bmp, game.level, off.x, off.y);
+      fixedvec const kOffs = vp->rect.Ul() - IVec2(vp->x, vp->y);  // viewport.cpp:198
+
+      // Shadows and explosion masks query the level (screen + offset = world). Same
+      // world_offset = -kOffs convention as the Rust frame::draw/shadow_pass.
+      ShadowQuery const kShadow{.common = common,
+                                .level = game.level,
+                                .pal32 = renderer->pal32,
+                                .world_offset_x = -kOffs.x,
+                                .world_offset_y = -kOffs.y,
+                                .mode = renderer->mode,
+                                .cycles = game.cycles};
+
+      DrawLevel(renderer->bmp, game.level, kOffs.x, kOffs.y);  // viewport.cpp:210
+
+      Worm const& vp_worm = *game.WormByIdx(vp->worm_idx);
+
+      // ---- Pass 1: all shadows (viewport.cpp:274-398), gated on settings->shadow. ----
+      if (game.settings->shadow) {
+        {  // bonuses — viewport.cpp:276-284
+          auto br = game.bonuses.All();
+          for (Bonus const* i = nullptr; (i = br.Next());) {
+            if (i->timer > LC(BonusFlickerTime) || (game.cycles & 3) == 0) {
+              int const kF = common.bonus_frames[i->frame];
+              BlitShadowImage(kShadow, renderer->bmp, common.small_sprites.SpritePtr(kF),
+                              Ftoi(i->x) - 5 + kOffs.x, Ftoi(i->y) - 1 + kOffs.y, 7, 7);
+            }
+          }
+        }
+
+        {  // sobjects — viewport.cpp:287-298
+          auto sr = game.sobjects.All();
+          for (SObject const* i = nullptr; (i = sr.Next());) {
+            SObjectType const& t = common.sobject_types[i->id];
+            int const kFrame = i->cur_frame + t.start_frame;
+            BlitShadowImage(kShadow, renderer->bmp, common.large_sprites.SpritePtr(kFrame),
+                            i->x + kOffs.x - 3, i->y + kOffs.y + 3, 16, 16);
+          }
+        }
+
+        {  // wobjects — viewport.cpp:300-343
+          auto wr = game.wobjects.All();
+          for (WObject const* i = nullptr; (i = wr.Next());) {
+            Weapon const& w = *i->type;
+            if (w.start_frame > -1) {
+              int cur_frame = i->cur_frame;
+              int const kShotType = w.shot_type;
+              if (kShotType == 2) {
+                cur_frame += 4;
+                cur_frame >>= 3;
+                if (cur_frame < 0) {
+                  cur_frame = 16;
+                } else if (cur_frame > 15) {
+                  cur_frame -= 16;
+                }
+              } else if (kShotType == 3) {
+                if (cur_frame > 64) {
+                  --cur_frame;
+                }
+                cur_frame -= 12;
+                cur_frame >>= 3;
+                if (cur_frame < 0) {
+                  cur_frame = 0;
+                } else if (cur_frame > 12) {
+                  cur_frame = 12;
+                }
+              }
+              int const kPosX = Ftoi(i->pos.x) - 3;
+              int const kPosY = Ftoi(i->pos.y) - 3;
+              if (w.shadow) {
+                BlitShadowImage(kShadow, renderer->bmp,
+                                common.small_sprites.SpritePtr(w.start_frame + cur_frame),
+                                kPosX - 3 + kOffs.x, kPosY + 3 + kOffs.y, 7, 7);
+              }
+            } else if (i->cur_frame > 0) {
+              int const kPosX = Ftoi(i->pos.x) + kOffs.x - 3;
+              int const kPosY = Ftoi(i->pos.y) + kOffs.y + 3;
+              uint32_t const kShadowed = kShadow.ShadowedArgb(kPosX, kPosY);
+              if (kShadowed != 0 && renderer->bmp.clip_rect.Inside(kPosX, kPosY)) {
+                renderer->bmp.GetPixel(kPosX, kPosY) = kShadowed;
+              }
+            }
+          }
+        }
+
+        {  // nobjects — viewport.cpp:345-366
+          auto nr = game.nobjects.All();
+          for (NObject const* i = nullptr; (i = nr.Next());) {
+            NObjectType const& t = *i->type;
+            if (t.start_frame > 0) {
+              auto pos = Ftoi(i->pos) - IVec2(3, 3);
+              BlitShadowImage(kShadow, renderer->bmp,
+                              common.small_sprites.SpritePtr(t.start_frame + i->cur_frame),
+                              pos.x - 3 + kOffs.x, pos.y + 3 + kOffs.y, 7, 7);
+            } else if (i->cur_frame > 1) {
+              auto pos = Ftoi(i->pos) + kOffs;
+              pos.x -= 3;
+              pos.y += 3;
+              if (renderer->bmp.clip_rect.Encloses(pos)) {
+                uint32_t const kShadowed = kShadow.ShadowedArgb(pos.x, pos.y);
+                if (kShadowed != 0) {
+                  renderer->bmp.GetPixel(pos.x, pos.y) = kShadowed;
+                }
+              }
+            }
+          }
+        }
+
+        for (auto const& worm_ptr : game.worms) {  // worms + ninjarope — viewport.cpp:368-385
+          Worm const& w = *worm_ptr;
+          if (w.visible) {
+            int const kTempX = Ftoi(w.pos.x) - 7 + kOffs.x;
+            int const kTempY = Ftoi(w.pos.y) - 5 + kOffs.y;
+            if (w.ninjarope.out) {
+              int const kNinjaropeX = Ftoi(w.ninjarope.pos.x) + kOffs.x;
+              int const kNinjaropeY = Ftoi(w.ninjarope.pos.y) + kOffs.y;
+              DrawShadowLine(kShadow, renderer->bmp, kNinjaropeX - 3, kNinjaropeY + 3,
+                             kTempX + 7 - 3, kTempY + 4 + 3);
+              BlitShadowImage(kShadow, renderer->bmp, common.large_sprites.SpritePtr(84),
+                              kNinjaropeX - 4, kNinjaropeY + 2, 16, 16);
+            }
+            BlitShadowImage(kShadow, renderer->bmp,
+                            common.WormSprite(w.current_frame, w.direction, w.index), kTempX - 3,
+                            kTempY + 3, 16, 16);
+          }
+        }
+
+        // bobjects (blood) — viewport.cpp:387-397
+        for (Game::BObjectList::Iterator i = game.bobjects.Begin(); i != game.bobjects.End(); ++i) {
+          auto ipos = Ftoi(i->pos) + kOffs;
+          ipos.x -= 3;
+          ipos.y += 3;
+          if (renderer->bmp.clip_rect.Encloses(ipos)) {
+            uint32_t const kShadowed = kShadow.ShadowedArgb(ipos.x, ipos.y);
+            if (kShadowed != 0) {
+              renderer->bmp.GetPixel(ipos.x, ipos.y) = kShadowed;
+            }
+          }
+        }
+      }
+
+      // ---- Pass 2: all sprites (viewport.cpp:400-590). Name labels (:411/:465-479/:575-582)
+      //      and AI debug (:549-551) are omitted (3e / skip). ----
+      {  // bonuses — viewport.cpp:402-415
+        auto br = game.bonuses.All();
+        for (Bonus const* i = nullptr; (i = br.Next());) {
+          if (i->timer > LC(BonusFlickerTime) || (game.cycles & 3) == 0) {
+            int const kF = common.bonus_frames[i->frame];
+            BlitImage(renderer->bmp, common.small_sprites[kF], Ftoi(i->x) - 3 + kOffs.x,
+                      Ftoi(i->y) - 3 + kOffs.y);
+          }
+        }
+      }
+
+      {  // sobjects — viewport.cpp:418-425 (BlitImageR gates on the water range)
+        auto sr = game.sobjects.All();
+        for (SObject const* i = nullptr; (i = sr.Next());) {
+          SObjectType const& t = common.sobject_types[i->id];
+          int const kFrame = i->cur_frame + t.start_frame;
+          BlitImageR(kShadow, renderer->bmp, common.large_sprites.SpritePtr(kFrame),
+                     i->x + kOffs.x, i->y + kOffs.y, 16, 16);
+        }
+      }
+
+      {  // wobjects — viewport.cpp:428-481 (sprite blit UNCONDITIONAL on w.shadow)
+        auto wr = game.wobjects.All();
+        for (WObject* i = nullptr; (i = wr.Next());) {
+          Weapon const& w = *i->type;
+          if (w.start_frame > -1) {
+            int cur_frame = i->cur_frame;
+            int const kShotType = w.shot_type;
+            if (kShotType == 2) {
+              cur_frame += 4;
+              cur_frame >>= 3;
+              if (cur_frame < 0) {
+                cur_frame = 16;
+              } else if (cur_frame > 15) {
+                cur_frame -= 16;
+              }
+            } else if (kShotType == 3) {
+              if (cur_frame > 64) {
+                --cur_frame;
+              }
+              cur_frame -= 12;
+              cur_frame >>= 3;
+              if (cur_frame < 0) {
+                cur_frame = 0;
+              } else if (cur_frame > 12) {
+                cur_frame = 12;
+              }
+            }
+            int const kPosX = Ftoi(i->pos.x) - 3;
+            int const kPosY = Ftoi(i->pos.y) - 3;
+            BlitImage(renderer->bmp, common.small_sprites[w.start_frame + cur_frame],
+                      kPosX + kOffs.x, kPosY + kOffs.y);
+          } else if (i->cur_frame > 0) {
+            int const kPosX = Ftoi(i->pos.x) + kOffs.x;
+            int const kPosY = Ftoi(i->pos.y) + kOffs.y;
+            renderer->bmp.SetPixel(kPosX, kPosY, static_cast<PalIdx>(i->cur_frame));
+          }
+        }
+      }
+
+      {  // nobjects — viewport.cpp:483-498
+        auto nr = game.nobjects.All();
+        for (NObject const* i = nullptr; (i = nr.Next());) {
+          NObjectType const& t = *i->type;
+          if (t.start_frame > 0) {
+            auto pos = Ftoi(i->pos) - IVec2(3, 3);
+            BlitImage(renderer->bmp, common.small_sprites[t.start_frame + i->cur_frame],
+                      pos.x + kOffs.x, pos.y + kOffs.y);
+          } else if (i->cur_frame > 1) {
+            auto pos = Ftoi(i->pos) + kOffs;
+            if (renderer->bmp.clip_rect.Encloses(pos)) {
+              renderer->bmp.SetPixel(pos.x, pos.y, static_cast<PalIdx>(i->cur_frame));
+            }
+          }
+        }
+      }
+
+      // worms — viewport.cpp:500-552. game.worms order; laser sight -> laser beam ->
+      // ninjarope -> fire cone -> worm body. The laser sight advances THIS viewport's RNG.
+      for (std::size_t i = 0; i < game.worms.size(); ++i) {
+        Worm const& w = *game.worms[i];
+
+        if (w.visible) {
+          int const kTempX = Ftoi(w.pos.x) - 7 + kOffs.x;
+          int const kTempY = Ftoi(w.pos.y) - 5 + kOffs.y;
+          int const kAngleFrame = w.AngleFrame();
+
+          if (w.weapons[w.current_weapon].Available()) {
+            int const kHotspotX = w.hotspot_x + kOffs.x;
+            int const kHotspotY = w.hotspot_y + kOffs.y;
+
+            WormWeapon const& ww = w.weapons[w.current_weapon];
+            Weapon const& weapon = *ww.type;
+
+            if (weapon.laser_sight) {
+              DrawLaserSight(renderer->bmp, vp->rand, kHotspotX, kHotspotY, kTempX + 7,
+                             kTempY + 4);
+            }
+
+            if (ww.type - common.weapons.data() == LC(LaserWeapon) - 1 && w.Pressed(Worm::kFire)) {
+              DrawLine(renderer->bmp, kHotspotX, kHotspotY, kTempX + 7, kTempY + 4,
+                       weapon.color_bullets);
+            }
+          }
+
+          if (w.ninjarope.out) {
+            int const kNinjaropeX = Ftoi(w.ninjarope.pos.x) + kOffs.x;
+            int const kNinjaropeY = Ftoi(w.ninjarope.pos.y) + kOffs.y;
+
+            DrawNinjarope(common, renderer->bmp, kNinjaropeX, kNinjaropeY, kTempX + 7, kTempY + 4);
+
+            BlitImage(renderer->bmp, common.large_sprites[84], kNinjaropeX - 1, kNinjaropeY - 1);
+          }
+
+          if (w.weapons[w.current_weapon].type->fire_cone > 0 && w.fire_cone > 0) {
+            BlitFireCone(renderer->bmp, w.fire_cone / 2,
+                         common.FireConeSprite(kAngleFrame, w.direction),
+                         Common::fire_cone_offset[w.direction][kAngleFrame][0] + kTempX,
+                         Common::fire_cone_offset[w.direction][kAngleFrame][1] + kTempY);
+          }
+
+          BlitImage(renderer->bmp, common.WormSpriteObj(w.current_frame, w.direction, w.index),
+                    kTempX, kTempY);
+        }
+      }
+
+      // aim crosshair — viewport.cpp:566-583. Gated on the VIEWPORT'S OWN worm being visible.
+      if (vp_worm.visible) {
+        auto temp = Ftoi(vp_worm.pos) - IVec2(1, 2) +
+                    Ftoi(cossin_table[Ftoi(vp_worm.aiming_angle)] * 16) + kOffs;
+        BlitImage(renderer->bmp, common.small_sprites[vp_worm.make_sight_green ? 44 : 43], temp.x,
+                  temp.y);
+      }
+
+      // bobjects (blood) — viewport.cpp:585-590
+      for (Game::BObjectList::Iterator i = game.bobjects.Begin(); i != game.bobjects.End(); ++i) {
+        auto ipos = Ftoi(i->pos) + kOffs;
+        if (renderer->bmp.clip_rect.Encloses(ipos)) {
+          renderer->bmp.SetPixel(ipos.x, ipos.y, static_cast<PalIdx>(i->color));
+        }
+      }
     }
+
+    // Restore the draw-time shadow flip before the next tick's sim Process (spec O2).
+    game.settings->shadow = saved_shadow;
+
     renderer->bmp.clip_rect = Rect(0, 0, renderer->bmp.w, renderer->bmp.h);
     int const fade = (tick == 0) ? 0 : 33;  // frame 0 black, then identity.
     uint64_t h = kFnvOffset;

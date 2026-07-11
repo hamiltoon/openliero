@@ -8,22 +8,33 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-10 · **🖼️ STEP 3 STARTED — slice 3a shipped: the first
-> pixel-exact terrain frame vs the C++ oracle.** A new **Bevy-free `render` crate** stands
-> up the CPU renderer: `Bitmap` (ARGB8888, pitch-in-pixels, clip), the per-frame palette
-> build (reset→RotateFrom→LightUp→pal32 pack, Classic 6-bit VGA), `DrawLevel` (Classic arm),
-> the 320×200 **two-viewport** player layout (`Viewport::process` centering/clamp, shake-RNG
-> present-but-inert), a reduced `frame::draw`, and the FNV-1a **frame hash** + `FadeChannel`.
-> The C++ dumper gained an **opt-in `render player` directive** emitting a sidecar frame
-> golden (`<tick> <frame_hash> <state_hash>` + a running total) — the **re-diff gate is
-> GREEN** (all 29 prior sim goldens regenerate byte-identical; the opt-in gate line-reviewed
-> watertight). 🎯 **MILESTONE:** `render_slice3a_golden` matches C++ **tick-for-tick** — all
-> 27 frame hashes + the total accumulator bit-exact, and it **matched on the first run**.
-> RotateFrom (palette-cycling) is proven **observable**: the hash holds constant inside each
-> 8-tick window and flips exactly on the `cycles>>3` boundaries @8/16/24. **Triple isolation
-> proof:** the `state_hash` (Rust == the sidecar column == the pre-existing sim golden) is
-> untouched by rendering. Step 3 lands on **PR #4** (branch `liero-rs-step-3`, accumulating);
-> remaining slices 3b–3f. Next: **3b** (shadow + sprite pass).
+> **Last updated:** 2026-07-11 · **🖼️ STEP 3 — slices 3a + 3b SHIPPED: the world view is
+> now PIXEL-EXACT vs the C++ oracle.** 🎯 **MILESTONE (3b):** the full two-pass world block
+> — shadow pass + sprite pass (all 6 object families in C++ order, `viewport.cpp:274-590`),
+> worm sprites, ninjarope, fire cone, laser sight, aim crosshair, blood — matches C++
+> **tick-for-tick** across **7 golden scenarios** (laser/shadow/shake/fan/dart/blood/
+> dart_water), **225 frame rows, ALL matched on the first run**. The draw-time RNG traps go
+> live and are proven **non-vacuous**: laser draws **6 distinct per-tick hashes** with both
+> viewport RNGs (laser-sparks + shake) active; shadow ON≠OFF (`SeeShadow` pixels land);
+> shake steps the frame + a `LightUp` flash blip; draining a pool changes the frame (incl.
+> the positive `BlitImageR`-over-water witness). **Triple isolation proof** holds per tick
+> (`state_hash` Rust == sidecar == the pre-existing sim golden — rendering never perturbs
+> the sim), and the **re-diff gate stays GREEN** (every prior `sim_slice*` byte-identical +
+> `render_slice3a.txt` byte-identical; the new `render_slice3b_*` files are the only
+> additions). Two real findings en route: an inverted laser `rand(2)` order (caught in the
+> T3 review — the plan had misread C++; `rand(2)` is drawn **only inside** the clip) and a
+> C++ `cossin[128]` UB on facing-flip (caught by the T0b insert; Rust masks `&0x7f`).
+> Ported: the blit primitives (`BlitImage`/`Trans`/`R`, `BlitShadowImage`, `FireCone`,
+> `DO_LINE` Bresenham, ninjarope/laser-sight/shadow-line/line), `ShadowQuery` (+4/clamp/
+> `SeeShadow`), the fire-cone table/bank, sprite selectors, `wobj_remap`, a widened
+> `frame::draw` (Scene + LightUp/shake live), plus the render-only non-hashed `hotspot_x/y`
+> + the `ProcessSight` port (closed the laser-origin gap). Step 3 lands on **PR #4** (branch
+> `liero-rs-step-3`, accumulating); remaining slices **3c–3f**. Next: **3c** (Bevy window —
+> native). Prior (3a): the **Bevy-free `render` crate** stood up the CPU renderer (`Bitmap`
+> ARGB8888/pitch/clip, the per-frame palette build reset→RotateFrom→LightUp→pal32, `DrawLevel`
+> Classic, the two-viewport 320×200 layout, the FNV-1a **frame hash** + `FadeChannel`) and
+> shipped the first pixel-exact **terrain** frame (`render_slice3a_golden`, all 27 hashes
+> bit-exact first run; RotateFrom proven observable, flipping on `cycles>>3` @8/16/24).
 > Prior: **🎉 STEP 2 COMPLETE** — the full deterministic sim core is ported and bit-exact vs
 > the C++ oracle (all of `ProcessFrame`: worms, weapons, all object families, ninjarope,
 > bonuses+pickup, death/respawn, GameOfTag+Scales; proven by 24 goldens + 5 fuzz variants ×
@@ -72,20 +83,21 @@ the LAST slice of step 2.
 
 ---
 
-## 🔁 Rewrite track — faithful port (~60%)
+## 🔁 Rewrite track — faithful port (~63%)
 
 Strangler-style: the C++ engine is the oracle, every piece differential-tested
 bit-for-bit before moving on. Steps 0–2 merged (the deterministic sim core — the
-hardest part — is bit-exact vs C++); step 3 (rendering) has **started**, with slice 3a
-shipping the first pixel-exact terrain frame; steps 4–5 not started.
+hardest part — is bit-exact vs C++); step 3 (rendering) is **in progress**, with slices
+3a + 3b shipping the pixel-exact terrain frame **and** the full world view (shadow +
+sprite pass); steps 4–5 not started.
 
 ```
-REWRITE (steg 0–5)                                          ~60%
+REWRITE (steg 0–5)                                          ~63%
 ├─ ✅ Step 0  sim-core primitives (RNG/fixed/vec/math/tables)   DONE — merged (PR #1)
 ├─ ✅ Step 1  asset IO, slices 1a–1e (level/palette/sprites/    DONE — merged (PR #2)
 │             tc.cfg/objects/WAV)
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
-├─ 🔨 Step 3  Bevy rendering / window (reproduce the SDL3 view) IN PROGRESS — 3a shipped (PR #4)  ◀── YOU ARE HERE
+├─ 🔨 Step 3  Bevy rendering / window (reproduce the SDL3 view) IN PROGRESS — 3a+3b shipped (PR #4)  ◀── YOU ARE HERE
 ├─ ⬜ Step 4  input + replay (.lrp) playback                    not started
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
@@ -131,8 +143,9 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~60%** |
-| Step 3 (rendering) | **🔨 IN PROGRESS** (slice 3a shipped; PR #4 accumulating) |
+| Rewrite track (steps 0–5) | **~63%** |
+| Step 3 (rendering) | **🔨 IN PROGRESS** (slices 3a + 3b shipped; PR #4 accumulating) |
+| Slice 3b (shadow + sprite pass) | **✅ MILESTONE GREEN** (🎯 the **world view is PIXEL-EXACT** vs C++: **7 goldens** `render_slice3b_{laser,shadow,shake,fan,dart,blood,dart_water}` — **225 frame rows, ALL matched first run**; two-pass shadow+sprite block, all 6 object families in C++ order (`viewport.cpp:274-590`), worm sprites/ninjarope/fire cone/laser sight/crosshair/blood; blit primitives + `ShadowQuery` (+4/clamp/`SeeShadow`) + line drawers + fire-cone table + render-only `hotspot_x/y` + `ProcessSight` ported, `LightUp`/shake live; **both viewport RNGs live & non-vacuous** — laser 6 distinct per-tick hashes, shadow ON≠OFF, shake+flash blip, pool-drain changes the frame (positive `BlitImageR`-over-water witness); **triple isolation per tick** (`state_hash` Rust == sidecar == sim golden); **re-diff GREEN** (all `sim_slice*` + `render_slice3a` byte-identical, new `render_slice3b_*` the only additions). 2 real finds: inverted laser `rand(2)` order (T3 review; drawn only inside clip) + C++ `cossin[128]` UB on facing-flip (T0b; Rust masks `&0x7f`)) |
 | Slice 3a (render foundation) | **✅ SHIPPED** (🎯 first pixel-exact **terrain** frame vs C++: `render_slice3a_golden` — all 27 frame hashes + total accumulator bit-exact, **first run**; Bevy-free `render` crate: `Bitmap`/palette build (RotateFrom/LightUp/pal32)/`DrawLevel` Classic/two-viewport `Viewport::process`/FNV-1a hash+`FadeChannel`; C++ dumper's opt-in `render player` directive → sidecar frame golden, **re-diff gate GREEN** (29 priors byte-identical); **RotateFrom observable** — hash constant per 8-tick window, flips on `cycles>>3` @8/16/24; **triple isolation proof** — `state_hash` Rust == sidecar == sim golden, untouched by rendering) |
 | Step 2 | **✅ COMPLETE** (all slices bit-exact; merged in PR #3) |
 | Slice 5′b (bonus pickup) | **✅ MILESTONE GREEN** (the 5c-deferred pickup block `worm.cpp:287-322` live: 11×11 AABB gate + health/weapon/booby branches, TC consts threaded unhashed; `sim_slice5prime_pickup_health` — a worm wounded to 50 **walks onto** a dropped health bonus, heals @tick 87/110t, pool 1→0 — and `sim_slice5prime_pickup_weapon` — walk-on reload @tick 67/90t, `ww` 3→2, health flat all ticks (the booby discriminator) — both master+9 components bit-exact vs C++ **first run**; booby branch pinned by RED-first unit tests with exact per-branch draw counts; pure-Rust slice, priors byte-identical; chain-loop → slice 6) |
@@ -161,17 +174,29 @@ FNV-1a **frame hash** differential-tested against C++ over the reused Step 2 sce
 │         observable (hash constant per 8-tick window, flips on cycles>>3 @8/16/24); C++
 │         dumper opt-in `render player` directive → sidecar frame golden, re-diff gate GREEN
 │         (29 priors byte-identical); triple isolation proof (state_hash untouched)
-├─ ⬜ 3b  shadow + sprite pass — two-pass world block; LightUp/shake/laser-sight RNG go live
+├─ ✅ 3b  shadow + sprite pass — two-pass world block; LightUp/shake/laser-sight RNG live   SHIPPED
+│         🎯 the WORLD VIEW is pixel-exact vs C++: 7 goldens (laser/shadow/shake/fan/dart/
+│         blood/dart_water), 225 frame rows, ALL matched first run; both viewport RNGs live
+│         & proven non-vacuous (laser 6 distinct hashes; shadow ON≠OFF; shake+flash blip;
+│         pool-drain incl. positive BlitImageR-over-water); triple isolation per tick;
+│         re-diff GREEN (all sim_slice* + render_slice3a byte-identical). 2 real finds:
+│         inverted laser rand(2) order (T3 review) + C++ cossin[128] UB on facing-flip (T0b)
 ├─ ⬜ 3c  Bevy window (native) — FixedUpdate sim tick, CPU buffer → Image → Sprite/Camera2d
 ├─ ⬜ 3d  headless screenshot CLI + in-repo run-skill (change → screenshot → judge, no GPU)
 ├─ ⬜ 3e  HUD / font / bars / minimap — the full player view, pixel-gated
 └─ ⬜ 3f  wasm bring-up — WebGL2 build to C++ emscripten parity
 ```
 
-**Deferrals carried from 3a:** Modern `ColorMode` (unimplemented `match` arms), steerable
-centering (→3b), layout-token value validation in the Rust parser (inert until more layouts
-exist), a `fade=31` boundary test; `LightUp`/shake/laser-sight RNG are present-but-inert
-until 3b makes them live.
+**Deferrals carried after 3b:** Modern `ColorMode` display-halve/`ResolveDisplayAt` arms;
+steerable centering (`WormState` has no `steerable_sum` — assert kept); `bonus_frames` empty
++ `BONUS_FLICKER_TIME` hardcoded (no bonus scenario yet); spawn-preview `BlitImageTrans`
+unreached (`names_on_bonuses=false`, no `kChange`); Rust-parser layout-token value validation
+(inert until more layouts exist); C++ render-path edits are **not** caught by CI's re-diff
+(the gen-scripts are local); the `cossin`-UB sites (ninjarope/`worm_fire`) left unmasked;
+`MAT_SEE_SHADOW`-constant placement in `render`. Name labels / font (`DrawTextSmall`) +
+HUD/bars/banners/holdazone/minimap → **3e**. (3a's `LightUp`/shake/laser-sight RNG are now
+live; steerable centering stays deferred.) A future scenario reaching any of these must lift
+the deferral with a matching golden.
 
 ---
 

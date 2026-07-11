@@ -1,6 +1,6 @@
 # Step 3 — Rendering: overview / altitude decisions
 
-Status: **active** · 2026-07-10 · slice **3a SHIPPED** (see *Slice ordering* below); 3b–3f pending
+Status: **active** · 2026-07-11 · slices **3a + 3b SHIPPED** (see *Slice ordering* below); 3c–3f pending
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 3 — Rendering" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-07-10-liero-rs-step3-cpp-render-pipeline-map.md` (C++ map, cited as **render-map §N**)
@@ -286,14 +286,37 @@ what it *proves*.
   (→3b), Rust-parser layout-token value validation, a `fade=31` boundary test; LightUp/
   shake/laser-sight RNG present-but-inert until 3b.
 
-- **3b — shadow + sprite pass.** Two-pass world block: shadow pass (bonuses/objects/
-  worms/ninjarope/blood) then sprite pass (objects, worm sprites, ninjarope, fire
-  cone, laser sight + **viewport-local RNG**, aim crosshair, blood), plus `LightUp`
-  screen-flash and shake now going live. Reuse the slice-4/5 fire/object scenarios.
-  **Proves:** the world view is pixel-exact over motion, explosions, and the
-  laser-sight RNG trap; the two-pass order is load-bearing. **Done-when:** the
-  world-view frame hash matches C++ over the object scenarios; viewport RNG frames
-  match.
+- **3b — shadow + sprite pass. ✅ SHIPPED (2026-07-11).** Two-pass world block: shadow pass
+  (bonuses/objects/worms/ninjarope/blood) then sprite pass (all 6 object families in C++
+  order, `viewport.cpp:274-590`; worm sprites, ninjarope, fire cone, laser sight +
+  **viewport-local RNG**, aim crosshair, blood), plus `LightUp` screen-flash and shake now
+  going live. Ported: the blit primitives (`BlitImage`/`Trans`/`R`, `BlitShadowImage`,
+  `FireCone`, `DO_LINE` Bresenham, ninjarope/laser-sight/shadow-line/line), `ShadowQuery`
+  (+4/clamp/`SeeShadow`), the fire-cone table/bank, sprite selectors, `wobj_remap`, a widened
+  `frame::draw` (Scene + LightUp/shake live); sim-side the render-only non-hashed `hotspot_x/y`
+  + the `ProcessSight` port (closed the laser-origin gap). The dumper renders the full-world
+  block behind `render_shadow`/`render_shake`/`render_flash` directives; 3 new fixture levels
+  (`render_stage`/`see_shadow_test`/`water_stage`) + Rust parser arms. Reused the slice-4/5
+  fire/object scenarios. **Proves:** the world view is pixel-exact over motion, explosions,
+  and the laser-sight RNG trap; the two-pass order is load-bearing.
+  **Done-when:** met — world-view frame hash matches C++ over the object scenarios; viewport
+  RNG frames match.
+  **RESULT:** 🎯 **MILESTONE — the world view is PIXEL-EXACT vs the C++ oracle.** 7 golden
+  scenarios (laser/shadow/shake/fan/dart/blood/dart_water), **225 frame rows, ALL matched on
+  the first run**; triple-isolation proof per tick (`state_hash` Rust == sidecar == the
+  pre-existing sim golden). **Non-vacuity proven** — laser: 6 distinct per-tick hashes with
+  **both** viewport RNGs live; shadow ON≠OFF; shake steps + a flash blip; pool-drain changes
+  the frame (incl. the positive `BlitImageR`-over-water witness). Two real findings en route:
+  (1) the T3 review caught an inverted laser `rand(2)` order (the plan had misread C++ —
+  `rand(2)` is drawn **only inside** the clip; fixed + plan corrected); (2) the T0b insert
+  caught a C++ UB `cossin[128]` OOB on facing-flip (Rust masks `&0x7f`; scenario-constrained
+  and documented). Deferrals carried to later slices: Modern `ColorMode` display-halve arm;
+  steerable centering (`WormState` has no `steerable_sum`) — assert kept; `bonus_frames` empty
+  + `BONUS_FLICKER_TIME` hardcoded (no bonus scenario); spawn-preview `BlitImageTrans` unreached
+  (`names_on_bonuses=false`, no `kChange`); Rust-side layout-token value validation; C++
+  render-path edits are not caught by CI's re-diff (gen-scripts are local); the `cossin`-UB
+  sites (ninjarope/`worm_fire`) left unmasked; `MAT_SEE_SHADOW`-constant placement in `render`.
+  Name labels / font (`DrawTextSmall`), HUD/bars/banners/holdazone/minimap → **3e**.
 
 - **3c — Bevy window (native).** The `game` crate: `FixedUpdate` sim tick, CPU buffer
   → `Image` → `Sprite` + `Camera2d`, nearest, integer-scaled; a fixed-seed scripted

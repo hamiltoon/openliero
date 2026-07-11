@@ -15,10 +15,16 @@
 //! is gated on `draw_shadow` at the caller (T5); `shadow_pass` itself assumes it
 //! should draw.
 
-use crate::bitmap::Bitmap;
-use crate::blit::{blit_shadow_image, draw_shadow_line};
+use crate::bitmap::{Bitmap, ColorMode, Pal32};
+use crate::blit::{
+    blit_fire_cone, blit_image, blit_image_r, blit_shadow_image, draw_laser_sight, draw_line,
+    draw_ninjarope, draw_shadow_line,
+};
+use crate::fire_cone::FIRE_CONE_OFFSET;
 use crate::shadow_query::ShadowQuery;
-use sim::state::SimState;
+use crate::viewport::Viewport;
+use assets::sprite::SpriteSet;
+use sim::state::{angle_frame, ControlState, SimState};
 use sim_core::fixed::ftoi;
 
 /// `common.hpp:150` `WormSprite(f, dir, w)`: the worm-body sprite index into the
@@ -224,17 +230,243 @@ pub fn shadow_pass(
     }
 }
 
+/// **Pass 2** — port of `viewport.cpp:400-590`, all sprites drawn on top of the
+/// fully-composited shadow layer. The families run in the same fixed C++ order as
+/// the shadow pass: bonuses -> sobjects -> wobjects -> nobjects -> worms(+laser
+/// sight/beam/ninjarope/fire cone/body) -> aim crosshair -> bobjects. This is the
+/// second half of the load-bearing two-pass ordering (Global Constraint): every
+/// shadow composited before ANY sprite, so `frame::draw` runs `shadow_pass`
+/// COMPLETELY before this per viewport.
+///
+/// `off_x`/`off_y` are `kOffs` (`screen = world + kOffs`). `vp` is `&mut` because
+/// the worm sub-loop is where the **viewport-local RNG goes live**: `draw_laser_sight`
+/// advances `vp.rand` per stepped Bresenham pixel (`viewport.cpp:516`). The aim
+/// crosshair is gated on the **viewport's own** worm being visible (`vp.worm_idx`),
+/// NOT on the loop worm.
+///
+/// The **name-label `DrawTextSmall` calls** (`:411`, `:476`, `:580`) and the
+/// **AI debug** draw (`:550`) are deliberately omitted here — they belong to 3e
+/// (font/HUD). The sobject blit is the sole sprite-pass user of the `ShadowQuery`
+/// (`BlitImageR`'s water-range test, `viewport.cpp:423`); the query is built
+/// internally (a pure read-only view of the level + palette), so `frame::draw`'s
+/// own shadow query can be dropped before this takes `&mut vp`.
+#[allow(clippy::too_many_arguments)]
+pub fn sprite_pass(
+    scr: &mut Bitmap,
+    state: &SimState,
+    pal: &Pal32,
+    vp: &mut Viewport,
+    off_x: i32,
+    off_y: i32,
+    fire_cone_sprites: &SpriteSet,
+    nr_begin: i32,
+    nr_end: i32,
+    laser_weapon: i32,
+    bonus_frames: &[i32],
+) {
+    // The sobject BlitImageR (:423) reads the LEVEL (water range) via this query.
+    // Same `world_offset = -kOffs` convention as `frame::draw`/`shadow_pass`.
+    let shadow = ShadowQuery {
+        level: &state.level,
+        pal32: pal,
+        world_offset_x: -off_x,
+        world_offset_y: -off_y,
+        mode: ColorMode::Classic,
+        cycles: state.cycles,
+    };
+
+    // (7) bonuses — viewport.cpp:402-415 (name label :411 skipped).
+    for i in state.bonuses.iter() {
+        if i.timer > BONUS_FLICKER_TIME || (state.cycles & 3) == 0 {
+            let f = bonus_frames[i.frame as usize]; // :405
+            // :406-407 — small sprite at (Ftoi(x)-3, Ftoi(y)-3) + offs.
+            blit_image(
+                scr,
+                pal,
+                &state.small_sprites,
+                f as usize,
+                ftoi(i.x) - 3 + off_x,
+                ftoi(i.y) - 3 + off_y,
+            );
+        }
+    }
+
+    // (8) sobjects — viewport.cpp:418-425. BlitImageR gates on the water range.
+    for i in state.sobjects.iter() {
+        let t = &state.sobject_types[i.id as usize]; // :421
+        let frame = i.cur_frame + t.start_frame; // :422
+        // :423-424 — 16x16 large sprite at (x, y) + offs (x/y are int pixels).
+        blit_image_r(
+            scr,
+            pal,
+            &shadow,
+            &state.large_sprites,
+            frame as usize,
+            i.x + off_x,
+            i.y + off_y,
+            16,
+            16,
+        );
+    }
+
+    // (9) wobjects — viewport.cpp:428-481 (name label :465-479 skipped). The
+    // sprite blit is UNCONDITIONAL on `w.shadow` (unlike the shadow pass).
+    for i in state.wobjects.iter() {
+        let w = &state.weapons[i.ty.expect("live wobject has a weapon type") as usize]; // :431
+        if w.start_frame > -1 {
+            // :432
+            let cur_frame = wobj_remap(i.cur_frame, w.shot_type); // :433-454
+            let pos_x = ftoi(i.pos.x) - 3; // :455
+            let pos_y = ftoi(i.pos.y) - 3; // :456
+            // :457-458 — small[start_frame+cur_frame] at (kPosX, kPosY) + offs.
+            blit_image(
+                scr,
+                pal,
+                &state.small_sprites,
+                (w.start_frame + cur_frame) as usize,
+                pos_x + off_x,
+                pos_y + off_y,
+            );
+        } else if i.cur_frame > 0 {
+            // :459-462 — single palette pixel at (Ftoi(x)+offs, Ftoi(y)+offs).
+            // SetPixel clips internally (Inside), matching C++ (no extra gate).
+            let pos_x = ftoi(i.pos.x) + off_x;
+            let pos_y = ftoi(i.pos.y) + off_y;
+            scr.set_pixel(pos_x, pos_y, i.cur_frame as u8, pal);
+        }
+    }
+
+    // (10) nobjects — viewport.cpp:483-498.
+    for i in state.nobjects.iter() {
+        let t = &state.nobject_types[i.ty.expect("live nobject has a type") as usize]; // :486
+        if t.start_frame > 0 {
+            // :487 — pos = Ftoi(pos)-(3,3); blit small[start_frame+cur_frame] at
+            // (pos.x, pos.y) + offs.
+            let px = ftoi(i.pos.x) - 3; // :488
+            let py = ftoi(i.pos.y) - 3;
+            blit_image(
+                scr,
+                pal,
+                &state.small_sprites,
+                (t.start_frame + i.cur_frame) as usize,
+                px + off_x, // :489-490
+                py + off_y,
+            );
+        } else if i.cur_frame > 1 {
+            // :491 — pos = Ftoi(pos) + offs; Encloses gate then SetPixel.
+            let px = ftoi(i.pos.x) + off_x; // :492
+            let py = ftoi(i.pos.y) + off_y;
+            if scr.clip.encloses(px, py) {
+                // :493
+                scr.set_pixel(px, py, i.cur_frame as u8, pal); // :494
+            }
+        }
+    }
+
+    // (11) worms — viewport.cpp:500-552. game.worms order; only VISIBLE worms.
+    // The worm sub-loop order is: laser sight -> laser beam -> ninjarope ->
+    // fire cone -> worm body (AI debug :550 skipped).
+    for w in state.worms.iter() {
+        if w.visible {
+            // :503
+            let temp_x = ftoi(w.pos.x) - 7 + off_x; // :504
+            let temp_y = ftoi(w.pos.y) - 5 + off_y; // :505
+            let af = angle_frame(w.aiming_angle, w.direction); // :506
+            let cw = w.current_weapon as usize;
+            let ww = w.weapons[cw];
+
+            if ww.available() {
+                // :508
+                let hotspot_x = w.hotspot_x + off_x; // :509
+                let hotspot_y = w.hotspot_y + off_y; // :510
+                let weapon = &state.weapons[ww.ty.expect("current weapon has a type") as usize]; // :513
+                if weapon.laser_sight {
+                    // :515 — the viewport-RNG trap: advances vp.rand.
+                    draw_laser_sight(scr, pal, &mut vp.rand, hotspot_x, hotspot_y, temp_x + 7, temp_y + 4);
+                }
+                // :519 — the designated laser weapon, firing, draws a beam.
+                if ww.ty == Some(laser_weapon - 1) && w.control_states.get(ControlState::FIRE) {
+                    draw_line(scr, pal, hotspot_x, hotspot_y, temp_x + 7, temp_y + 4, weapon.color_bullets);
+                }
+            }
+
+            if w.ninjarope.out {
+                // :525
+                let nx = ftoi(w.ninjarope.pos.x) + off_x; // :526
+                let ny = ftoi(w.ninjarope.pos.y) + off_y; // :527
+                // :529 — the rope line, colour cycling [nr_begin, nr_end).
+                draw_ninjarope(scr, pal, nx, ny, temp_x + 7, temp_y + 4, nr_begin, nr_end);
+                // :531 — the rope-hook sprite large[84] at (nx-1, ny-1).
+                blit_image(scr, pal, &state.large_sprites, 84, nx - 1, ny - 1);
+            }
+
+            // :534 — the fire cone, gated on the weapon's fire_cone AND the worm's
+            // fire_cone countdown. The weapon type is *i->type of the slot.
+            let weapon_fire_cone = ww
+                .ty
+                .map(|ty| state.weapons[ty as usize].fire_cone)
+                .unwrap_or(0);
+            if weapon_fire_cone > 0 && w.fire_cone > 0 {
+                // :539-542.
+                blit_fire_cone(
+                    scr,
+                    pal,
+                    w.fire_cone / 2,
+                    fire_cone_sprites,
+                    fire_cone_sprite_index(af, w.direction),
+                    FIRE_CONE_OFFSET[w.direction as usize][af as usize][0] + temp_x,
+                    FIRE_CONE_OFFSET[w.direction as usize][af as usize][1] + temp_y,
+                );
+            }
+
+            // :545 — the worm body sprite at (tempX, tempY).
+            let frame = worm_sprite_index(w.current_frame, w.direction, w.index);
+            blit_image(scr, pal, &state.worm_sprites, frame, temp_x, temp_y);
+        }
+    }
+
+    // (12) aim crosshair — viewport.cpp:566-583 (change-name label :575-582
+    // skipped). Gated on the VIEWPORT'S OWN worm being visible.
+    let worm = &state.worms[vp.worm_idx];
+    if worm.visible {
+        // :566
+        // :568 — temp = Ftoi(pos) - (1,2) + Ftoi(cossin[Ftoi(aiming_angle)] * 16) + offs.
+        // The index can be exactly 128 (same benign OOB as `process_sight`,
+        // worm.cpp:1197); the sim's 128-entry table is periodic, so mask `& 0x7f`
+        // (a no-op for 0..=127, mapping the degenerate 128 -> 0). Render-only.
+        let cd = state.cossin[(ftoi(worm.aiming_angle) & 0x7f) as usize].mul(16);
+        let temp_x = ftoi(worm.pos.x) - 1 + ftoi(cd.x) + off_x;
+        let temp_y = ftoi(worm.pos.y) - 2 + ftoi(cd.y) + off_y;
+        // :572 — small[44] when the sight is green, else small[43].
+        let f = if worm.make_sight_green { 44 } else { 43 };
+        blit_image(scr, pal, &state.small_sprites, f, temp_x, temp_y);
+    }
+
+    // (13) bobjects (blood) — viewport.cpp:585-590. Encloses gate then SetPixel.
+    for i in state.bobjects.iter() {
+        let px = ftoi(i.pos.x) + off_x; // :586
+        let py = ftoi(i.pos.y) + off_y;
+        if scr.clip.encloses(px, py) {
+            // :587
+            scr.set_pixel(px, py, i.color as u8, pal); // :588
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitmap::{Bitmap, ColorMode, Pal32};
+    use crate::bitmap::{Bitmap, ColorMode, Pal32, Rect};
     use crate::shadow_query::{ShadowQuery, MAT_SEE_SHADOW};
+    use crate::viewport::Viewport;
     use assets::level::LevelData;
     use assets::object::{NObjectType, SObjectType, Weapon};
     use assets::sprite::SpriteSet;
     use sim::control::ControlConsts;
     use sim::physics::PhysicsConsts;
-    use sim::state::{NObject, SObject, SimState, WObject, WeaponInit, WormInit, NUM_WEAPONS};
+    use sim::state::{
+        NObject, SObject, SimState, WObject, WeaponInit, WormWeapon, WormInit, NUM_WEAPONS,
+    };
     use sim_core::fixed::itof;
     use sim_core::vec::Vec2;
 
@@ -645,5 +877,323 @@ mod tests {
         let mut b = filled(64, 64);
         shadow_pass(&mut b, &state, &q, 0, 0, &[]);
         assert_eq!(px(&b, 27, 33), SHADOW_ARGB, "overlapping shadows resolve to the same value");
+    }
+
+    // ===================================================================
+    // sprite_pass (pass 2) — viewport.cpp:400-590
+    // ===================================================================
+
+    const SPRITE: u32 = 0xFF00_0001; // solid_bank writes index 1 -> pal[1].
+
+    fn vp_at(worm_idx: usize) -> Viewport {
+        Viewport::new(Rect::new(0, 0, 64, 64), worm_idx)
+    }
+
+    // Give worm `wi`'s current slot a real weapon type so the `Available()` block
+    // can dereference `*i->type` without hitting the None-slot invariant.
+    fn arm_worm(state: &mut SimState, wi: usize, w: Weapon) {
+        state.weapons = vec![w];
+        state.worms[wi].weapons[0] =
+            WormWeapon { ty: Some(0), ammo: 0, delay_left: 0, loading_left: 0 };
+        state.worms[wi].current_weapon = 0;
+    }
+
+    // ---- (11) worm body: sprite at (tempX, tempY), worm_sprite_index ----
+
+    #[test]
+    fn sprite_pass_worm_body_at_temp() {
+        // Two worms: worm[0] visible (draws its body); worm[1] invisible AND the
+        // viewport's own worm, so the crosshair (visible-gated on vp.worm_idx=1)
+        // is skipped — isolating the body blit.
+        let pal = ramp_pal();
+        let mut state = base_state(&[worm_init(0, 30, 30, true), worm_init(1, 0, 0, false)]);
+        arm_worm(&mut state, 0, Weapon::default()); // no laser/firecone -> body only
+        state.worms[0].current_frame = 0;
+        state.worms[0].direction = 0;
+        let mut vp = vp_at(1);
+        let mut b = filled(64, 64);
+        sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        // tempX = 30-7 = 23, tempY = 30-5 = 25; body 16x16 block [23,39)x[25,41).
+        assert_eq!(px(&b, 23, 25), SPRITE, "worm body top-left = (Ftoi-7, Ftoi-5)");
+        assert_eq!(px(&b, 38, 40), SPRITE, "worm body bottom-right (16x16)");
+        assert_eq!(px(&b, 22, 25), SENTINEL, "one left of body");
+        assert_eq!(px(&b, 23, 24), SENTINEL, "one above body");
+    }
+
+    // ---- (12) crosshair: gated on the VIEWPORT'S OWN worm visibility ----
+
+    #[test]
+    fn sprite_pass_crosshair_visible_gated() {
+        let pal = ramp_pal();
+        // Viewport worm is index 0. When visible -> crosshair small[43] draws;
+        // arm it so the Available() block does not panic, but with a plain weapon.
+        let mut state = base_state(&[worm_init(0, 30, 30, true), worm_init(1, 0, 0, false)]);
+        arm_worm(&mut state, 0, Weapon::default());
+        state.worms[0].aiming_angle = 0; // cossin[0]
+        let mut vp = vp_at(0);
+        let mut b = filled(64, 64);
+        sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        // temp = Ftoi(pos) - (1,2) + Ftoi(cossin[0] * 16). Compute the exact cell.
+        let cd = state.cossin[0].mul(16);
+        let tx = 30 - 1 + ftoi(cd.x);
+        let ty = 30 - 2 + ftoi(cd.y);
+        assert_eq!(px(&b, tx, ty), SPRITE, "crosshair small[43] top-left at temp");
+
+        // Same scene but the viewport worm is INVISIBLE -> no crosshair at temp.
+        let mut state2 = base_state(&[worm_init(0, 30, 30, false), worm_init(1, 0, 0, false)]);
+        arm_worm(&mut state2, 0, Weapon::default());
+        let mut vp2 = vp_at(0);
+        let mut b2 = filled(64, 64);
+        sprite_pass(&mut b2, &state2, &pal, &mut vp2, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        assert!(b2.pixels.iter().all(|&p| p == SENTINEL), "invisible viewport worm -> no crosshair");
+    }
+
+    #[test]
+    fn sprite_pass_crosshair_make_sight_green_picks_44() {
+        // make_sight_green flips the crosshair sprite index 43 -> 44. With a
+        // per-frame-distinct bank we can prove the frame selection.
+        let pal = ramp_pal();
+        let mut state = base_state(&[worm_init(0, 30, 30, true), worm_init(1, 0, 0, false)]);
+        arm_worm(&mut state, 0, Weapon::default());
+        state.worms[0].make_sight_green = true;
+        // Bank whose frame 44 top-left byte is a UNIQUE index (7), frame 43 is 5.
+        let mut data = vec![0u8; 200 * 7 * 7];
+        data[43 * 49] = 5;
+        data[44 * 49] = 7;
+        state.small_sprites = SpriteSet { width: 7, height: 7, count: 200, data };
+        let mut vp = vp_at(0);
+        let mut b = filled(64, 64);
+        sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        let cd = state.cossin[0].mul(16);
+        let tx = 30 - 1 + ftoi(cd.x);
+        let ty = 30 - 2 + ftoi(cd.y);
+        assert_eq!(px(&b, tx, ty), 0xFF00_0000 | 7, "green sight -> small[44] (byte 7)");
+    }
+
+    // ---- viewport-RNG: laser sight advances vp.rand, non-laser leaves it ----
+
+    #[test]
+    fn sprite_pass_laser_sight_advances_vp_rand() {
+        let pal = ramp_pal();
+        let mut state = base_state(&[worm_init(0, 30, 30, true), worm_init(1, 0, 0, false)]);
+        let laser = Weapon { laser_sight: true, ..Default::default() };
+        arm_worm(&mut state, 0, laser);
+        state.worms[0].hotspot_x = 10;
+        state.worms[0].hotspot_y = 10;
+        // Viewport worm 1 (invisible) so no crosshair; worm 0 draws the sight.
+        let mut vp = vp_at(1);
+        let before = vp.rand.draws();
+        let mut b = filled(64, 64);
+        sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        assert!(vp.rand.draws() > before, "laser_sight walked the viewport RNG live");
+
+        // Non-laser weapon: the sight is never walked -> vp.rand untouched.
+        let mut state2 = base_state(&[worm_init(0, 30, 30, true), worm_init(1, 0, 0, false)]);
+        arm_worm(&mut state2, 0, Weapon::default());
+        state2.worms[0].hotspot_x = 10;
+        state2.worms[0].hotspot_y = 10;
+        let mut vp2 = vp_at(1);
+        let before2 = vp2.rand.draws();
+        let mut b2 = filled(64, 64);
+        sprite_pass(&mut b2, &state2, &pal, &mut vp2, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        assert_eq!(vp2.rand.draws(), before2, "no laser_sight -> no RNG draw");
+    }
+
+    // ---- laser beam: designated LaserWeapon slot + Fire pressed -> DrawLine ----
+
+    #[test]
+    fn sprite_pass_laser_beam_gated_on_weapon_index_and_fire() {
+        use sim::state::ControlState;
+        let pal = ramp_pal();
+        let mut state = base_state(&[worm_init(0, 30, 30, true), worm_init(1, 0, 0, false)]);
+        // color_bullets = 9 so the beam paints pal[9]; ty slot 0 == laser_weapon-1
+        // requires laser_weapon = 1.
+        arm_worm(&mut state, 0, Weapon { color_bullets: 9, ..Default::default() });
+        state.worms[0].hotspot_x = 10;
+        state.worms[0].hotspot_y = 10;
+        state.worms[0].control_states.set(ControlState::FIRE, true);
+        let mut vp = vp_at(1);
+        let mut b = filled(64, 64);
+        sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 1, &[]);
+        // The beam line from (10,10) to (tempX+7, tempY+4) = (30, 29) paints pal[9]
+        // on its stepped pixels; a mid pixel just past the start must be pal[9].
+        let painted = b.pixels.iter().any(|&p| p == 0xFF00_0009);
+        assert!(painted, "laser beam DrawLine painted color_bullets when Fire held");
+
+        // Fire NOT held -> no beam.
+        let mut state2 = base_state(&[worm_init(0, 30, 30, true), worm_init(1, 0, 0, false)]);
+        arm_worm(&mut state2, 0, Weapon { color_bullets: 9, ..Default::default() });
+        state2.worms[0].hotspot_x = 10;
+        state2.worms[0].hotspot_y = 10;
+        let mut vp2 = vp_at(1);
+        let mut b2 = filled(64, 64);
+        sprite_pass(&mut b2, &state2, &pal, &mut vp2, 0, 0, &SpriteSet::default(), 0, 0, 1, &[]);
+        assert!(!b2.pixels.iter().any(|&p| p == 0xFF00_0009), "no Fire -> no beam");
+    }
+
+    // ---- (13) bobjects (blood): SetPixel(color) at Encloses cells ----
+
+    #[test]
+    fn sprite_pass_bobject_setpixel_color() {
+        let pal = ramp_pal();
+        let mut state = base_state(&[worm_init(0, 0, 0, false), worm_init(1, 0, 0, false)]);
+        state.bobjects.spawn(sim::state::BObject {
+            pos: Vec2::new(itof(30), itof(30)),
+            color: 17,
+            ..Default::default()
+        });
+        let mut vp = vp_at(0);
+        let mut b = filled(64, 64);
+        sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        // Blood pixel at Ftoi(pos)+offs = (30,30), palette index = color 17.
+        assert_eq!(px(&b, 30, 30), 0xFF00_0000 | 17, "blood SetPixel(color) at Ftoi(pos)");
+        let n = b.pixels.iter().filter(|&&p| p != SENTINEL).count();
+        assert_eq!(n, 1, "one blood particle -> exactly one pixel");
+    }
+
+    // ---- (9) wobject sprite branch (unconditional on w.shadow) + else pixel ----
+
+    #[test]
+    fn sprite_pass_wobject_sprite_and_else_pixel() {
+        let pal = ramp_pal();
+        // start_frame >= 0 -> blit small[start_frame+cur_frame] (shadow flag IGNORED
+        // in the sprite pass). shot_type 0 -> identity remap.
+        let mut state = base_state(&[worm_init(0, 0, 0, false), worm_init(1, 0, 0, false)]);
+        state.weapons = vec![Weapon { start_frame: 0, shot_type: 0, shadow: false, ..Default::default() }];
+        state.wobjects.spawn(WObject {
+            pos: Vec2::new(itof(30), itof(30)),
+            ty: Some(0),
+            cur_frame: 0,
+            ..Default::default()
+        });
+        let mut vp = vp_at(0);
+        let mut b = filled(64, 64);
+        sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        // kPosX = 30-3 = 27; small 7x7 block [27,34)x[27,34).
+        assert_eq!(px(&b, 27, 27), SPRITE, "wobject sprite top-left = (Ftoi-3, Ftoi-3)");
+        assert_eq!(px(&b, 33, 33), SPRITE, "wobject sprite bottom-right (7x7)");
+
+        // else branch: start_frame = -1, cur_frame > 0 -> SetPixel(cur_frame) at
+        // (Ftoi(pos)+offs).
+        let mut state2 = base_state(&[worm_init(0, 0, 0, false), worm_init(1, 0, 0, false)]);
+        state2.weapons = vec![Weapon { start_frame: -1, ..Default::default() }];
+        state2.wobjects.spawn(WObject {
+            pos: Vec2::new(itof(30), itof(30)),
+            ty: Some(0),
+            cur_frame: 6,
+            ..Default::default()
+        });
+        let mut vp2 = vp_at(0);
+        let mut b2 = filled(64, 64);
+        sprite_pass(&mut b2, &state2, &pal, &mut vp2, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        assert_eq!(px(&b2, 30, 30), 0xFF00_0000 | 6, "wobject else SetPixel(cur_frame) at Ftoi(pos)");
+    }
+
+    // ---- (10) nobject sprite branch + else pixel (Encloses-gated) ----
+
+    #[test]
+    fn sprite_pass_nobject_sprite_and_else_pixel() {
+        let pal = ramp_pal();
+        let mut state = base_state(&[worm_init(0, 0, 0, false), worm_init(1, 0, 0, false)]);
+        state.nobject_types = vec![NObjectType { start_frame: 1, ..Default::default() }];
+        state.nobjects.spawn(NObject {
+            pos: Vec2::new(itof(30), itof(30)),
+            ty: Some(0),
+            cur_frame: 0,
+            ..Default::default()
+        });
+        let mut vp = vp_at(0);
+        let mut b = filled(64, 64);
+        sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        // pos = Ftoi-(3,3) = (27,27); small 7x7 block [27,34)x[27,34).
+        assert_eq!(px(&b, 27, 27), SPRITE, "nobject sprite top-left = (Ftoi-3, Ftoi-3)");
+        assert_eq!(px(&b, 33, 33), SPRITE, "nobject sprite bottom-right (7x7)");
+
+        // else branch (start_frame = 0): SetPixel iff cur_frame > 1 at Ftoi(pos).
+        let mut state2 = base_state(&[worm_init(0, 0, 0, false), worm_init(1, 0, 0, false)]);
+        state2.nobject_types = vec![NObjectType { start_frame: 0, ..Default::default() }];
+        state2.nobjects.spawn(NObject {
+            pos: Vec2::new(itof(30), itof(30)),
+            ty: Some(0),
+            cur_frame: 3,
+            ..Default::default()
+        });
+        let mut vp2 = vp_at(0);
+        let mut b2 = filled(64, 64);
+        sprite_pass(&mut b2, &state2, &pal, &mut vp2, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        assert_eq!(px(&b2, 30, 30), 0xFF00_0000 | 3, "nobject else SetPixel(cur_frame) at Ftoi(pos)");
+    }
+
+    // ---- (8) sobjects: BlitImageR gates on the water range [160,168) ----
+
+    #[test]
+    fn sprite_pass_sobject_blit_image_r_water_gated() {
+        let pal = ramp_pal();
+        // A 64x64 level with a water cell (material 160) at world (20,20) and rock
+        // (material 0) elsewhere. BlitImageR only paints over the water cell.
+        let mut material_id = vec![0u8; 64 * 64];
+        material_id[(20 + 20 * 64) as usize] = 160; // in [160,168)
+        let level = LevelData { width: 64, height: 64, material_id, palette: None, display: None };
+        let flags = [0u8; 256];
+        let mut state = SimState::new(
+            &level, &[worm_init(0, 0, 0, false), worm_init(1, 0, 0, false)], 0, &flags, vec![],
+            PhysicsConsts::default(), ControlConsts::default(), false, SpriteSet::default(),
+            vec![], vec![], vec![], 0, false, 0,
+        );
+        state.large_sprites = solid_bank(16, 16); // frame 0 solid
+        state.sobject_types = vec![SObjectType { start_frame: 0, ..Default::default() }];
+        // sobject at pixel (13,13): 16x16 sprite covers [13,29)x[13,29), so the water
+        // cell (20,20) is inside the sprite footprint.
+        state.sobjects.spawn(SObject { id: 0, x: 13, y: 13, cur_frame: 0, anim_delay: 0 });
+        let mut vp = vp_at(0);
+        let mut b = filled(64, 64);
+        sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        // Only the water cell (20,20) is painted (pal[1]); a dry cell is untouched.
+        assert_eq!(px(&b, 20, 20), SPRITE, "sobject BlitImageR paints over water cell");
+        assert_eq!(px(&b, 14, 14), SENTINEL, "dry cell inside sprite -> not painted");
+    }
+
+    // ---- empty scene guard: no visible worms, empty pools -> nothing ----
+
+    #[test]
+    fn sprite_pass_empty_scene_writes_nothing() {
+        let pal = ramp_pal();
+        let state = base_state(&[worm_init(0, 30, 30, false), worm_init(1, 40, 40, false)]);
+        let mut vp = vp_at(0);
+        let mut b = filled(64, 64);
+        sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        assert!(b.pixels.iter().all(|&p| p == SENTINEL), "empty sprite scene draws nothing");
+    }
+
+    // ---- the LOAD-BEARING two-pass ordering: shadow pass COMPLETE, then sprites ----
+
+    #[test]
+    fn two_pass_shadow_then_sprite_ordering() {
+        // A single shadow-casting wobject: its shadow (pass 1) lands at (Ftoi-6,
+        // Ftoi) and its sprite (pass 2) at (Ftoi-3, Ftoi-3); the two footprints
+        // overlap. Running shadow_pass COMPLETELY before sprite_pass (exactly what
+        // frame::draw does per viewport) means the sprite survives at the overlap,
+        // while a shadow-only cell keeps its pass-1 darkening. A single reordered
+        // draw would flip either assertion.
+        let pal = ramp_pal();
+        let mut state = base_state(&[worm_init(0, 0, 0, false), worm_init(1, 0, 0, false)]);
+        state.weapons =
+            vec![Weapon { shadow: true, start_frame: 0, shot_type: 0, ..Default::default() }];
+        state.wobjects.spawn(WObject {
+            pos: Vec2::new(itof(30), itof(30)),
+            ty: Some(0),
+            cur_frame: 0,
+            ..Default::default()
+        });
+        let q = shadow_query(&state, &pal);
+        let mut vp = vp_at(0);
+        let mut b = filled(64, 64);
+        // shadow 7x7 at (24,30) -> [24,31)x[30,37); sprite 7x7 at (27,27) ->
+        // [27,34)x[27,34). Overlap region [27,31)x[30,34).
+        shadow_pass(&mut b, &state, &q, 0, 0, &[]);
+        sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
+        assert_eq!(px(&b, 27, 30), SPRITE, "overlap: sprite (pass 2) survives over shadow (pass 1)");
+        assert_eq!(px(&b, 24, 30), SHADOW_ARGB, "shadow-only cell keeps pass-1 darkening");
+        assert_eq!(px(&b, 33, 27), SPRITE, "sprite-only cell shows the sprite");
     }
 }

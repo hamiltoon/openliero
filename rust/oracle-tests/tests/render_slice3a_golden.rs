@@ -181,12 +181,30 @@ fn render_slice3a_frame_hash_matches_cpp_oracle() {
     let mut bmp = render::bitmap::Bitmap::new(320, 200);
     let mut viewports = render::viewport::Viewport::player_layout();
 
+    // 3a parity under the widened `frame::draw`: no shadows, no fire cones, no
+    // flash. 3a's invisible worms + empty pools mean the sprite pass paints
+    // nothing, so the frame hashes stay byte-identical to the terrain-only draw.
+    // (T6 owns the eventual dumper-symmetric callsite; this is the minimal
+    // mechanical adaptation to keep the crate + oracle-tests compiling in T5.)
+    let empty_fire_cone = assets::sprite::SpriteSet::default();
+    let scene = render::frame::Scene {
+        origpal: &origpal,
+        color_anim: &color_anim,
+        fire_cone_sprites: &empty_fire_cone,
+        bonus_frames: &[],
+        nr_begin: tc.constants.NRColourBegin,
+        nr_end: tc.constants.NRColourEnd,
+        laser_weapon: tc.constants.LaserWeapon,
+        screen_flash: 0,
+        draw_shadow: false,
+    };
+
     let render_tick = |bmp: &mut render::bitmap::Bitmap,
                        vps: &mut [render::viewport::Viewport],
                        state: &SimState,
                        tick: u32|
      -> u64 {
-        render::frame::draw(bmp, state, &origpal, &color_anim, vps, 0);
+        render::frame::draw(bmp, state, vps, &scene);
         let fade = if tick == 0 { 0 } else { 33 };
         render::hash::hash_frame(bmp, fade)
     };

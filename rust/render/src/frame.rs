@@ -1,30 +1,52 @@
-//! The 3a draw path: the terrain-only subset of `Game::Draw`
-//! (`game.cpp:170-198`) + the viewport world block (`viewport.cpp:196-210`).
-//! Build the per-frame palette, Fill(0) the whole surface, then for each
-//! viewport center it, clip to its rect, and DrawLevel at kOffs. Shadows,
-//! sprites, HUD, minimap are 3b/3e.
+//! The full world draw: the world subset of `Game::Draw` (`game.cpp:170-198`) +
+//! the two-pass `Viewport::Draw` world block (`viewport.cpp:196-591`). Build the
+//! per-frame palette (with `screen_flash` -> `LightUp` live), Fill(0) the whole
+//! surface, then per viewport: center, clip, `draw_level` at kOffs, the COMPLETE
+//! `shadow_pass` (if `draw_shadow`), then the `sprite_pass`. HUD/banners/minimap/
+//! font stay in 3e.
+//!
+//! **The two-pass ordering is load-bearing** (Global Constraint): all shadows of
+//! a viewport composite before ANY of its sprites. `shadow_pass` runs COMPLETELY
+//! before `sprite_pass`, per viewport, inside the viewport loop — mirroring the
+//! C++ `Viewport::Draw` structure (everything happens per viewport in its `Draw`).
 
 use crate::bitmap::{Bitmap, ColorMode};
 use crate::level_draw::draw_level;
+use crate::object_draw::{shadow_pass, sprite_pass};
 use crate::palette::build_palette;
+use crate::shadow_query::ShadowQuery;
 use crate::viewport::Viewport;
 use assets::palette::Palette;
+use assets::sprite::SpriteSet;
 use assets::tc::ColorAnim;
 use sim::state::SimState;
 
-pub fn draw(
-    bmp: &mut Bitmap,
-    state: &SimState,
-    origpal: &Palette,
-    color_anim: &[ColorAnim],
-    viewports: &mut [Viewport],
-    screen_flash: i32,
-) {
-    // 1. Per-frame palette, before any blit (game.cpp:171-183).
-    let pal = build_palette(origpal, color_anim, state.cycles, screen_flash);
+/// The per-frame render inputs that are not the surface, the sim state, or the
+/// viewports — bundled so the wide `draw` arg list stays readable. `origpal` +
+/// `color_anim` + `screen_flash` feed the palette build (`game.cpp:170-198`, with
+/// `screen_flash > 0` making `LightUp` live); `fire_cone_sprites`/`bonus_frames`/
+/// `nr_begin`/`nr_end`/`laser_weapon` thread into the sprite pass; `draw_shadow`
+/// gates the shadow pass (the decoupled draw-time shadow directive).
+pub struct Scene<'a> {
+    pub origpal: &'a Palette,
+    pub color_anim: &'a [ColorAnim],
+    pub fire_cone_sprites: &'a SpriteSet,
+    pub bonus_frames: &'a [i32],
+    pub nr_begin: i32,
+    pub nr_end: i32,
+    pub laser_weapon: i32,
+    pub screen_flash: i32,
+    pub draw_shadow: bool,
+}
+
+pub fn draw(bmp: &mut Bitmap, state: &SimState, viewports: &mut [Viewport], scene: &Scene) {
+    // 1. Per-frame palette, before any blit (game.cpp:171-183). `screen_flash > 0`
+    //    makes `LightUp` live via `build_palette` (game.cpp:170-198).
+    let pal = build_palette(scene.origpal, scene.color_anim, state.cycles, scene.screen_flash);
     // 2. Repaint the whole surface through the fresh LUT (game.cpp:189).
     bmp.fill(0, &pal);
-    // 3. Per viewport: center, clip, DrawLevel at kOffs (viewport.cpp:196-210).
+    // 3. Per viewport: center (shake goes live automatically via vp.shake), clip,
+    //    then terrain -> ALL shadows -> ALL sprites (viewport.cpp:196-591).
     let full_clip = bmp.clip;
     for vp in viewports.iter_mut() {
         let worm = &state.worms[vp.worm_idx];
@@ -33,7 +55,36 @@ pub fn draw(
         bmp.cycles = state.cycles;
         // kOffs = rect.Ul() - (vp.x, vp.y): screen = world + kOffs.
         let (ulx, uly) = vp.rect.ul();
-        draw_level(bmp, &state.level, &pal, ulx - vp.x, uly - vp.y, ColorMode::Classic);
+        let off_x = ulx - vp.x;
+        let off_y = uly - vp.y;
+        draw_level(bmp, &state.level, &pal, off_x, off_y, ColorMode::Classic);
+        // Pass 1: all shadows (world_offset = -kOffs). Scoped so its immutable
+        // borrows of `pal`/`state.level` drop before `sprite_pass` takes `&mut vp`.
+        if scene.draw_shadow {
+            let shadow = ShadowQuery {
+                level: &state.level,
+                pal32: &pal,
+                world_offset_x: -off_x,
+                world_offset_y: -off_y,
+                mode: ColorMode::Classic,
+                cycles: state.cycles,
+            };
+            shadow_pass(bmp, state, &shadow, off_x, off_y, scene.bonus_frames);
+        }
+        // Pass 2: all sprites (advances vp.rand for laser sights).
+        sprite_pass(
+            bmp,
+            state,
+            &pal,
+            vp,
+            off_x,
+            off_y,
+            scene.fire_cone_sprites,
+            scene.nr_begin,
+            scene.nr_end,
+            scene.laser_weapon,
+            scene.bonus_frames,
+        );
         bmp.clip = full_clip;
     }
 }
@@ -107,14 +158,37 @@ mod tests {
             0,
         );
         // Exercise the visible-centering arm (from_init leaves killed_timer=150).
+        // Arm slot 0 with a real weapon type so the (now visible) sprite pass can
+        // dereference `*i->type` without hitting the None-slot invariant; the
+        // sprite banks stay empty (default), so every worm/crosshair blit no-ops
+        // and this stays a pure terrain test.
+        state.weapons = vec![assets::object::Weapon::default()];
         for w in state.worms.iter_mut() {
             w.killed_timer = 0;
+            w.weapons[0] =
+                sim::state::WormWeapon { ty: Some(0), ammo: 0, delay_left: 0, loading_left: 0 };
+            w.current_weapon = 0;
         }
 
         let origpal = ramp_origpal();
         let mut vps = Viewport::player_layout();
         let mut bmp = Bitmap::new(320, 200);
-        draw(&mut bmp, &state, &origpal, &[], &mut vps, 0);
+        // 3a parity: no shadows, empty fire-cone bank, no flash. With invisible
+        // worms + empty pools the sprite pass paints nothing, so the terrain-only
+        // frame is reproduced byte-for-byte.
+        let empty_bank = SpriteSet::default();
+        let scene = Scene {
+            origpal: &origpal,
+            color_anim: &[],
+            fire_cone_sprites: &empty_bank,
+            bonus_frames: &[],
+            nr_begin: 0,
+            nr_end: 0,
+            laser_weapon: 0,
+            screen_flash: 0,
+            draw_shadow: false,
+        };
+        draw(&mut bmp, &state, &mut vps, &scene);
 
         let px = |x: i32, y: i32| bmp.pixels[(x + y * 320) as usize];
         // Viewport 0 draws world (0,0) at screen (0,0); world (5,5) -> screen (5,5).

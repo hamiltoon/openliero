@@ -1,0 +1,83 @@
+# Step 3 Slice 3b — DART-over-WATER: the POSITIVE BlitImageR (sobject) proof.
+#
+# Read by BOTH the C++ dumper (full-world render + `render player`) and the Rust frame-hash
+# test (T8). Grammar = sim slices + `render <layout>`.
+#
+# === WHAT THIS PROVES: BlitImageR PAINTS a sobject sprite over water pixels ===========
+# The sibling render_slice3b_dart scenario runs the SAME dart on render_stage.lev, whose
+# sky is palette 130 (a non-water background). BlitImageR (blit.cpp:344-368) blits a
+# sobject-explosion pixel ONLY where the underlying LEVEL pixel's palette index is in the
+# classic water range [160,168) (shadow.PixelAt gate). Over palette 130 that gate is always
+# false, so on render_stage the dart's small_explosion sobject paints ZERO pixels — its
+# frame motion there is purely nobject debris + terrain carve (the sobject arm is exercised
+# but its water gate is never taken). That is BlitImageR's NEGATIVE path.
+#
+# This scenario swaps the level for water_stage.lev (gen_water_stage_level.py): render_stage
+# geometry EXACTLY (dirt floor at y=120, in-window) but the sky band [0,120) is a WATER-range
+# background (palette 160, value 24 = kSeeShadow|kBackground, inside [160,168)) instead of
+# 130. The dart flies through the water sky exactly as it flew through the render_stage sky
+# (both Background, neither DirtRock => identical collision/gravity => identical physics) and
+# explodes on the SAME dirt floor at y≈120. The small_explosion SObject is created with
+# obj.{x,y} = impact - 8 (sobject.cpp:36-37), so its 16x16 sprite is CENTRED on the impact
+# and STRADDLES the water/dirt boundary: the rows < 120 land on palette-160 water and ARE
+# painted by BlitImageR (viewport.cpp:418-425, the sprite pass); the rows >= 120 land on
+# palette-12 dirt (out of range) and are skipped. That upper-half water paint is the
+# POSITIVE BlitImageR path the corpus was missing.
+#
+# === THE EMPIRICAL WINDOW (see the T7 report "Fix" section) ==========================
+# Physics is byte-identical to render_slice3b_dart (only the never-collided sky palette
+# differs), so the explosion lands at the same tick: at t26 the `sobjects` column goes
+# non-empty and animates 000003ff -> 00000400 -> ... over t26..t37 (cur_frame 0..5), exactly
+# as render_slice3b_dart_sim.txt. The impact is CLEAR of both worms (bobjects stays empty,
+# worm columns unchanged — the slice-4c O10 discipline). The sobject sits over the water
+# band (rows < 120) for those ticks, so BlitImageR paints on every one of them.
+#
+# Proof by contrast (spec-accepted): the explosion-window frame hashes here differ from the
+# outside-band render_slice3b_dart frames. Same debris, same carve, same worms — the ONLY
+# added render contribution is the sobject sprite BlitImageR now paints over the water sky.
+#
+# The Up phase (t2..t21) gives the dart a downrange arc that lands in the window clear of
+# both worms; worm0 uses Up only (no Left/Right -> no facing-flip, aim stays [12,64]).
+#
+# HARD CONSTRAINTS (verified): both worms VISIBLE + ARMED slot 0 (DART, Available()); no
+# Left/Right -> no facing-flip (aim 0..=127); steerable_count == 0 (DART shot_type 1, not
+# 2/3); worms stay visible + alive (impact clear, no self-damage) -> never the spawn-preview
+# state.
+seed 42
+level Levels/water_stage.lev
+ticks 45
+render player
+# Both VISIBLE, grounded (y=7602176 == 116.0px). worm0 px=40 (2621440) shooter near the left
+# edge so the arc lands downrange in-window; worm1 px=140 (9175040) bystander at the right,
+# clear of the impact. Both inside the fixed [0,158) window (over the palette-160 water sky).
+worm 0 2621440 7602176 100 10 0   1
+worm 1 9175040 7602176 100 10 218 1
+weapon 0 DART
+# === Phase layout (tick : worm0 action) — VERIFIED against the golden ===============
+# 2-21  Up(1)      : arc the gun up (~20 ticks; worm0 stays grounded).
+# 22    Fire(16)   : DART arcs downrange; wobjects non-empty in flight; explodes ~t26 on the
+#                    floor clear of both worms -> sobjects + nobjects non-empty, level carves,
+#                    bobjects stays empty, worm columns unchanged. The sobject sprite straddles
+#                    the water/dirt boundary -> BlitImageR paints its upper (water) rows.
+# input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0; visible bystander)
+input 2 1 0
+input 3 1 0
+input 4 1 0
+input 5 1 0
+input 6 1 0
+input 7 1 0
+input 8 1 0
+input 9 1 0
+input 10 1 0
+input 11 1 0
+input 12 1 0
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 21 1 0
+input 22 16 0

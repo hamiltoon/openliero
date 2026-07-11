@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerates the Slice-3b render goldens (the sprite + shadow world view): fan, dart,
-# blood, shadow, laser, shake. Builds the REAL C++ Game + a headless Renderer, drives each
+# blood, shadow, laser, shake, dart_water. Builds the REAL C++ Game + a headless Renderer, drives each
 # scenario's worms N ticks, and for each tick dumps (a) the normal 11-column sim record
 # (render_slice3b_<name>_sim.txt, the isolation source) and (b) a sidecar frame golden
 # (render_slice3b_<name>.txt: <tick> <frame_hash16> <state_hash8> + a final `total`). Full
@@ -11,7 +11,9 @@
 # Also (re)generates the two purpose-built fixture levels this corpus needs — render_stage.lev
 # (high floor so grounded worms are inside the fixed [0,158) framehash window; the reduced
 # dumper never re-centres its viewports, so the camera stays at world origin) and
-# see_shadow_test.lev (a kSeeShadow background band so the shadow pass paints visible pixels).
+# see_shadow_test.lev (a kSeeShadow background band so the shadow pass paints visible pixels)
+# and water_stage.lev (render_stage geometry with a water-range [160,168) sky band so the
+# dart's sobject explosion sprite lands over water and BlitImageR paints — the positive proof).
 #
 # The 3rd dumper arg is the seed passed EXPLICITLY (42, matching each scenario); the 4th arg
 # is the sidecar frame-golden path. The dumper enables its opt-in render path from the
@@ -24,6 +26,7 @@ PRESET="${PRESET:-macos-arm64}"
 # Fixture levels (idempotent; read material indices from the live tc.cfg).
 python3 "$ROOT/rust/oracle-tests/gen_render_stage_level.py"
 python3 "$ROOT/rust/oracle-tests/gen_see_shadow_level.py"
+python3 "$ROOT/rust/oracle-tests/gen_water_stage_level.py"
 
 cmake --preset "$PRESET" -DOPENLIERO_BUILD_ORACLE_DUMP=ON >/dev/null
 cmake --build "$ROOT/build/$PRESET" --config Release --target oracle_dump_sim_physics
@@ -31,7 +34,7 @@ cmake --build "$ROOT/build/$PRESET" --config Release --target oracle_dump_sim_ph
 BIN="$ROOT/build/$PRESET/Release/oracle_dump_sim_physics"
 GOLD="$ROOT/rust/oracle-tests/golden"
 cd "$ROOT"
-for name in fan dart blood shadow laser shake; do
+for name in fan dart blood shadow laser shake dart_water; do
   "$BIN" \
     "$GOLD/render_slice3b_${name}_scenario.txt" \
     "$GOLD/render_slice3b_${name}_sim.txt" \

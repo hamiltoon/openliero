@@ -9,9 +9,11 @@
 //! sprites, HUD, minimap arrive in 3b/3e.
 pub mod bitmap;
 pub mod blit;
+pub mod fire_cone;
 pub mod frame;
 pub mod hash;
 pub mod level_draw;
+pub mod object_draw;
 pub mod palette;
 pub mod shadow_query;
 pub mod viewport;

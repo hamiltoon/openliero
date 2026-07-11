@@ -1,0 +1,23 @@
+[package]
+name = "game"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+render   = { path = "../render" }
+sim      = { path = "../sim" }
+assets   = { path = "../assets" }
+sim-core = { path = "../sim-core" }
+scenario = { path = "../scenario" }
+
+bevy = { version = "0.19", default-features = false, features = [
+    "bevy_sprite",   # sprites / Image / 2D pipeline (pulls bevy_render, bevy_core_pipeline)
+    "bevy_winit",    # window + event loop
+    "bevy_window",
+    "x11",           # Linux windowing (CI + Linux dev); inert on macOS
+    "wayland",       # Linux windowing (optional companion to x11)
+] }
+
+# Dev-only fast-iteration linking. NEVER a default; never enabled in CI or wasm.
+[features]
+dynamic = ["bevy/dynamic_linking"]

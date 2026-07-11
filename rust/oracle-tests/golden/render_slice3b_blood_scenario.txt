@@ -1,0 +1,52 @@
+# Step 3 Slice 3b — BLOOD bobject scenario (worm-hit blood pool + wounded-worm sprite).
+#
+# Read by BOTH the C++ dumper (full-world render + `render player`) and the Rust frame-hash
+# test (T8). Grammar = sim slices + `render <layout>`.
+#
+# === WHAT THIS PROVES: the bobject blood arm of the sprite pass ======================
+# worm0 (visible, grounded) aims DOWN and Fires the DART straight into the dirt at its own
+# feet. The DART explodes on contact (createOnExp="small_explosion", damage=5, detectRange=8,
+# blowAway=3000): worm0 is INSIDE the +/-8 box, so the SObject per-worm loop wounds it and
+# sprays blood NObjects (type 6) that drip the `bobjects` blood pool LIVE. In the sprite
+# pass the blood arm (viewport.cpp:585-590, Encloses-gated SetPixel(color) at Ftoi(pos)+kOffs)
+# paints each blood particle in the wounded worm's own colour; the wounded worm body sprite
+# (blown by blowAway) also renders. This is the bobject headline of 3b.
+#
+# === THE EMPIRICAL WINDOW (verified in the T7 report) ================================
+# The dart explodes ~t10 (sobjects/nobjects non-empty, level carves) and the `bobjects`
+# column goes NON-EMPTY from ~t11 and stays live ~30 ticks (the first live blood pool). The
+# frame hash moves across that window as the blood SetPixels + wounded worm render. worm0
+# takes ONE small hit (damage=5 → health 95) and STAYS visible + alive (never dies/respawns,
+# so the spawn-preview state is never reached). worm1 (px=50) is far from the +/-8 box —
+# its column is unchanged.
+#
+# worm0 uses Down only (aim toward the floor; no Left/Right → no facing-flip, aim stays
+# [64,116] ⊂ 0..=127). Deviation from the slice-5b base weapon: EXPLOSIVES' 55-tick air-burst
+# + bouncing is unreliable inside the fixed [0,158) window, so this uses the DART's immediate,
+# controlled small_explosion worm-hit to spawn blood deterministically — same bobject family.
+#
+# HARD CONSTRAINTS (verified): both worms VISIBLE + ARMED slot 0 (DART, Available()); no
+# Left/Right → no facing-flip; steerable_count == 0 (DART shot_type 1); worm0 wounded but
+# survives (health 95 > 0) so it never enters !visible && !ready && Change.
+seed 42
+level Levels/render_stage.lev
+ticks 40
+render player
+# Both VISIBLE, grounded (y=7602176 == 116.0px). worm0 px=100 (6553600) fires into its own
+# feet; worm1 px=50 (3276800) bystander, clear of the +/-8 blast box. Both in the window.
+worm 0 6553600 7602176 100 10 0   1
+worm 1 3276800 7602176 100 10 218 1
+weapon 0 DART
+# === Phase layout (tick : worm0 action) — VERIFIED against the golden ===============
+# 2-7   Down(2)    : lower the gun into the floor at worm0's feet.
+# 8     Fire(16)   : DART drives into the dirt and explodes ~t10 at worm0 -> wounds worm0
+#                    (health 95, blown), blood NObjects spawn -> `bobjects` non-empty ~t11+
+#                    ~30 ticks; sobjects/nobjects non-empty, level carves; worm1 unchanged.
+# input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0; visible bystander)
+input 2 2 0
+input 3 2 0
+input 4 2 0
+input 5 2 0
+input 6 2 0
+input 7 2 0
+input 8 16 0

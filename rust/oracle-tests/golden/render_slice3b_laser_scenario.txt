@@ -1,0 +1,62 @@
+# Step 3 Slice 3b — LASER-SIGHT viewport-RNG scenario (the RNG trap).
+#
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics, slice-3b full-world render +
+# `render player` sidecar) and the Rust frame-hash test (T8). Same grammar as the sim
+# slices plus the 3a `render <layout>` directive.
+#
+# === THE FIXED-CAMERA FACT (shared by every 3b visible-worm scenario) ===============
+# The reduced framehash dumper's worms keep killed_timer == kKilledTimerInitial (150)
+# and health 100 for the whole run: ResetWorms sets the timer and the ALIVE-worm branch
+# never decrements it (worm.cpp:439 is in the DEAD branch). So Viewport::Process
+# (viewport.cpp:28) takes NEITHER the `killed_timer <= 0` centering arm NOR the
+# `health <= 0` arm — the camera stays at its constructed origin (0,0) every tick (the
+# Rust viewport::process, viewport.rs:84, mirrors this exactly). The VISIBLE WORLD WINDOW
+# is therefore FIXED at world [0,158) x [0,158) (viewport 0 → screen x[0,158); viewport 1,
+# kOffs.x=160, → screen x[160,318) of the SAME world box). All 3b scenarios put their
+# worms + action INSIDE that box (render_stage.lev's floor is at y=120, in-window, so a
+# grounded worm at y≈116 is on screen — physics_fall_test's y=200 floor is BELOW it).
+#
+# === WHAT THIS PROVES: DrawLaserSight advances the per-viewport RNG ==================
+# Two VISIBLE, GROUNDED, STATIONARY worms hold the RIFLE (rifle.cfg name=RIFLE,
+# laserSight=true). In the sprite pass (viewport.cpp:500-516) a visible worm whose
+# current weapon is Available() and has laser_sight draws DrawLaserSight(vp->rand, hotspot,
+# worm): a stepped Bresenham walk drawing `rand(5)` per pixel and, iff 0 AND inside the
+# clip, a `rand(2)` spark colour pal32[rand(2)+83] (blit.cpp:693-703). The RNG is the
+# viewport's OWN Viewport::rand (default-seeded, one instance per viewport, state
+# accumulates across ticks — NEVER game.rand). So even with a MOTIONLESS worm the spark
+# pattern differs every tick because vp->rand advanced — the frame hash MOVES tick-to-tick.
+#
+# === THE EMPIRICAL WINDOW (verified in the T7 report) ===============================
+# Both worms are grounded at the floor rest (y≈116px) → stationary from tick 0 (they draw
+# NO game.rand). The palette RotateFrom is CONSTANT inside ticks 1..7 (cycles>>3 == 0), so
+# the ONLY moving part in that window is the laser sparks off vp->rand. The generated
+# golden's ticks 1..7 are therefore NOT constant (6 distinct frame hashes) — proving the
+# viewport RNG is live — whereas the SAME scenario with a non-laser weapon (FAN) yields a
+# SINGLE constant hash across 1..7 (exactly like 3a's static terrain scene). RNG live.
+#
+# We never Fire: the laser BEAM (DrawLine, gated on the LaserWeapon slot + Pressed kFire)
+# is a separate, RNG-FREE static line covered by the T5 unit tests; the RNG trap is the
+# SIGHT, so no fire input is given (keeps both worms frozen).
+#
+# HARD CONSTRAINTS (verified — see the T7 report empirical + self-review sections):
+#   * Both worms VISIBLE with an ARMED current slot (slot 0 = RIFLE, Available()), so the
+#     sprite pass `*ww.type` deref (viewport.cpp:513) is safe on both.
+#   * NO Left/Right on either visible worm → no ProcessMovement facing-flip → each viewport
+#     worm's Ftoi(aiming_angle) stays at its spawn value (32 or 96, both in 0..=127), so the
+#     crosshair cossin index never reads OOB (T0b/T5 concern 1).
+#   * steerable_count == 0: RIFLE is shot_type 0 (not a steerable 2/3 weapon).
+#   * Grounded + stationary + visible → NEVER the !visible && !ready && Change spawn-preview.
+seed 42
+level Levels/render_stage.lev
+ticks 12
+render player
+# worm <index> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
+# Both VISIBLE, grounded at the render_stage floor rest (y=7602176 == 116.0px), inside the
+# fixed [0,158) window. worm0 px=100 (6553600), worm1 px=50 (3276800): both on screen, far
+# enough apart that their sight lines sweep different spans of the clip.
+worm 0 6553600 7602176 100 10 0   1
+worm 1 3276800 7602176 100 10 218 1
+# `weapon <slot> <name>`: override BOTH worms' slot 0 with RIFLE (laserSight=true), full
+# ammo, ready. Slot 0 == the dumper's current_weapon, so both worms draw a laser sight.
+weapon 0 RIFLE
+# No `input` lines: fully static worms — the ONLY per-tick motion is the sight's vp->rand.

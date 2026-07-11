@@ -1,0 +1,48 @@
+# Step 3 Slice 3b — SHAKE + FLASH injection scenario (draw-only, spec O4; T5 = FAITHFUL).
+#
+# Read by BOTH the C++ dumper (full-world render + `render player` + `render_shake` +
+# `render_flash`) and the Rust frame-hash test (T8). Grammar = sim slices + `render <layout>`
+# + `render_shake <tick> <vp> <amount>` + `render_flash <tick> <amount>`. Authored because
+# T5's faithfulness checkpoint PASSED (injection is faithful; the main track ships).
+#
+# === WHAT THIS PROVES: screen-shake (viewport RNG + camera shift) and screen-flash =====
+# Two VISIBLE, GROUNDED, STATIONARY worms hold the FAN (no laser). The stationary FAN scene
+# is CONSTANT inside the palette window ticks 1..7 (932c2a2d…) — the baseline.
+#   * `render_shake 4 0 6` sets viewports[0].shake = Itof(6) for tick 4's draw only. The
+#     shake branch (viewport.cpp:47-52) draws TWO rand off viewport 0's RNG and shifts the
+#     camera by rand(12)-6 on each axis. At tick 4 the frame CHANGES (932c2a2d → f85b8123):
+#     the viewport moved + the RNG advanced.
+#   * `render_flash 6 40` feeds screen_flash=40 into the palette build (game.cpp:179-181,
+#     LightUp) for tick 6's draw only. Tick 6 is a ONE-TICK palette blip (f85b8123 → 7f4d75aa)
+#     that differs from BOTH neighbours (t5 and t7), then the palette restores.
+#
+# === THE EMPIRICAL WINDOWS (verified in the T7 report) ===============================
+# (a) SHAKE: generating this SAME scenario WITH vs WITHOUT the `render_shake` line changes
+#     tick 4's frame hash (f85b8123… with vs 932c2a2d… without) — the camera provably moved.
+#     NOTE: because the reduced dumper never re-centres the camera (killed_timer>0, see the
+#     laser scenario header), the tick-4 shift PERSISTS through ticks 5..7 (the camera is not
+#     reset), so shake is a STEP vs its left neighbour, not a one-tick blip. The step + the
+#     no-shake diff together prove "shake moves the viewport" (spec O4).
+# (b) FLASH: tick 6 differs from BOTH t5 and t7 — a clean one-tick LightUp blip.
+# In every case the state_hash column is byte-IDENTICAL with/without the injections (the sim
+# never reads shake/flash — the reduced dumper's viewports are not wired into ProcessViewports;
+# flash lives in GameSnapshot, absent from HashGameState). Isolation intact.
+#
+# amount 6 is the smallest shake whose rand(12)-6 draw yields a POSITIVE shift on the
+# origin-pinned camera (a negative shift would clamp back to x=max(x,0)=0 → invisible);
+# verified by the amount sweep in the T7 report.
+#
+# HARD CONSTRAINTS (verified): both worms VISIBLE + ARMED slot 0 (FAN, Available()); no
+# input at all → stationary, no facing-flip (aim at spawn value 0..=127); steerable_count == 0;
+# worms visible + alive → never the spawn-preview state.
+seed 42
+level Levels/render_stage.lev
+ticks 8
+render player
+# Both VISIBLE, grounded + stationary (y=7602176 == 116.0px), inside the fixed [0,158) window.
+worm 0 6553600 7602176 100 10 0   1
+worm 1 3276800 7602176 100 10 218 1
+weapon 0 FAN
+# Draw-only injections (sim-neutral): shake viewport 0 at tick 4; screen-flash at tick 6.
+render_shake 4 0 6
+render_flash 6 40

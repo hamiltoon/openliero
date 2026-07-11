@@ -1,0 +1,79 @@
+# Step 3 Slice 3b — FAN wobject-sprite scenario (reuses the slice-4a fan mechanic).
+#
+# Read by BOTH the C++ dumper (full-world render + `render player`) and the Rust frame-hash
+# test (T8). Grammar = sim slices + `render <layout>`.
+#
+# === WHAT THIS PROVES: the wobject SPRITE arm of the sprite pass ======================
+# worm0 (visible, grounded) raises its gun and Fires the FAN (fan.cfg name=FAN: parts=1,
+# gravity=0, dirt_effect=-1, expl_ground=true, time_to_explo=45). With gravity=0 the fan
+# flies in a STRAIGHT line along the aim; aimed up-left it climbs across the fixed [0,158)
+# window and stays on screen ~24 ticks. Each of those ticks the wobject sprite arm
+# (viewport.cpp:428-457, `start_frame > -1` → BlitImage of small_sprites[start_frame +
+# cur_frame]) draws the fan sprite, and its cur_frame animation + motion MOVE the frame
+# hash. Both worms are visible so the worm-body sprites + crosshairs draw too.
+#
+# === THE EMPIRICAL WINDOW (verified in the T7 report) ================================
+# The `wobjects` component column of the _sim sidecar is EMPTY (00000001) until the Fire
+# tick, then NON-EMPTY for ~24 consecutive ticks while the fan flies in view, and the
+# frame hash moves across them. The fan explodes on its time_to_explo countdown far from
+# both worms — the `bobjects` column stays EMPTY (no worm caught; clean wobject proof).
+#
+# The long Up phase (t2..t37) drives the aim to its up-most clamp (worm.cpp:1026-1028) so
+# the fan flies UP and stays in the window; worm0 never walks (Up only, no Left/Right), so
+# it stays grounded + stationary and its Ftoi(aiming_angle) stays in [12,64] ⊂ 0..=127.
+#
+# HARD CONSTRAINTS (verified): both worms VISIBLE + ARMED slot 0 (FAN, Available()); no
+# Left/Right → no facing-flip; steerable_count == 0 (FAN shot_type 0); worms stay visible +
+# alive (fan explodes clear, no self-damage) → never the spawn-preview state.
+seed 42
+level Levels/render_stage.lev
+ticks 62
+render player
+# Both VISIBLE, grounded at the render_stage floor rest (y=7602176 == 116.0px). worm0
+# px=100 (6553600) is the shooter; worm1 px=50 (3276800) is a visible bystander (no input).
+worm 0 6553600 7602176 100 10 0   1
+worm 1 3276800 7602176 100 10 218 1
+weapon 0 FAN
+# === Phase layout (tick : worm0 action) — VERIFIED against the golden ===============
+# 2-37  Up(1)      : raise the gun to its up-most clamp (~36 ticks; worm0 stays grounded).
+# 38    Fire(16)   : FAN launches up-left; wobjects non-empty ~24 ticks in the window; the
+#                    fan sprite animates + flies (frame hash moves); explodes clear on
+#                    time_to_explo (bobjects stays empty).
+# input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0; visible bystander)
+input 2 1 0
+input 3 1 0
+input 4 1 0
+input 5 1 0
+input 6 1 0
+input 7 1 0
+input 8 1 0
+input 9 1 0
+input 10 1 0
+input 11 1 0
+input 12 1 0
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 21 1 0
+input 22 1 0
+input 23 1 0
+input 24 1 0
+input 25 1 0
+input 26 1 0
+input 27 1 0
+input 28 1 0
+input 29 1 0
+input 30 1 0
+input 31 1 0
+input 32 1 0
+input 33 1 0
+input 34 1 0
+input 35 1 0
+input 36 1 0
+input 37 1 0
+input 38 16 0

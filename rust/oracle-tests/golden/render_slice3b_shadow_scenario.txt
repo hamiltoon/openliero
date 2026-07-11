@@ -1,0 +1,51 @@
+# Step 3 Slice 3b — SHADOW-PASS scenario (draw-time settings->shadow flip, spec O2/O3).
+#
+# Read by BOTH the C++ dumper (full-world render + `render player` + `render_shadow`) and
+# the Rust frame-hash test (T8). Grammar = sim slices + `render <layout>` + `render_shadow`.
+#
+# === WHAT THIS PROVES: the two-pass shadow block paints real shadow pixels ===========
+# `render_shadow` flips settings->shadow=true for the DRAW window only (AFTER the tick's
+# sim Process ran, so it never reaches CorrectShadow — the sim stays byte-identical; the
+# state_hash column is unchanged with vs without the flip). With the flip on, the FIRST
+# pass (viewport.cpp:274-398) composites, for every visible worm, BlitShadowImage of the
+# worm silhouette shifted (-3,+3): each silhouette pixel over terrain whose material sets
+# kSeeShadow (material.hpp:11, 1<<4) is repainted with ShadowedArgb = pal32[idx+4]
+# (shadow_query.hpp:51-68). Without a kSeeShadow material under the silhouette the pass
+# runs but paints NOTHING (ShadowedArgb==0) — so the proof needs kSeeShadow terrain.
+#
+# === WHY see_shadow_test.lev (spec O3 empirical requirement) =========================
+# physics_fall_test.lev's two materials (sky mat 8, dirt mat 1) carry NO kSeeShadow, so a
+# shadow cast on it is invisible. The openliero TC's ONLY kSeeShadow material is value 24
+# (kSeeShadow | kBackground) at palette indices 160..163 (tc.cfg `materials`). see_shadow_
+# test.lev (gen_see_shadow_level.py) fills rows [0,340) with that material — a background
+# the worm falls through but onto which its shadow DOES paint — over a solid floor at 340.
+# Both worms sit in the band (y≈70), so their silhouettes fall entirely on kSeeShadow and
+# the shadow pass paints on EVERY dumped tick.
+#
+# === THE EMPIRICAL DIFF (verified in the T7 report, spec O3 done-when) ===============
+# Generating this SAME scenario WITH vs WITHOUT the `render_shadow` line yields DIFFERENT
+# frame hashes on ticks 1..6 (11985d72… with shadow vs 14b1c310… without) while the
+# state_hash column is byte-IDENTICAL (isolation intact). The differing pixels ARE the
+# shadow pixels, and they live in the hashed back buffer → provably in the window. If the
+# two runs were identical the shadow pass painted nothing → the golden would NOT be
+# committed (spec O3). They differ → committed.
+#
+# FAN (laserSight=false) is the current weapon so NO laser sparks confound the shadow diff;
+# no Fire input, so no wobject — the frame's only shadow-pass contribution is the worm
+# silhouette shadows. The worms drift < 1px over the short window (integer-quantised draw),
+# so the frame is stable apart from the shadow the flip adds.
+#
+# HARD CONSTRAINTS (verified): both worms VISIBLE + ARMED slot 0 (FAN, Available());
+# no Left/Right → no facing-flip (aim stays 0..=127); steerable_count == 0 (FAN shot_type
+# 0); worms visible+alive → never the spawn-preview state.
+seed 42
+level Levels/see_shadow_test.lev
+ticks 6
+render player
+render_shadow
+# Both VISIBLE in the kSeeShadow band (y=4587520 == 70.0px), inside the fixed [0,158)
+# window. worm0 px=60 (3932160), worm1 px=100 (6553600): both silhouettes land on kSeeShadow.
+worm 0 3932160 4587520 100 10 0   1
+worm 1 6553600 4587520 100 10 218 1
+# Armed non-laser slot 0 so Available() holds (silhouette shadows only; no sparks/wobject).
+weapon 0 FAN

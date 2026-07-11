@@ -335,13 +335,19 @@ pub fn draw_ninjarope(
 }
 
 /// `blit.cpp:693-703` DrawLaserSight — the viewport-RNG trap. Per stepped
-/// Bresenham pixel it draws `rand(5)` (**always**, 1 draw); **iff that is 0** it
-/// then draws `rand(2)` and writes `pal[rand(2) + 83]` at `(cx, cy)` if the
-/// pixel is `Inside` the clip. Crucially the `rand(2)` is drawn **unconditionally
-/// once `rand(5) == 0`** — before the clip test — because in C++ the index is
-/// computed inside the assignment reached after `rand(5) == 0` (`blit.cpp:700`),
-/// so an off-clip zero-pixel still advances the RNG by the `rand(2)`. The
-/// per-pixel draw count is therefore 1, or 2 iff the first draw was 0. `rand` is
+/// Bresenham pixel it draws `rand(5)` (**always**, 1 draw); **iff that is 0**
+/// AND the pixel is `Inside` the clip, it then draws `rand(2)` and writes
+/// `pal[rand(2) + 83]` at `(cx, cy)`. In C++ (`blit.cpp:698-701`):
+/// ```cpp
+/// if (rand(5) == 0) {
+///   if (clip.Inside(cx, cy)) ptr[cy * kPitch + cx] = scr.pal32[rand(2) + 83];
+/// }
+/// ```
+/// the `rand(2)` call is on the RHS of the assignment inside the `Inside`
+/// branch — it is the *controlled statement* of the `if`, so it only
+/// evaluates when `Inside` is true. An off-clip zero-pixel therefore does
+/// NOT advance the RNG by the `rand(2)` draw. The per-pixel draw count is 1,
+/// or 2 iff the first draw was 0 AND the pixel is inside the clip. `rand` is
 /// the display-only per-viewport `Rand` (never `game.rand`).
 #[allow(clippy::too_many_arguments)]
 pub fn draw_laser_sight(
@@ -357,8 +363,8 @@ pub fn draw_laser_sight(
     let pitch = scr.pitch;
     do_line(from_x, from_y, to_x, to_y, |cx, cy| {
         if rand.bound(5) == 0 {
-            let idx = rand.bound(2) as i32 + 83;
             if clip.inside(cx, cy) {
+                let idx = rand.bound(2) as i32 + 83;
                 scr.pixels[(cy * pitch + cx) as usize] = pal[idx as usize];
             }
         }
@@ -718,8 +724,10 @@ mod tests {
     // ----- draw_laser_sight (the viewport-RNG pin) -----
 
     // Oracle that models blit.cpp:698-701 with an INDEPENDENT default Rand:
-    // returns (writes:(cx,cy,idx), total_draws). Clip is applied to the WRITE
-    // only; rand(2) is drawn whenever rand(5)==0 (even off-clip).
+    // returns (writes:(cx,cy,idx), total_draws). rand(2) is the controlled
+    // statement of `if (clip.Inside(cx, cy))`, so it is only drawn when
+    // rand(5)==0 AND the pixel is inside the clip (off-clip zero-pixels draw
+    // only the rand(5)).
     fn laser_oracle(path: &[(i32, i32)], clip: Rect) -> (Vec<(i32, i32, usize)>, u64) {
         let mut r = Rand::new();
         let mut writes = Vec::new();
@@ -727,12 +735,10 @@ mod tests {
         for &(cx, cy) in path {
             let z = r.bound(5);
             draws += 1;
-            if z == 0 {
+            if z == 0 && clip.inside(cx, cy) {
                 let idx = r.bound(2) as usize + 83;
                 draws += 1;
-                if clip.inside(cx, cy) {
-                    writes.push((cx, cy, idx));
-                }
+                writes.push((cx, cy, idx));
             }
         }
         (writes, draws)
@@ -784,12 +790,16 @@ mod tests {
     }
 
     #[test]
-    fn draw_laser_sight_rand2_drawn_even_when_pixel_off_clip() {
-        // THE subtlety (blit.cpp:700): rand(2) is drawn whenever rand(5)==0,
-        // BEFORE the Inside test. So the RNG draw count is INDEPENDENT of the
-        // clip. Run the same span with a full clip and an empty clip; the draw
-        // counts must be identical. If rand(2) were gated behind Inside, the
-        // empty-clip run would draw fewer times.
+    fn draw_laser_sight_rand2_gated_behind_clip_inside() {
+        // THE subtlety (blit.cpp:698-701): `rand(2)` sits on the RHS of the
+        // assignment that is the controlled statement of `if (clip.Inside(cx,
+        // cy))` — it only evaluates when the pixel is inside the clip. So an
+        // empty clip (Inside always false) must draw ONLY the rand(5) per
+        // stepped pixel (20 draws for this 20-pixel span), while a full clip
+        // additionally draws rand(2) for each of the 3 rand(5)==0 hits pinned
+        // by seed 0x1337 in the sibling test (23 draws). If rand(2) were
+        // drawn unconditionally (the old, inverted-order bug), the empty-clip
+        // run would ALSO draw 23, not 20.
         let pal = ramp_pal();
         let (fx, fy, tx, ty) = (0, 0, 20, 4);
         let mut full = filled(40, 40);
@@ -802,7 +812,8 @@ mod tests {
         let mut rb = Rand::new();
         draw_laser_sight(&mut empty, &pal, &mut rb, fx, fy, tx, ty);
 
-        assert_eq!(ra.draws(), rb.draws(), "clip must not change the RNG draw count");
+        assert_eq!(rb.draws(), 20, "empty clip: only the rand(5) per pixel, no rand(2)");
+        assert_eq!(ra.draws(), 23, "full clip: 20 rand(5) + 3 rand(2) (seed 0x1337)");
         assert!(empty.pixels.iter().all(|&p| p == SENTINEL), "empty clip writes nothing");
     }
 

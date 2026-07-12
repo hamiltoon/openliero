@@ -57,14 +57,31 @@ mod tests {
 
     #[test]
     fn respects_pitch_greater_than_width() {
-        // 2x1 image with pitch 4 (stride padding). Only the 2 real columns emit;
-        // the destination is tightly packed w*h*4 = 8 bytes.
-        let mut bmp = Bitmap::new(2, 1);
+        // 2x2 image with pitch 4 (stride padding). A single-row (h=1) fixture
+        // can't distinguish `y*pitch+x` from a buggy `y*w+x` — with h=1, y is
+        // always 0 and both formulas collapse to the same index. h=2 forces
+        // row 1's source read through the padded stride: row 0 = real px, pad,
+        // pad; row 1 = real px, pad, pad. Pad columns get sentinel values
+        // (0x99/0xAA/0xBB/0xCC) that don't match any expected output byte, so
+        // if the implementation ever indexes by `w` instead of `pitch`, row 1
+        // reads from row 0's pad cells and the assertion below fails loudly.
+        let mut bmp = Bitmap::new(2, 2);
         bmp.pitch = 4; // stride wider than width (guard the w-vs-pitch bug)
-        bmp.pixels = vec![0xFF_11_00_00, 0xFF_22_00_00, 0, 0]; // row: [px0, px1, pad, pad]
-        let mut out = vec![0u8; 8];
+        bmp.pixels = vec![
+            0xFF_11_00_00, 0xFF_22_00_00, 0xFF_99_00_00, 0xFF_AA_00_00, // row0: px0, px1, pad, pad
+            0xFF_33_00_00, 0xFF_44_00_00, 0xFF_BB_00_00, 0xFF_CC_00_00, // row1: px0, px1, pad, pad
+        ];
+        let mut out = vec![0u8; 16];
         blit_surface_into_bytes(&bmp, &mut out);
-        assert_eq!(out, [0x11, 0, 0, 0xFF, 0x22, 0, 0, 0xFF]);
+        assert_eq!(
+            out,
+            [
+                0x11, 0, 0, 0xFF, // (0,0)
+                0x22, 0, 0, 0xFF, // (1,0)
+                0x33, 0, 0, 0xFF, // (0,1) — from source row 1, not row 0's pad
+                0x44, 0, 0, 0xFF, // (1,1) — from source row 1, not row 0's pad
+            ]
+        );
     }
 
     #[test]

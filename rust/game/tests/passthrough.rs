@@ -112,16 +112,11 @@ fn assert_passthrough_deterministic(name: &str) {
             "{name} tick {k}: state hash diverged from golden through InputSource::Scripted"
         );
     }
-
-    // Final-tick guard: we consumed the whole series and the last state we hold
-    // is tick `ticks`, which matched `golden[ticks]` above — so a truncated run
-    // cannot pass silently.
-    assert_eq!(
-        golden.len() as u32,
-        scenario.ticks + 1,
-        "{name}: drove the full golden series through the final tick {}",
-        scenario.ticks
-    );
+    // The loop above ran through `scenario.ticks` unconditionally (no early
+    // return), and the length assert above already pins `golden.len() ==
+    // scenario.ticks + 1` — so reaching here already proves the full series
+    // was driven through the final tick; a second length assert here would be
+    // tautological.
 }
 
 // One test per committed 3b scenario so a drift localises to the family that

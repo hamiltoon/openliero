@@ -125,15 +125,36 @@ Each slice accumulates on `liero-rs-step-4`, states its done-when and what it *p
 exists before the soft surfaces are layered on. `.lrp` interop (4e) is sequenced late because it is
 the largest surface and depends on nothing the earlier slices produce.
 
-- **4a — Live input core.** Bevy keyboard → per-worm `ControlState`, snapshotted once per
-  `FixedUpdate` tick into `process_frame`; configurable key bindings (default one keyset 1P + a
-  second for 2P hotseat); `Dig`→Left+Right chord; Esc/quit. Replaces the scripted
-  `scenario.input(t, w)` source (`rust/game/src/main.rs:258`) with the live snapshot; the debug
-  determinism guard is retired for live play but kept for scripted/replay runs.
-  **Proves:** the game is playable from the keyboard, one snapshot/tick, no render-rate coupling.
-  **Oracle/gate:** feed a *scripted* input stream through the new sampler and assert it still
-  reproduces a scenario golden (the sampler is a pass-through for recorded input) — bridges into 4b.
-  **Risks:** ⚠ level-triggered vs edge semantics (input-map §1a), `Dig` chord, key-repeat filtering.
+- **4a — Live input core. LANDED (2026-07-12, commits `072817b`/`642adeb`/`e189de2`/`d9a54a3`,
+  all reviewed READY 0 Critical/0 Important).** Bevy keyboard → per-worm `ControlState`,
+  snapshotted once per `FixedUpdate` tick into `process_frame`; a new `InputSource{Scripted,Live}`
+  replaced the inline `scenario.input(t, w)` feed (`rust/game/src/main.rs`, pre-4a `:257-261`) —
+  Scripted is a verbatim pass-through, Live polls `ButtonInput`; `--live [name]` CLI (`Mode` enum,
+  native-only); `Dig`→Left+Right chord (a pure OR, never a stored bit); default bindings decoded
+  from `settings.cpp:36-37` via `keys.cpp:9-58` (P0 R/F/D/G+LCtrl/LShift/LAlt, P1 arrows+RCtrl/
+  RAlt/RShift, Dig unbound both, index-for-index verified). The debug determinism self-check and
+  the loop/reload are gated scripted-only (kept live for the regression path, off for `--live`).
+  **Proved:** the game is playable from the keyboard, native, 1P+2P hotseat, one snapshot/tick, no
+  render-rate coupling; Esc quits. **Oracle/gate — MET:** the headless pass-through determinism
+  gate (`rust/game/tests/passthrough.rs`) drives the real `InputSource::Scripted` through all
+  **7** committed `render_slice3b_*` scenarios and asserts `hash_game_state` bit-exact per tick vs
+  the golden `state_hash` column, wired into CI via `cargo test -p game` (3c's `cargo build -p
+  game` step upgraded). `sim`/`render`/`scenario` stayed byte-unchanged; every golden re-diffs
+  empty. **Risk resolutions:** level-triggered sampling (once per tick, before `process_frame`) —
+  confirmed the central invariant, RED-proven by an off-by-one repro (diverged at tick 2) before
+  the fix; `Dig` chord and default-table mismatches — caught by a 14-index-for-index review pass.
+  **Open-question resolutions carried forward:** sampler lives in a new Bevy-free-testable
+  `game/src/input.rs` (not re-homed into a resource-accumulator or `Update`); the default run mode
+  stays scripted (`--live` is opt-in, matching Open Q4's minimal-menu posture — no menu was needed
+  to reach playability); live-mode camera is unchanged (fixed ×3, no follow-cam — that Step-3
+  deferral stands). **Finding:** focus-loss needed **no** backstop — Bevy 0.19 already releases
+  held keys on window-focus-loss (`bevy_winit/src/system.rs:133-173` `check_keyboard_focus_lost` →
+  synthetic `Released` events → `bevy_input::keyboard.rs:199-203` `release_all`), verified by
+  reading the Bevy source rather than added defensively. **Manual playability (John's 30-second
+  keyboard check) remains an open advisory** — not yet run, same posture as 3c's Srgb eyeball
+  check; not a gate. **Deferred:** live-wasm (browser keyboard input — wasm stays on the scripted
+  witness per 3f, browser input revisited later); gamepad (unchanged, still later/optional);
+  recording → **4b**.
 
 - **4b — Record / replay round-trip + regression (the hard gate).** Record the per-tick
   `ControlState` stream (+ seed/level/weapon) to the recorded-input artifact; a headless replay

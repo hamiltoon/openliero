@@ -75,10 +75,12 @@ jobs:
       # the Bevy tree (wgpu/winit/naga). `cargo test --workspace` compiles every
       # binary target in every member, so without `--exclude game` the hard gate
       # would be coupled to Bevy's compile time and toolchain. The window is
-      # never launched in CI — this only proves `game` builds. The trimmed
-      # feature set (audio/gilrs dropped; winit's x11/wayland dlopen at runtime)
-      # needs no extra apt `-dev` packages on stock ubuntu-latest; if a future
-      # bump requires one, add the apt install to THIS step only, never above.
+      # never launched in CI — this only proves `game` builds. Most of the
+      # trimmed feature set dlopens at runtime, but `wayland-sys`'s build script
+      # resolves wayland-client via pkg-config at BUILD time, so this step (and
+      # only this step) needs the wayland/xkbcommon dev headers.
+      - name: Install game build deps (wayland headers)
+        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
       - name: Build game crate (Bevy)
         run: cargo build --manifest-path rust/Cargo.toml -p game
 

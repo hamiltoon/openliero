@@ -22,7 +22,9 @@ use bevy::window::WindowResolution;
 use render::bitmap::Bitmap;
 use render::viewport::Viewport;
 use scenario::{Scenario, SceneData};
-use sim::state::{ControlState, SimState};
+use sim::state::SimState;
+
+use input::InputSource;
 
 mod blit;
 mod input;
@@ -234,6 +236,11 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, name: Res<Sc
     // 7. Render tick 0 into the surface and upload once (window shows frame 0).
     render_and_upload(&mut demo, &sim.0, &mut images, &handle);
 
+    // The input source: scripted default feeds the scenario's recorded inputs as a
+    // literal pass-through (behavior unchanged from 3c). `--live` swaps this for
+    // `InputSource::Live(default_bindings())` in T2.
+    commands.insert_resource(InputSource::Scripted(demo.scenario.clone()));
+
     commands.insert_resource(sim);
     commands.insert_resource(demo);
     commands.insert_resource(FrameImage(handle));
@@ -247,18 +254,19 @@ fn tick_and_render(
     mut demo: ResMut<Demo>,
     mut images: ResMut<Assets<Image>>,
     frame: Res<FrameImage>,
+    source: Res<InputSource>,
+    keys: Res<ButtonInput<KeyCode>>,
 ) {
-    // 1. Advance the sim one tick, feeding the scenario's RECORDED inputs for the
-    //    tick we are leaving. (The blood golden was driven with these inputs — the
-    //    DART-into-own-feet fire is `input 8 16 0` — so empty inputs would diverge
-    //    and trip the self-check. "No input" in 3c means no LIVE player input; the
-    //    scenario's replay inputs are part of the deterministic corpus. See the
-    //    done-report for this correction to the brief's `ControlState::new()`.)
-    let t = demo.tick;
-    let inputs = [
-        ControlState::unpack(demo.scenario.input(t, 0)),
-        ControlState::unpack(demo.scenario.input(t, 1)),
-    ];
+    // 1. Sample the input source EXACTLY ONCE per tick, at the top of the single
+    //    FixedUpdate system, before `process_frame` (spec §4.3) — the central
+    //    one-snapshot-per-tick determinism invariant, decoupled from render rate.
+    //    `Scripted` (the default) is a literal pass-through of the scenario's
+    //    RECORDED inputs, so scripted behavior is byte-unchanged from the 3c inline
+    //    feed. (The blood golden was driven with these inputs — the DART-into-own-
+    //    feet fire is `input 8 16 0` — so empty inputs would diverge and trip the
+    //    self-check.) `Live` (--live, T2) instead polls the held-key set.
+    let inputs = source.sample(demo.tick, &keys);
+    // 4b recorder seam: recorded stream taps the sampled inputs here
     sim.0.process_frame(&inputs);
 
     // 2. Loop step: when `tick` passes `ticks`, rebuild from the loader at tick 0

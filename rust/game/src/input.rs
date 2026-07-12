@@ -7,8 +7,15 @@
 //! `KeyCode` via [`default_bindings`]. See spec §4.1.
 
 use bevy::input::keyboard::KeyCode;
+use bevy::input::ButtonInput;
+use bevy::prelude::Resource;
 
+use scenario::Scenario;
 use sim::state::ControlState;
+
+/// Number of worms sampled per tick — positional `[ControlState; N]`, the same
+/// index `process_frame` reads and `Viewport::worm_idx` maps (spec §4.2).
+pub const N_WORMS: usize = 2;
 
 /// One worm's key bindings. Generic over the key type so the bit-mapping + Dig
 /// chord in [`control_state`](PlayerBindings::control_state) are Bevy-free and
@@ -99,6 +106,47 @@ pub fn default_bindings() -> InputMap {
                 dig: None,                   // unbound in C++ defaults (§2)
             },
         ],
+    }
+}
+
+/// Where a tick's `[ControlState; N_WORMS]` snapshot comes from — the 4b-extensible
+/// seam (spec §4.2). `Scripted` makes the existing recorded scenario path a literal
+/// pass-through source (Bevy-free, drives the pass-through determinism gate);
+/// `Live` polls the held-key set through the per-worm [`PlayerBindings`]. 4b later
+/// adds a `Replay(Recording)` arm here, symmetric with `Scripted`.
+#[derive(Resource)]
+pub enum InputSource {
+    /// Recorded scenario inputs — the existing 3c feed (`main.rs:257-261`), now
+    /// behind the source. Ignores live keys.
+    Scripted(Scenario),
+    /// Live keyboard: one [`PlayerBindings`] per worm, polled level-triggered.
+    Live(InputMap),
+    // 4b adds: Replay(Recording) — reads back the recorded-input artifact,
+    // symmetric with Scripted. (Not built in 4a.)
+}
+
+impl InputSource {
+    /// The single per-tick input snapshot (spec §4.2/§4.3), sampled once at the
+    /// top of the FixedUpdate tick system.
+    ///
+    /// - `Scripted` is a **literal pass-through** of the scenario's recorded inputs
+    ///   (`parser.rs:261-268`), masked through [`ControlState::unpack`] exactly as
+    ///   the 3c inline feed did — `keys` is ignored, so the scripted path (and its
+    ///   determinism gate) is byte-unchanged.
+    /// - `Live` maps each worm's held-key set to a [`ControlState`] via the pure
+    ///   sampler, with `ButtonInput::pressed` as the level-triggered "pressed"
+    ///   query (spec §4.4).
+    pub fn sample(&self, tick: u32, keys: &ButtonInput<KeyCode>) -> [ControlState; N_WORMS] {
+        match self {
+            InputSource::Scripted(scenario) => [
+                ControlState::unpack(scenario.input(tick, 0)),
+                ControlState::unpack(scenario.input(tick, 1)),
+            ],
+            InputSource::Live(map) => [
+                map.players[0].control_state(|k| keys.pressed(k)),
+                map.players[1].control_state(|k| keys.pressed(k)),
+            ],
+        }
     }
 }
 
@@ -217,6 +265,53 @@ mod tests {
         assert!(cs.pack() < 0x80, "pack() = {:#x} must be 7-bit", cs.pack());
         // All seven bits actually set (the maximal 7-bit word).
         assert_eq!(cs.pack(), 0x7f);
+    }
+
+    /// `InputSource::Scripted` is a **literal pass-through** of the scenario's
+    /// recorded inputs (spec §4.2): for every tick, `sample` returns exactly
+    /// `[unpack(scn.input(t,0)), unpack(scn.input(t,1))]`, and an empty
+    /// `ButtonInput` is ignored (Scripted never reads keys). This is the sampler
+    /// half of the pass-through determinism gate (spec §5.1).
+    #[test]
+    fn scripted_sample_is_scenario_passthrough() {
+        // A minimal parsed scenario with sparse per-tick input overrides. The
+        // absence of an `input` line for a tick is "no keys" (parser.rs:262).
+        let text = "\
+seed 1
+level foo/bar
+ticks 6
+input 0 5 3
+input 2 127 0
+input 5 64 96
+";
+        let scn = Scenario::parse(text).expect("scenario parses");
+        let source = InputSource::Scripted(scn.clone());
+        let empty = ButtonInput::<KeyCode>::default();
+
+        for t in 0..scn.ticks {
+            let got = source.sample(t, &empty);
+            let want = [
+                ControlState::unpack(scn.input(t, 0)),
+                ControlState::unpack(scn.input(t, 1)),
+            ];
+            assert_eq!(got, want, "Scripted pass-through diverged at tick {t}");
+        }
+
+        // Spot-check the concrete decoded values so a silent unpack/index swap
+        // is caught, not just self-consistency.
+        assert_eq!(
+            source.sample(0, &empty),
+            [ControlState::unpack(5), ControlState::unpack(3)]
+        );
+        assert_eq!(
+            source.sample(2, &empty),
+            [ControlState::unpack(127), ControlState::unpack(0)]
+        );
+        // A tick with no `input` line => both worms empty.
+        assert_eq!(
+            source.sample(1, &empty),
+            [ControlState::new(), ControlState::new()]
+        );
     }
 
     /// The default table mirrors the decoded C++ defaults exactly (spec §2),

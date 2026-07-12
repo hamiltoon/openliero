@@ -25,6 +25,7 @@ use scenario::{Scenario, SceneData};
 use sim::state::{ControlState, SimState};
 
 mod blit;
+mod input;
 
 /// TC asset root, resolved at compile time relative to this crate so `cargo run
 /// -p game` works from any CWD (constraint: CARGO_MANIFEST_DIR, not CWD).

@@ -1,4 +1,13 @@
-use std::path::PathBuf;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+
+use render::bitmap::Bitmap;
+use render::hash::{FNV_OFFSET, FNV_PRIME};
+use render::viewport::Viewport;
+use scenario::{Scenario, SceneData};
+use sim::hash::hash_game_state;
+use sim::state::{ControlState, SimState};
+use sim_core::fixed::itof;
 
 /// Parsed configuration for the headless screenshot CLI.
 ///
@@ -85,6 +94,13 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     if out.is_none() && !hashes {
         return Err("require --out or --hashes".to_string());
     }
+    // `--scale 0` is geometrically meaningless (a 0x0 image, `w*0` PNG). Reject it
+    // here at the argument boundary — a pure argument-validity concern — so `run`
+    // and `render_scenario` keep `scale >= 1` as a clean precondition, and the
+    // error surfaces alongside the other flag errors + USAGE (T0 review finding).
+    if scale == 0 {
+        return Err("--scale must be >= 1".to_string());
+    }
 
     Ok(Config {
         scenario,
@@ -103,6 +119,239 @@ fn value_for(args: &[String], i: &mut usize, flag: &str) -> Result<String, Strin
         .ok_or_else(|| format!("missing value for {flag}"))?;
     *i += 1;
     Ok(next.clone())
+}
+
+/// One rendered tick: its frame hash (the render-crate FNV-1a over the ARGB
+/// buffer), the sim `state_hash`, and — only for the ticks the caller asked to
+/// capture — the encoded PNG bytes.
+pub struct Frame {
+    pub tick: u32,
+    pub frame_hash: u64,
+    pub state_hash: u32,
+    /// PNG bytes iff this tick was in `wanted` (PNG encode is expensive, so it is
+    /// skipped for the driven-but-not-captured ticks).
+    pub png: Option<Vec<u8>>,
+}
+
+/// Render one tick's frame off the current state, mirroring the T8 dumper's
+/// per-tick semantics: inject `render_shake` (`shake = itof(amount)`) for the
+/// draw and restore it after, feed `render_flash` into `Scene.screen_flash`, and
+/// gate the shadow pass on `scenario.shadow()`. Returns the frame hash (fade 0 on
+/// tick 0 — the black first frame — else 33, the identity fade).
+///
+/// This is a deliberate CLI-local copy of `render_slice3b_common::render_tick`;
+/// a T2 golden test guards the two against drift.
+fn render_tick(
+    bmp: &mut Bitmap,
+    state: &SimState,
+    viewports: &mut [Viewport],
+    scene_data: &SceneData,
+    scenario: &Scenario,
+    tick: u32,
+) -> u64 {
+    let draw_shadow = scenario.shadow();
+    let screen_flash = scenario.flash_at(tick).unwrap_or(0);
+
+    // Inject shake for THIS draw (set before, restore after — dumper semantics).
+    let shakes = scenario.shake_at(tick);
+    for &(vp, amount) in &shakes {
+        viewports[vp].shake = itof(amount);
+    }
+
+    let scene = scene_data.as_scene(screen_flash, draw_shadow);
+    render::frame::draw(bmp, state, viewports, &scene);
+
+    // Restore shake so the next tick's Process is clean (mirror the dumper).
+    for &(vp, _) in &shakes {
+        viewports[vp].shake = 0;
+    }
+
+    let fade = if tick == 0 { 0 } else { 33 };
+    render::hash::hash_frame(bmp, fade)
+}
+
+/// Drive `scenario` from tick 0 to `up_to`, rendering the FULL world view on
+/// EVERY tick (the viewport-local RNG steps per draw, so a skipped tick would
+/// desync every later frame). Returns one [`Frame`] per tick `0..=up_to`; PNG
+/// bytes are attached only for the ticks in `wanted`. `scale` is the nearest
+/// integer upscale factor for those PNGs.
+///
+/// Tick 0 is rendered/hashed BEFORE the first `process_frame` (as the sim
+/// goldens). Inputs are the scenario's recorded 7-bit vectors, never defaults.
+pub fn render_scenario(
+    tc_root: &Path,
+    scenario: &Scenario,
+    up_to: u32,
+    wanted: &[u32],
+    scale: u32,
+) -> Vec<Frame> {
+    let mut loaded = scenario::load(tc_root, scenario);
+    let mut bmp = Bitmap::new(320, 200);
+    let mut frames = Vec::with_capacity((up_to + 1) as usize);
+
+    // tick 0: rendered/hashed BEFORE the first ProcessFrame.
+    let fh = render_tick(
+        &mut bmp,
+        &loaded.state,
+        &mut loaded.viewports,
+        &loaded.scene,
+        scenario,
+        0,
+    );
+    let sh = hash_game_state(&loaded.state);
+    let png = wanted.contains(&0).then(|| encode_png(&bmp, scale));
+    frames.push(Frame {
+        tick: 0,
+        frame_hash: fh,
+        state_hash: sh,
+        png,
+    });
+
+    for k in 1..=up_to {
+        let inputs = [
+            ControlState::unpack(scenario.input(k - 1, 0)),
+            ControlState::unpack(scenario.input(k - 1, 1)),
+        ];
+        loaded.state.process_frame(&inputs);
+        let fh = render_tick(
+            &mut bmp,
+            &loaded.state,
+            &mut loaded.viewports,
+            &loaded.scene,
+            scenario,
+            k,
+        );
+        let sh = hash_game_state(&loaded.state);
+        let png = wanted.contains(&k).then(|| encode_png(&bmp, scale));
+        frames.push(Frame {
+            tick: k,
+            frame_hash: fh,
+            state_hash: sh,
+            png,
+        });
+    }
+
+    frames
+}
+
+/// Encode a `Bitmap` as a nearest ×`scale` RGB PNG: raw colours, alpha dropped,
+/// NO fade (the frame-hash fade would blacken tick 0). Per source pixel the RGB
+/// is `[(px>>16)&0xff, (px>>8)&0xff, px&0xff]`; the source is addressed by
+/// `pitch` (which may exceed `w`), never by `w`.
+pub fn encode_png(bmp: &Bitmap, scale: u32) -> Vec<u8> {
+    let img = scale_to_rgb(bmp, scale);
+    let mut out = Vec::new();
+    img.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+        .expect("PNG encode");
+    out
+}
+
+/// The nearest ×`scale` upscale of `bmp` into an `RgbImage` (the pre-encode
+/// surface). Split out so the encode step stays a one-liner and the scaling /
+/// channel-order logic is unit-testable in isolation.
+fn scale_to_rgb(bmp: &Bitmap, scale: u32) -> image::RgbImage {
+    let sc = scale as i32;
+    let w = (bmp.w * sc) as u32;
+    let h = (bmp.h * sc) as u32;
+    let mut img = image::RgbImage::new(w, h);
+    for y in 0..h {
+        let sy = y as i32 / sc;
+        for x in 0..w {
+            let sx = x as i32 / sc;
+            let px = bmp.pixels[(sy * bmp.pitch + sx) as usize];
+            let r = ((px >> 16) & 0xff) as u8;
+            let g = ((px >> 8) & 0xff) as u8;
+            let b = (px & 0xff) as u8;
+            img.put_pixel(x, y, image::Rgb([r, g, b]));
+        }
+    }
+    img
+}
+
+/// Top-level CLI entry: resolve the TC root and scenario-text paths from `cfg`,
+/// load + drive + render the scenario, write the requested PNG(s), and (for
+/// `--hashes`) emit the sidecar grammar to STDOUT. All info/progress goes to
+/// STDERR so `--hashes` stdout stays machine-parseable.
+pub fn run(cfg: &Config) -> Result<(), String> {
+    let tc_root: PathBuf = cfg.tc_root.clone().unwrap_or_else(|| {
+        PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/TC/openliero"
+        ))
+    });
+
+    let scenario_path = format!(
+        "{}/../oracle-tests/golden/render_slice3b_{}_scenario.txt",
+        env!("CARGO_MANIFEST_DIR"),
+        cfg.scenario
+    );
+    let text = std::fs::read_to_string(&scenario_path).map_err(|_| {
+        format!(
+            "unknown scenario {:?} (looked for {}). available: \
+             blood, dart, dart_water, laser, shadow, shake, fan",
+            cfg.scenario, scenario_path
+        )
+    })?;
+    let scenario = Scenario::parse(&text)?;
+
+    let up_to = *cfg
+        .ticks
+        .iter()
+        .max()
+        .expect("parse_args guarantees at least one --tick");
+    // PNG encode only when an output path was given (and only for the wanted
+    // ticks); a bare `--hashes` run drives+hashes every tick but encodes nothing.
+    let wanted: Vec<u32> = if cfg.out.is_some() {
+        cfg.ticks.clone()
+    } else {
+        Vec::new()
+    };
+
+    eprintln!(
+        "shot: scenario={} up_to={} scale={} capture={:?}",
+        cfg.scenario, up_to, cfg.scale, cfg.ticks
+    );
+    let frames = render_scenario(&tc_root, &scenario, up_to, &wanted, cfg.scale);
+
+    if let Some(out) = &cfg.out {
+        let find = |tick: u32| -> &Frame {
+            frames
+                .iter()
+                .find(|f| f.tick == tick)
+                .expect("wanted tick was rendered")
+        };
+        if cfg.ticks.len() == 1 {
+            // Single tick: `--out` is the exact PNG file path.
+            let f = find(cfg.ticks[0]);
+            let png = f.png.as_ref().expect("captured tick has PNG");
+            std::fs::write(out, png).map_err(|e| format!("write {}: {e}", out.display()))?;
+            eprintln!("shot: wrote {} ({} bytes)", out.display(), png.len());
+        } else {
+            // Multiple ticks: `--out` is a directory of `<name>_tick<N>.png`.
+            std::fs::create_dir_all(out).map_err(|e| format!("mkdir {}: {e}", out.display()))?;
+            for &tick in &cfg.ticks {
+                let f = find(tick);
+                let png = f.png.as_ref().expect("captured tick has PNG");
+                let path = out.join(format!("{}_tick{}.png", cfg.scenario, tick));
+                std::fs::write(&path, png).map_err(|e| format!("write {}: {e}", path.display()))?;
+                eprintln!("shot: wrote {} ({} bytes)", path.display(), png.len());
+            }
+        }
+    }
+
+    if cfg.hashes {
+        // Sidecar grammar to STDOUT: one `<tick> <fh_hex16> <sh_hex8>` line per
+        // tick, then `total <n> <acc_hex16>` (acc: FNV_OFFSET seed, folded per
+        // tick) — the exact grammar `render_slice3b_common::parse_frames` reads.
+        let mut acc = FNV_OFFSET;
+        for f in &frames {
+            println!("{} {:016x} {:08x}", f.tick, f.frame_hash, f.state_hash);
+            acc = (acc ^ f.frame_hash).wrapping_mul(FNV_PRIME);
+        }
+        println!("total {} {:016x}", frames.len(), acc);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -159,5 +408,90 @@ mod parse_tests {
     #[test]
     fn no_out_and_no_hashes_is_error() {
         assert!(parse_args(&v(&["--scenario", "blood", "--tick", "1"])).is_err());
+    }
+    #[test]
+    fn scale_zero_is_error() {
+        // `--scale 0` is rejected at the argument boundary (T0 review finding).
+        let r = parse_args(&v(&[
+            "--scenario",
+            "blood",
+            "--tick",
+            "1",
+            "--out",
+            "/tmp/x.png",
+            "--scale",
+            "0",
+        ]));
+        match r {
+            Err(e) => assert!(e.contains("scale"), "error mentions scale: {e}"),
+            Ok(_) => panic!("--scale 0 must be rejected"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use render::bitmap::{Bitmap, Rect};
+
+    const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
+
+    fn two_px(pitch: i32, pixels: Vec<u32>) -> Bitmap {
+        Bitmap {
+            w: 2,
+            h: 1,
+            pitch,
+            pixels,
+            clip: Rect::new(0, 0, 2, 1),
+            cycles: 0,
+        }
+    }
+
+    fn decode(png: &[u8]) -> image::RgbImage {
+        image::load_from_memory_with_format(png, image::ImageFormat::Png)
+            .expect("decode PNG")
+            .to_rgb8()
+    }
+
+    #[test]
+    fn encode_png_scales_and_orders_channels() {
+        // Red then green, ×2 nearest. Channel order must be R,G,B (alpha dropped).
+        let bmp = two_px(2, vec![0xFF_2A_00_00, 0xFF_00_2A_00]);
+        let img = decode(&encode_png(&bmp, 2));
+        assert_eq!(img.dimensions(), (4, 2), "×2 nearest upscale");
+        assert_eq!(img.get_pixel(0, 0).0, [0x2A, 0, 0], "top-left is red");
+        assert_eq!(img.get_pixel(2, 0).0, [0, 0x2A, 0], "x=2 is green");
+    }
+
+    #[test]
+    fn encode_png_respects_pitch_not_w() {
+        // Logical 2x1 backed by pitch=4 (two dead columns). The dead columns must
+        // NOT leak into the encoded image — addressing is by pitch, never w.
+        let bmp = two_px(
+            4,
+            vec![0xFF_2A_00_00, 0xFF_00_2A_00, 0xFF_DE_AD_BE, 0xFF_DE_AD_BF],
+        );
+        let img = decode(&encode_png(&bmp, 1));
+        assert_eq!(img.dimensions(), (2, 1));
+        assert_eq!(img.get_pixel(0, 0).0, [0x2A, 0, 0]);
+        assert_eq!(img.get_pixel(1, 0).0, [0, 0x2A, 0], "no dead-column leak");
+    }
+
+    #[test]
+    fn render_scenario_is_deterministic() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../oracle-tests/golden/render_slice3b_blood_scenario.txt"
+        ))
+        .expect("read blood scenario");
+        let scenario = Scenario::parse(&text).expect("parse");
+        let a = render_scenario(Path::new(TC_ROOT), &scenario, 5, &[5], 3);
+        let b = render_scenario(Path::new(TC_ROOT), &scenario, 5, &[5], 3);
+        let fa = a.iter().find(|f| f.tick == 5).unwrap();
+        let fb = b.iter().find(|f| f.tick == 5).unwrap();
+        assert_eq!(fa.frame_hash, fb.frame_hash, "frame hash is deterministic");
+        assert!(fa.png.is_some(), "tick 5 was captured");
+        assert_eq!(fa.png, fb.png, "PNG bytes are deterministic");
+        assert_eq!(a.len(), 6, "one frame per tick 0..=5");
     }
 }

@@ -114,36 +114,46 @@ pub fn default_bindings() -> InputMap {
 /// Where a tick's `[ControlState; N_WORMS]` snapshot comes from — the 4b-extensible
 /// seam (spec §4.2). `Scripted` makes the existing recorded scenario path a literal
 /// pass-through source (Bevy-free, drives the pass-through determinism gate);
-/// `Live` polls the held-key set through the per-worm [`PlayerBindings`]. 4b later
-/// adds a `Replay(Recording)` arm here, symmetric with `Scripted`.
+/// `Live` polls the held-key set through the per-worm [`PlayerBindings`].
+///
+/// 4b's `--replay <path>` (T2) does **not** add a `Replay` arm here: a
+/// recorded/replayed file IS a scenario (spec §3), so replay is `Scripted`
+/// verbatim over the file parsed from an arbitrary path — no new source
+/// variant, no new replay engine (spec §5). [`Mode::Replay`] is the CLI-level
+/// distinction (loop/self-check retired); the sampler stays two-armed.
 #[derive(Resource)]
 pub enum InputSource {
     /// Recorded scenario inputs — the existing 3c feed (`main.rs:257-261`), now
-    /// behind the source. Ignores live keys.
+    /// behind the source. Ignores live keys. Also the `--replay` source (4b,
+    /// T2), fed the parsed replay-file scenario instead of a committed golden.
     Scripted(Scenario),
     /// Live keyboard: one [`PlayerBindings`] per worm, polled level-triggered.
     Live(InputMap),
-    // 4b adds: Replay(Recording) — reads back the recorded-input artifact,
-    // symmetric with Scripted. (Not built in 4a.)
 }
 
-/// The CLI-selected run mode (spec §7/§9, T2). `Scripted` is the existing 3c
-/// default: recorded inputs, the loop/reload, and the debug determinism
-/// self-check. `Live` swaps the source for the keyboard and has no golden to
-/// check or loop against, so both are retired for it — but kept, unchanged,
-/// for `Scripted` (spec §9, the guard-retirement risk). Native-only: wasm's
-/// `resolve_scenario` hard-codes `Scripted` (no CLI args there).
+/// The CLI-selected run mode (spec §7/§9, T2; `Replay` added 4b T2). `Scripted`
+/// is the existing 3c default: recorded inputs, the loop/reload, and the debug
+/// determinism self-check. `Live` swaps the source for the keyboard and has no
+/// golden to check or loop against, so both are retired for it. `Replay` also
+/// feeds `InputSource::Scripted`, but over an **arbitrary** scenario file named
+/// by `--replay <path>` (bypassing the golden-dir name validation the
+/// positional `<name>` keeps) — it has no committed golden either, so the
+/// self-check is retired the same way as `Live`, and it has no loop (plays once
+/// through `ticks`, then holds on the final frame — spec §5). Native-only:
+/// wasm's `resolve_scenario` hard-codes `Scripted` (no CLI args there).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Resource)]
 pub enum Mode {
     Scripted,
     Live,
+    Replay,
 }
 
 /// The parsed native CLI args (spec §7): the run [`Mode`], the scenario `name`
 /// (positional, defaulting to the caller's default), and the optional 4b
-/// `--record <path>` flush target. Bevy-free and pure — `name` is not validated
-/// here (the caller re-uses `available_scenarios`), and the "record requires
-/// live" rule is enforced by the caller (`main.rs::resolve_scenario`), not here.
+/// `--record <path>` / `--replay <path>` flush/load targets. Bevy-free and pure
+/// — `name` is not validated here (the caller re-uses `available_scenarios`),
+/// and the "record requires live" / "replay excludes live/record" rules are
+/// enforced by the caller (`main.rs::resolve_scenario`), not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedArgs {
     pub mode: Mode,
@@ -151,6 +161,11 @@ pub struct ParsedArgs {
     /// `Some(path)` iff `--record <path>` was given (4b, T1) — the scenario file
     /// the recorder flushes on exit. Live-mode only (enforced by the caller).
     pub record: Option<PathBuf>,
+    /// `Some(path)` iff `--replay <path>` was given (4b, T2) — an arbitrary
+    /// scenario file (not necessarily a committed golden) to play back windowed,
+    /// guard/loop off. Mutually exclusive with `--live`/`--record` (enforced by
+    /// the caller).
+    pub replay: Option<PathBuf>,
 }
 
 /// A syntactic error `parse_args` can detect on its own, with no external
@@ -163,13 +178,20 @@ pub enum ParseArgsError {
     /// this silently parsed as `record: None`, so a dropped/typo'd path was
     /// indistinguishable from not passing `--record` at all.
     RecordMissingPath,
+    /// `--replay` was the last token — no path token followed it (4b, T2),
+    /// mirroring [`ParseArgsError::RecordMissingPath`].
+    ReplayMissingPath,
 }
 
 /// Parse the native CLI args (post `argv[0]`): leading flags — `--live`
-/// (selects [`Mode::Live`]) and `--record <path>` (4b, T1) — in any order,
-/// then an optional positional scenario name defaulting to `default_name`
-/// (spec §7). Pure and Bevy-free. `Err(ParseArgsError::RecordMissingPath)`
-/// if `--record` has no following path token.
+/// (selects [`Mode::Live`]), `--record <path>` (4b, T1), and `--replay <path>`
+/// (4b, T2) — in any order, then an optional positional scenario name
+/// defaulting to `default_name` (spec §7). Pure and Bevy-free.
+/// `Err(ParseArgsError::RecordMissingPath)` / `Err(ParseArgsError::ReplayMissingPath)`
+/// if `--record`/`--replay` has no following path token. The "`--replay`
+/// excludes `--live`/`--record`" combination rule needs no external state, but
+/// (like "record requires live") stays the caller's job (`main.rs::resolve_scenario`)
+/// for consistency — this parser only builds the flag shape.
 pub fn parse_args<I: IntoIterator<Item = String>>(
     args: I,
     default_name: &str,
@@ -177,6 +199,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(
     let mut it = args.into_iter().peekable();
     let mut mode = Mode::Scripted;
     let mut record: Option<PathBuf> = None;
+    let mut replay: Option<PathBuf> = None;
     while let Some(arg) = it.peek().map(String::as_str) {
         match arg {
             "--live" => {
@@ -190,11 +213,22 @@ pub fn parse_args<I: IntoIterator<Item = String>>(
                 let path = it.next().ok_or(ParseArgsError::RecordMissingPath)?;
                 record = Some(PathBuf::from(path));
             }
+            "--replay" => {
+                it.next();
+                // Same "required, not optional" rule as `--record`.
+                let path = it.next().ok_or(ParseArgsError::ReplayMissingPath)?;
+                replay = Some(PathBuf::from(path));
+            }
             _ => break,
         }
     }
     let name = it.next().unwrap_or_else(|| default_name.to_string());
-    Ok(ParsedArgs { mode, name, record })
+    Ok(ParsedArgs {
+        mode,
+        name,
+        record,
+        replay,
+    })
 }
 
 impl InputSource {
@@ -283,6 +317,31 @@ impl Recorder {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// Headless per-tick `hash_game_state` time series for `scenario`, driven
+/// entirely through `InputSource::Scripted` (spec §5, 4b T2) — the
+/// library-testable twin of `tests/passthrough.rs`'s harness and the building
+/// block both the T3 round-trip gate and `--replay <path>` (windowed) reuse.
+/// No Bevy window/app: `scenario::load` reconstructs tick-0, then each tick
+/// `k` in `1..=scenario.ticks` samples `Scripted`'s recorded input for `k - 1`
+/// (an empty `ButtonInput` — Scripted ignores keys) and feeds it into
+/// `process_frame`. `series[0]` is tick 0, hashed BEFORE any `process_frame`,
+/// so `series.len() == scenario.ticks as usize + 1`, matching the golden
+/// sidecar's `<tick> <frame_hash> <state_hash>` grammar (index = tick).
+pub fn replay_state_series(tc_root: &Path, scenario: &Scenario) -> Vec<u32> {
+    let mut state = scenario::load(tc_root, scenario).state;
+    let source = InputSource::Scripted(scenario.clone());
+    let empty = ButtonInput::<KeyCode>::default();
+
+    let mut series = Vec::with_capacity(scenario.ticks as usize + 1);
+    series.push(sim::hash::hash_game_state(&state));
+    for k in 1..=scenario.ticks {
+        let inputs = source.sample(k - 1, &empty);
+        state.process_frame(&inputs);
+        series.push(sim::hash::hash_game_state(&state));
+    }
+    series
 }
 
 #[cfg(test)]
@@ -466,6 +525,7 @@ input 5 64 96
             assert_eq!(p.mode, want_mode, "args {args:?}: mode");
             assert_eq!(p.name, want_name, "args {args:?}: name");
             assert_eq!(p.record, None, "args {args:?}: no --record => record None");
+            assert_eq!(p.replay, None, "args {args:?}: no --replay => replay None");
         }
     }
 
@@ -499,6 +559,51 @@ input 5 64 96
         // Plain --live => no record target.
         let p = parse_args(["--live"].iter().map(|s| s.to_string()), "blood").unwrap();
         assert_eq!(p.record, None);
+    }
+
+    /// `--replay <path>` (4b, T2) is parsed into `ParsedArgs::replay`, leaving
+    /// `mode`/`record` at their defaults when given alone — replay's mode is
+    /// resolved by the caller (Scripted, via `InputSource::Scripted`), not by
+    /// this parser.
+    #[test]
+    fn parse_args_replay_flag_carries_path() {
+        let p = parse_args(
+            ["--replay", "/tmp/x.txt"].iter().map(|s| s.to_string()),
+            "blood",
+        )
+        .unwrap();
+        assert_eq!(
+            p.mode,
+            Mode::Scripted,
+            "--replay alone leaves mode Scripted"
+        );
+        assert_eq!(p.name, "blood");
+        assert_eq!(p.record, None);
+        assert_eq!(p.replay, Some(PathBuf::from("/tmp/x.txt")));
+
+        // The positional name still parses after --replay <path>.
+        let p = parse_args(
+            ["--replay", "/tmp/x.txt", "dart"]
+                .iter()
+                .map(|s| s.to_string()),
+            "blood",
+        )
+        .unwrap();
+        assert_eq!(p.name, "dart");
+        assert_eq!(p.replay, Some(PathBuf::from("/tmp/x.txt")));
+
+        // No --replay => None, matching the --record default-None precedent.
+        let p = parse_args(["--live"].iter().map(|s| s.to_string()), "blood").unwrap();
+        assert_eq!(p.replay, None);
+    }
+
+    /// `--replay` with no following path token (4b, T2): mirrors
+    /// `parse_args_record_missing_path_is_error` — a bare trailing `--replay`
+    /// must not silently parse as "no replay target".
+    #[test]
+    fn parse_args_replay_missing_path_is_error() {
+        let err = parse_args(["--replay"].iter().map(|s| s.to_string()), "blood").unwrap_err();
+        assert_eq!(err, ParseArgsError::ReplayMissingPath);
     }
 
     /// `--record` with no following path token (spec §7, T1 review fix): a bare
@@ -554,6 +659,62 @@ input 5 64 96
         assert_eq!(Scenario::parse(&built.to_text()).unwrap(), built);
         // The recorder targets the CLI path.
         assert_eq!(rec.path(), Path::new("/tmp/rec.txt"));
+    }
+
+    /// Original-Liero TC data root (relative to this crate's manifest — same
+    /// resolution `main.rs`/`tests/passthrough.rs` use).
+    const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
+    /// Committed golden dir (mirrors `tests/passthrough.rs::read_golden`).
+    const GOLDEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../oracle-tests/golden");
+
+    /// The committed `render_slice3b_<name>` golden's per-tick `state_hash`
+    /// column (3rd column, hex `u32`) — index = tick. Same grammar as
+    /// `tests/passthrough.rs::golden_state_hashes`; duplicated here (rather than
+    /// shared) because `tests/` integration tests and this `src`-internal unit
+    /// test compile as separate crates.
+    fn golden_state_hashes(name: &str) -> Vec<u32> {
+        let path = format!("{GOLDEN_DIR}/render_slice3b_{name}.txt");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let mut states = Vec::new();
+        for l in text.lines() {
+            let t = l.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            let mut it = t.split_whitespace();
+            if it.next() == Some("total") {
+                continue;
+            }
+            let _frame_hash = it.next().expect("frame_hash column");
+            let state_hash = it.next().expect("state_hash column");
+            states.push(u32::from_str_radix(state_hash, 16).expect("state_hash hex"));
+        }
+        states
+    }
+
+    /// `replay_state_series` (headless, 4b T2) over a committed 3b scenario must
+    /// reproduce that scenario's golden `state_hash` column exactly — proving the
+    /// library-testable replay path is equivalent to the pass-through gate
+    /// (`tests/passthrough.rs`) T3's round-trip gate builds on.
+    #[test]
+    fn replay_state_series_matches_passthrough_golden() {
+        let scenario_path = format!("{GOLDEN_DIR}/render_slice3b_blood_scenario.txt");
+        let scenario_text = std::fs::read_to_string(&scenario_path)
+            .unwrap_or_else(|e| panic!("read {scenario_path}: {e}"));
+        let scenario = Scenario::parse(&scenario_text).expect("scenario parses");
+
+        let golden = golden_state_hashes("blood");
+        assert_eq!(
+            golden.len(),
+            (scenario.ticks + 1) as usize,
+            "one golden state_hash per tick 0..=ticks"
+        );
+
+        let series = replay_state_series(Path::new(TC_ROOT), &scenario);
+        assert_eq!(
+            series, golden,
+            "replay_state_series diverged from the passthrough golden"
+        );
     }
 
     /// The default table mirrors the decoded C++ defaults exactly (spec §2),

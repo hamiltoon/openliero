@@ -53,6 +53,14 @@ struct ScenarioName(String);
 #[derive(Resource)]
 struct RecordPath(Option<PathBuf>);
 
+/// The 4b (T2) `--replay <path>` source target (`None` unless `--replay` was
+/// given; always paired with `mode == Mode::Replay`, enforced by
+/// `resolve_scenario`). Threaded into `setup`, which reads the scenario text
+/// from this arbitrary path instead of `GOLDEN_DIR` when set. Always `None` on
+/// wasm (no CLI args there).
+#[derive(Resource)]
+struct ReplayPath(Option<PathBuf>);
+
 /// The pure-Rust simulation. NO Bevy types inside (the rollback-ready shape).
 #[derive(Resource)]
 struct Sim(SimState);
@@ -92,7 +100,14 @@ fn main() {
     // prints the available scenarios and exits non-zero (no window flash).
     // `--live` (native-only, T2) selects Mode::Live; wasm hard-codes Scripted.
     // `--record <path>` (4b, T1) names the recorder's on-exit flush target.
-    let ParsedArgs { mode, name, record } = resolve_scenario();
+    // `--replay <path>` (4b, T2) selects Mode::Replay and names the arbitrary
+    // scenario file `setup` reads instead of `GOLDEN_DIR`.
+    let ParsedArgs {
+        mode,
+        name,
+        record,
+        replay,
+    } = resolve_scenario();
     let title = format!("Liero-rs — 3c demo ({name})");
 
     App::new()
@@ -113,6 +128,7 @@ fn main() {
         .insert_resource(ScenarioName(name))
         .insert_resource(mode)
         .insert_resource(RecordPath(record))
+        .insert_resource(ReplayPath(replay))
         // C++ gfx.cpp kDelay = 14ms => one processFrame per ~71.43 Hz tick. The
         // number only sets perceived speed; determinism is by tick count, not
         // wall-clock. `Time<Fixed>` gives the fixed-timestep accumulator for free.
@@ -148,14 +164,41 @@ fn main() {
 fn resolve_scenario() -> ParsedArgs {
     let parsed = match game::input::parse_args(std::env::args().skip(1), DEFAULT_SCENARIO) {
         Ok(parsed) => parsed,
-        // A bare trailing `--record` with no path token (T1 review fix): report
-        // and exit rather than silently falling back to `record: None`, same
-        // pattern as the "--record requires --live" check just below.
+        // A bare trailing `--record`/`--replay` with no path token (T1 review
+        // fix; mirrored for `--replay` in T2): report and exit rather than
+        // silently falling back to `None`, same pattern as the
+        // "--record requires --live" check just below.
         Err(game::input::ParseArgsError::RecordMissingPath) => {
             eprintln!("--record requires a path");
             std::process::exit(2);
         }
+        Err(game::input::ParseArgsError::ReplayMissingPath) => {
+            eprintln!("--replay requires a path");
+            std::process::exit(2);
+        }
     };
+
+    // `--replay <path>` (4b, T2) excludes `--live`/`--record` (spec §7/§10 Q2):
+    // it is a distinct third mode (an arbitrary scenario file, loop/self-check
+    // off) — not a live session and not something to record, so combining it
+    // with either is a malformed CLI, checked before any window opens.
+    if parsed.replay.is_some() && (parsed.mode == Mode::Live || parsed.record.is_some()) {
+        eprintln!("--replay excludes --live/--record");
+        std::process::exit(2);
+    }
+    if let Some(path) = parsed.replay {
+        // `--replay` loads an arbitrary path, bypassing the golden-dir name
+        // validation below (`available_scenarios`/`GOLDEN_DIR`) that the
+        // positional `<name>` keeps for committed goldens (spec §5). `name`
+        // is otherwise unused on this path (only the window title reads it).
+        return ParsedArgs {
+            mode: Mode::Replay,
+            name: parsed.name,
+            record: None,
+            replay: Some(path),
+        };
+    }
+
     let available = available_scenarios();
     if !available.iter().any(|n| n == &parsed.name) {
         eprintln!("unknown scenario {:?}. available scenarios:", parsed.name);
@@ -186,6 +229,7 @@ fn resolve_scenario() -> ParsedArgs {
         mode: Mode::Scripted,
         name: DEFAULT_SCENARIO.to_string(),
         record: None,
+        replay: None,
     }
 }
 
@@ -219,12 +263,23 @@ fn setup(
     name: Res<ScenarioName>,
     mode: Res<Mode>,
     record_path: Res<RecordPath>,
+    replay_path: Res<ReplayPath>,
 ) {
     let name = &name.0;
-    // 1. Read + parse the scenario text. The byte source forks by target (native:
-    //    `std::fs`; wasm: `include_str!` of the compile-time default) — see
-    //    `load_scenario_text`. DRY: only the source forks; the parse is shared.
-    let scenario_text = load_scenario_text(name);
+    // 1. Read + parse the scenario text. `Mode::Replay` (4b, T2) reads an
+    //    ARBITRARY path (not `GOLDEN_DIR`) — the whole point of `--replay` is to
+    //    play back a file that need not be a committed golden (spec §5).
+    //    Otherwise the byte source forks by target (native: `std::fs`; wasm:
+    //    `include_str!` of the compile-time default) — see `load_scenario_text`.
+    let scenario_text = if *mode == Mode::Replay {
+        let path = replay_path
+            .0
+            .as_ref()
+            .expect("Mode::Replay implies a --replay path (resolve_scenario invariant)");
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    } else {
+        load_scenario_text(name)
+    };
     let scenario = Scenario::parse(&scenario_text).expect("scenario parses");
 
     // 2. Tick-0 load (moves `state` into `Sim`; viewports + scene into `Demo`).
@@ -265,9 +320,10 @@ fn setup(
         Transform::from_scale(Vec3::splat(3.0)),
     ));
 
-    // 6. Assemble the resources. Live mode has no golden to self-check against
-    //    and does not load the golden column at all (spec §7/T2); Scripted loads
-    //    it exactly as 3c did.
+    // 6. Assemble the resources. Live and Replay have no golden to self-check
+    //    against and do not load the golden column at all (spec §7/T2; Replay's
+    //    arbitrary file has no committed sidecar either); Scripted loads it
+    //    exactly as 3c did.
     #[cfg(debug_assertions)]
     let golden = if *mode == Mode::Scripted {
         load_golden_hashes(name)
@@ -291,13 +347,16 @@ fn setup(
     // 7. Render tick 0 into the surface and upload once (window shows frame 0).
     render_and_upload(&mut demo, &sim.0, &mut images, &handle);
 
-    // The input source (spec §7/T2): Scripted feeds the scenario's recorded
-    // inputs as a literal pass-through (behavior unchanged from 3c); `--live`
-    // swaps this for the keyboard via the default bindings. Live still loads
-    // its initial state (level + worms) through the same `scenario::load` above
-    // — only the input source differs.
+    // The input source (spec §7/T2; `Replay` 4b T2): Scripted feeds the
+    // scenario's recorded inputs as a literal pass-through (behavior unchanged
+    // from 3c); `--live` swaps this for the keyboard via the default bindings.
+    // `--replay` is `InputSource::Scripted` verbatim (spec §5, no new source
+    // variant) over the scenario parsed from the arbitrary `--replay` path
+    // above — not a committed golden. All three still load their initial state
+    // (level + worms) through the same `scenario::load` above — only the input
+    // source differs.
     let source = match *mode {
-        Mode::Scripted => InputSource::Scripted(demo.scenario.clone()),
+        Mode::Scripted | Mode::Replay => InputSource::Scripted(demo.scenario.clone()),
         Mode::Live => InputSource::Live(game::input::default_bindings()),
     };
     commands.insert_resource(source);
@@ -331,39 +390,55 @@ fn tick_and_render(
     // 4b: present only on the Live + `--record` path; `None` (no-op) otherwise.
     mut recorder: Option<ResMut<Recorder>>,
 ) {
-    // 1. Sample the input source EXACTLY ONCE per tick, at the top of the single
-    //    FixedUpdate system, before `process_frame` (spec §4.3) — the central
-    //    one-snapshot-per-tick determinism invariant, decoupled from render rate.
-    //    `Scripted` (the default) is a literal pass-through of the scenario's
-    //    RECORDED inputs, so scripted behavior is byte-unchanged from the 3c inline
-    //    feed. (The blood golden was driven with these inputs — the DART-into-own-
-    //    feet fire is `input 8 16 0` — so empty inputs would diverge and trip the
-    //    self-check.) `Live` (--live, T2) instead polls the held-key set.
-    let inputs = source.sample(demo.tick, &keys);
-    // 4b recorder seam (spec §4.1): tap the SAMPLED array here — after `sample`
-    // (so the Dig→Left+Right chord is already resolved into the words the sim
-    // sees) and before `process_frame`. Present only in Live + `--record`, so
-    // Scripted is untouched.
-    if let Some(recorder) = recorder.as_mut() {
-        recorder.record(&inputs);
-    }
-    sim.0.process_frame(&inputs);
+    // 4b (T2): `--replay` has no loop/reload (spec §5/§9) — once `tick` reaches
+    // `ticks` the replay HOLDS on the final rendered frame: no further
+    // `process_frame`, no further tick advance. Scripted/Live are unaffected
+    // (Scripted loops at its boundary below; Live has no bound at all).
+    let replay_finished = *mode == Mode::Replay && demo.tick >= demo.scenario.ticks;
 
-    // 2. Loop step, Scripted-only (spec §4.3 step 4 / §9): when `tick` passes
-    //    `ticks`, rebuild from the loader at tick 0 for a bit-identical loop
-    //    (fixed seed + fixed inputs). Live has no golden `ticks` boundary to loop
-    //    against and runs indefinitely, so this step is skipped entirely — not
-    //    replaced by a plain increment, since `demo.tick` is unused by
-    //    `InputSource::Live::sample` and by anything else on the live path.
-    if *mode == Mode::Scripted {
-        let (next, reload) = blit::next_tick(demo.tick, demo.scenario.ticks);
-        demo.tick = next;
-        if reload {
-            let loaded = scenario::load(Path::new(TC_ROOT), &demo.scenario);
-            sim.0 = loaded.state;
-            demo.viewports = loaded.viewports;
-            demo.scene = loaded.scene;
+    if !replay_finished {
+        // 1. Sample the input source EXACTLY ONCE per tick, at the top of the
+        //    single FixedUpdate system, before `process_frame` (spec §4.3) — the
+        //    central one-snapshot-per-tick determinism invariant, decoupled from
+        //    render rate. `Scripted` (the default) is a literal pass-through of
+        //    the scenario's RECORDED inputs, so scripted behavior is
+        //    byte-unchanged from the 3c inline feed. (The blood golden was
+        //    driven with these inputs — the DART-into-own-feet fire is
+        //    `input 8 16 0` — so empty inputs would diverge and trip the
+        //    self-check.) `Live` (--live, T2) instead polls the held-key set;
+        //    `Replay` (--replay, 4b T2) is `Scripted` over the replay file.
+        let inputs = source.sample(demo.tick, &keys);
+        // 4b recorder seam (spec §4.1): tap the SAMPLED array here — after
+        // `sample` (so the Dig→Left+Right chord is already resolved into the
+        // words the sim sees) and before `process_frame`. Present only in
+        // Live + `--record`, so Scripted/Replay are untouched.
+        if let Some(recorder) = recorder.as_mut() {
+            recorder.record(&inputs);
         }
+        sim.0.process_frame(&inputs);
+    }
+
+    // 2. Loop step. Scripted-only reload (spec §4.3 step 4 / §9): when `tick`
+    //    passes `ticks`, rebuild from the loader at tick 0 for a bit-identical
+    //    loop (fixed seed + fixed inputs). `Replay` advances toward its own
+    //    `ticks` bound with NO reload (guard/loop off, spec §5) and stops
+    //    advancing once `replay_finished` (holds the final frame). `Live` has
+    //    no golden `ticks` boundary and runs indefinitely, so `demo.tick` is
+    //    left untouched — it is unused by `InputSource::Live::sample` and by
+    //    anything else on the live path.
+    match *mode {
+        Mode::Scripted => {
+            let (next, reload) = blit::next_tick(demo.tick, demo.scenario.ticks);
+            demo.tick = next;
+            if reload {
+                let loaded = scenario::load(Path::new(TC_ROOT), &demo.scenario);
+                sim.0 = loaded.state;
+                demo.viewports = loaded.viewports;
+                demo.scene = loaded.scene;
+            }
+        }
+        Mode::Replay if !replay_finished => demo.tick += 1,
+        Mode::Replay | Mode::Live => {}
     }
 
     // 3 + 4. Render the current tick into the CPU surface, then upload.

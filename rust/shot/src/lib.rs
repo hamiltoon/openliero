@@ -27,6 +27,9 @@ pub struct Config {
     pub hashes: bool,
     /// Optional `--tc-root` override.
     pub tc_root: Option<PathBuf>,
+    /// Whether `--hud` was requested — opt-in full player view (HUD bars +
+    /// minimap). Default false keeps the world-only path byte-identical.
+    pub hud: bool,
 }
 
 /// Parse the CLI arguments (already stripped of the program name).
@@ -38,6 +41,7 @@ pub struct Config {
 /// - `--scale <u32>` (default 3)
 /// - `--hashes`
 /// - `--tc-root <path>`
+/// - `--hud` (opt-in full player view: HUD bars + minimap; default off)
 ///
 /// At least one of `--out` / `--hashes` must be present.
 pub fn parse_args(args: &[String]) -> Result<Config, String> {
@@ -47,6 +51,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut scale: u32 = 3;
     let mut hashes = false;
     let mut tc_root: Option<PathBuf> = None;
+    let mut hud = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -75,6 +80,9 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
             }
             "--hashes" => {
                 hashes = true;
+            }
+            "--hud" => {
+                hud = true;
             }
             "--tc-root" => {
                 let v = value_for(args, &mut i, "--tc-root")?;
@@ -109,6 +117,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         scale,
         hashes,
         tc_root,
+        hud,
     })
 }
 
@@ -148,6 +157,7 @@ fn render_tick(
     scene_data: &SceneData,
     scenario: &Scenario,
     tick: u32,
+    hud: bool,
 ) -> u64 {
     let draw_shadow = scenario.shadow();
     let screen_flash = scenario.flash_at(tick).unwrap_or(0);
@@ -158,7 +168,16 @@ fn render_tick(
         viewports[vp].shake = itof(amount);
     }
 
-    let scene = scene_data.as_scene(screen_flash, draw_shadow);
+    // `as_scene` returns the world-only Scene (draw_hud/map false). Opt-in `--hud`
+    // flips both to paint the full player view (3e's HUD bars + minimap) via the
+    // existing `Scene.draw_hud`/`map` path — no new render code. When `hud` is
+    // false the Scene is untouched, so the frame stays byte-identical (the golden
+    // faithfulness test proves it).
+    let mut scene = scene_data.as_scene(screen_flash, draw_shadow);
+    if hud {
+        scene.draw_hud = true;
+        scene.map = true;
+    }
     render::frame::draw(bmp, state, viewports, &scene);
 
     // Restore shake so the next tick's Process is clean (mirror the dumper).
@@ -185,6 +204,23 @@ pub fn render_scenario(
     wanted: &[u32],
     scale: u32,
 ) -> Vec<Frame> {
+    // Public entry: the world-only path (`hud = false`). This is the signature the
+    // golden faithfulness + determinism tests drive; keeping it fixed is what lets
+    // the no-`--hud` behaviour stay provably byte-identical.
+    render_scenario_hud(tc_root, scenario, up_to, wanted, scale, false)
+}
+
+/// `render_scenario` with the opt-in `hud` toggle threaded to every per-tick
+/// draw. `hud = false` reproduces the public `render_scenario` byte-for-byte;
+/// `hud = true` paints the full player view (HUD bars + minimap).
+fn render_scenario_hud(
+    tc_root: &Path,
+    scenario: &Scenario,
+    up_to: u32,
+    wanted: &[u32],
+    scale: u32,
+    hud: bool,
+) -> Vec<Frame> {
     let mut loaded = scenario::load(tc_root, scenario);
     let mut bmp = Bitmap::new(320, 200);
     let mut frames = Vec::with_capacity((up_to + 1) as usize);
@@ -197,6 +233,7 @@ pub fn render_scenario(
         &loaded.scene,
         scenario,
         0,
+        hud,
     );
     let sh = hash_game_state(&loaded.state);
     let png = wanted.contains(&0).then(|| encode_png(&bmp, scale));
@@ -220,6 +257,7 @@ pub fn render_scenario(
             &loaded.scene,
             scenario,
             k,
+            hud,
         );
         let sh = hash_game_state(&loaded.state);
         let png = wanted.contains(&k).then(|| encode_png(&bmp, scale));
@@ -268,6 +306,61 @@ fn scale_to_rgb(bmp: &Bitmap, scale: u32) -> image::RgbImage {
     img
 }
 
+/// The `oracle-tests/golden/` directory that holds every committed scenario
+/// sidecar (both the 3b and 3e corpora).
+fn golden_dir() -> PathBuf {
+    PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../oracle-tests/golden"
+    ))
+}
+
+/// Resolve a scenario name to its committed golden sidecar text. The 3e corpus
+/// (`render_slice3e_<name>_scenario.txt`) is tried FIRST, then the 3b corpus
+/// (`render_slice3b_<name>_scenario.txt`) as a fallback. The two corpora share
+/// no names today, so the order is only a documented tie-break: a name present
+/// in both would resolve to its 3e sidecar. On miss, the error lists both paths
+/// tried plus every available name scanned from each corpus.
+fn resolve_scenario_text(name: &str) -> Result<String, String> {
+    let dir = golden_dir();
+    // Order: 3e first (full player view / newer corpus), then 3b fallback.
+    let candidates = [
+        dir.join(format!("render_slice3e_{name}_scenario.txt")),
+        dir.join(format!("render_slice3b_{name}_scenario.txt")),
+    ];
+    for path in &candidates {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            return Ok(text);
+        }
+    }
+    Err(format!(
+        "unknown scenario {:?} (looked for {} then {}). available 3b: [{}]; available 3e: [{}]",
+        name,
+        candidates[0].display(),
+        candidates[1].display(),
+        available_names("render_slice3b_").join(", "),
+        available_names("render_slice3e_").join(", "),
+    ))
+}
+
+/// Scan the golden dir for `<prefix><name>_scenario.txt` files and return the
+/// sorted `<name>` list — the diagnostic surface for an unknown-scenario error.
+fn available_names(prefix: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(golden_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|f| {
+            f.strip_prefix(prefix)
+                .and_then(|r| r.strip_suffix("_scenario.txt"))
+                .map(str::to_string)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// Top-level CLI entry: resolve the TC root and scenario-text paths from `cfg`,
 /// load + drive + render the scenario, write the requested PNG(s), and (for
 /// `--hashes`) emit the sidecar grammar to STDOUT. All info/progress goes to
@@ -280,18 +373,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         ))
     });
 
-    let scenario_path = format!(
-        "{}/../oracle-tests/golden/render_slice3b_{}_scenario.txt",
-        env!("CARGO_MANIFEST_DIR"),
-        cfg.scenario
-    );
-    let text = std::fs::read_to_string(&scenario_path).map_err(|_| {
-        format!(
-            "unknown scenario {:?} (looked for {}). available: \
-             blood, dart, dart_water, laser, shadow, shake, fan",
-            cfg.scenario, scenario_path
-        )
-    })?;
+    let text = resolve_scenario_text(&cfg.scenario)?;
     let scenario = Scenario::parse(&text)?;
 
     let up_to = *cfg
@@ -308,10 +390,10 @@ pub fn run(cfg: &Config) -> Result<(), String> {
     };
 
     eprintln!(
-        "shot: scenario={} up_to={} scale={} capture={:?}",
-        cfg.scenario, up_to, cfg.scale, cfg.ticks
+        "shot: scenario={} up_to={} scale={} hud={} capture={:?}",
+        cfg.scenario, up_to, cfg.scale, cfg.hud, cfg.ticks
     );
-    let frames = render_scenario(&tc_root, &scenario, up_to, &wanted, cfg.scale);
+    let frames = render_scenario_hud(&tc_root, &scenario, up_to, &wanted, cfg.scale, cfg.hud);
 
     if let Some(out) = &cfg.out {
         let find = |tick: u32| -> &Frame {
@@ -398,6 +480,32 @@ mod parse_tests {
         assert!(c.out.is_none());
     }
     #[test]
+    fn hud_flag_sets_config() {
+        // `--hud` is opt-in; default is false, and the flag flips it true.
+        let base = parse_args(&v(&[
+            "--scenario",
+            "hud",
+            "--tick",
+            "30",
+            "--out",
+            "/tmp/x.png",
+        ]))
+        .unwrap();
+        assert!(!base.hud, "default: hud off");
+        let c = parse_args(&v(&[
+            "--scenario",
+            "hud",
+            "--tick",
+            "30",
+            "--out",
+            "/tmp/x.png",
+            "--hud",
+        ]))
+        .unwrap();
+        assert!(c.hud, "--hud sets Config.hud = true");
+    }
+
+    #[test]
     fn missing_scenario_is_error() {
         assert!(parse_args(&v(&["--tick", "1", "--out", "/tmp/x.png"])).is_err());
     }
@@ -475,6 +583,42 @@ mod render_tests {
         assert_eq!(img.dimensions(), (2, 1));
         assert_eq!(img.get_pixel(0, 0).0, [0x2A, 0, 0]);
         assert_eq!(img.get_pixel(1, 0).0, [0, 0x2A, 0], "no dead-column leak");
+    }
+
+    #[test]
+    fn resolves_3e_hud_scenario() {
+        // The 3e corpus committed `render_slice3e_hud_scenario.txt`; the CLI must
+        // resolve the bare name "hud" against it (3b-only lookup misses it).
+        assert!(
+            resolve_scenario_text("hud").is_ok(),
+            "scenario \"hud\" resolves to the 3e golden sidecar"
+        );
+    }
+
+    #[test]
+    fn resolves_existing_3b_scenario() {
+        // Existing 3b names keep resolving unchanged.
+        assert!(
+            resolve_scenario_text("blood").is_ok(),
+            "3b \"blood\" resolves"
+        );
+    }
+
+    #[test]
+    fn unknown_scenario_lists_both_corpora() {
+        // The diagnostic for a bad name lists what was tried plus the available
+        // names from BOTH the 3b and 3e corpora.
+        let err = resolve_scenario_text("nope").unwrap_err();
+        assert!(
+            err.contains("render_slice3e_nope"),
+            "lists the 3e path tried: {err}"
+        );
+        assert!(
+            err.contains("render_slice3b_nope"),
+            "lists the 3b path tried: {err}"
+        );
+        assert!(err.contains("blood"), "lists a 3b name: {err}");
+        assert!(err.contains("hud"), "lists a 3e name: {err}");
     }
 
     #[test]

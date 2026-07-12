@@ -1,0 +1,55 @@
+# Step 3 Slice 3e — DEATH scenario (the DYING life-bar countdown arm, viewport.cpp:88-95).
+#
+# Read by BOTH the C++ dumper (full-world render + HUD/minimap behind `render_hud`)
+# and the Rust frame-hash test (T8). Grammar = sim slices + `render <layout>` +
+# `render_hud`.
+#
+# === WHAT THIS PROVES: the DYING life-bar arm (viewport.cpp:88-95) ===================
+# Reuses the slice-5d KILL geometry: worm0 fires EXPLOSIVES; the low-left air-bursts
+# WOUND worm1 (health 12 < settings->health/4), and the first catching blast drives
+# worm1 health <= 0 -> the DEATH block (worm.cpp:369-426) sets visible=false and
+# killed_timer=150 (~tick 91). While worm1 is DEAD its HUD takes the ELSE arm:
+#   * DYING BAR (viewport.cpp:88-93): lifebar_width = 100 - (killed_timer*25)/37,
+#     drawn only while > 0. killed_timer counts down 150->0, so the bar first APPEARS
+#     when killed_timer < 148 (~tick 94, width 1) and GROWS ~1px every ~1.5 ticks
+#     thereafter — the per-tick frame hash STEPS across the countdown window (the
+#     death non-vacuity witness). worm0 (alive) shows the normal visible life bar.
+# Banners are NOT drawn: banner_y state is stepped only in viewport-processing that
+# neither the dumper nor the Rust sim runs (Step-4 deferral), so no banner pixels are
+# expected and none are asserted (adjudicated).
+#
+# === WINDOW (clipped from 5d) =======================================================
+# 5d runs 360 ticks (fire -> death ~t91 -> 150-tick countdown -> BeginRespawn ~t240 ->
+# DoRespawning). The dying-bar PROOF needs only death + enough countdown for the bar to
+# grow visibly, so this clips to 140 ticks: worm1 dies ~t91, killed_timer 150->~101 by
+# t140, dying bar 1 -> ~32 px. Respawn is NOT reached (not needed for the HUD proof;
+# a shorter golden is better). The tick-150 worm1 Fire (5d's respawn `ready` latch) is
+# dropped since it lands past this window.
+#
+# physics_fall_test.lev worms rest at y~=196px, BELOW the [0,158) framehash world
+# viewport, so the world block shows no worm bodies here — but the HUD (drawn into the
+# FULL 320x200 surface, y 161-178) and the minimap (y~162+) ARE hashed, so the dying
+# life bar at (218, render_res_y-39) is captured regardless.
+seed 42
+level Levels/physics_fall_test.lev
+ticks 140
+max_bonuses 0
+# worm0 = KILLER (x=150, y=195, health 100, EXPLOSIVES). worm1 = VICTIM at rest
+# (x=115, y~=196), VISIBLE + grounded, LOW health 12 (< settings->health/4=25) so the
+# first air-burst kills it. Identical to slice 5d.
+worm 0  9830400 12779520 100 10 0   1
+worm 1  7536640 12845520  12 10 218 1
+weapon 0 EXPLOSIVES
+render player
+render_hud
+# input <tick> <worm0_7bit> <worm1_7bit>
+# worm0: raise the gun (Up ticks 13-20) then Fire tick 38 — the 5d kill sequence.
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 38 16 0

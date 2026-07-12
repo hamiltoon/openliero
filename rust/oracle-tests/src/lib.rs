@@ -1,7 +1,8 @@
 //! Golden-vector tests against the C++ oracle. See tests/.
 //!
-//! Also hosts the [`scenario`] parser: the single source of truth for the
-//! Slice-2 physics scenario file, read by both the Rust differential test and
-//! (eventually) the C++ dumper. Kept here because only `oracle-tests` reads it.
+//! The scenario parser + tick-0 loader now live in the Bevy-free `scenario`
+//! crate (Step 3, Slice 3c, T0). This crate re-exports it so the existing
+//! `oracle_tests::scenario::Scenario` references across the tests/examples
+//! compile unchanged.
 
-pub mod scenario;
+pub use scenario;

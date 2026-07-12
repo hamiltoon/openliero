@@ -68,7 +68,21 @@ jobs:
           CARGO_TERM_COLOR: never
         run: |
           set -o pipefail
-          cargo test --manifest-path rust/Cargo.toml --workspace 2>&1 | tee test-output.txt
+          cargo test --manifest-path rust/Cargo.toml --workspace --exclude game 2>&1 | tee test-output.txt
+
+      # Gate the Bevy `game` crate compilation in its OWN step (separate cache,
+      # own failure surface) so the fast determinism gate above never pulls in
+      # the Bevy tree (wgpu/winit/naga). `cargo test --workspace` compiles every
+      # binary target in every member, so without `--exclude game` the hard gate
+      # would be coupled to Bevy's compile time and toolchain. The window is
+      # never launched in CI — this only proves `game` builds. Most of the
+      # trimmed feature set dlopens at runtime, but `wayland-sys`'s build script
+      # resolves wayland-client via pkg-config at BUILD time, so this step (and
+      # only this step) needs the wayland/xkbcommon dev headers.
+      - name: Install game build deps (wayland headers)
+        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
+      - name: Build game crate (Bevy)
+        run: cargo build --manifest-path rust/Cargo.toml -p game
 
       # Render a human-readable summary on the run's Summary page. Runs even on
       # failure (`if: always()`) so a red run still explains what broke. Pure
@@ -181,3 +195,29 @@ jobs:
               }
             }
           ' test-output.txt >> "$GITHUB_STEP_SUMMARY"
+
+  # Prove the `game` crate compiles for the browser target (wasm32). This is the
+  # slice-3f wasm bring-up gate: build-only, no browser, no window, no wgpu
+  # adapter — a green `cargo build --target wasm32-unknown-unknown` is the CI
+  # witness that the WebGL2 build stays healthy. Kept in its OWN job (not a step
+  # of `sim-core`) so it is fully independent of the determinism gate: the
+  # fast bit-for-bit oracle above never waits on, and is never coupled to, the
+  # Bevy/wasm toolchain. No wayland/xkbcommon apt here — those native windowing
+  # backends are compiled out on wasm (the game crate's target-scoped feature
+  # split gates x11/wayland to native and webgl2 to wasm), so the wasm build
+  # needs no system dev headers. Mirrors `sim-core`'s cache posture: neither job
+  # caches the cargo registry/target dir, so this one does not either.
+  game-wasm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (+ wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build game crate for wasm32 (WebGL2)
+        run: cargo build --manifest-path rust/Cargo.toml -p game --target wasm32-unknown-unknown

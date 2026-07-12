@@ -244,6 +244,7 @@ mod tests {
             num_blood_colours: 0,
             first_blood_colour: 0,
             bobj_gravity: 0,
+            laser_weapon: 0,
             settings_health: 100,
             game_mode: 0,
             time_to_lose: 600,
@@ -402,6 +403,9 @@ mod tests {
             steerable_count: 0,
             current_frame: 0,
             animate: false,
+            // Slice 3b T0 render-only hotspots — not hashed; defaults suffice.
+            hotspot_x: 0,
+            hotspot_y: 0,
         }
     }
 

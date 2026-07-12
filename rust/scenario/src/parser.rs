@@ -18,6 +18,11 @@
 //! input       <tick> <worm0_7bit> <worm1_7bit>   # sparse; absent => 0
 //! weapon      <slot> <name> [ammo]               # override worm weapon slot (0..NUM_WEAPONS);
 //!                                                 # optional 3rd token overrides starting ammo
+//! render      <layout>                           # Slice 3a; only `player` (enables the sidecar)
+//! render_shadow                                  # Slice 3b; draw-time-only shadow flip (0 args)
+//! render_shake <tick> <vp> <amount>             # Slice 3b; draw-only shake injection
+//! render_flash <tick> <amount>                  # Slice 3b; draw-only screen-flash injection
+//! render_hud                                     # Slice 3e; draw-time HUD/minimap draw (0 args)
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
@@ -66,6 +71,22 @@ pub struct Scenario {
     /// Per-slot starting-ammo overrides: `slot -> ammo` (the optional 3rd token of
     /// a `weapon` directive). Absent => use the weapon type's default ammo.
     weapon_ammo: HashMap<usize, i32>,
+    /// Slice-3b `render_shadow` (0-arg) — the draw-time-only shadow flip. Absent =>
+    /// `false` (the C++ dumper leaves `settings->shadow = false`, no shadow pass; the
+    /// Rust `Scene.draw_shadow` stays `false`). Both sides move together.
+    render_shadow: bool,
+    /// Slice-3b `render_shake <tick> <vp> <amount>` — draw-only screen-shake injections
+    /// as `(tick, vp, amount)`. The C++ dumper sets `viewports[vp]->shake = Itof(amount)`
+    /// for that draw; the Rust T8 test injects `itof(amount)` into `viewports[vp].shake`.
+    render_shake: Vec<(u32, usize, i32)>,
+    /// Slice-3b `render_flash <tick> <amount>` — draw-only screen-flash injections as
+    /// `(tick, amount)`. Fed into the palette `LightUp` (C++) / `Scene.screen_flash` (Rust).
+    render_flash: Vec<(u32, i32)>,
+    /// Slice-3e `render_hud` (0-arg) — the draw-time HUD/minimap directive. Absent =>
+    /// `false` (the C++ dumper skips the HUD pre-block + minimap; the Rust
+    /// `Scene.draw_hud` stays `false`, so the world-only draw is byte-identical). Both
+    /// parser sides move together (T6).
+    render_hud: bool,
 }
 
 impl Scenario {
@@ -81,6 +102,10 @@ impl Scenario {
         let mut inputs = HashMap::new();
         let mut weapons: HashMap<usize, String> = HashMap::new();
         let mut weapon_ammo: HashMap<usize, i32> = HashMap::new();
+        let mut render_shadow = false;
+        let mut render_shake: Vec<(u32, usize, i32)> = Vec::new();
+        let mut render_flash: Vec<(u32, i32)> = Vec::new();
+        let mut render_hud = false;
 
         for (lineno, raw) in text.lines().enumerate() {
             let n = lineno + 1;
@@ -120,6 +145,45 @@ impl Scenario {
                 "game_mode" => {
                     expect_args(n, key, &nums, 1)?;
                     game_mode = parse_at(0)? as i32;
+                }
+                "render" => {
+                    // Opt-in render-layout directive for the shared scenario (Slice 3a).
+                    // The C++ dumper reads `<layout>` to pick the viewport arrangement and
+                    // emit the sidecar frame golden; the Rust frame-hash test hardcodes the
+                    // two-viewport player layout, so the arg is validated and ignored here.
+                    // Accepted (not rejected) so the shared scenario file parses on BOTH
+                    // sides — same discipline as `game_mode`/`max_bonuses` above.
+                    expect_args(n, key, &nums, 1)?;
+                }
+                "render_shadow" => {
+                    // Slice 3b: draw-time-only shadow flip (0 args — presence flips it).
+                    // Accepted-and-applied on BOTH sides (mirrors the C++ dumper's
+                    // `render_shadow` arm); the Rust T8 test maps it to `Scene.draw_shadow`.
+                    expect_args(n, key, &nums, 0)?;
+                    render_shadow = true;
+                }
+                "render_shake" => {
+                    // Slice 3b: `render_shake <tick> <vp> <amount>` — draw-only injection.
+                    expect_args(n, key, &nums, 3)?;
+                    let tick = parse_at(0)? as u32;
+                    let vp = parse_at(1)? as usize;
+                    let amount = parse_at(2)? as i32;
+                    render_shake.push((tick, vp, amount));
+                }
+                "render_flash" => {
+                    // Slice 3b: `render_flash <tick> <amount>` — draw-only injection.
+                    expect_args(n, key, &nums, 2)?;
+                    let tick = parse_at(0)? as u32;
+                    let amount = parse_at(1)? as i32;
+                    render_flash.push((tick, amount));
+                }
+                "render_hud" => {
+                    // Slice 3e: draw-time HUD/minimap directive (0 args — presence
+                    // enables it). Accepted-and-applied on BOTH sides (mirrors the
+                    // C++ dumper's `render_hud` arm); the T8 frame-hash test maps it
+                    // to `Scene.draw_hud` (and `Scene.map`).
+                    expect_args(n, key, &nums, 0)?;
+                    render_hud = true;
                 }
                 "worm" => {
                     expect_args(n, key, &nums, 7)?;
@@ -185,6 +249,10 @@ impl Scenario {
             inputs,
             weapons,
             weapon_ammo,
+            render_shadow,
+            render_shake,
+            render_flash,
+            render_hud,
         })
     }
 
@@ -208,6 +276,38 @@ impl Scenario {
     /// `None` if absent — in which case the caller uses the weapon type's default ammo.
     pub fn weapon_ammo(&self, slot: usize) -> Option<i32> {
         self.weapon_ammo.get(&slot).copied()
+    }
+
+    /// Whether the `render_shadow` directive is present — the draw-time-only shadow
+    /// flip. The T8 frame-hash test maps this to `render::frame::Scene.draw_shadow`.
+    pub fn shadow(&self) -> bool {
+        self.render_shadow
+    }
+
+    /// The `render_shake` injections for `tick` as `(vp, amount)` pairs (empty if none).
+    /// The T8 test injects `itof(amount)` into `viewports[vp].shake` before drawing `tick`.
+    pub fn shake_at(&self, tick: u32) -> Vec<(usize, i32)> {
+        self.render_shake
+            .iter()
+            .filter(|(t, _, _)| *t == tick)
+            .map(|(_, vp, amount)| (*vp, *amount))
+            .collect()
+    }
+
+    /// The `render_flash` amount for `tick`, or `None` if the tick has no injection.
+    /// The T8 test passes this as `Scene.screen_flash` for that tick's draw.
+    pub fn flash_at(&self, tick: u32) -> Option<i32> {
+        self.render_flash
+            .iter()
+            .find(|(t, _)| *t == tick)
+            .map(|(_, amount)| *amount)
+    }
+
+    /// Whether the `render_hud` directive is present — the draw-time HUD/minimap
+    /// draw. The T8 frame-hash test maps this to `render::frame::Scene.draw_hud`
+    /// (and, for the minimap, `Scene.map`).
+    pub fn hud(&self) -> bool {
+        self.render_hud
     }
 }
 
@@ -401,5 +501,91 @@ input 5 16 0
     fn game_mode_wrong_arity_errors() {
         let err = Scenario::parse("seed 1\nlevel a.lev\nticks 1\ngame_mode\n").unwrap_err();
         assert!(err.contains("expects 1 args"), "got: {err}");
+    }
+
+    // ---- Slice 3b draw-time render directives (both parser sides move together) ----
+
+    #[test]
+    fn render_shadow_defaults_off_and_parses() {
+        // Absent => off (prior scenarios unchanged).
+        let s = Scenario::parse(SAMPLE).expect("parses");
+        assert!(!s.shadow(), "absent render_shadow defaults off");
+        // Present (0 args) => on.
+        let s = Scenario::parse("seed 1\nlevel a.lev\nticks 1\nrender player\nrender_shadow\n")
+            .expect("parses");
+        assert!(s.shadow(), "render_shadow flips the draw-time shadow flag");
+    }
+
+    #[test]
+    fn render_shadow_wrong_arity_errors() {
+        // render_shadow takes NO args; a trailing token is rejected.
+        let err =
+            Scenario::parse("seed 1\nlevel a.lev\nticks 1\nrender_shadow 1\n").unwrap_err();
+        assert!(err.contains("expects 0 args"), "got: {err}");
+    }
+
+    #[test]
+    fn render_shake_parses_and_defaults_empty() {
+        // Absent => no shake for any tick.
+        let s = Scenario::parse(SAMPLE).expect("parses");
+        assert!(s.shake_at(0).is_empty(), "absent render_shake => empty");
+        // `render_shake <tick> <vp> <amount>` — read back per tick as (vp, amount).
+        let s = Scenario::parse(
+            "seed 1\nlevel a.lev\nticks 5\nrender player\nrender_shake 3 1 7\nrender_shake 3 0 4\n",
+        )
+        .expect("parses");
+        let mut at3 = s.shake_at(3);
+        at3.sort_unstable();
+        assert_eq!(at3, vec![(0usize, 4i32), (1usize, 7i32)], "tick 3 shake per vp");
+        assert!(s.shake_at(4).is_empty(), "tick without a render_shake => empty");
+    }
+
+    #[test]
+    fn render_shake_wrong_arity_errors() {
+        let err =
+            Scenario::parse("seed 1\nlevel a.lev\nticks 1\nrender_shake 3 1\n").unwrap_err();
+        assert!(err.contains("expects 3 args"), "got: {err}");
+    }
+
+    #[test]
+    fn render_flash_parses_and_defaults_absent() {
+        // Absent => None for any tick.
+        let s = Scenario::parse(SAMPLE).expect("parses");
+        assert_eq!(s.flash_at(0), None, "absent render_flash => None");
+        // `render_flash <tick> <amount>`.
+        let s = Scenario::parse(
+            "seed 1\nlevel a.lev\nticks 5\nrender player\nrender_flash 2 20\n",
+        )
+        .expect("parses");
+        assert_eq!(s.flash_at(2), Some(20), "tick 2 flash amount");
+        assert_eq!(s.flash_at(1), None, "tick without a render_flash => None");
+    }
+
+    #[test]
+    fn render_flash_wrong_arity_errors() {
+        let err =
+            Scenario::parse("seed 1\nlevel a.lev\nticks 1\nrender_flash 2\n").unwrap_err();
+        assert!(err.contains("expects 2 args"), "got: {err}");
+    }
+
+    // ---- Slice 3e draw-time HUD directive (both parser sides move together) ----
+
+    #[test]
+    fn render_hud_defaults_off_and_parses() {
+        // Absent => off (prior scenarios unchanged).
+        let s = Scenario::parse(SAMPLE).expect("parses");
+        assert!(!s.hud(), "absent render_hud defaults off");
+        // Present (0 args) => on.
+        let s = Scenario::parse("seed 1\nlevel a.lev\nticks 1\nrender player\nrender_hud\n")
+            .expect("parses");
+        assert!(s.hud(), "render_hud enables the draw-time HUD/minimap path");
+    }
+
+    #[test]
+    fn render_hud_wrong_arity_errors() {
+        // render_hud takes NO args; a trailing token is rejected.
+        let err =
+            Scenario::parse("seed 1\nlevel a.lev\nticks 1\nrender_hud 1\n").unwrap_err();
+        assert!(err.contains("expects 0 args"), "got: {err}");
     }
 }

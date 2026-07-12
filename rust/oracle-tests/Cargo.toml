@@ -3,7 +3,14 @@ name = "oracle-tests"
 version = "0.1.0"
 edition = "2021"
 
+# `scenario` is a normal dependency (not dev-only): `src/lib.rs` re-exports it
+# (`pub use scenario;`), and a crate re-export must resolve in the library target,
+# where dev-dependencies are not visible.
+[dependencies]
+scenario = { path = "../scenario" }
+
 [dev-dependencies]
 sim-core = { path = "../sim-core" }
 assets = { path = "../assets" }
 sim = { path = "../sim" }
+render = { path = "../render" }

@@ -1,0 +1,16 @@
+[package]
+name = "scenario"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sim-core = { path = "../sim-core" }
+assets = { path = "../assets" }
+sim = { path = "../sim" }
+render = { path = "../render" }
+
+# Wasm-only: the curated TC asset set is embedded in the binary (there is no
+# filesystem in the browser). Native never pulls this in, so the host dep tree
+# — and every native golden — is unperturbed (Slice 3f T2).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+include_dir = "0.7"

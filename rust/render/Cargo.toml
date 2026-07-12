@@ -1,0 +1,9 @@
+[package]
+name = "render"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sim-core = { path = "../sim-core" }
+assets = { path = "../assets" }
+sim = { path = "../sim" }

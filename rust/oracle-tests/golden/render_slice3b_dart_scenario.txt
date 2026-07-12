@@ -1,0 +1,74 @@
+# Step 3 Slice 3b — DART sobject-explosion + nobject-debris scenario (reuses slice-4c).
+#
+# Read by BOTH the C++ dumper (full-world render + `render player`) and the Rust frame-hash
+# test (T8). Grammar = sim slices + `render <layout>`.
+#
+# === WHAT THIS PROVES: sobject arm EXERCISED + nobject BlitImage/SetPixel arms =======
+# worm0 (visible, grounded) arcs the DART (dart.cfg name=DART: gravity=200, expl_ground=true,
+# timeToExplo=0, createOnExp="small_explosion", dirtEffect=2 carving). Aimed up it arcs and
+# lands on the floor DOWNRANGE, clear of both worms, and explodes: a `small_explosion`
+# SObject (id 2) + dirt-debris NObjects (particle__disappearing, type 2). In the sprite pass
+# the sobject arm (viewport.cpp:418-425) walks the pool and calls BlitImageR of
+# large_sprites[cur_frame+start_frame] — but BlitImageR (blit.cpp:344-368) blits a pixel ONLY
+# where the underlying LEVEL pixel is in the water range [160,168), and render_stage.lev's
+# sky is palette 130 (NON-water). So over THIS level BlitImageR paints ZERO sobject pixels:
+# the explosion's on-screen MOTION here comes from the nobject debris + the terrain carve,
+# NOT the sobject sprite. This scenario therefore exercises the sobject arm's NEGATIVE
+# (water-gate-false) path; the POSITIVE (over-water) BlitImageR paint is proven separately by
+# render_slice3b_dart_water (same dart, water sky). The nobject arm (viewport.cpp:483-498:
+# `start_frame > 0` → BlitImage; else `cur_frame > 1` → Encloses-gated SetPixel) draws the
+# flying debris. Both worm bodies + crosshairs also draw.
+#
+# === THE EMPIRICAL WINDOW (verified in the T7 report) ================================
+# The dart flies (wobjects non-empty) then EXPLODES: at the explode tick the `sobjects`
+# column goes non-empty (000003ff → 00000400 → 00000401 … as cur_frame animates over ~8
+# ticks), the `nobjects` column goes non-empty (dirt debris), and the `level` column CARVES
+# (fa32a601 → 6cdbe62d). The frame hash moves across the explosion window as the debris +
+# carve render (the sobject sprite paints nothing here — see above). The impact is CLEAR of
+# both worms (detectRange=8): `bobjects` stays EMPTY
+# and the worm columns are UNCHANGED — a clean sobject/nobject proof (the slice-4c O10
+# discipline). worm1 sits well to the right (px=140), also clear.
+#
+# The Up phase (t2..t21) gives the dart a downrange arc that lands in the window clear of
+# both worms; worm0 uses Up only (no Left/Right → no facing-flip, aim stays [12,64]).
+#
+# HARD CONSTRAINTS (verified): both worms VISIBLE + ARMED slot 0 (DART, Available()); no
+# Left/Right → no facing-flip; steerable_count == 0 (DART shot_type 1, not 2/3); worms stay
+# visible + alive (impact clear, no self-damage) → never the spawn-preview state.
+seed 42
+level Levels/render_stage.lev
+ticks 45
+render player
+# Both VISIBLE, grounded (y=7602176 == 116.0px). worm0 px=40 (2621440) shooter near the left
+# edge so the arc lands downrange in-window; worm1 px=140 (9175040) bystander at the right,
+# clear of the impact. Both inside the fixed [0,158) window.
+worm 0 2621440 7602176 100 10 0   1
+worm 1 9175040 7602176 100 10 218 1
+weapon 0 DART
+# === Phase layout (tick : worm0 action) — VERIFIED against the golden ===============
+# 2-21  Up(1)      : arc the gun up (~20 ticks; worm0 stays grounded).
+# 22    Fire(16)   : DART arcs downrange; wobjects non-empty in flight; explodes ~t26 on the
+#                    floor clear of both worms -> sobjects + nobjects non-empty, level carves,
+#                    bobjects stays empty, worm columns unchanged.
+# input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0; visible bystander)
+input 2 1 0
+input 3 1 0
+input 4 1 0
+input 5 1 0
+input 6 1 0
+input 7 1 0
+input 8 1 0
+input 9 1 0
+input 10 1 0
+input 11 1 0
+input 12 1 0
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 21 1 0
+input 22 16 0

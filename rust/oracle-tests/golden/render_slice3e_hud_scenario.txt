@@ -1,0 +1,54 @@
+# Step 3 Slice 3e — HUD headline scenario (life bar + kills/lives text + minimap).
+#
+# Read by BOTH the C++ dumper (full-world render + HUD/minimap behind `render_hud`)
+# and the Rust frame-hash test (T8). Grammar = sim slices + `render <layout>` +
+# `render_hud`.
+#
+# === WHAT THIS PROVES: the STATIC HUD elements (spec §4 non-vacuity) =================
+# Reuses the slice-3b BLOOD inputs verbatim (worm0 fires the DART into its own feet,
+# taking one 5-damage hit -> health 95, STAYS visible + alive; worm1 a clear-of-blast
+# bystander). Adding `render_hud` draws, per viewport-worm, the HUD pre-block
+# (viewport.cpp:84-153) into the full-surface clip + the 52x36 minimap
+# (viewport.cpp:593-613) after the world block. With both worms VISIBLE + KillEmAll:
+#   * LIFE BAR (visible arm, viewport.cpp:85-87): worm0 health 95 -> width 95 color
+#     95/10+234=243; worm1 health 100 -> width 100 color 244. worm0's bar SHRINKS by
+#     5px when the DART wounds it (~t11) — a live, non-constant witness.
+#   * KILLS text ALWAYS (viewport.cpp:131-132) + LIVES text KillEmAll arm
+#     (viewport.cpp:148-153) at each worm's stats_x (0 / 218).
+#   * MINIMAP terrain (DrawMiniature, level.cpp:489) + a worm dot per visible worm
+#     (viewport.cpp:604-613, MinimapColor 129+index*4). Both worms move slightly, so
+#     a dot position steps across the window (non-vacuity control c in T8).
+# The reload/loading arm is NOT exercised here (worm0's DART keeps ammo>0 with
+# loading_left==0 => the ammo-bar arm, not the loading bar); the loading bar +
+# blinking Reloading text are proven by render_slice3e_reload. The dying-life-bar
+# countdown arm is proven by render_slice3e_death.
+#
+# Non-vacuity vs the world-only frame: the tick-0 frame hash DIFFERS from
+# render_slice3b_blood.txt tick-0 (the HUD/minimap paint extra pixels) — the fast
+# HUD-paints check. T8 adds the map on/off + HUD on/off suppression controls.
+#
+# HARD CONSTRAINTS (inherited from blood, verified): both worms VISIBLE + ARMED slot 0
+# (DART, Available()); no Left/Right -> no facing-flip; worm0 wounded but survives
+# (health 95 > 0) so it never enters the dying arm.
+seed 42
+level Levels/render_stage.lev
+ticks 40
+render player
+render_hud
+# Both VISIBLE, grounded (y=7602176 == 116.0px). worm0 px=100 (6553600) fires into its own
+# feet; worm1 px=50 (3276800) bystander, clear of the +/-8 blast box. Both in the window.
+worm 0 6553600 7602176 100 10 0   1
+worm 1 3276800 7602176 100 10 218 1
+weapon 0 DART
+# === Phase layout (tick : worm0 action) — VERIFIED against the blood golden ==========
+# 2-7   Down(2)    : lower the gun into the floor at worm0's feet.
+# 8     Fire(16)   : DART drives into the dirt and explodes ~t10 at worm0 -> wounds worm0
+#                    (health 95) -> life bar SHRINKS 100->95.
+# input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0; visible bystander)
+input 2 2 0
+input 3 2 0
+input 4 2 0
+input 5 2 0
+input 6 2 0
+input 7 2 0
+input 8 16 0

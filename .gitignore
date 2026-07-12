@@ -24,5 +24,11 @@ server/openliero-relay
 # Claude
 /.claude/worktrees/
 
+# Generated wasm static bundle (Slice 3f) — wasm-bindgen output next to the
+# tracked web/index.html. Keep the page, never commit the generated glue/binary.
+web/*.js
+web/*.wasm
+web/*.ts
+
 # Generated large test level (not committed — generate via tools/gen_large_test.py)
 data/TC/openliero/Levels/large_test.lev

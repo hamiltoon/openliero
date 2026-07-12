@@ -1,0 +1,12 @@
+[package]
+name = "shot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+scenario = { path = "../scenario" }
+render   = { path = "../render" }
+sim      = { path = "../sim" }
+assets   = { path = "../assets" }
+sim-core = { path = "../sim-core" }
+image = { version = "0.25", default-features = false, features = ["png"] }

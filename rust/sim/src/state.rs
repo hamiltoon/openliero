@@ -361,6 +361,25 @@ pub struct WormState {
     /// (`worm.cpp:870,886`), `false` at the idle/fire sites (`worm.cpp:954,
     /// 1073`). Gates `current_frame`'s anim offset only. **Not hashed.**
     pub animate: bool,
+
+    // --- Slice 3b T0: laser-sight / laser-beam origin (NOT hashed) ---------
+    // Render-only pixel-space anchor read by the viewport's laser/laser-sight
+    // draw (`viewport.cpp:509-510`, `spectatorviewport.cpp:635-636`). Absent
+    // from BOTH `HashGameState` and `HashGameComponents` (verified against
+    // `stateHash.hpp` / `hash.rs`), so adding it leaves every prior
+    // `sim_slice*` golden byte-identical — the same "hash-silent render field"
+    // family as `current_frame`/`animate` above. Set at the weapon-cycle sites
+    // (`worm.cpp:1085,1094`) and, each tick, by the laser-sight `ProcessSight`
+    // walk (`worm.cpp:1207-1208`, T0b — [`crate::control::process_sight`]).
+    /// `Worm::hotspot_x` (`worm.hpp:225`): laser-sight / laser-beam origin in
+    /// pixel space. Set to `Ftoi(pos)` on a weapon cycle (`worm.cpp:1085,1094`)
+    /// and to `Ftoi(temp)` by the laser-sight walk in
+    /// [`process_sight`](crate::control::process_sight) (`worm.cpp:1207`). Read
+    /// only by the renderer (`viewport.cpp:509`). **Not hashed.**
+    pub hotspot_x: i32,
+    /// `Worm::hotspot_y` (`worm.hpp:225`), see [`hotspot_x`](Self::hotspot_x).
+    /// **Not hashed.**
+    pub hotspot_y: i32,
 }
 
 /// `Worm::kKilledTimerInitial` (`worm.hpp:243`): the respawn countdown the worm
@@ -422,6 +441,11 @@ impl WormState {
             // Not hashed.
             current_frame: 0,
             animate: false,
+
+            // Slice 3b T0 laser hotspots: `worm.hpp:225` in-class `{0}` default.
+            // Render-only, not hashed.
+            hotspot_x: 0,
+            hotspot_y: 0,
         }
     }
 
@@ -990,6 +1014,17 @@ pub struct SimState {
     /// hash over time (gravity -> vel -> future pos). Defaulted to 0; harness-assigned
     /// after `new`. Inert for slices 1-5a (no bobjects).
     pub bobj_gravity: i32,
+    /// C++ `LC(LaserWeapon)` (`constants.hpp:67`, TC `common.C[CLaserWeapon]`): the
+    /// **1-based** index of the designated laser weapon. `ProcessSight`
+    /// (`worm.cpp:1196`) draws the sight when the current weapon has the
+    /// `laser_sight` flag **or** its type index equals `LC(LaserWeapon) - 1`. Read
+    /// only by the render-only sight walk (writes `make_sight_green`/`hotspot`, all
+    /// non-hashed), so this is **not** hashed. **Defaulted to 0** here (NOT in the
+    /// `new` arg list — set post-`new` by the differential harness, like the blood
+    /// consts): with `0`, `laser_weapon - 1 == -1` never equals a valid `ty >= 0`, so
+    /// the index arm is inert and only the per-weapon `laser_sight` flag can arm the
+    /// sight. Keeps every prior golden byte-identical (the sight fields are unhashed).
+    pub laser_weapon: i32,
     /// C++ `Settings::max_bonuses` (`settings.hpp:69`, in-game default 4): the cap the
     /// per-tick **bonus-drop roll** gates on (`game.cpp:359`). The roll `if (max_bonuses
     /// > 0 && rand(CBonusDropChance) == 0) CreateBonus()` fires in [`process_frame`]
@@ -1260,6 +1295,11 @@ impl SimState {
             num_blood_colours: 0,
             first_blood_colour: 0,
             bobj_gravity: 0,
+            // LaserWeapon index: defaulted (0). Left at 0 the `ty == laser_weapon - 1`
+            // arm never matches (only the per-weapon `laser_sight` flag can arm the
+            // sight); the difftest assigns the real `LC(LaserWeapon)` after `new`. The
+            // sight fields are unhashed, so this leaves every golden byte-identical.
+            laser_weapon: 0,
             // Bonus-drop roll inputs: defaulted (0). Left at 0 the roll short-circuits
             // (NO rand) so slices 1-5b stay byte-identical; the difftest assigns the
             // real `max_bonuses`/`BonusDropChance` after `new` (post-`new` pattern, like
@@ -1338,8 +1378,7 @@ impl SimState {
 
     /// Advance one tick: a **subset** of `Game::ProcessFrame` (`game.cpp:333-355`
     /// object loops, then `++cycles` at `game.cpp:357`, then `worm.cpp:210-353` per
-    /// worm) — *not* yet the whole frame (no bonus-drop RNG roll, no ninjarope
-    /// `Process`, no `ProcessSight`; those land in a later slice). `cycles` advances
+    /// worm) — *not* yet the whole frame. `cycles` advances
     /// once per tick at the exact game.cpp:357 point (after the object loops, before
     /// the worm loop); it folds into the master hash only (hash.rs:50), not the
     /// components. Renamed from the Slice-3 `process_worms` now that it runs the
@@ -1384,7 +1423,8 @@ impl SimState {
     /// 7. [`process_weapons`].
     /// 8. *(Fire gate — OUT, Slice 4.)*
     /// 9. [`worm_process_physics`] — reads the SAME `reacts`.
-    /// 10. *(ProcessSight — OUT, omitted.)*
+    /// 10. [`crate::control::process_sight`] — render-only laser sight (writes only
+    ///     the non-hashed `make_sight_green`/`hotspot`; draws no rand).
     /// 11. Change gate: held → [`process_weapon_change`]; else clear
     ///     `key_change_pressed` + [`process_movement`] (walk writes `vel.x`
     ///     **after** physics, so it affects *next* tick's integration).
@@ -1419,6 +1459,7 @@ impl SimState {
             num_blood_colours,
             first_blood_colour,
             bobj_gravity,
+            laser_weapon,
             settings_max_bonuses,
             bonus_drop_chance,
             bonus_spawn_rect_w,
@@ -1461,6 +1502,7 @@ impl SimState {
         let num_blood_colours = *num_blood_colours;
         let first_blood_colour = *first_blood_colour;
         let bobj_gravity = *bobj_gravity;
+        let laser_weapon = *laser_weapon;
         let settings_max_bonuses = *settings_max_bonuses;
         let bonus_drop_chance = *bonus_drop_chance;
         let bonus_spawn_rect_w = *bonus_spawn_rect_w;
@@ -1865,7 +1907,26 @@ impl SimState {
                 // 9. physics — reads the SAME reacts computed in step 2.
                 worm_process_physics(w, &reacts, physics);
 
-                // 10. ProcessSight — omitted.
+                // 10. ProcessSight (worm.cpp:346) — render-only laser sight. Writes
+                //     ONLY the non-hashed `make_sight_green`/`hotspot_x`/`hotspot_y`
+                //     and draws NO rand; the walk reads `CheckForWormHit` (the OTHER
+                //     worms' silhouettes) so it needs the whole `&mut worms` slice.
+                //     `w` (the per-worm `&mut worms[i]`) is dropped here and rebound
+                //     below for steps 11-14 — the same un-bind/rebind the bonus-pickup
+                //     pass uses (`worm.cpp:346` sits between physics and the
+                //     change/movement gate, so it runs on the post-physics pos/angle).
+                crate::control::process_sight(
+                    worms,
+                    i,
+                    weapons,
+                    cossin,
+                    level,
+                    worm_sprites,
+                    laser_weapon,
+                );
+
+                // Rebind the per-worm `&mut` dropped for `process_sight` above.
+                let w = &mut worms[i];
 
                 // 11. change/movement gate (worm.cpp:348-353).
                 if w.control_states.get(ControlState::CHANGE) {
@@ -5039,6 +5100,213 @@ mod tests {
             angle_frame(w.aiming_angle, w.direction) + WORM_ANIM_TAB[((state.cycles & 31) >> 3) as usize],
             "moving current_frame == angle_frame + anim offset"
         );
+    }
+
+    // (T0, Slice 3b) `hotspot_x`/`hotspot_y` are render-only (`worm.hpp:225`) and
+    // hash-neutral. A worm that cycles its weapon sets `hotspot = Ftoi(pos)`
+    // (`worm.cpp:1085,1094`); the value is read only by the renderer
+    // (`viewport.cpp:509-510`), so carrying it must leave BOTH folds byte-identical.
+    // This test is the Rust-side proof of the OHASHADE (non-hashed render field)
+    // discipline; the standing sim re-diff gate (`cargo test --workspace`) proves
+    // the whole determinism series is unmoved.
+    #[test]
+    fn hotspot_is_render_only_and_hash_neutral() {
+        use crate::hash::{hash_components, hash_game_state};
+        use sim_core::fixed::ftoi;
+
+        // A worm holding Change+Right cycles the weapon on the SECOND tick: the
+        // first change-tick Releases L/R and latches `key_change_pressed`
+        // (`worm.cpp:1065-1070`), so no cycle fires on tick 1; the cycle site
+        // (`worm.cpp:1089-1095`) then sets `hotspot = Ftoi(pos)` on tick 2.
+        let mut state = open_state(itof(20), 0);
+        let change_right = {
+            let mut c = ControlState::new();
+            c.set(ControlState::CHANGE, true);
+            c.set(ControlState::RIGHT, true);
+            c
+        };
+
+        // Tick 1: latch only. hotspot stays at its `from_init` default (0).
+        state.process_frame(&[change_right, ControlState::new()]);
+        assert_eq!(state.worms[0].hotspot_x, 0, "tick1 latch: no cycle -> hotspot unset");
+        assert_eq!(state.worms[0].hotspot_y, 0, "tick1 latch: no cycle -> hotspot unset");
+
+        // Tick 2: PressedOnce(Right) cycles the weapon -> hotspot = Ftoi(pos).
+        state.process_frame(&[change_right, ControlState::new()]);
+        let w = &state.worms[0];
+        assert_eq!(w.hotspot_x, ftoi(w.pos.x), "hotspot_x == Ftoi(pos.x) (worm.cpp:1094)");
+        assert_eq!(w.hotspot_y, ftoi(w.pos.y), "hotspot_y == Ftoi(pos.y) (worm.cpp:1095)");
+        assert_ne!(w.hotspot_x, 0, "non-vacuous: the field is actually populated");
+
+        // Hash-neutrality: `hotspot_*` is absent from BOTH folds. Mutating it to
+        // arbitrary values must leave `hash_game_state` (master) AND
+        // `hash_components` (per-component) byte-identical.
+        let master_before = hash_game_state(&state);
+        let components_before = hash_components(&state);
+        state.worms[0].hotspot_x = 0x7fff_ffff;
+        state.worms[0].hotspot_y = -0x0123_4567;
+        assert_eq!(hash_game_state(&state), master_before, "hotspot absent from master hash");
+        assert_eq!(hash_components(&state), components_before, "hotspot absent from component hash");
+    }
+
+    // -----------------------------------------------------------------------
+    // Slice 3b T0b: Worm::ProcessSight (worm.cpp:1190-1212) — render-only laser
+    // sight ported into the worm loop (step 10). Writes ONLY the non-hashed
+    // make_sight_green / hotspot; draws no rand.
+    // -----------------------------------------------------------------------
+
+    /// A 64×64 all-background level with TWO worms (0 at (20,20), 1 at (40,40))
+    /// each carrying weapon type 0. `laser` sets that type's `laser_sight` flag so
+    /// the current slot arms (or not) the sight. Worm-sprite bank is empty, so
+    /// `CheckForWormHit` is always a miss (`make_sight_green` stays false) and the
+    /// walk is purely bounds + Background.
+    fn sight_state(laser: bool) -> SimState {
+        let w = 64i32;
+        let level = LevelData {
+            width: w,
+            height: w,
+            material_id: vec![1u8; (w * w) as usize],
+            palette: None,
+            display: None,
+        };
+        let mut flags = [0u8; 256];
+        flags[0] = MAT_BACKGROUND;
+        flags[1] = MAT_BACKGROUND;
+        let weapons = vec![Weapon {
+            id: 0,
+            laser_sight: laser,
+            ammo: 100,
+            ..Default::default()
+        }];
+        let mk = |index: i32, pos: Vec2| WormInit {
+            index,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit { ty: Some(0), ammo: 100 }; NUM_WEAPONS],
+            start_pos: pos,
+            visible: true,
+        };
+        let mut state = SimState::new(
+            &level,
+            &[
+                mk(0, Vec2::new(itof(20), itof(20))),
+                mk(1, Vec2::new(itof(40), itof(40))),
+            ],
+            1,
+            &flags,
+            weapons,
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            SpriteSet::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            100,
+            true,
+            100,
+        );
+        for wm in &mut state.worms {
+            wm.aiming_angle = itof(20);
+            wm.direction = 0;
+        }
+        state
+    }
+
+    // (T0b) HASH-NEUTRALITY: running the sight walk (laser-armed) must leave BOTH
+    // folds byte-identical to an otherwise-identical run whose weapon is not a
+    // laser — proving ProcessSight touches only non-hashed state and draws no rand.
+    #[test]
+    fn process_sight_is_hash_neutral() {
+        use crate::hash::{hash_components, hash_game_state};
+
+        let mut laser = sight_state(true);
+        let mut plain = sight_state(false);
+        let idle = [ControlState::new(), ControlState::new()];
+
+        for tick in 0..8 {
+            laser.process_frame(&idle);
+            plain.process_frame(&idle);
+            assert_eq!(
+                hash_game_state(&laser),
+                hash_game_state(&plain),
+                "tick {tick}: laser sight must not move the master hash"
+            );
+            assert_eq!(
+                hash_components(&laser),
+                hash_components(&plain),
+                "tick {tick}: laser sight must not move any component hash"
+            );
+        }
+
+        // Non-vacuous: the laser run actually walked the sight (hotspot populated),
+        // while the non-laser run's else-branch left hotspot at its default.
+        assert_ne!(
+            (laser.worms[0].hotspot_x, laser.worms[0].hotspot_y),
+            (0, 0),
+            "laser run populated hotspot (sight path ran)"
+        );
+        assert_eq!(
+            (plain.worms[0].hotspot_x, plain.worms[0].hotspot_y),
+            (0, 0),
+            "non-laser run left hotspot untouched"
+        );
+    }
+
+    // (T0b) BEHAVIOUR — laser armed: the walk steps along cossin[Ftoi(angle)] from
+    // pos until it exits the all-background level; hotspot == that exit point. The
+    // reference walk mirrors worm.cpp:1197-1208 from the POST-tick pos/angle (idle
+    // movement leaves pos unchanged, so final pos == the pos ProcessSight saw).
+    #[test]
+    fn process_sight_walks_to_boundary_for_laser() {
+        let mut state = sight_state(true);
+        // Pre-set true to prove the loop's final write (a miss) actively clears it.
+        state.worms[0].make_sight_green = true;
+        let idle = [ControlState::new(), ControlState::new()];
+        state.process_frame(&idle);
+
+        let w = &state.worms[0];
+        // Empty sprite bank -> CheckForWormHit always misses.
+        assert!(!w.make_sight_green, "no sprite bank -> no worm hit -> false");
+
+        // Reference walk (worm.cpp:1197-1205 with hit==false throughout).
+        let k = state.cossin[ftoi(w.aiming_angle) as usize];
+        let mut temp = w.pos.add(k.mul(6));
+        temp.y = temp.y.wrapping_sub(itof(1));
+        loop {
+            temp = temp.add(k);
+            let in_bounds =
+                temp.x >= 0 && temp.y >= 0 && temp.x < itof(64) && temp.y < itof(64);
+            if !(in_bounds && state.level.background(ftoi(temp.x), ftoi(temp.y))) {
+                break;
+            }
+        }
+        assert_eq!(w.hotspot_x, ftoi(temp.x), "hotspot_x == sight walk exit");
+        assert_eq!(w.hotspot_y, ftoi(temp.y), "hotspot_y == sight walk exit");
+
+        // Concrete geometry: an all-background level is always exited, so the exit
+        // point lies at/over a boundary (NOT both coordinates in-range).
+        let in_level =
+            w.hotspot_x >= 0 && w.hotspot_x < 64 && w.hotspot_y >= 0 && w.hotspot_y < 64;
+        assert!(!in_level, "sight walk exited the level boundary");
+        assert_ne!((w.hotspot_x, w.hotspot_y), (0, 0), "non-vacuous: hotspot moved");
+    }
+
+    // (T0b) BEHAVIOUR — non-laser: the else-branch clears make_sight_green and never
+    // writes hotspot (proving the sight effect is GATED on the laser condition).
+    #[test]
+    fn process_sight_gated_off_for_non_laser() {
+        let mut state = sight_state(false);
+        // Pre-set true to prove the else-branch (worm.cpp:1210) actively clears it.
+        state.worms[0].make_sight_green = true;
+        let idle = [ControlState::new(), ControlState::new()];
+        state.process_frame(&idle);
+
+        let w = &state.worms[0];
+        assert!(!w.make_sight_green, "non-laser: else-branch cleared make_sight_green");
+        assert_eq!(w.hotspot_x, 0, "non-laser: sight never writes hotspot_x");
+        assert_eq!(w.hotspot_y, 0, "non-laser: sight never writes hotspot_y");
     }
 
     // -----------------------------------------------------------------------

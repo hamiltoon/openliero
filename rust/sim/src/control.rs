@@ -342,7 +342,11 @@ pub fn process_tasks(
             // SoundNinjaropeThrow (worm.cpp:979) OMITTED: sound not hashed.
             worm.ninjarope.pos = worm.pos;
             // worm.cpp:982-983 — vel = cossin[Ftoi(aiming_angle)] << NRThrowVel{X,Y}.
-            let cs = cossin[ftoi(worm.aiming_angle) as usize];
+            // `& 0x7f`: the walk-flip residue (`aiming_angle == Itof(128)`, see the
+            // `worm_fire` guard in `weapon.rs`) reaches this read — spawn -> tap a
+            // direction -> Change+Jump. C++ reads cossin_table[128] as UB; the mask
+            // wraps the degenerate 128 to the equivalent 0, a no-op for 0..=127.
+            let cs = cossin[(ftoi(worm.aiming_angle) & 0x7f) as usize];
             worm.ninjarope.vel = Vec2::new(
                 cs.x.wrapping_shl(c.nr_throw_vel_x as u32),
                 cs.y.wrapping_shl(c.nr_throw_vel_y as u32),
@@ -685,7 +689,12 @@ pub fn process_movement(
             worm.able_to_dig = false;
 
             // worm.cpp:893 — kDir = cossin_table[Ftoi(aiming_angle)].
-            let k_dir = cossin[ftoi(worm.aiming_angle) as usize];
+            // `& 0x7f`: the walk-flip residue (`aiming_angle == Itof(128)`, see the
+            // `worm_fire` guard in `weapon.rs`) reaches this read — L+R the tick
+            // after a flip (neither walk branch runs, able_to_dig is re-armed).
+            // C++ reads cossin_table[128] as UB; the mask wraps 128 to the
+            // equivalent 0, a no-op for 0..=127.
+            let k_dir = cossin[(ftoi(worm.aiming_angle) & 0x7f) as usize];
 
             // worm.cpp:895 — dig_pos = kDir*2 + pos.
             let mut dig_pos = k_dir.mul(2).add(worm.pos);
@@ -1393,6 +1402,31 @@ MultiJump = true
         );
         assert_eq!(w.ninjarope.length, 4000, "length = NRInitialLength");
         assert!(!w.ninjarope.attached, "throw clears attached");
+    }
+
+    // Hardening H1: the walk-flip residue (`aiming_angle == Itof(128)` after an
+    // un-aimed worm flips direction; ProcessAiming's clamp is gated on
+    // `aiming_speed != 0` and does not correct it) reaches the throw's cossin
+    // read. Pre-guard this panics (cossin[128], one past the table); post-guard
+    // the index masks to 0 — the mathematically equivalent direction.
+    #[test]
+    fn ninjarope_throw_at_aiming_angle_128_wraps_to_zero_instead_of_oob_panic() {
+        let c = ControlConsts::default();
+        let cossin = precompute_cossin();
+        let mut w = task_worm();
+        w.aiming_angle = itof(128); // the degenerate walk-flip residue
+        w.control_states.press(ControlState::CHANGE);
+        w.control_states.press(ControlState::JUMP);
+
+        process_tasks(&mut w, &[0, 0, 0, 0], &c, &cossin);
+
+        assert!(w.ninjarope.out, "throw ran (no OOB panic)");
+        let cs = cossin[0]; // 128 & 0x7f == 0
+        assert_eq!(
+            w.ninjarope.vel,
+            Vec2::new(cs.x << 2, cs.y << 2),
+            "angle 128 throws as angle 0 (cossin[128 & 0x7f] == cossin[0])"
+        );
     }
 
     #[test]
@@ -2389,6 +2423,53 @@ MultiJump = true
                 assert_eq!(m, 1, "pixel {i} untouched (still Dirt)");
             }
         }
+    }
+
+    // Hardening H1: the walk-flip residue (`aiming_angle == Itof(128)`, see the
+    // ninjarope-throw twin above) also reaches the dig's cossin read — L+R the
+    // tick AFTER a flip re-armed able_to_dig. Pre-guard: cossin[128] panic;
+    // post-guard: index masks to 0 and the dig carves along cossin[0].
+    #[test]
+    fn dig_at_aiming_angle_128_wraps_to_zero_instead_of_oob_panic() {
+        let c = ControlConsts::default();
+        let cossin = precompute_cossin();
+
+        let mut w = move_worm(0);
+        w.able_to_dig = true;
+        w.aiming_angle = itof(128); // the degenerate walk-flip residue
+        w.pos = Vec2::new(itof(20), itof(20));
+        w.control_states.press(ControlState::LEFT);
+        w.control_states.press(ControlState::RIGHT);
+
+        let mut level = dirt_level(32, 32, 1);
+        let sprites = make_sprites(84, &[(38, mask_one(0, 6)), (82, fill_const(50)), (83, fill_const(50))]);
+        let textures = dig_textures();
+        let mut rand = seeded(0x1234_5678);
+
+        process_movement(&mut w, &c, &mut level, &sprites, &textures, &cossin, &mut rand);
+
+        assert!(!w.able_to_dig, "dig ran (no OOB panic)");
+        // kDir = cossin[128 & 0x7f] == cossin[0]; craters at kDir*2 / kDir*4
+        // + pos - Itof(7), exactly as the in-range geometry test above.
+        let k = cossin[0];
+        let (x1, y1) = (
+            ftoi(k.x * 2 + itof(20) - itof(7)),
+            ftoi(k.y * 2 + itof(20) - itof(7)),
+        );
+        let (x2, y2) = (
+            ftoi(k.x * 4 + itof(20) - itof(7)),
+            ftoi(k.y * 4 + itof(20) - itof(7)),
+        );
+        assert_eq!(
+            level.material_id[(y1 * 32 + x1) as usize],
+            50,
+            "first crater carved along cossin[0]"
+        );
+        assert_eq!(
+            level.material_id[(y2 * 32 + x2) as usize],
+            50,
+            "second crater carved along cossin[0]"
+        );
     }
 
     // Step 2 — level carve + RNG. The dig advances the RNG by EXACTLY two rand(2)

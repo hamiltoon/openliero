@@ -167,21 +167,30 @@ pub fn worm_fire(
 
     // kFiring = cossin[angle] * (detect_distance + 5) + pos - (0, Itof(1)).
     //
-    // `cossin[128]` OOB (deferral #3): an un-aimed worm with `aiming_angle == 0`
-    // that walk-flips to `dir1` keeps the mirrored `Itof(128)`, so `Ftoi` here
-    // would read `cossin[128]` — one past this 128-entry table. C++ reads that
-    // as UB; Rust panics (index out of bounds). Found by the slice-5′ T10 fuzz
-    // (`.superpowers/sdd/step2-slice5prime-task-T10-report.md:51-66`) via a
-    // hand-driven dumper path that sets `aiming_angle = 0` directly. It is
-    // UNREACHABLE in the slice-6 ProcessFrame fuzz: worms there are seeded DEAD
-    // and respawn through `DoRespawning`, which sets `aiming_angle ∈ {32, 96}`
-    // (`worm.cpp:799-805`, never 0); the dir-flip maps `32 <-> 96` and the aim
-    // clamp holds `[64,116]`, so `Ftoi(aiming_angle)` stays in `[12,116]` and
-    // never reaches 128 (design §8,
-    // `docs/superpowers/specs/2026-07-09-liero-rs-step2-slice6-full-processframe-design.md`).
-    // JOHN-BESLUT #3 (2026-07-09): defer the residual hardening (a clamp/guard
-    // on `Ftoi(aiming_angle)`) past Step 2 — comment only, no behavior change.
-    let angle = ftoi(worm.aiming_angle);
+    // `cossin[128]` OOB guard (was deferral #3): an un-aimed worm with
+    // `aiming_angle == 0` that walk-flips to `dir1` keeps the mirrored
+    // `Itof(128)`, so `Ftoi` here reads `cossin[128]` — one past this 128-entry
+    // table. C++ reads that as UB (benign, feeds only geometry); Rust panics
+    // (index out of bounds). The `& 0x7f` mask below wraps the degenerate `128`
+    // to `0` — the mathematically equivalent direction on the periodic table
+    // (`math.cpp:91` builds it with the same `& 0x7f`) — a no-op for every
+    // in-range `0..=127`. This binds `angle` for ALL downstream fire reads:
+    // `firing_pos` here, `weapon_fire` (`obj.vel`, and `cur_frame == angle` for
+    // steerable/type2 -> its later `cossin[cur_frame]`), and the post-loop
+    // recoil — so the single mask covers the whole fire path.
+    //
+    // JOHN-BESLUT #3 (2026-07-09) deferred this as "comment only, UNREACHABLE in
+    // the slice-6 ProcessFrame fuzz". That premise FELL when 4a shipped `--live`:
+    // the chain spawn -> tap Right (`process_movement` sets `aiming_angle =
+    // Itof(128) - 0`) -> next tick `process_aiming` does NOT clamp (gated on
+    // `aiming_speed != 0`, which the flip zeroes) -> Fire is now hand-reachable.
+    // Guard added under the 3b precedent (the SAME cossin table is masked with
+    // `& 0x7f` in the render path, `object_draw.rs`, and the laser-sight walk in
+    // `control.rs`); the same flip residue also reaches the ninjarope throw and
+    // the dig in `control.rs`, guarded identically. The C++-UB reference stands:
+    // there is no defined C++ behavior to mirror here, so the periodic wrap is
+    // the faithful choice.
+    let angle = ftoi(worm.aiming_angle) & 0x7f;
     let firing_pos = cossin[angle as usize]
         .mul(w.detect_distance + 5)
         .add(worm.pos)
@@ -944,6 +953,52 @@ mod tests {
         // subtracts from the PRE-fire vel (the loop does not touch worm.vel).
         let expected = pre_vel.sub(cossin[32].mul(2).div(100));
         assert_eq!(worm.vel, expected, "recoil applied after parts loop");
+    }
+
+    // ---- Hardening H1: cossin[128] OOB guard in the fire path ----------------
+
+    // An un-aimed worm (aiming_angle == 0) that walk-flips keeps the mirrored
+    // `Itof(128) - 0 == Itof(128)`, and ProcessAiming's clamp does NOT correct
+    // it (that clamp is gated on `aiming_speed != 0`, which the flip zeroes). A
+    // subsequent Fire then reads `cossin[Ftoi(128)] == cossin[128]` — one past
+    // this 128-entry table. Reachable in `--live`: spawn -> tap Right -> Fire.
+    // BEFORE the guard this panics ("index out of bounds"); AFTER it, the index
+    // masks to 0 (the mathematically equivalent direction on the periodic
+    // table), so firing at angle 128 behaves exactly like firing at angle 0.
+    // Golden-neutral: every existing golden avoids the edge, so masking only the
+    // degenerate 128 leaves all in-range 0..=127 reads untouched.
+    #[test]
+    fn fire_at_aiming_angle_128_wraps_to_zero_instead_of_oob_panic() {
+        let cossin = precompute_cossin();
+        // No-RNG synthetic weapon: speed 100 (no affect_by_worm clamp), recoil 2,
+        // so obj.vel and the recoil are exact functions of the cossin index.
+        let w = synth_weapon(2, 100, 2, false);
+        let mut worm = firing_worm(10);
+        worm.aiming_angle = itof(128); // the degenerate walk-flip residue
+        let pre_vel = worm.vel;
+        let mut pool: Pool<WObject> = Pool::new(8);
+        let mut rand = seeded();
+
+        // Pre-guard: this call panics — cossin[128] is out of bounds.
+        worm_fire(&mut worm, &[w], &cossin, false, &mut rand, &mut pool);
+
+        // No panic: exactly one wobject spawned.
+        assert_eq!(pool.len(), 1, "fire spawns one wobject (no OOB panic)");
+        let obj = *pool.get(0).unwrap();
+
+        // Index 128 masked to 0: projectile velocity matches the cossin[0]
+        // direction exactly — identical to firing with aiming_angle == 0.
+        assert_eq!(
+            obj.vel,
+            cossin[0].mul(100).div(100),
+            "angle 128 fires as angle 0 (cossin[128 & 0x7f] == cossin[0])"
+        );
+        // The post-loop recoil reads the same masked (0) index.
+        assert_eq!(
+            worm.vel,
+            pre_vel.sub(cossin[0].mul(2).div(100)),
+            "recoil also uses the masked (0) index"
+        );
     }
 
     // ---- Step 2: affect_by_worm + HSignedRecoil ------------------------------

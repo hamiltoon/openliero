@@ -1,6 +1,6 @@
 # Step 3 — Rendering: overview / altitude decisions
 
-Status: **active** · 2026-07-12 · slices **3a + 3b + 3c + 3d SHIPPED** (see *Slice ordering* below); 3e–3f pending
+Status: **active** · 2026-07-12 · slices **3a + 3b + 3c + 3d + 3e SHIPPED** (see *Slice ordering* below); only **3f** (wasm) pending
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 3 — Rendering" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-07-10-liero-rs-step3-cpp-render-pipeline-map.md` (C++ map, cited as **render-map §N**)
@@ -389,12 +389,50 @@ what it *proves*.
   non-vacuity). Reviews: T0/T1/T2 two-stage-reviewed, **0 Critical / 0 Important** blocking (T2's one
   Important fixed in `5dfa9c0`).
 
-- **3e — HUD / font / bars / minimap.** The full player view: `Font::DrawString`
-  (CP437), `DrawTextSmall`, `DrawBar`/`FillRect`/`DrawDashedLineBox`/`Vline`, life/
-  ammo bars, kills/lives/reloading text, death banners, the 52×36 minimap
-  (`DrawMiniature`) (render-map §3 steps 1–6, 14; §5; §8b). Pixel-gated. **Proves:**
-  the complete in-game player frame matches C++. **Done-when:** the full player-view
-  frame hash matches C++.
+- **3e — HUD / font / bars / minimap. ✅ SHIPPED (2026-07-12).** The full player view:
+  `Font::DrawString` (a CP437→ASCII subset — see RESULT), `DrawBar`, life/ammo bars,
+  kills/lives/reloading text, the 52×36 minimap (`DrawMiniature`) (render-map §3 steps
+  1–6, 14; §5; §8b). Pixel-gated. **Proves:** the complete in-game player frame matches
+  C++. **Done-when:** the full player-view frame hash matches C++.
+  **RESULT:** 🎯 **MILESTONE — the full player view is PIXEL-EXACT vs the C++ oracle.** The
+  in-game overlay is ported verbatim and the MILESTONE difftests are **GREEN**. Ported:
+  **`render::font::Font`** (font.tga loader `common.cpp:414-433` with width-detect + the
+  0/50→0/8 palette remap) + `draw_char`/`draw_string` (`font.cpp:8-80` **verbatim** — the
+  double `c>=2 && c<252` guard preserved, `CLIP_IMAGE` inlined, newline on codepoint 0);
+  **`blit::draw_bar`** (`blit.cpp:105-113`, unclipped + a `width>0` anti-clamp witness);
+  **`render::hud::draw_hud`** (`viewport.cpp:84-153` verbatim — the two-arm life bar
+  (`health*100/settings_health`; `100-(killed_timer*25)/37` clamped), the two-arm ammo/
+  loading bar, the blinking **Reloading** label (`(cycles%20)>10 && visible`, y=`164*multiplier`
+  **absolute** — a plan-deviation caught vs C++), kills-always / lives-on-KillEmAll+Scales,
+  the `w/10+234` / `w/10+245` / 50 / 10 / 6 colour columns); **`draw_minimap`+`draw_miniature`**
+  (`viewport.cpp:593-613` + `level.cpp:489-507` — the *two different* `step` (ceil) vs `bounds`
+  (round) idioms preserved, worm-dots at `ftoi(pos)/step` in colour `129+worm.index*4`,
+  clip-gated, `AppearanceAt` inlined). `Scene`/`frame::draw` composites per viewport —
+  **HUD (full clip) → world (world clip) → minimap** with the verbatim double-draw — and every
+  prior render golden stays **byte-identical** (anti-bleed proof). The C++ dumper gained an
+  opt-in **`render_hud`** directive mirroring `frame::draw`; the RE-DIFF gate is **empty**
+  (3a/blood/shake/sim_slice2 regenerate byte-for-byte). Three scenarios + goldens — **hud**
+  (41t), **reload** (71t), **death** (141t): hud + death matched **first run** (per-tick + total
+  + triple-isolation + suppression controls + non-vacuity); reload was first **blocked** (the T7
+  RIFLE = `ST_LASER` tripped the deferred laser do-loop in the sim), re-cut to a **GRENADE**
+  scenario (`ST_NORMAL`, inert hit-arm, no in-window explosion) and turned **GREEN** (71 rows +
+  total; a settled 50/51-tick witness). Finding: tick 0 is a fade-to-black, so the HUD witness
+  reads tick 1. Milestone review: **0 Critical / 0 Important.** **3e-relevant open questions
+  resolved:** **Q2 (font — full CP437 table vs subset)** → the shipped label corpus is proven
+  **ASCII-only** by a bevis-test (`draw_string` is identity for `cp<0x80`), so a subset ships and
+  the full CP437 table is deferred until a label needs it; **Q3 (a death scenario for the dying
+  HUD arm)** → **YES, shipped** (the `death` golden exercises the `killed_timer` life-bar arm;
+  the death **banners** `viewport.cpp:236-267` are adjudicated **structurally unreachable** — the
+  `banner_y` state steps in viewport processing neither harness runs — and deferred to Step 4,
+  not part of 3e); **Q5 (`FillRect`)** → **deferred** (replay-only, no HUD path reaches it);
+  **Q6 (minimap double-draw)** → **verbatim reproduced** (`frame::draw` redraws the minimap
+  inside the per-viewport loop exactly as C++). Deferrals carried: death banners (Step 4, above);
+  name labels / `DrawTextSmall` + text.tga (Step 4 / future — labels are ASCII-proven);
+  Holdazone/GameOfTag/replay HUD-arms (tripwired); spawn-preview `BlitImageTrans` (unreachable);
+  `fill_rect` (replay-only); the RIFLE/`ST_LASER` laser-do-loop (a **sim** deferral — the reload
+  golden uses GRENADE until it is ported); plus review minors (DRY the inlined `clip_image`, a
+  `size>1`-advance font test, minimap dot-index discrimination, the reload difftest's own
+  suppression control [deliberately omitted]).
 
 - **3f — wasm bring-up.** WebGL2 build, `include_bytes!`/embedded assets (dodge async
   fetch), serve/deploy recipe to C++ emscripten parity (bevy-research §5). **Proves:**

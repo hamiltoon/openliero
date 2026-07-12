@@ -187,6 +187,11 @@ fn render_slice3a_frame_hash_matches_cpp_oracle() {
     // (T6 owns the eventual dumper-symmetric callsite; this is the minimal
     // mechanical adaptation to keep the crate + oracle-tests compiling in T5.)
     let empty_fire_cone = assets::sprite::SpriteSet::default();
+    // 3e widened `Scene` with HUD fields. 3a renders world-only (`draw_hud=false`),
+    // so an empty font + default labels are never read; they only satisfy the
+    // non-optional refs, keeping the 3a frame hashes byte-identical.
+    let empty_font = render::font::Font::default();
+    let empty_labels = render::hud::HudLabels::default();
     let scene = render::frame::Scene {
         origpal: &origpal,
         color_anim: &color_anim,
@@ -197,6 +202,10 @@ fn render_slice3a_frame_hash_matches_cpp_oracle() {
         laser_weapon: tc.constants.LaserWeapon,
         screen_flash: 0,
         draw_shadow: false,
+        font: &empty_font,
+        labels: &empty_labels,
+        draw_hud: false,
+        map: false,
     };
 
     let render_tick = |bmp: &mut render::bitmap::Bitmap,

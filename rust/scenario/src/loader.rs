@@ -26,6 +26,12 @@ use render::font::Font;
 use render::frame::Scene;
 use render::viewport::Viewport;
 
+// The HUD labels type is owned by `render` (`render::hud::HudLabels`). Slice 3e T5
+// dropped the identical `scenario`-local duplicate and re-exports the render type
+// here, so `frame::Scene.labels: &HudLabels` is filled without a conversion and
+// `scenario::HudLabels` keeps naming the same struct.
+pub use render::hud::HudLabels;
+
 use crate::parser::Scenario;
 
 /// Owned Scene ingredients — everything the per-tick `render::frame::draw` needs
@@ -38,11 +44,21 @@ pub struct SceneData {
     pub nr_begin: i32,
     pub nr_end: i32,
     pub laser_weapon: i32,
+    /// The 250-glyph HUD font (`sprites/font.tga` post-processed by `Font::load`).
+    /// Owned here (Slice 3e T5) so `as_scene` can thread `&Font` into the widened
+    /// `frame::Scene` without a second load.
+    pub font: Font,
+    /// The three HUD text labels from the TC's `[texts]` (`Kills`/`Lives`/`Reloading`).
+    pub labels: HudLabels,
 }
 
 impl SceneData {
     /// Borrow the owned ingredients into a `render::frame::Scene` for one draw.
     /// `screen_flash`/`draw_shadow` are per-draw (demo passes 0 / scenario.shadow()).
+    /// `draw_hud`/`map` default to `false` — the world-only path every existing
+    /// caller (shot, game, the 3b harness) drives, so 3a/3b frame hashes stay
+    /// byte-identical. A HUD-enabling caller (3e T8) sets them on the returned
+    /// `Scene`.
     pub fn as_scene(&self, screen_flash: i32, draw_shadow: bool) -> Scene<'_> {
         Scene {
             origpal: &self.origpal,
@@ -54,35 +70,22 @@ impl SceneData {
             laser_weapon: self.laser_weapon,
             screen_flash,
             draw_shadow,
+            font: &self.font,
+            labels: &self.labels,
+            draw_hud: false,
+            map: false,
         }
     }
 }
 
-/// The three HUD text labels carried verbatim from the TC's `[texts]`
-/// (`Kills`/`Lives`/`Reloading`; `tc.rs:239-242`). The HUD text pass draws these
-/// through `Font::draw_string`. Held here in `Loaded` for Slice 3e T0; the wire
-/// task (T5) relocates them into `render::frame::Scene`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HudLabels {
-    /// `Texts::Kills` — the "Kills: " prefix (`viewport.cpp:131-132`).
-    pub kills: String,
-    /// `Texts::Lives` — the "Lives: " prefix (`viewport.cpp:148-153`).
-    pub lives: String,
-    /// `Texts::Reloading` — the blinking "Reloading..." label (`viewport.cpp:110-128`).
-    pub reloading: String,
-}
-
 /// The full tick-0 load: driven `SimState`, the two fixed-camera viewports
-/// (fresh default-seeded RNG), the owned Scene ingredients, and the HUD font +
-/// labels (Slice 3e T0 — carried on `Loaded` until T5 threads them into `Scene`).
+/// (fresh default-seeded RNG), and the owned Scene ingredients (which now carry
+/// the HUD font + labels, Slice 3e T5). `as_scene` threads those into the widened
+/// `frame::Scene`.
 pub struct Loaded {
     pub state: SimState,
     pub viewports: [Viewport; 2],
     pub scene: SceneData,
-    /// The 250-glyph HUD font (`sprites/font.tga` post-processed by `Font::load`).
-    pub font: Font,
-    /// The three HUD text labels from the TC's `[texts]`.
-    pub labels: HudLabels,
 }
 
 fn load_sprites(tc_root: &Path, file: &str, w: i32, h: i32, count: i32) -> SpriteSet {
@@ -208,9 +211,9 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
             nr_begin: tc.constants.NRColourBegin,
             nr_end: tc.constants.NRColourEnd,
             laser_weapon: tc.constants.LaserWeapon,
+            font,
+            labels,
         },
-        font,
-        labels,
     }
 }
 
@@ -236,15 +239,15 @@ weapon 0 DART
     fn load_yields_font_and_labels() {
         let scenario = Scenario::parse(SAMPLE).expect("scenario parses");
         let loaded = load(Path::new(TC_ROOT), &scenario);
-        // Non-empty 250-glyph font.
-        assert_eq!(loaded.font.chars.len(), 250);
+        // Non-empty 250-glyph font (now owned by `scene`, Slice 3e T5).
+        assert_eq!(loaded.scene.font.chars.len(), 250);
         assert!(
-            loaded.font.chars.iter().any(|c| c.width > 0),
+            loaded.scene.font.chars.iter().any(|c| c.width > 0),
             "the real font has glyphs with nonzero advance"
         );
         // Labels carried verbatim from the TC's `[texts]` (data/TC/openliero/tc.cfg).
-        assert_eq!(loaded.labels.kills, "Kills: ");
-        assert_eq!(loaded.labels.lives, "Lives: ");
-        assert_eq!(loaded.labels.reloading, "Reloading...");
+        assert_eq!(loaded.scene.labels.kills, "Kills: ");
+        assert_eq!(loaded.scene.labels.lives, "Lives: ");
+        assert_eq!(loaded.scene.labels.reloading, "Reloading...");
     }
 }

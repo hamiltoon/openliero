@@ -35,7 +35,9 @@ use sim::state::{ControlState, SimState};
 use sim_core::fixed::itof;
 
 use render::bitmap::Bitmap;
+use render::font::Font;
 use render::frame::Scene;
+use render::hud::HudLabels;
 use render::viewport::Viewport;
 
 const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
@@ -109,6 +111,10 @@ struct Built {
     nr_begin: i32,
     nr_end: i32,
     laser_weapon: i32,
+    // HUD ingredients (Slice 3e T5). Carried so the widened `Scene` compiles; the
+    // 3b harness renders world-only (`draw_hud=false`), so they are never read.
+    font: Font,
+    labels: HudLabels,
 }
 
 /// Build tick-0 state + render harness for a 3b scenario — the full Step-2 setup
@@ -136,6 +142,8 @@ fn build(name: &str) -> Built {
         nr_begin: loaded.scene.nr_begin,
         nr_end: loaded.scene.nr_end,
         laser_weapon: loaded.scene.laser_weapon,
+        font: loaded.scene.font,
+        labels: loaded.scene.labels,
     }
 }
 
@@ -163,6 +171,12 @@ fn render_tick(b: &mut Built, tick: u32, force_shadow: Option<bool>) -> u64 {
         laser_weapon: b.laser_weapon,
         screen_flash,
         draw_shadow,
+        // World-only path: the HUD/minimap stay off, so the 3b frame hashes are
+        // byte-identical to their pre-3e values (the render re-diff proof).
+        font: &b.font,
+        labels: &b.labels,
+        draw_hud: false,
+        map: false,
     };
     render::frame::draw(&mut b.bmp, &b.state, &mut b.viewports, &scene);
 

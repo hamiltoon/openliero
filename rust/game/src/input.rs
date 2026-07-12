@@ -6,6 +6,8 @@
 //! and so it runs in the fast CI test set. `game` instantiates it with Bevy's
 //! `KeyCode` via [`default_bindings`]. See spec §4.1.
 
+use std::path::{Path, PathBuf};
+
 use bevy::input::ButtonInput;
 use bevy::input::keyboard::KeyCode;
 use bevy::prelude::Resource;
@@ -137,21 +139,44 @@ pub enum Mode {
     Live,
 }
 
-/// Parse the native CLI args (post `argv[0]`): an optional leading `--live`
-/// flag selects [`Mode::Live`], then an optional positional scenario name
-/// defaulting to `default_name` when absent (spec §7). Pure and Bevy-free —
-/// the name is not validated here; the caller (`main.rs::resolve_scenario`)
-/// re-uses `available_scenarios` for that, unchanged from 3c.
-pub fn parse_args<I: IntoIterator<Item = String>>(args: I, default_name: &str) -> (Mode, String) {
+/// The parsed native CLI args (spec §7): the run [`Mode`], the scenario `name`
+/// (positional, defaulting to the caller's default), and the optional 4b
+/// `--record <path>` flush target. Bevy-free and pure — `name` is not validated
+/// here (the caller re-uses `available_scenarios`), and the "record requires
+/// live" rule is enforced by the caller (`main.rs::resolve_scenario`), not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedArgs {
+    pub mode: Mode,
+    pub name: String,
+    /// `Some(path)` iff `--record <path>` was given (4b, T1) — the scenario file
+    /// the recorder flushes on exit. Live-mode only (enforced by the caller).
+    pub record: Option<PathBuf>,
+}
+
+/// Parse the native CLI args (post `argv[0]`): leading flags — `--live`
+/// (selects [`Mode::Live`]) and `--record <path>` (4b, T1) — in any order,
+/// then an optional positional scenario name defaulting to `default_name`
+/// (spec §7). Pure and Bevy-free.
+pub fn parse_args<I: IntoIterator<Item = String>>(args: I, default_name: &str) -> ParsedArgs {
     let mut it = args.into_iter().peekable();
-    let mode = if it.peek().map(String::as_str) == Some("--live") {
-        it.next();
-        Mode::Live
-    } else {
-        Mode::Scripted
-    };
+    let mut mode = Mode::Scripted;
+    let mut record: Option<PathBuf> = None;
+    while let Some(arg) = it.peek().map(String::as_str) {
+        match arg {
+            "--live" => {
+                it.next();
+                mode = Mode::Live;
+            }
+            "--record" => {
+                it.next();
+                // The following token is the flush path (absent => no target).
+                record = it.next().map(PathBuf::from);
+            }
+            _ => break,
+        }
+    }
     let name = it.next().unwrap_or_else(|| default_name.to_string());
-    (mode, name)
+    ParsedArgs { mode, name, record }
 }
 
 impl InputSource {
@@ -176,6 +201,69 @@ impl InputSource {
                 map.players[1].control_state(|k| keys.pressed(k)),
             ],
         }
+    }
+}
+
+/// The 4b input recorder (spec §4.2): buffers the per-tick **sampled**
+/// `[ControlState; N_WORMS]` array — tapped at the 4a seam, *after* `sample` and
+/// *before* `process_frame` (`main.rs:290-292`), so the Dig→Left+Right chord is
+/// already resolved into the words the sim saw — and, on exit, builds a scenario
+/// file that replays byte-for-byte through `InputSource::Scripted`.
+///
+/// Live-mode only: `Scripted` already *is* a recorded stream, so recording it is
+/// the vacuous case (spec §6). No `Recorder` is inserted in Scripted mode, so the
+/// scripted path and its 4a pass-through gate stay byte-unchanged.
+///
+/// Bevy-free-testable: the buffer + the scenario build carry no Bevy types (only
+/// the `Resource` derive and the thin flush system in `main.rs` touch Bevy).
+///
+/// **Flush caveat (spec §4.2/§9):** the stream is held in memory and written once
+/// on *graceful* exit (Esc / window close → `AppExit`). A hard crash or a signal
+/// kill (SIGTERM/SIGALRM — e.g. a `timeout`/`alarm` smoke test) bypasses the flush
+/// and writes no file. Acceptable for a dev/test artifact; a periodic flush is a
+/// deferred optimization.
+#[derive(Resource)]
+pub struct Recorder {
+    /// The base scenario the live match was launched from — its tick-0 metadata
+    /// (seed / level / worms / loadout / settings) is carried verbatim into the
+    /// recording so replay reconstructs the identical initial state.
+    base: Scenario,
+    /// One `[ControlState; N_WORMS]` snapshot per recorded tick, in tick order.
+    snapshots: Vec<[ControlState; N_WORMS]>,
+    /// The `--record <path>` flush target.
+    path: PathBuf,
+}
+
+impl Recorder {
+    /// A recorder over `base`'s tick-0 metadata, flushing to `path` on exit.
+    pub fn new(base: Scenario, path: PathBuf) -> Self {
+        Recorder {
+            base,
+            snapshots: Vec::new(),
+            path,
+        }
+    }
+
+    /// Tap one tick's sampled array (called at the 4a seam, Live only).
+    pub fn record(&mut self, inputs: &[ControlState; N_WORMS]) {
+        self.snapshots.push(*inputs);
+    }
+
+    /// Build the recording scenario: each snapshot's two `ControlState`s are
+    /// `pack()`ed to 7-bit words and handed to `Scenario::with_recorded_inputs`
+    /// (positional by worm index; `ticks` = snapshot count; sparse storage).
+    pub fn build(&self) -> Scenario {
+        let per_tick: Vec<(u32, u32)> = self
+            .snapshots
+            .iter()
+            .map(|snap| (snap[0].pack(), snap[1].pack()))
+            .collect();
+        self.base.with_recorded_inputs(&per_tick)
+    }
+
+    /// The `--record <path>` flush target.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -343,9 +431,10 @@ input 5 64 96
         );
     }
 
-    /// `parse_args` (spec §7, T2): a leading `--live` flag selects `Mode::Live`;
+    /// `parse_args` (spec §7): a leading `--live` flag selects `Mode::Live`;
     /// otherwise `Mode::Scripted`. The remaining positional arg is the scenario
-    /// name, defaulting to the caller-supplied default when absent.
+    /// name, defaulting to the caller-supplied default when absent. With no
+    /// `--record`, the record target is `None`.
     #[test]
     fn parse_args_live_flag_and_scenario_name() {
         let cases: [(&[&str], Mode, &str); 4] = [
@@ -355,10 +444,81 @@ input 5 64 96
             (&[], Mode::Scripted, "blood"),
         ];
         for (args, want_mode, want_name) in cases {
-            let (mode, name) = parse_args(args.iter().map(|s| s.to_string()), "blood");
-            assert_eq!(mode, want_mode, "args {args:?}: mode");
-            assert_eq!(name, want_name, "args {args:?}: name");
+            let p = parse_args(args.iter().map(|s| s.to_string()), "blood");
+            assert_eq!(p.mode, want_mode, "args {args:?}: mode");
+            assert_eq!(p.name, want_name, "args {args:?}: name");
+            assert_eq!(p.record, None, "args {args:?}: no --record => record None");
         }
+    }
+
+    /// `--record <path>` (4b, T1) is parsed into `ParsedArgs::record`, alongside
+    /// `--live`, with the positional scenario name still recognized after it.
+    #[test]
+    fn parse_args_record_flag_carries_path() {
+        // --live --record <path>: Live, default name, record set.
+        let p = parse_args(
+            ["--live", "--record", "/tmp/r.txt"]
+                .iter()
+                .map(|s| s.to_string()),
+            "blood",
+        );
+        assert_eq!(p.mode, Mode::Live);
+        assert_eq!(p.name, "blood");
+        assert_eq!(p.record, Some(PathBuf::from("/tmp/r.txt")));
+
+        // --record before the positional name still leaves the name positional.
+        let p = parse_args(
+            ["--live", "--record", "/tmp/r.txt", "dart"]
+                .iter()
+                .map(|s| s.to_string()),
+            "blood",
+        );
+        assert_eq!(p.name, "dart");
+        assert_eq!(p.record, Some(PathBuf::from("/tmp/r.txt")));
+
+        // Plain --live => no record target.
+        let p = parse_args(["--live"].iter().map(|s| s.to_string()), "blood");
+        assert_eq!(p.record, None);
+    }
+
+    /// A `Recorder` fed a hand-built sequence of `[ControlState; N]` arrays
+    /// `build()`s a scenario whose per-tick `input(t, w)` equals each fed word's
+    /// `pack()` and whose `ticks` equals the sequence length (spec §4.2). The
+    /// tick-0 metadata is carried verbatim from the base, and the built scenario
+    /// is a valid file (round-trips through `to_text`).
+    #[test]
+    fn recorder_build_maps_snapshots_to_scenario_inputs() {
+        use std::path::{Path, PathBuf};
+
+        let base = Scenario::parse("seed 7\nlevel a.lev\nticks 0\n").expect("base parses");
+        let mut rec = Recorder::new(base.clone(), PathBuf::from("/tmp/rec.txt"));
+
+        let mut fire = ControlState::new();
+        fire.set(ControlState::FIRE, true);
+        let mut left = ControlState::new();
+        left.set(ControlState::LEFT, true);
+
+        // tick 0: worm0 fire, worm1 idle; tick 1: both idle; tick 2: worm0 left, worm1 fire.
+        rec.record(&[fire, ControlState::new()]);
+        rec.record(&[ControlState::new(), ControlState::new()]);
+        rec.record(&[left, fire]);
+
+        let built = rec.build();
+        assert_eq!(built.ticks, 3, "ticks == recorded snapshot count");
+        assert_eq!(built.input(0, 0), fire.pack());
+        assert_eq!(built.input(0, 1), 0);
+        // The all-idle middle tick decodes to (0,0) from absence (sparse storage).
+        assert_eq!(built.input(1, 0), 0);
+        assert_eq!(built.input(1, 1), 0);
+        assert_eq!(built.input(2, 0), left.pack());
+        assert_eq!(built.input(2, 1), fire.pack());
+        // Tick-0 metadata carried verbatim from the base scenario.
+        assert_eq!(built.seed, base.seed);
+        assert_eq!(built.level, base.level);
+        // The built scenario is a valid file: it round-trips through text.
+        assert_eq!(Scenario::parse(&built.to_text()).unwrap(), built);
+        // The recorder targets the CLI path.
+        assert_eq!(rec.path(), Path::new("/tmp/rec.txt"));
     }
 
     /// The default table mirrors the decoded C++ defaults exactly (spec §2),

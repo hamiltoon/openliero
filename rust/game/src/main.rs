@@ -11,7 +11,7 @@
 //! The sim is a plain `Resource` that Bevy only *ticks and presents*: `SimState`
 //! is mutated ONLY in `tick_and_render`, only via `process_frame`, and no Bevy
 //! value ever flows into it — the Step-5 `bevy_ggrs` rollback shape.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
@@ -24,7 +24,7 @@ use render::viewport::Viewport;
 use scenario::{Scenario, SceneData};
 use sim::state::SimState;
 
-use game::input::{InputSource, Mode};
+use game::input::{InputSource, Mode, ParsedArgs, Recorder};
 
 mod blit;
 
@@ -46,6 +46,12 @@ const SURFACE_H: u32 = 200;
 /// `main` (validated before any window opens) and threaded into `setup`.
 #[derive(Resource)]
 struct ScenarioName(String);
+
+/// The 4b `--record <path>` flush target (`None` unless `--live --record` was
+/// given). Threaded into `setup`, which inserts a [`Recorder`] iff this is
+/// `Some` and the mode is Live. Always `None` on wasm (no CLI args there).
+#[derive(Resource)]
+struct RecordPath(Option<PathBuf>);
 
 /// The pure-Rust simulation. NO Bevy types inside (the rollback-ready shape).
 #[derive(Resource)]
@@ -85,7 +91,8 @@ fn main() {
     // Resolve + validate the scenario BEFORE opening a window: an unknown name
     // prints the available scenarios and exits non-zero (no window flash).
     // `--live` (native-only, T2) selects Mode::Live; wasm hard-codes Scripted.
-    let (mode, name) = resolve_scenario();
+    // `--record <path>` (4b, T1) names the recorder's on-exit flush target.
+    let ParsedArgs { mode, name, record } = resolve_scenario();
     let title = format!("Liero-rs — 3c demo ({name})");
 
     App::new()
@@ -105,6 +112,7 @@ fn main() {
         )
         .insert_resource(ScenarioName(name))
         .insert_resource(mode)
+        .insert_resource(RecordPath(record))
         // C++ gfx.cpp kDelay = 14ms => one processFrame per ~71.43 Hz tick. The
         // number only sets perceived speed; determinism is by tick count, not
         // wall-clock. `Time<Fixed>` gives the fixed-timestep accumulator for free.
@@ -112,6 +120,10 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, tick_and_render)
         .add_systems(Update, close_on_esc)
+        // 4b: flush the recorder once, on graceful exit. `Last` runs after the
+        // `Update` `close_on_esc` / winit window-close in the same frame, so the
+        // `AppExit` message is still observable before the app quits.
+        .add_systems(Last, flush_recorder_on_exit)
         .run();
 }
 
@@ -125,17 +137,23 @@ fn main() {
 /// also a golden, so the debug self-check golden path is guaranteed to resolve
 /// (Scripted mode only — Live does not load the golden column, see `setup`).
 #[cfg(not(target_arch = "wasm32"))]
-fn resolve_scenario() -> (Mode, String) {
-    let (mode, name) = game::input::parse_args(std::env::args().skip(1), DEFAULT_SCENARIO);
+fn resolve_scenario() -> ParsedArgs {
+    let parsed = game::input::parse_args(std::env::args().skip(1), DEFAULT_SCENARIO);
     let available = available_scenarios();
-    if !available.iter().any(|n| n == &name) {
-        eprintln!("unknown scenario {name:?}. available scenarios:");
+    if !available.iter().any(|n| n == &parsed.name) {
+        eprintln!("unknown scenario {:?}. available scenarios:", parsed.name);
         for n in &available {
             eprintln!("  {n}");
         }
         std::process::exit(2);
     }
-    (mode, name)
+    // `--record` is a Live-only value flag (spec §7): recording a Scripted run is
+    // the vacuous case (§6), so reject it here — before any window opens.
+    if parsed.record.is_some() && parsed.mode != Mode::Live {
+        eprintln!("--record requires --live (recording is live-mode only)");
+        std::process::exit(2);
+    }
+    parsed
 }
 
 /// Wasm has no CLI args and no filesystem to enumerate, so the scenario is the
@@ -146,8 +164,12 @@ fn resolve_scenario() -> (Mode, String) {
 /// `--live` is native-only (spec §8): wasm always resolves `Mode::Scripted`, so
 /// the scripted witness path (incl. the debug self-check) is untouched by 4a.
 #[cfg(target_arch = "wasm32")]
-fn resolve_scenario() -> (Mode, String) {
-    (Mode::Scripted, DEFAULT_SCENARIO.to_string())
+fn resolve_scenario() -> ParsedArgs {
+    ParsedArgs {
+        mode: Mode::Scripted,
+        name: DEFAULT_SCENARIO.to_string(),
+        record: None,
+    }
 }
 
 /// Enumerate the committed demo scenarios — the `<name>` of every
@@ -179,6 +201,7 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     name: Res<ScenarioName>,
     mode: Res<Mode>,
+    record_path: Res<RecordPath>,
 ) {
     let name = &name.0;
     // 1. Read + parse the scenario text. The byte source forks by target (native:
@@ -262,6 +285,16 @@ fn setup(
     };
     commands.insert_resource(source);
 
+    // 4b recorder (spec §4.2): Live mode only, and only when `--record` names a
+    // path. The recorder carries the base scenario's tick-0 metadata; the flush
+    // system writes it on exit. Scripted inserts no recorder, so that path — and
+    // its 4a pass-through gate — stays byte-unchanged.
+    if *mode == Mode::Live {
+        if let Some(path) = &record_path.0 {
+            commands.insert_resource(Recorder::new(demo.scenario.clone(), path.clone()));
+        }
+    }
+
     commands.insert_resource(sim);
     commands.insert_resource(demo);
     commands.insert_resource(FrameImage(handle));
@@ -278,6 +311,8 @@ fn tick_and_render(
     source: Res<InputSource>,
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<Mode>,
+    // 4b: present only on the Live + `--record` path; `None` (no-op) otherwise.
+    mut recorder: Option<ResMut<Recorder>>,
 ) {
     // 1. Sample the input source EXACTLY ONCE per tick, at the top of the single
     //    FixedUpdate system, before `process_frame` (spec §4.3) — the central
@@ -288,7 +323,13 @@ fn tick_and_render(
     //    feet fire is `input 8 16 0` — so empty inputs would diverge and trip the
     //    self-check.) `Live` (--live, T2) instead polls the held-key set.
     let inputs = source.sample(demo.tick, &keys);
-    // 4b recorder seam: recorded stream taps the sampled inputs here
+    // 4b recorder seam (spec §4.1): tap the SAMPLED array here — after `sample`
+    // (so the Dig→Left+Right chord is already resolved into the words the sim
+    // sees) and before `process_frame`. Present only in Live + `--record`, so
+    // Scripted is untouched.
+    if let Some(recorder) = recorder.as_mut() {
+        recorder.record(&inputs);
+    }
     sim.0.process_frame(&inputs);
 
     // 2. Loop step, Scripted-only (spec §4.3 step 4 / §9): when `tick` passes
@@ -446,5 +487,47 @@ fn golden_sidecar_text(_name: &str) -> String {
 fn close_on_esc(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {
     if keys.just_pressed(KeyCode::Escape) {
         exit.write(AppExit::Success);
+    }
+}
+
+/// Flush the recorded input stream to the `--record` path once, on graceful exit
+/// (Esc / window close → `AppExit`). Reads the `AppExit` message in `Last`, so it
+/// observes the exit written by `close_on_esc` (or winit's window-close) in the
+/// same frame, before the app quits. A `Local<bool>` guards against a second
+/// write if the exit lingers across frames.
+///
+/// The `Recorder` is inserted only on the native `--live --record` path (see
+/// `setup`), so `recorder` is `None` — and this system inert — for every other
+/// run, including wasm. Building the scenario and writing `to_text` reuses the
+/// serializer proven by the T0 round-trip property test.
+///
+/// **Caveat (spec §4.2/§9):** the stream is buffered in memory and written only
+/// here, so a hard crash or a signal kill (SIGTERM/SIGALRM — e.g. a `timeout` or
+/// `alarm` smoke test) never reaches this system and writes **no** file. That is
+/// acceptable for a dev/test artifact; the objective record→replay proof is the
+/// headless round-trip gate (T3), which never touches this exit path.
+fn flush_recorder_on_exit(
+    mut exits: MessageReader<AppExit>,
+    recorder: Option<Res<Recorder>>,
+    mut done: Local<bool>,
+) {
+    if *done || exits.is_empty() {
+        return;
+    }
+    // React exactly once: consume the exit message(s) and latch `done`.
+    exits.clear();
+    *done = true;
+    let Some(recorder) = recorder else {
+        return; // no recording in flight (Scripted, or --record absent).
+    };
+    let scenario = recorder.build();
+    let path = recorder.path();
+    match std::fs::write(path, scenario.to_text()) {
+        Ok(()) => eprintln!(
+            "recording written to {} ({} ticks)",
+            path.display(),
+            scenario.ticks
+        ),
+        Err(e) => eprintln!("failed to write recording to {}: {e}", path.display()),
     }
 }

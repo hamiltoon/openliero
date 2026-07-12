@@ -6,8 +6,8 @@
 //! and so it runs in the fast CI test set. `game` instantiates it with Bevy's
 //! `KeyCode` via [`default_bindings`]. See spec §4.1.
 
-use bevy::input::keyboard::KeyCode;
 use bevy::input::ButtonInput;
+use bevy::input::keyboard::KeyCode;
 use bevy::prelude::Resource;
 
 use scenario::Scenario;
@@ -123,6 +123,35 @@ pub enum InputSource {
     Live(InputMap),
     // 4b adds: Replay(Recording) — reads back the recorded-input artifact,
     // symmetric with Scripted. (Not built in 4a.)
+}
+
+/// The CLI-selected run mode (spec §7/§9, T2). `Scripted` is the existing 3c
+/// default: recorded inputs, the loop/reload, and the debug determinism
+/// self-check. `Live` swaps the source for the keyboard and has no golden to
+/// check or loop against, so both are retired for it — but kept, unchanged,
+/// for `Scripted` (spec §9, the guard-retirement risk). Native-only: wasm's
+/// `resolve_scenario` hard-codes `Scripted` (no CLI args there).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Resource)]
+pub enum Mode {
+    Scripted,
+    Live,
+}
+
+/// Parse the native CLI args (post `argv[0]`): an optional leading `--live`
+/// flag selects [`Mode::Live`], then an optional positional scenario name
+/// defaulting to `default_name` when absent (spec §7). Pure and Bevy-free —
+/// the name is not validated here; the caller (`main.rs::resolve_scenario`)
+/// re-uses `available_scenarios` for that, unchanged from 3c.
+pub fn parse_args<I: IntoIterator<Item = String>>(args: I, default_name: &str) -> (Mode, String) {
+    let mut it = args.into_iter().peekable();
+    let mode = if it.peek().map(String::as_str) == Some("--live") {
+        it.next();
+        Mode::Live
+    } else {
+        Mode::Scripted
+    };
+    let name = it.next().unwrap_or_else(|| default_name.to_string());
+    (mode, name)
 }
 
 impl InputSource {
@@ -312,6 +341,24 @@ input 5 64 96
             source.sample(1, &empty),
             [ControlState::new(), ControlState::new()]
         );
+    }
+
+    /// `parse_args` (spec §7, T2): a leading `--live` flag selects `Mode::Live`;
+    /// otherwise `Mode::Scripted`. The remaining positional arg is the scenario
+    /// name, defaulting to the caller-supplied default when absent.
+    #[test]
+    fn parse_args_live_flag_and_scenario_name() {
+        let cases: [(&[&str], Mode, &str); 4] = [
+            (&["--live"], Mode::Live, "blood"),
+            (&["--live", "dart"], Mode::Live, "dart"),
+            (&["dart"], Mode::Scripted, "dart"),
+            (&[], Mode::Scripted, "blood"),
+        ];
+        for (args, want_mode, want_name) in cases {
+            let (mode, name) = parse_args(args.iter().map(|s| s.to_string()), "blood");
+            assert_eq!(mode, want_mode, "args {args:?}: mode");
+            assert_eq!(name, want_name, "args {args:?}: name");
+        }
     }
 
     /// The default table mirrors the decoded C++ defaults exactly (spec §2),

@@ -24,7 +24,7 @@ use render::viewport::Viewport;
 use scenario::{Scenario, SceneData};
 use sim::state::SimState;
 
-use input::InputSource;
+use input::{InputSource, Mode};
 
 mod blit;
 mod input;
@@ -85,7 +85,8 @@ struct FrameImage(Handle<Image>);
 fn main() {
     // Resolve + validate the scenario BEFORE opening a window: an unknown name
     // prints the available scenarios and exits non-zero (no window flash).
-    let name = resolve_scenario();
+    // `--live` (native-only, T2) selects Mode::Live; wasm hard-codes Scripted.
+    let (mode, name) = resolve_scenario();
     let title = format!("Liero-rs — 3c demo ({name})");
 
     App::new()
@@ -104,6 +105,7 @@ fn main() {
                 }),
         )
         .insert_resource(ScenarioName(name))
+        .insert_resource(mode)
         // C++ gfx.cpp kDelay = 14ms => one processFrame per ~71.43 Hz tick. The
         // number only sets perceived speed; determinism is by tick count, not
         // wall-clock. `Time<Fixed>` gives the fixed-timestep accumulator for free.
@@ -114,17 +116,18 @@ fn main() {
         .run();
 }
 
-/// Read the optional positional scenario arg (`cargo run -p game -- <name>`),
-/// defaulting to `blood`, and validate it names a committed
+/// Read the CLI args (`cargo run -p game -- [--live] [<name>]`) into a
+/// `(Mode, name)` pair (spec §7, T2) — an optional leading `--live` flag
+/// selects `Mode::Live`, the remaining optional positional is the scenario
+/// name (default `blood`) — and validate the name names a committed
 /// `render_slice3b_<name>_scenario.txt` under `GOLDEN_DIR`. On an unknown name,
 /// print the available scenarios and exit non-zero — done here, before the Bevy
 /// app starts, so a typo never flashes a window. Every committed 3b scenario is
-/// also a golden, so the debug self-check golden path is guaranteed to resolve.
+/// also a golden, so the debug self-check golden path is guaranteed to resolve
+/// (Scripted mode only — Live does not load the golden column, see `setup`).
 #[cfg(not(target_arch = "wasm32"))]
-fn resolve_scenario() -> String {
-    let name = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_SCENARIO.to_string());
+fn resolve_scenario() -> (Mode, String) {
+    let (mode, name) = input::parse_args(std::env::args().skip(1), DEFAULT_SCENARIO);
     let available = available_scenarios();
     if !available.iter().any(|n| n == &name) {
         eprintln!("unknown scenario {name:?}. available scenarios:");
@@ -133,7 +136,7 @@ fn resolve_scenario() -> String {
         }
         std::process::exit(2);
     }
-    name
+    (mode, name)
 }
 
 /// Wasm has no CLI args and no filesystem to enumerate, so the scenario is the
@@ -141,9 +144,11 @@ fn resolve_scenario() -> String {
 /// embedded via `include_str!` (see `load_scenario_text` / `golden_sidecar_text`),
 /// and its level lives in the `scenario` crate's embedded TC manifest (Slice 3f
 /// T2). A `?scenario=` query-param switch is a documented follow-up (spec §Q4).
+/// `--live` is native-only (spec §8): wasm always resolves `Mode::Scripted`, so
+/// the scripted witness path (incl. the debug self-check) is untouched by 4a.
 #[cfg(target_arch = "wasm32")]
-fn resolve_scenario() -> String {
-    DEFAULT_SCENARIO.to_string()
+fn resolve_scenario() -> (Mode, String) {
+    (Mode::Scripted, DEFAULT_SCENARIO.to_string())
 }
 
 /// Enumerate the committed demo scenarios — the `<name>` of every
@@ -170,7 +175,12 @@ fn available_scenarios() -> Vec<String> {
 /// Startup: load the scenario, build the sim + render surface + the one Image,
 /// spawn the camera and the ×3 sprite, and render tick 0 so the window shows the
 /// first frame immediately (before the first `FixedUpdate`).
-fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, name: Res<ScenarioName>) {
+fn setup(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    name: Res<ScenarioName>,
+    mode: Res<Mode>,
+) {
     let name = &name.0;
     // 1. Read + parse the scenario text. The byte source forks by target (native:
     //    `std::fs`; wasm: `include_str!` of the compile-time default) — see
@@ -216,9 +226,15 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, name: Res<Sc
         Transform::from_scale(Vec3::splat(3.0)),
     ));
 
-    // 6. Assemble the resources.
+    // 6. Assemble the resources. Live mode has no golden to self-check against
+    //    and does not load the golden column at all (spec §7/T2); Scripted loads
+    //    it exactly as 3c did.
     #[cfg(debug_assertions)]
-    let golden = load_golden_hashes(name);
+    let golden = if *mode == Mode::Scripted {
+        load_golden_hashes(name)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let mut demo = Demo {
         scenario,
@@ -236,10 +252,16 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, name: Res<Sc
     // 7. Render tick 0 into the surface and upload once (window shows frame 0).
     render_and_upload(&mut demo, &sim.0, &mut images, &handle);
 
-    // The input source: scripted default feeds the scenario's recorded inputs as a
-    // literal pass-through (behavior unchanged from 3c). `--live` swaps this for
-    // `InputSource::Live(default_bindings())` in T2.
-    commands.insert_resource(InputSource::Scripted(demo.scenario.clone()));
+    // The input source (spec §7/T2): Scripted feeds the scenario's recorded
+    // inputs as a literal pass-through (behavior unchanged from 3c); `--live`
+    // swaps this for the keyboard via the default bindings. Live still loads
+    // its initial state (level + worms) through the same `scenario::load` above
+    // — only the input source differs.
+    let source = match *mode {
+        Mode::Scripted => InputSource::Scripted(demo.scenario.clone()),
+        Mode::Live => InputSource::Live(input::default_bindings()),
+    };
+    commands.insert_resource(source);
 
     commands.insert_resource(sim);
     commands.insert_resource(demo);
@@ -256,6 +278,7 @@ fn tick_and_render(
     frame: Res<FrameImage>,
     source: Res<InputSource>,
     keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<Mode>,
 ) {
     // 1. Sample the input source EXACTLY ONCE per tick, at the top of the single
     //    FixedUpdate system, before `process_frame` (spec §4.3) — the central
@@ -269,31 +292,42 @@ fn tick_and_render(
     // 4b recorder seam: recorded stream taps the sampled inputs here
     sim.0.process_frame(&inputs);
 
-    // 2. Loop step: when `tick` passes `ticks`, rebuild from the loader at tick 0
-    //    for a bit-identical loop (fixed seed + fixed inputs).
-    let (next, reload) = blit::next_tick(demo.tick, demo.scenario.ticks);
-    demo.tick = next;
-    if reload {
-        let loaded = scenario::load(Path::new(TC_ROOT), &demo.scenario);
-        sim.0 = loaded.state;
-        demo.viewports = loaded.viewports;
-        demo.scene = loaded.scene;
+    // 2. Loop step, Scripted-only (spec §4.3 step 4 / §9): when `tick` passes
+    //    `ticks`, rebuild from the loader at tick 0 for a bit-identical loop
+    //    (fixed seed + fixed inputs). Live has no golden `ticks` boundary to loop
+    //    against and runs indefinitely, so this step is skipped entirely — not
+    //    replaced by a plain increment, since `demo.tick` is unused by
+    //    `InputSource::Live::sample` and by anything else on the live path.
+    if *mode == Mode::Scripted {
+        let (next, reload) = blit::next_tick(demo.tick, demo.scenario.ticks);
+        demo.tick = next;
+        if reload {
+            let loaded = scenario::load(Path::new(TC_ROOT), &demo.scenario);
+            sim.0 = loaded.state;
+            demo.viewports = loaded.viewports;
+            demo.scene = loaded.scene;
+        }
     }
 
     // 3 + 4. Render the current tick into the CPU surface, then upload.
     render_and_upload(&mut demo, &sim.0, &mut images, &frame.0);
 
-    // 5. Debug-only determinism self-check (the default scenario is a golden).
-    //    After the tick+wrap, `demo.tick` names the tick whose state `sim` now
-    //    holds: a normal tick `k` matches `golden[k]`; the wrap tick resets to 0
-    //    with a fresh tick-0 sim, matching `golden[0]`.
+    // 5. Debug-only determinism self-check, Scripted-only (spec §4.3 step 6 /
+    //    §9): the default scenario is a golden, but Live has no golden loaded
+    //    (see `setup`) and no `demo.tick` progression to index it with — retired
+    //    for live, retained unchanged for scripted so the regression path is
+    //    never silently disabled. After the tick+wrap, `demo.tick` names the
+    //    tick whose state `sim` now holds: a normal tick `k` matches `golden[k]`;
+    //    the wrap tick resets to 0 with a fresh tick-0 sim, matching `golden[0]`.
     #[cfg(debug_assertions)]
-    debug_assert_eq!(
-        sim::hash::hash_game_state(&sim.0),
-        demo.golden_state[demo.tick as usize],
-        "sim-hash diverged from the committed golden at tick {}",
-        demo.tick
-    );
+    if *mode == Mode::Scripted {
+        debug_assert_eq!(
+            sim::hash::hash_game_state(&sim.0),
+            demo.golden_state[demo.tick as usize],
+            "sim-hash diverged from the committed golden at tick {}",
+            demo.tick
+        );
+    }
 
     // 6. Wasm render-parity witness (debug-only): the CPU frame just rendered into
     //    `demo.surface` must hash to the embedded golden's `frame_hash` column —

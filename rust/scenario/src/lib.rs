@@ -10,5 +10,5 @@
 pub mod loader;
 pub mod parser;
 
-pub use loader::{load, Loaded, SceneData};
+pub use loader::{load, HudLabels, Loaded, SceneData};
 pub use parser::{Scenario, ScenarioWorm};

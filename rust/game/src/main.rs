@@ -154,6 +154,9 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, name: Res<Sc
         state,
         viewports,
         scene,
+        // `font`/`labels` (Slice 3e T0) are wired into the render path in T5; the
+        // interactive `game` binary does not draw the HUD yet.
+        ..
     } = loaded;
 
     // 3. Owned CPU surface the `render` crate paints into.

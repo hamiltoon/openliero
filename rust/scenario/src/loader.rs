@@ -22,6 +22,7 @@ use sim::state::{SimState, WeaponId, WeaponInit, WormInit, NUM_WEAPONS};
 use sim_core::vec::Vec2;
 
 use render::fire_cone::build_fire_cone_sprites;
+use render::font::Font;
 use render::frame::Scene;
 use render::viewport::Viewport;
 
@@ -57,12 +58,31 @@ impl SceneData {
     }
 }
 
+/// The three HUD text labels carried verbatim from the TC's `[texts]`
+/// (`Kills`/`Lives`/`Reloading`; `tc.rs:239-242`). The HUD text pass draws these
+/// through `Font::draw_string`. Held here in `Loaded` for Slice 3e T0; the wire
+/// task (T5) relocates them into `render::frame::Scene`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HudLabels {
+    /// `Texts::Kills` — the "Kills: " prefix (`viewport.cpp:131-132`).
+    pub kills: String,
+    /// `Texts::Lives` — the "Lives: " prefix (`viewport.cpp:148-153`).
+    pub lives: String,
+    /// `Texts::Reloading` — the blinking "Reloading..." label (`viewport.cpp:110-128`).
+    pub reloading: String,
+}
+
 /// The full tick-0 load: driven `SimState`, the two fixed-camera viewports
-/// (fresh default-seeded RNG), and the owned Scene ingredients.
+/// (fresh default-seeded RNG), the owned Scene ingredients, and the HUD font +
+/// labels (Slice 3e T0 — carried on `Loaded` until T5 threads them into `Scene`).
 pub struct Loaded {
     pub state: SimState,
     pub viewports: [Viewport; 2],
     pub scene: SceneData,
+    /// The 250-glyph HUD font (`sprites/font.tga` post-processed by `Font::load`).
+    pub font: Font,
+    /// The three HUD text labels from the TC's `[texts]`.
+    pub labels: HudLabels,
 }
 
 fn load_sprites(tc_root: &Path, file: &str, w: i32, h: i32, count: i32) -> SpriteSet {
@@ -164,6 +184,20 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
 
     let fire_cone = build_fire_cone_sprites(&state.large_sprites);
 
+    // HUD font: `sprites/font.tga` is a plain uncompressed indexed TGA, so the
+    // generic `Tga::load` parses it (7 × 250*8, de-flipped); `Font::load` runs the
+    // `common.cpp:414-433` per-glyph post-process. No new TGA parser (T0).
+    let font_bytes = std::fs::read(format!("{}/sprites/font.tga", tc_root.display()))
+        .expect("read sprites/font.tga");
+    let font_tga = assets::sprite::Tga::load(&font_bytes).expect("font.tga parses");
+    let font = Font::load(&font_tga);
+    // HUD labels carried verbatim from the TC's `[texts]` (already parsed by `assets::tc`).
+    let labels = HudLabels {
+        kills: tc.texts.Kills.clone(),
+        lives: tc.texts.Lives.clone(),
+        reloading: tc.texts.Reloading.clone(),
+    };
+
     Loaded {
         state,
         viewports: Viewport::player_layout(),
@@ -175,5 +209,42 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
             nr_end: tc.constants.NRColourEnd,
             laser_weapon: tc.constants.LaserWeapon,
         },
+        font,
+        labels,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::Scenario;
+
+    const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
+
+    // A minimal real-TC scenario (real level + real weapon) so `load` succeeds;
+    // the font + labels it yields do not depend on the scenario specifics.
+    const SAMPLE: &str = "\
+seed 42
+level Levels/render_stage.lev
+ticks 1
+worm 0 6553600 7602176 100 10 0   1
+worm 1 3276800 7602176 100 10 218 1
+weapon 0 DART
+";
+
+    #[test]
+    fn load_yields_font_and_labels() {
+        let scenario = Scenario::parse(SAMPLE).expect("scenario parses");
+        let loaded = load(Path::new(TC_ROOT), &scenario);
+        // Non-empty 250-glyph font.
+        assert_eq!(loaded.font.chars.len(), 250);
+        assert!(
+            loaded.font.chars.iter().any(|c| c.width > 0),
+            "the real font has glyphs with nonzero advance"
+        );
+        // Labels carried verbatim from the TC's `[texts]` (data/TC/openliero/tc.cfg).
+        assert_eq!(loaded.labels.kills, "Kills: ");
+        assert_eq!(loaded.labels.lives, "Lives: ");
+        assert_eq!(loaded.labels.reloading, "Reloading...");
     }
 }

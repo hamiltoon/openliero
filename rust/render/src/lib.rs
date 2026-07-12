@@ -10,6 +10,7 @@
 pub mod bitmap;
 pub mod blit;
 pub mod fire_cone;
+pub mod font;
 pub mod frame;
 pub mod hash;
 pub mod level_draw;

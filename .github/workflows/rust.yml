@@ -68,7 +68,19 @@ jobs:
           CARGO_TERM_COLOR: never
         run: |
           set -o pipefail
-          cargo test --manifest-path rust/Cargo.toml --workspace 2>&1 | tee test-output.txt
+          cargo test --manifest-path rust/Cargo.toml --workspace --exclude game 2>&1 | tee test-output.txt
+
+      # Gate the Bevy `game` crate compilation in its OWN step (separate cache,
+      # own failure surface) so the fast determinism gate above never pulls in
+      # the Bevy tree (wgpu/winit/naga). `cargo test --workspace` compiles every
+      # binary target in every member, so without `--exclude game` the hard gate
+      # would be coupled to Bevy's compile time and toolchain. The window is
+      # never launched in CI — this only proves `game` builds. The trimmed
+      # feature set (audio/gilrs dropped; winit's x11/wayland dlopen at runtime)
+      # needs no extra apt `-dev` packages on stock ubuntu-latest; if a future
+      # bump requires one, add the apt install to THIS step only, never above.
+      - name: Build game crate (Bevy)
+        run: cargo build --manifest-path rust/Cargo.toml -p game
 
       # Render a human-readable summary on the run's Summary page. Runs even on
       # failure (`if: always()`) so a red run still explains what broke. Pure

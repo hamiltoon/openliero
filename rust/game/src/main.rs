@@ -31,11 +31,16 @@ mod blit;
 const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
 /// Committed golden dir — the scenario text and (debug) the self-check column.
 const GOLDEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../oracle-tests/golden");
-/// The hard-coded demo scenario for T3 (the `--<name>` arg is T4).
-const SCENARIO_NAME: &str = "blood";
+/// Default demo scenario when no positional arg is given (`cargo run -p game`).
+const DEFAULT_SCENARIO: &str = "blood";
 /// Native low-res canvas the `render` crate paints (one Liero screen).
 const SURFACE_W: u32 = 320;
 const SURFACE_H: u32 = 200;
+
+/// The chosen scenario name (positional CLI arg, default `blood`). Read once in
+/// `main` (validated before any window opens) and threaded into `setup`.
+#[derive(Resource)]
+struct ScenarioName(String);
 
 /// The pure-Rust simulation. NO Bevy types inside (the rollback-ready shape).
 #[derive(Resource)]
@@ -61,6 +66,11 @@ struct Demo {
 struct FrameImage(Handle<Image>);
 
 fn main() {
+    // Resolve + validate the scenario BEFORE opening a window: an unknown name
+    // prints the available scenarios and exits non-zero (no window flash).
+    let name = resolve_scenario();
+    let title = format!("Liero-rs — 3c demo ({name})");
+
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -69,13 +79,14 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         resolution: WindowResolution::new(960, 600),
-                        title: "Liero-rs — 3c demo".into(),
+                        title,
                         resizable: false,
                         ..default()
                     }),
                     ..default()
                 }),
         )
+        .insert_resource(ScenarioName(name))
         // C++ gfx.cpp kDelay = 14ms => one processFrame per ~71.43 Hz tick. The
         // number only sets perceived speed; determinism is by tick count, not
         // wall-clock. `Time<Fixed>` gives the fixed-timestep accumulator for free.
@@ -86,12 +97,53 @@ fn main() {
         .run();
 }
 
+/// Read the optional positional scenario arg (`cargo run -p game -- <name>`),
+/// defaulting to `blood`, and validate it names a committed
+/// `render_slice3b_<name>_scenario.txt` under `GOLDEN_DIR`. On an unknown name,
+/// print the available scenarios and exit non-zero — done here, before the Bevy
+/// app starts, so a typo never flashes a window. Every committed 3b scenario is
+/// also a golden, so the debug self-check golden path is guaranteed to resolve.
+fn resolve_scenario() -> String {
+    let name = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_SCENARIO.to_string());
+    let available = available_scenarios();
+    if !available.iter().any(|n| n == &name) {
+        eprintln!("unknown scenario {name:?}. available scenarios:");
+        for n in &available {
+            eprintln!("  {n}");
+        }
+        std::process::exit(2);
+    }
+    name
+}
+
+/// Enumerate the committed demo scenarios — the `<name>` of every
+/// `render_slice3b_<name>_scenario.txt` in `GOLDEN_DIR`, sorted for a stable
+/// help listing.
+fn available_scenarios() -> Vec<String> {
+    let mut names = Vec::new();
+    let dir = std::fs::read_dir(GOLDEN_DIR).unwrap_or_else(|e| panic!("read {GOLDEN_DIR}: {e}"));
+    for entry in dir {
+        let file = entry.expect("dir entry").file_name();
+        let file = file.to_string_lossy();
+        if let Some(rest) = file.strip_prefix("render_slice3b_") {
+            if let Some(name) = rest.strip_suffix("_scenario.txt") {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
 /// Startup: load the scenario, build the sim + render surface + the one Image,
 /// spawn the camera and the ×3 sprite, and render tick 0 so the window shows the
 /// first frame immediately (before the first `FixedUpdate`).
-fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, name: Res<ScenarioName>) {
+    let name = &name.0;
     // 1. Read + parse the committed scenario text.
-    let scenario_path = format!("{GOLDEN_DIR}/render_slice3b_{SCENARIO_NAME}_scenario.txt");
+    let scenario_path = format!("{GOLDEN_DIR}/render_slice3b_{name}_scenario.txt");
     let scenario_text = std::fs::read_to_string(&scenario_path)
         .unwrap_or_else(|e| panic!("read {scenario_path}: {e}"));
     let scenario = Scenario::parse(&scenario_text).expect("scenario parses");
@@ -133,7 +185,7 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
 
     // 6. Assemble the resources.
     #[cfg(debug_assertions)]
-    let golden = load_golden_state_hashes(SCENARIO_NAME);
+    let golden = load_golden_state_hashes(name);
 
     let mut demo = Demo {
         scenario,

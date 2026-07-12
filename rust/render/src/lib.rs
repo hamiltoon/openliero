@@ -13,6 +13,7 @@ pub mod fire_cone;
 pub mod font;
 pub mod frame;
 pub mod hash;
+pub mod hud;
 pub mod level_draw;
 pub mod object_draw;
 pub mod palette;

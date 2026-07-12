@@ -394,6 +394,34 @@ pub fn draw_shadow_line(
     });
 }
 
+/// `blit.cpp:105-113` DrawBar: an **unclipped** horizontal bar fill — `height`
+/// rows of `width` pixels of `pal[color]` starting at `(x,y)`. Guarded ONLY by
+/// the `h < height` loop bound (so `height <= 0` writes nothing) and a per-row,
+/// loop-invariant `width > 0` (so `width <= 0` writes nothing). Unlike
+/// `fill_rect` (`blit.cpp:20-37`, which clamps `x/y/x2/y2` to `clip_rect`),
+/// DrawBar does NOT consult the clip: the HUD is drawn into the full-surface
+/// clip and the caller's coordinates are trusted. A HUD bar that clamps where
+/// C++ does not (or vice-versa) shifts the bar pixels → hash-miss.
+///
+/// `pal` is an explicit arg (the C++ `scr.pal32[color]`), matching the 3b
+/// convention used by every blit in this module.
+// deferred: FillRect (replay color box only) — `blit.cpp:20-37` is clip-clamped
+// and its only reachable-adjacent use is the deferred replay color box; not
+// ported until a reached use appears (see T2 plan).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_bar(scr: &mut Bitmap, pal: &Pal32, x: i32, y: i32, width: i32, height: i32, color: i32) {
+    let argb = pal[color as usize];
+    let pitch = scr.pitch;
+    for h in 0..height {
+        if width > 0 {
+            let row = ((y + h) * pitch + x) as usize;
+            for dx in 0..width {
+                scr.pixels[row + dx as usize] = argb;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,5 +961,73 @@ mod tests {
         assert_eq!(b.pixels[1], 0xFF00_0000 | 24, "(1,0) SeeShadow 20 -> pal[24]");
         assert_eq!(b.pixels[2], 0xFF00_0000 | 24, "(2,0) SeeShadow 20 -> pal[24]");
         assert_eq!(b.pixels[3], SENTINEL, "(3,0) material 0 not SeeShadow -> untouched");
+    }
+
+    // ----- draw_bar (DrawBar, unclipped HUD bar fill) -----
+
+    #[test]
+    fn draw_bar_fills_height_rows_by_width_cols() {
+        // DrawBar at (1,1), width 3, height 2, color 9: exactly the 3x2 block
+        // [1,4) x [1,3) becomes pal[9]; everything else stays sentinel.
+        let pal = ramp_pal();
+        let mut b = filled(6, 6);
+        draw_bar(&mut b, &pal, 1, 1, 3, 2, 9);
+        for y in 0..6 {
+            for x in 0..6 {
+                let inside = (1..4).contains(&x) && (1..3).contains(&y);
+                let got = b.pixels[(y * 6 + x) as usize];
+                if inside {
+                    assert_eq!(got, 0xFF00_0000 | 9, "({x},{y}) filled pal[9]");
+                } else {
+                    assert_eq!(got, SENTINEL, "({x},{y}) untouched");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn draw_bar_width_le_zero_writes_nothing() {
+        // The per-row `width > 0` guard (blit.cpp:108): width 0 and width < 0
+        // both write nothing.
+        let pal = ramp_pal();
+        let mut b = filled(4, 4);
+        draw_bar(&mut b, &pal, 0, 0, 0, 3, 9);
+        draw_bar(&mut b, &pal, 0, 0, -5, 3, 9);
+        assert!(b.pixels.iter().all(|&p| p == SENTINEL), "width<=0 writes nothing");
+    }
+
+    #[test]
+    fn draw_bar_height_le_zero_writes_nothing() {
+        // The `h < height` loop bound (blit.cpp:107): height 0 and height < 0
+        // both run zero rows -> nothing written.
+        let pal = ramp_pal();
+        let mut b = filled(4, 4);
+        draw_bar(&mut b, &pal, 0, 0, 3, 0, 9);
+        draw_bar(&mut b, &pal, 0, 0, 3, -2, 9);
+        assert!(b.pixels.iter().all(|&p| p == SENTINEL), "height<=0 writes nothing");
+    }
+
+    #[test]
+    fn draw_bar_is_unclipped_draws_outside_clip_rect() {
+        // THE anti-clamp witness: set a clip that would clamp a clip-clamped
+        // fill_rect to nothing here, and prove draw_bar draws the FULL bar
+        // OUTSIDE that clip (blit.cpp:105-113 never consults scr.clip_rect,
+        // unlike FillRect at blit.cpp:25-28). If draw_bar clamped like
+        // fill_rect, the 3x2 block at (2,2) would stay sentinel.
+        let pal = ramp_pal();
+        let mut b = filled(6, 6);
+        b.clip = Rect::new(0, 0, 1, 1); // clip = single cell [0,1) x [0,1)
+        draw_bar(&mut b, &pal, 2, 2, 3, 2, 9); // entirely outside the clip
+        for y in 2..4 {
+            for x in 2..5 {
+                assert_eq!(
+                    b.pixels[(y * 6 + x) as usize],
+                    0xFF00_0000 | 9,
+                    "({x},{y}) drawn despite lying outside the clip (unclipped)"
+                );
+            }
+        }
+        // The clip cell itself was never a target coordinate; stays sentinel.
+        assert_eq!(b.pixels[0], SENTINEL, "clip cell untouched (never targeted)");
     }
 }

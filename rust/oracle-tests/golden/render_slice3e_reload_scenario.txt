@@ -5,45 +5,60 @@
 # `render_hud`.
 #
 # === WHAT THIS PROVES: the ammo-bar RELOAD arm (viewport.cpp:110-128) ================
-# worm0 wields the single-ammo RIFLE (rifle.cfg: ammo=1, delay=0, loadingTime=275,
-# shotType=4 projectile, gravity=20). It aims UP (ticks 2-21, no Left/Right -> no
-# facing-flip) and Fires ONCE (tick 22). The shot empties the magazine (ammo 1 -> 0),
-# so `loading_left` latches ComputedLoadingTime (settings.loading_time 100% * 275 /
-# 100 = 275) and `WormWeapon::Available()` (== loading_left==0, worm.hpp:35) goes
-# FALSE for the rest of the window. The HUD then takes the reload arm:
-#   * LOADING BAR (viewport.cpp:113-122): width = 100 - loading_left*100/275, color
+# worm0 wields the single-ammo GRENADE (grenade.cfg: ammo=1, delay=0, loadingTime=260,
+# shotType=0 == ST_NORMAL projectile, gravity=1300, bounce=40, timeToExplo=115). It aims
+# UP (ticks 2-21, no Left/Right -> no facing-flip) and Fires ONCE (tick 22). The shot
+# empties the magazine (ammo 1 -> 0), so `loading_left` latches ComputedLoadingTime
+# (settings.loading_time 100% * 260 / 100 = 260) and `WormWeapon::Available()` (==
+# loading_left==0, worm.hpp:35) goes FALSE for the rest of the window. The HUD then takes
+# the reload arm:
+#   * LOADING BAR (viewport.cpp:113-122): width = 100 - loading_left*100/260, color
 #     width/10+245, at (stats_x, render_res_y-34). loading_left counts down 1/tick, so
 #     the bar GROWS ~1px every ~2-3 ticks across ticks 23..70 — the per-tick frame
 #     hash STEPS (the reload non-vacuity witness the plan requires).
 #   * "Reloading" TEXT (viewport.cpp:125-128), gated (cycles%20)>10 && visible: it
 #     BLINKS on/off every ~10 ticks as `cycles` advances — a second live witness.
-# The shot arcs up-and-right into open sky and lands downrange, well RIGHT of both
-# worms (worm0 px=80, worm1 px=20 far LEFT), so neither is wounded: both stay VISIBLE
-# with FULL life bars, and worm0's HUD is the clean reload headline.
+# The grenade arcs up-and-right, falls back, and bounces to rest downrange (bounce=40
+# damps fast). timeToExplo=115 means it does NOT explode inside the 70-tick window (fire
+# @22 -> would explode ~@128), so no splinter spray / large_explosion perturbs the settled
+# reload window. Crucially GRENADE's in-flight worm-hit arm is INERT — hitDamage=0,
+# blowAway=0, bloodOnHit=0, wormCollide=false, so the hit gate (weapon.cpp:290-291) NEVER
+# fires — hence NEITHER worm can be wounded regardless of the shot's trajectory: both stay
+# VISIBLE with FULL life bars, and worm0's HUD is the clean reload headline.
 #
 # NOTE (adjudicated): a single-ammo weapon exercises the LOADING bar directly (the
 # reload headline). The ammo-bar STEP arm (available+ammo>0, viewport.cpp:101-107) is
 # already proven live in render_slice3e_hud (worm0's DART, ammo>0). This scenario
 # isolates the reload/loading path so its per-tick step is unambiguous.
 #
-# HARD CONSTRAINTS (verified): both worms VISIBLE + ARMED slot 0 (RIFLE); no Left/Right
-# -> no facing-flip; the shot lands clear of both worms -> neither wounded, neither
-# enters the dying arm; worm0 reloads for the whole post-fire window.
+# WEAPON CHOICE (T7b): the earlier RIFLE pick was shotType=4 (ST_LASER), which trips the
+# deliberately-deferred laser do-loop in sim::weapon::wobject_process (weapon.rs:319) the
+# moment the shot enters Process — the Rust sim cannot advance past the fire. GRENADE is
+# shotType=0 (ST_NORMAL), fully ported. EXPLOSIVES (also ammo=1, ported) is already the
+# reload weapon proven by render_slice3e_death; GRENADE keeps this scenario independent,
+# and its fully-inert worm-hit arm + no in-window explosion give the cleanest settled
+# reload window.
+#
+# HARD CONSTRAINTS (verified): both worms VISIBLE + ARMED slot 0 (GRENADE); no Left/Right
+# -> no facing-flip; GRENADE's hit arm is inert -> neither worm can be wounded, neither
+# enters the dying arm; the shot does not explode in-window; worm0 reloads for the whole
+# post-fire window.
 seed 42
 level Levels/render_stage.lev
 ticks 70
 render player
 render_hud
 # Both VISIBLE, grounded (y=7602176 == 116.0px). worm0 px=80 (5242880) shooter; worm1
-# px=20 (1310720) bystander far LEFT, clear of the up-and-RIGHT shot's downrange landing.
+# px=20 (1310720) bystander far LEFT, clear of the up-and-RIGHT shot.
 worm 0 5242880 7602176 100 10 0   1
 worm 1 1310720 7602176 100 10 218 1
-weapon 0 RIFLE
+weapon 0 GRENADE
 # === Phase layout (tick : worm0 action) =============================================
 # 2-21  Up(1)      : arc the gun up (~20 ticks; worm0 stays grounded).
-# 22    Fire(16)   : RIFLE fires up-and-right; ammo 1->0 -> loading_left=275 -> the HUD
+# 22    Fire(16)   : GRENADE fires up-and-right; ammo 1->0 -> loading_left=260 -> the HUD
 #                    reload arm draws the loading bar (growing) + blinking Reloading text
-#                    for ticks 23..70; the shot lands downrange clear of both worms.
+#                    for ticks 23..70; the shot bounces to rest downrange, never exploding
+#                    in-window and never able to wound either worm (inert hit arm).
 # input <tick> <worm0_7bit> <worm1_7bit>   (worm1 always 0; visible bystander)
 input 2 1 0
 input 3 1 0

@@ -98,6 +98,11 @@ impl Font {
     /// Every "on" pixel (any non-zero glyph value — after `Font::load` that is
     /// only index 8) writes `pal[color]`; the glyph value itself is discarded, so
     /// the caller's `color` wins. Index-0 cells are transparent holes.
+    ///
+    /// CAUTION for direct callers: `c == 250` or `251` passes the verbatim guard
+    /// but indexes past `chars` (len 250) — a panic here, latent UB in C++.
+    /// `draw_string` can never produce those values (ASCII decode caps at 125
+    /// after the decrement); mask on the call side like `cossin[128]`.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_char(
         &self,

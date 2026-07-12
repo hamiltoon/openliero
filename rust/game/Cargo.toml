@@ -10,24 +10,38 @@ assets   = { path = "../assets" }
 sim-core = { path = "../sim-core" }
 scenario = { path = "../scenario" }
 
+# --- Base Bevy features (shared native + wasm): the 3c draw set --------------------
+# In Bevy 0.19 the render stack is split OUT of `bevy_sprite`: the plain
+# `bevy_sprite` feature only pulls the sprite *logic* crate (+ bevy_camera) and
+# brings in NO GPU backend (no bevy_render, no bevy_core_pipeline, no wgpu/naga).
+# These six are the platform-agnostic set both native and the browser draw with;
+# the per-target backend/windowing features union onto them via the target tables
+# below (standard cargo: features union across repeated deps for one package).
 bevy = { version = "0.19", default-features = false, features = [
-    # --- GPU render backend (REQUIRED for Camera2d/Sprite/Image to actually draw) ---
-    # In Bevy 0.19 the render stack is split OUT of `bevy_sprite`: the plain
-    # `bevy_sprite` feature only pulls the sprite *logic* crate (+ bevy_camera) and
-    # brings in NO GPU backend (no bevy_render, no bevy_core_pipeline, no wgpu/naga).
-    # On-screen rendering needs these three explicit features:
     "bevy_render",         # wgpu/naga GPU backend + RenderPlugin (the actual device)
     "bevy_core_pipeline",  # Camera2d + 2D render graph + clear-color (pulls bevy_render)
     "bevy_sprite_render",  # SpriteRenderPlugin — draws Sprite entities on the GPU
                            #   (transitively pulls bevy_core_pipeline + bevy_sprite)
-    # --- Sprite/ECS logic + windowing ---
     "bevy_sprite",   # sprite components / Image type (logic only; no GPU on its own)
-    "bevy_winit",    # window + event loop
+    "bevy_winit",    # window + event loop (winit drives the browser canvas on wasm)
     "bevy_window",
-    "x11",           # Linux windowing (CI + Linux dev); inert on macOS
-    "wayland",       # Linux windowing (optional companion to x11)
 ] }
 
-# Dev-only fast-iteration linking. NEVER a default; never enabled in CI or wasm.
+# --- Native-only windowing (Slice 3f) ---------------------------------------------
+# X11/Wayland are Linux window backends (inert on macOS, required on Linux/CI).
+# `wayland-sys` resolves via pkg-config AT BUILD TIME, so it must NEVER reach the
+# wasm target — hence this non-wasm target table (they'd break the wasm build).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bevy = { version = "0.19", default-features = false, features = ["x11", "wayland"] }
+
+# --- Wasm-only backend (Slice 3f) -------------------------------------------------
+# WebGL2 is Bevy 0.19's default web backend (broadest browser reach; the CPU-blit
+# renderer is trivially within it). NEVER `webgpu` — it OVERRIDES webgl2 and drops
+# non-WebGPU browsers. NEVER `x11`/`wayland` here (they do not build for wasm32).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { version = "0.19", default-features = false, features = ["webgl2"] }
+
+# Dev-only fast-iteration linking. NEVER a default; never enabled in CI; NEVER with
+# the wasm target (`dynamic_linking` cannot build for wasm32).
 [features]
 dynamic = ["bevy/dynamic_linking"]

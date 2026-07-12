@@ -30,6 +30,9 @@ mod blit;
 /// -p game` works from any CWD (constraint: CARGO_MANIFEST_DIR, not CWD).
 const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
 /// Committed golden dir — the scenario text and (debug) the self-check column.
+/// Native-only: on wasm the scenario text + sidecar are embedded via `include_str!`
+/// (there is no filesystem), so this path constant is not referenced there.
+#[cfg(not(target_arch = "wasm32"))]
 const GOLDEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../oracle-tests/golden");
 /// Default demo scenario when no positional arg is given (`cargo run -p game`).
 const DEFAULT_SCENARIO: &str = "blood";
@@ -56,9 +59,20 @@ struct Demo {
     scene: SceneData,
     surface: Bitmap,
     tick: u32,
-    /// Per-tick `state_hash` column of the committed golden (index = tick).
+    /// Per-tick `state_hash` column of the committed golden (index = tick) — the
+    /// sim determinism witness, asserted on BOTH targets in debug builds.
     #[cfg(debug_assertions)]
-    golden: Vec<u32>,
+    golden_state: Vec<u32>,
+    /// Per-tick `frame_hash` column of the committed golden (index = tick) — the
+    /// CPU render-parity witness. **Wasm-only:** the embedded demo (`blood`) has
+    /// no `render_flash`/`render_shake` directives, so the demo's world-only draw
+    /// (`screen_flash = 0`, no shake) reproduces the sidecar's frame hash exactly.
+    /// Not asserted natively: the native demo does not replay a scenario's
+    /// flash/shake, so a flashy scenario's frame would (correctly) diverge — and
+    /// the native CPU frame is already gated far more thoroughly by the
+    /// `render_slice3b_*` oracle-tests, making a native demo frame-hash redundant.
+    #[cfg(all(target_arch = "wasm32", debug_assertions))]
+    golden_frame: Vec<u64>,
 }
 
 /// Handle of the one `Image` the sprite samples; `tick_and_render` writes it.
@@ -103,6 +117,7 @@ fn main() {
 /// print the available scenarios and exit non-zero — done here, before the Bevy
 /// app starts, so a typo never flashes a window. Every committed 3b scenario is
 /// also a golden, so the debug self-check golden path is guaranteed to resolve.
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_scenario() -> String {
     let name = std::env::args()
         .nth(1)
@@ -118,9 +133,21 @@ fn resolve_scenario() -> String {
     name
 }
 
+/// Wasm has no CLI args and no filesystem to enumerate, so the scenario is the
+/// **compile-time default** (`blood`) — its text + (debug) golden sidecar are
+/// embedded via `include_str!` (see `load_scenario_text` / `golden_sidecar_text`),
+/// and its level lives in the `scenario` crate's embedded TC manifest (Slice 3f
+/// T2). A `?scenario=` query-param switch is a documented follow-up (spec §Q4).
+#[cfg(target_arch = "wasm32")]
+fn resolve_scenario() -> String {
+    DEFAULT_SCENARIO.to_string()
+}
+
 /// Enumerate the committed demo scenarios — the `<name>` of every
 /// `render_slice3b_<name>_scenario.txt` in `GOLDEN_DIR`, sorted for a stable
-/// help listing.
+/// help listing. Native-only: the wasm entry hard-codes the default scenario, so
+/// this `read_dir` (no filesystem in the browser) is never compiled for wasm.
+#[cfg(not(target_arch = "wasm32"))]
 fn available_scenarios() -> Vec<String> {
     let mut names = Vec::new();
     let dir = std::fs::read_dir(GOLDEN_DIR).unwrap_or_else(|e| panic!("read {GOLDEN_DIR}: {e}"));
@@ -142,10 +169,10 @@ fn available_scenarios() -> Vec<String> {
 /// first frame immediately (before the first `FixedUpdate`).
 fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, name: Res<ScenarioName>) {
     let name = &name.0;
-    // 1. Read + parse the committed scenario text.
-    let scenario_path = format!("{GOLDEN_DIR}/render_slice3b_{name}_scenario.txt");
-    let scenario_text = std::fs::read_to_string(&scenario_path)
-        .unwrap_or_else(|e| panic!("read {scenario_path}: {e}"));
+    // 1. Read + parse the scenario text. The byte source forks by target (native:
+    //    `std::fs`; wasm: `include_str!` of the compile-time default) — see
+    //    `load_scenario_text`. DRY: only the source forks; the parse is shared.
+    let scenario_text = load_scenario_text(name);
     let scenario = Scenario::parse(&scenario_text).expect("scenario parses");
 
     // 2. Tick-0 load (moves `state` into `Sim`; viewports + scene into `Demo`).
@@ -188,7 +215,7 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, name: Res<Sc
 
     // 6. Assemble the resources.
     #[cfg(debug_assertions)]
-    let golden = load_golden_state_hashes(name);
+    let golden = load_golden_hashes(name);
 
     let mut demo = Demo {
         scenario,
@@ -197,7 +224,9 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, name: Res<Sc
         surface,
         tick: 0,
         #[cfg(debug_assertions)]
-        golden,
+        golden_state: golden.0,
+        #[cfg(all(target_arch = "wasm32", debug_assertions))]
+        golden_frame: golden.1,
     };
     let sim = Sim(state);
 
@@ -252,10 +281,29 @@ fn tick_and_render(
     #[cfg(debug_assertions)]
     debug_assert_eq!(
         sim::hash::hash_game_state(&sim.0),
-        demo.golden[demo.tick as usize],
+        demo.golden_state[demo.tick as usize],
         "sim-hash diverged from the committed golden at tick {}",
         demo.tick
     );
+
+    // 6. Wasm render-parity witness (debug-only): the CPU frame just rendered into
+    //    `demo.surface` must hash to the embedded golden's `frame_hash` column —
+    //    the proof that the *render* (not just the sim) is bit-identical to native
+    //    in the browser (spec §Q3). The fade rule matches the 3b harness exactly:
+    //    tick 0 is the black open (`fade = 0`), every later tick is identity
+    //    (`fade = 33`). Wasm-only because the embedded `blood` demo has no
+    //    flash/shake (so the demo's world-only draw reproduces the sidecar), and
+    //    the native CPU frame is already gated by the `render_slice3b_*` oracle.
+    #[cfg(all(target_arch = "wasm32", debug_assertions))]
+    {
+        let fade = if demo.tick == 0 { 0 } else { 33 };
+        let frame_hash = render::hash::hash_frame(&demo.surface, fade);
+        debug_assert_eq!(
+            frame_hash, demo.golden_frame[demo.tick as usize],
+            "CPU frame-hash diverged from the committed golden at tick {}",
+            demo.tick
+        );
+    }
 }
 
 /// Render the current sim state into `demo.surface` and blit it (ARGB→RGBA) into
@@ -277,14 +325,38 @@ fn render_and_upload(
     blit::blit_surface_into_bytes(&demo.surface, image.data.as_mut().expect("image has data"));
 }
 
-/// Parse the committed frame sidecar's 3rd column (`state_hash`, hex u32) into a
-/// per-tick `Vec<u32>` (index = tick). Grammar mirrors
-/// `render_slice3b_common::parse_frames`: skip blank / `#` / `total` lines.
+/// The scenario text for `name`. **Native:** read the committed
+/// `render_slice3b_<name>_scenario.txt` from `GOLDEN_DIR` (`std::fs`, unchanged).
+#[cfg(not(target_arch = "wasm32"))]
+fn load_scenario_text(name: &str) -> String {
+    let scenario_path = format!("{GOLDEN_DIR}/render_slice3b_{name}_scenario.txt");
+    std::fs::read_to_string(&scenario_path).unwrap_or_else(|e| panic!("read {scenario_path}: {e}"))
+}
+
+/// The scenario text for the compile-time default. **Wasm:** there is no
+/// filesystem, so the default (`blood`) scenario text is embedded at compile time
+/// via `include_str!`. `name` is always `DEFAULT_SCENARIO` on wasm (see
+/// `resolve_scenario`); only that one scenario is embedded.
+#[cfg(target_arch = "wasm32")]
+fn load_scenario_text(_name: &str) -> String {
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../oracle-tests/golden/render_slice3b_blood_scenario.txt"
+    ))
+    .to_string()
+}
+
+/// Parse the committed frame sidecar into its two per-tick hash columns —
+/// `(state_hash: Vec<u32>, frame_hash: Vec<u64>)`, index = tick. The grammar
+/// mirrors `render_slice3b_common::parse_frames` (`<tick> <frame_hash_hex16>
+/// <state_hash_hex8>`; skip blank / `#` / `total` lines). Native uses only the
+/// `state_hash` column (the frame column is the wasm render-parity witness), but
+/// both are parsed here so the seam has one source of truth.
 #[cfg(debug_assertions)]
-fn load_golden_state_hashes(name: &str) -> Vec<u32> {
-    let path = format!("{GOLDEN_DIR}/render_slice3b_{name}.txt");
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    let mut out = Vec::new();
+fn load_golden_hashes(name: &str) -> (Vec<u32>, Vec<u64>) {
+    let text = golden_sidecar_text(name);
+    let mut states = Vec::new();
+    let mut frames = Vec::new();
     for l in text.lines() {
         let t = l.trim();
         if t.is_empty() || t.starts_with('#') {
@@ -294,11 +366,34 @@ fn load_golden_state_hashes(name: &str) -> Vec<u32> {
         if it.next() == Some("total") {
             continue;
         }
-        let _frame_hash = it.next().expect("frame_hash column");
+        let frame_hash = it.next().expect("frame_hash column");
         let state_hash = it.next().expect("state_hash column");
-        out.push(u32::from_str_radix(state_hash, 16).expect("state_hash hex"));
+        frames.push(u64::from_str_radix(frame_hash, 16).expect("frame_hash hex"));
+        states.push(u32::from_str_radix(state_hash, 16).expect("state_hash hex"));
     }
-    out
+    (states, frames)
+}
+
+/// The committed frame sidecar text for `name`. **Native:** read
+/// `render_slice3b_<name>.txt` from `GOLDEN_DIR` (`std::fs`, unchanged).
+#[cfg(all(not(target_arch = "wasm32"), debug_assertions))]
+fn golden_sidecar_text(name: &str) -> String {
+    let path = format!("{GOLDEN_DIR}/render_slice3b_{name}.txt");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
+/// The committed frame sidecar text for the compile-time default. **Wasm+debug:**
+/// embedded via `include_str!` so the debug wasm build can run the determinism +
+/// frame-hash witness with no filesystem. Only compiled into a *debug* wasm build
+/// (`cfg(all(target_arch = "wasm32", debug_assertions))`), so release wasm carries
+/// zero sidecar payload (spec §Q3).
+#[cfg(all(target_arch = "wasm32", debug_assertions))]
+fn golden_sidecar_text(_name: &str) -> String {
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../oracle-tests/golden/render_slice3b_blood.txt"
+    ))
+    .to_string()
 }
 
 /// Esc quits. The window's close button already exits via winit.

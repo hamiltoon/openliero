@@ -1,6 +1,6 @@
 # Step 3 — Rendering: overview / altitude decisions
 
-Status: **active** · 2026-07-11 · slices **3a + 3b SHIPPED** (see *Slice ordering* below); 3c–3f pending
+Status: **active** · 2026-07-12 · slices **3a + 3b + 3c SHIPPED** (see *Slice ordering* below); 3d–3f pending
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 3 — Rendering" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-07-10-liero-rs-step3-cpp-render-pipeline-map.md` (C++ map, cited as **render-map §N**)
@@ -318,11 +318,38 @@ what it *proves*.
   sites (ninjarope/`worm_fire`) left unmasked; `MAT_SEE_SHADOW`-constant placement in `render`.
   Name labels / font (`DrawTextSmall`), HUD/bars/banners/holdazone/minimap → **3e**.
 
-- **3c — Bevy window (native).** The `game` crate: `FixedUpdate` sim tick, CPU buffer
-  → `Image` → `Sprite` + `Camera2d`, nearest, integer-scaled; a fixed-seed scripted
+- **3c — Bevy window (native). ✅ SHIPPED (2026-07-12).** The `game` crate: `FixedUpdate` sim tick,
+  CPU buffer → `Image` → `Sprite` + `Camera2d`, nearest, integer-scaled; a fixed-seed scripted
   demo playing a deterministic scenario in real time (no input). **Proves:** the
-  renderer runs live natively; `cargo run` shows Liero. **Done-when:** the demo
+  renderer runs live natively; `cargo run` shows Liero. **Done-when:** met — the demo
   window renders the world view natively at real time.
+  **RESULT:** 🎯 **MILESTONE — `cargo run -p game` shows Liero LIVE, the project's first Bevy code.**
+  A native 960×600 window presents the `blood` scenario in real time: the sim ticks on `FixedUpdate`
+  at the **exact C++ cadence** `1000/14 ≈ 71.43 Hz` (`kDelay=14ms`, `gfx.cpp:1176` — **not** the 60 Hz
+  the plan had assumed), the Bevy-free `render` crate's CPU frame is copied into one `Image`
+  (`RenderAssetUsages::all()`, nearest sampler) and drawn as a `Sprite` at **×3**, and the scenario
+  **loops bit-identically** off its own recorded inputs while a debug determinism guard (per-tick
+  `state_hash` vs the sim golden) stays GREEN over ~26 loops / 15 s. **Three controller open questions
+  ratified & resolved:** (1) a **shared `scenario` crate** owns the parser (lifted verbatim out of
+  `oracle-tests`) + the loader (factored out of the T8 harness) — **3d reuses `scenario::load`**;
+  (2) CI keeps the **determinism gate Bevy-free** via `--exclude game` (proven with `cargo tree`) plus
+  a separate `cargo build -p game` step; (3) **Option A — fixed ×3 camera** is the default (follow-cam
+  is a later `--follow` toggle, not the default). Bevy 0.19 feature set used: `default-features=false`
+  + `bevy_sprite`/`bevy_winit`/`bevy_window`/`x11`/`wayland` + `bevy_render`/`core_pipeline`/
+  `sprite_render`. Dev tool `render_snapshot.rs` (headless BMP dumper) shipped the first images of
+  Rust-Liero. Two real findings: (1) Bevy's `bevy_sprite` feature alone ships **no GPU backend** —
+  `sprite_render`→`core_pipeline`→`render`→`wgpu`/`naga` are required (the window had opened
+  renderer-less and the draft report carried false lock-claims); (2) a brief bug — **empty** per-tick
+  inputs diverged from the golden, so the scenario's **recorded** inputs are fed (the debug guard
+  caught it live). **Deferrals carried to the slice that needs each:** keyboard **input** /
+  game-loop-with-input and **audio** → Step 4; **render interpolation** (`overstep_fraction` lerp —
+  draw the latest tick) → overview deferral; **resize-aware integer-fit camera** (fixed ×3 window
+  shipped) and **follow-cam** (Option B `--follow` toggle, `killed_timer` zeroing — diverges from the
+  goldens) → later; **live shake/flash wiring** (the `ProcessViewports` equivalent) → Step 4;
+  **texture-format gamma** (`Rgba8` Srgb vs linear — advisory, resolved by eyeball) → note the choice;
+  **HUD/font/bars/minimap** → 3e; **wasm** (WebGL2, embedded assets; no wasm feature pulled here) → 3f.
+  Minor tidy carried: `blit.rs` fmt-drift fixup, scenario-without-sidecar debug-panic comment,
+  setup-tick-0 assert gap.
 
 - **3d — headless screenshot CLI + run-skill.** A CLI that PNG-encodes the CPU buffer
   directly (via the `image` crate — no GPU readback, bevy-research §3b/§4) at a fixed
@@ -400,6 +427,15 @@ what it *proves*.
 ---
 
 ## Open questions for the controller to adjudicate
+
+> **Resolution status:** Q1–Q3 (3a dumper/scenario/golden-surface mechanics) were **resolved at 3a
+> ship** — the extended `sim_physics_dump.cpp` with the opt-in `render` directive and the joint
+> `frame_hash`+`state_hash` sidecar line are live and byte-identical. Q4 (Modern) stays **Classic-only**
+> as committed. Q5 (run-skill location) lands with **3d** (in-repo recommendation standing). Q6 (wasm CI
+> depth) lands with **3f**. The three **3c** companion-spec questions were **ratified** and are recorded
+> in the 3c **RESULT** above: (1) a shared `scenario` crate owning the parser + loader — ratified; (2)
+> CI `--exclude game` + a separate `game` build step — ratified; (3) Option A fixed ×3 camera as the
+> default — ratified.
 
 1. **Frame-golden scenario for 3a.** Confirm the reused Classic scenario's terrain
    window actually contains a `color_anim`-cycled palette index so `RotateFrom` is

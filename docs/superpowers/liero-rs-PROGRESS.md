@@ -8,8 +8,25 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-11 · **🖼️ STEP 3 — slices 3a + 3b SHIPPED: the world view is
-> now PIXEL-EXACT vs the C++ oracle.** 🎯 **MILESTONE (3b):** the full two-pass world block
+> **Last updated:** 2026-07-12 · **🖼️ STEP 3 — slice 3c SHIPPED: `cargo run -p game` shows
+> Liero LIVE — the project's FIRST Bevy code.** 🎯 **MILESTONE (3c):** a native window opens the
+> blood scenario running in real time — the sim ticks on `FixedUpdate` at the **exact C++ cadence**
+> (`1000/14 ≈ 71.43 Hz`, `kDelay=14ms`, `gfx.cpp:1176` — **not** the 60 Hz first assumed), the CPU
+> frame from the Bevy-free `render` crate is copied into one `Image` and presented as a `Sprite` at
+> **×3 nearest** in a 960×600 window, and the scenario loops **bit-identically** off its own recorded
+> inputs while a debug determinism guard (per-tick `state_hash` vs the golden) stays **GREEN** over
+> ~26 loops / 15 s. Delivered: a new **Bevy-free `scenario` crate** (the parser lifted verbatim out of
+> `oracle-tests` + the loader factored out of the T8 harness — **3d reuses it**); the **`game` binary**
+> (Bevy 0.19, `default-features=false` + `bevy_sprite`/`winit`/`window`/`x11`/`wayland` +
+> `bevy_render`/`core_pipeline`/`sprite_render` — the sprite feature alone ships **no** GPU backend);
+> pure helpers (ARGB→RGBA blit + `next_tick`, unit-tested with discrimination proofs); a CLI scenario
+> picker (default `blood`, 7 selectable); CI keeps the **determinism gate Bevy-free** (`--exclude game`,
+> proven via `cargo tree`) with a separate `cargo build -p game` step. Dev tool: `render_snapshot.rs`, a
+> headless BMP dumper — the first images of Rust-Liero. Two review-caught finds: (1) Bevy 0.19's
+> `bevy_sprite` feature has **no GPU backend** (`sprite_render`→`core_pipeline`→`render`→`wgpu`/`naga`
+> are required — the window had opened with no renderer and the report carried false lock-claims); (2)
+> a brief bug — empty inputs had **diverged** from the golden, so the scenario's **recorded** inputs are
+> fed (the debug guard caught it live). Prior (3b): 🎯 **MILESTONE (3b):** the full two-pass world block
 > — shadow pass + sprite pass (all 6 object families in C++ order, `viewport.cpp:274-590`),
 > worm sprites, ninjarope, fire cone, laser sight, aim crosshair, blood — matches C++
 > **tick-for-tick** across **7 golden scenarios** (laser/shadow/shake/fan/dart/blood/
@@ -83,21 +100,22 @@ the LAST slice of step 2.
 
 ---
 
-## 🔁 Rewrite track — faithful port (~63%)
+## 🔁 Rewrite track — faithful port (~66%)
 
 Strangler-style: the C++ engine is the oracle, every piece differential-tested
 bit-for-bit before moving on. Steps 0–2 merged (the deterministic sim core — the
 hardest part — is bit-exact vs C++); step 3 (rendering) is **in progress**, with slices
 3a + 3b shipping the pixel-exact terrain frame **and** the full world view (shadow +
-sprite pass); steps 4–5 not started.
+sprite pass) and **3c** putting it LIVE on screen (`cargo run -p game` — the first Bevy
+code); steps 4–5 not started.
 
 ```
-REWRITE (steg 0–5)                                          ~63%
+REWRITE (steg 0–5)                                          ~66%
 ├─ ✅ Step 0  sim-core primitives (RNG/fixed/vec/math/tables)   DONE — merged (PR #1)
 ├─ ✅ Step 1  asset IO, slices 1a–1e (level/palette/sprites/    DONE — merged (PR #2)
 │             tc.cfg/objects/WAV)
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
-├─ 🔨 Step 3  Bevy rendering / window (reproduce the SDL3 view) IN PROGRESS — 3a+3b shipped (PR #4)  ◀── YOU ARE HERE
+├─ 🔨 Step 3  Bevy rendering / window (reproduce the SDL3 view) IN PROGRESS — 3a–3c shipped (PR #4)  ◀── YOU ARE HERE
 ├─ ⬜ Step 4  input + replay (.lrp) playback                    not started
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
@@ -143,8 +161,9 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~63%** |
-| Step 3 (rendering) | **🔨 IN PROGRESS** (slices 3a + 3b shipped; PR #4 accumulating) |
+| Rewrite track (steps 0–5) | **~66%** |
+| Step 3 (rendering) | **🔨 IN PROGRESS** (slices 3a + 3b + 3c shipped; PR #4 accumulating) |
+| Slice 3c (Bevy window — native) | **✅ MILESTONE GREEN** (🎯 `cargo run -p game` shows **Liero LIVE** — the project's **first Bevy code**: a native 960×600 window presents the blood scenario in real time, sim on `FixedUpdate` at the **exact C++ cadence** `1000/14 ≈ 71.43 Hz` (`kDelay=14ms`, `gfx.cpp:1176` — **not** the 60 Hz first assumed), CPU frame (Bevy-free `render`) → one `Image` → `Sprite` at **×3 nearest**, scenario **loops bit-identically** off its recorded inputs with a debug determinism guard (per-tick `state_hash` vs golden) **GREEN** over ~26 loops/15 s. New **Bevy-free `scenario` crate** (parser lifted verbatim from oracle-tests + loader factored out of the T8 harness — **3d reuses it**); `game` binary (Bevy 0.19, `default-features=false` + `bevy_sprite`/`winit`/`window`/`x11`/`wayland` + `bevy_render`/`core_pipeline`/`sprite_render`); pure ARGB→RGBA blit + `next_tick` helpers (unit-tested w/ discrimination proofs); CLI scenario picker (default `blood`, 7 selectable); CI **determinism gate stays Bevy-free** (`--exclude game`, proven via `cargo tree`) + separate `cargo build -p game`; dev `render_snapshot.rs` headless BMP dumper. 2 review finds: Bevy `bevy_sprite` alone ships **no GPU backend** (needs `sprite_render`→`core_pipeline`→`render`→`wgpu`/`naga`; window had opened renderer-less) + a brief bug where empty inputs **diverged** (recorded inputs fed instead; guard caught it live)) |
 | Slice 3b (shadow + sprite pass) | **✅ MILESTONE GREEN** (🎯 the **world view is PIXEL-EXACT** vs C++: **7 goldens** `render_slice3b_{laser,shadow,shake,fan,dart,blood,dart_water}` — **225 frame rows, ALL matched first run**; two-pass shadow+sprite block, all 6 object families in C++ order (`viewport.cpp:274-590`), worm sprites/ninjarope/fire cone/laser sight/crosshair/blood; blit primitives + `ShadowQuery` (+4/clamp/`SeeShadow`) + line drawers + fire-cone table + render-only `hotspot_x/y` + `ProcessSight` ported, `LightUp`/shake live; **both viewport RNGs live & non-vacuous** — laser 6 distinct per-tick hashes, shadow ON≠OFF, shake+flash blip, pool-drain changes the frame (positive `BlitImageR`-over-water witness); **triple isolation per tick** (`state_hash` Rust == sidecar == sim golden); **re-diff GREEN** (all `sim_slice*` + `render_slice3a` byte-identical, new `render_slice3b_*` the only additions). 2 real finds: inverted laser `rand(2)` order (T3 review; drawn only inside clip) + C++ `cossin[128]` UB on facing-flip (T0b; Rust masks `&0x7f`)) |
 | Slice 3a (render foundation) | **✅ SHIPPED** (🎯 first pixel-exact **terrain** frame vs C++: `render_slice3a_golden` — all 27 frame hashes + total accumulator bit-exact, **first run**; Bevy-free `render` crate: `Bitmap`/palette build (RotateFrom/LightUp/pal32)/`DrawLevel` Classic/two-viewport `Viewport::process`/FNV-1a hash+`FadeChannel`; C++ dumper's opt-in `render player` directive → sidecar frame golden, **re-diff gate GREEN** (29 priors byte-identical); **RotateFrom observable** — hash constant per 8-tick window, flips on `cycles>>3` @8/16/24; **triple isolation proof** — `state_hash` Rust == sidecar == sim golden, untouched by rendering) |
 | Step 2 | **✅ COMPLETE** (all slices bit-exact; merged in PR #3) |
@@ -181,7 +200,17 @@ FNV-1a **frame hash** differential-tested against C++ over the reused Step 2 sce
 │         pool-drain incl. positive BlitImageR-over-water); triple isolation per tick;
 │         re-diff GREEN (all sim_slice* + render_slice3a byte-identical). 2 real finds:
 │         inverted laser rand(2) order (T3 review) + C++ cossin[128] UB on facing-flip (T0b)
-├─ ⬜ 3c  Bevy window (native) — FixedUpdate sim tick, CPU buffer → Image → Sprite/Camera2d
+├─ ✅ 3c  Bevy window (native) — FixedUpdate sim tick, CPU buffer → Image → Sprite/Camera2d   SHIPPED
+│         🎯 `cargo run -p game` shows Liero LIVE — the project's FIRST Bevy code: a 960×600
+│         window presents the blood scenario in real time, sim on FixedUpdate at the exact C++
+│         cadence 1000/14 ≈ 71.43 Hz (kDelay=14ms, gfx.cpp:1176 — NOT the 60 Hz first assumed),
+│         CPU frame (Bevy-free render) → Image → Sprite ×3 nearest; scenario loops bit-identically
+│         off its recorded inputs, debug determinism guard (per-tick state_hash vs golden) GREEN
+│         over ~26 loops/15 s. New Bevy-free `scenario` crate (parser verbatim from oracle-tests +
+│         loader factored out of the T8 harness — 3d reuses it); CI keeps the determinism gate
+│         Bevy-free (--exclude game, proven via cargo tree) + separate cargo build -p game. 2 finds:
+│         bevy_sprite alone ships no GPU backend (needs sprite_render/core_pipeline/render/wgpu) +
+│         empty-inputs divergence (recorded inputs fed instead; guard caught it live)
 ├─ ⬜ 3d  headless screenshot CLI + in-repo run-skill (change → screenshot → judge, no GPU)
 ├─ ⬜ 3e  HUD / font / bars / minimap — the full player view, pixel-gated
 └─ ⬜ 3f  wasm bring-up — WebGL2 build to C++ emscripten parity
@@ -197,6 +226,16 @@ unreached (`names_on_bonuses=false`, no `kChange`); Rust-parser layout-token val
 HUD/bars/banners/holdazone/minimap → **3e**. (3a's `LightUp`/shake/laser-sight RNG are now
 live; steerable centering stays deferred.) A future scenario reaching any of these must lift
 the deferral with a matching golden.
+
+**Deferrals carried after 3c** (each routed to the slice that needs it): keyboard **input** /
+game-loop-with-input and **audio** (Step 4); **render interpolation** (`overstep_fraction` lerp —
+draw the latest tick for now); **resize-aware integer-fit camera** (fixed ×3 window shipped);
+**follow-cam** (`--follow` / `killed_timer` zeroing — diverges from goldens, allowed later, not the
+default); **live shake/flash wiring** (the `ProcessViewports` equivalent — Step 4); **Srgb-vs-Unorm
+texture-format** visual verification (advisory — resolved by eyeball); plus minor tidy carried:
+`blit.rs` fmt-drift fixup, a scenario-without-sidecar debug-panic comment, and the setup-tick-0
+assert gap. **HUD/font/bars/minimap → 3e; wasm (WebGL2, embedded assets) → 3f** (no wasm feature
+pulled in 3c). The shared `scenario::load` is exactly what **3d** reuses for the headless CLI.
 
 ---
 

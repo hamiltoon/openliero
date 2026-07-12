@@ -20,7 +20,13 @@
 use crate::bitmap::{Bitmap, Pal32};
 use crate::blit::draw_bar;
 use crate::font::Font;
-use sim::state::SimState;
+use sim::state::{LevelSim, SimState};
+use sim_core::fixed::ftoi;
+
+/// `Level::kHudMinimapW` (`level.hpp:30`): the minimap fits into 52 px wide.
+const KHUD_MINIMAP_W: i32 = 52;
+/// `Level::kHudMinimapH` (`level.hpp:31`): the minimap fits into 36 px tall.
+const KHUD_MINIMAP_H: i32 = 36;
 
 /// The three HUD text labels, carried verbatim from the TC's `[texts]`
 /// (`Kills`/`Lives`/`Reloading`). Defined HERE (in `render`) rather than reused
@@ -215,6 +221,119 @@ pub fn draw_hud(
         ),
         // viewport.cpp:187 — default: break.
         _ => {}
+    }
+}
+
+/// Draw the 52×36 minimap + worm dots into the full-surface clip. Port of
+/// `viewport.cpp:593-613` (the `settings->map` block) wrapping a
+/// [`draw_miniature`] port of `level.cpp:489-507`.
+///
+/// `center_x` is the render surface's horizontal centre (`kCenterX`, C++
+/// `render_res_x / 2`); `render_res_y` its height. The minimap is anchored at
+/// `(center_x - 26, render_res_y - 38)` and sampled at
+/// `step = max(ceil(dim / {52,36}), 1)`.
+///
+/// **This function is per-call.** In `Viewport::Draw` BOTH viewports draw the
+/// minimap at this SAME centred position, so the second viewport's call
+/// overwrites the first (spec §7 Q6). Reproducing that double-draw is the
+/// CALLER's responsibility (T5 `frame::draw` invokes this once per viewport);
+/// this function paints exactly one pass.
+///
+/// The Holdazone minimap marker (`viewport.cpp:615-634`) is **tripwired** — no
+/// render scenario sets `game_mode == kGmHoldazone`, so it is deferred past
+/// Step 2, never silently dropped (spec §6).
+pub fn draw_minimap(
+    scr: &mut Bitmap,
+    pal: &Pal32,
+    state: &SimState,
+    center_x: i32,
+    render_res_y: i32,
+) {
+    // viewport.cpp:594-595 — anchor.
+    let map_x = center_x - 26;
+    let map_y = render_res_y - 38;
+
+    let level = &state.level;
+
+    // viewport.cpp:598-601 — fit into kHudMinimapW×kHudMinimapH regardless of map
+    // size: integer ceil-div `(dim + N - 1) / N`, floored to 1. NOT a float ceil.
+    let step_x = ((level.width + KHUD_MINIMAP_W - 1) / KHUD_MINIMAP_W).max(1);
+    let step_y = ((level.height + KHUD_MINIMAP_H - 1) / KHUD_MINIMAP_H).max(1);
+
+    // viewport.cpp:602 — terrain block.
+    draw_miniature(scr, pal, level, map_x, map_y, step_x, step_y);
+
+    // viewport.cpp:604-613 — one SetPixel per VISIBLE worm.
+    for worm in &state.worms {
+        if worm.visible {
+            // viewport.cpp:608-609 — Ftoi(pos)/step + map. ftoi FIRST (arithmetic
+            // shift), THEN truncating integer divide by step, THEN add the anchor.
+            let kx = ftoi(worm.pos.x) / step_x + map_x;
+            let ky = ftoi(worm.pos.y) / step_y + map_y;
+            // worm.hpp:203 — MinimapColor() = 129 + index*4, using the worm's own
+            // `index` member (NOT the loop position). SetPixel is clip-gated
+            // (bitmap.hpp:50-54) and truncates the int colour to a PalIdx.
+            let color = (129 + worm.index * 4) as u8;
+            scr.set_pixel(kx, ky, color, pal);
+        }
+    }
+
+    // viewport.cpp:615-634 — Holdazone minimap marker: TRIPWIRE. Deferred past
+    // Step 2; no render scenario sets game_mode == kGmHoldazone (2). Never
+    // silently dropped (spec §6).
+    debug_assert!(
+        state.game_mode != 2,
+        "Holdazone minimap marker (viewport.cpp:615-634) deferred past Step 2 (spec §6)"
+    );
+}
+
+/// Port of `Level::DrawMiniature` (`level.cpp:489-507`): step the material grid
+/// into a `map_x/map_y`-anchored block, sampling `AppearanceAt` (Classic:
+/// `pal32[material_id[idx]]`, `level.hpp:59-64`) per cell.
+fn draw_miniature(
+    scr: &mut Bitmap,
+    pal: &Pal32,
+    level: &LevelSim,
+    map_x: i32,
+    map_y: i32,
+    step_x: i32,
+    step_y: i32,
+) {
+    // level.cpp:490 — start half a step in.
+    let mut my = step_y / 2;
+    // level.cpp:492-493 — round-division bounds (`(dim + step/2) / step`), NOT the
+    // ceil-div used for the step itself.
+    let map_end_y = map_y + ((level.height + step_y / 2) / step_y);
+    let map_end_x = map_x + ((level.width + step_x / 2) / step_x);
+
+    let len = level.material_id.len();
+    let mut y = map_y;
+    while y < map_end_y {
+        // level.cpp:496
+        let mut mx = step_x / 2;
+        let mut x = map_x;
+        while x < map_end_x {
+            // level.cpp:498 — kIdx = mx + my*width as unsigned int.
+            let kidx = (mx + my * level.width) as u32 as usize;
+            // level.cpp:499 — `kIdx < material_id.size() && clip.Inside(x,y)`
+            // (that exact order). The unsigned cast makes a negative index wrap
+            // huge and fail the bound, matching C++.
+            if kidx < len && scr.clip.inside(x, y) {
+                // level.cpp:500-501 — GetPixel(x,y) = AppearanceAt(kIdx): a RAW
+                // (unchecked, no-palette-relookup) write of the already-resolved
+                // ARGB. Classic AppearanceAt is `pal32[material_id[kIdx]]`
+                // (level.hpp:59-64); Modern is deferred. The clip was already
+                // checked above, so the direct pixel write is safe.
+                let argb = pal[level.material_id[kidx] as usize];
+                scr.pixels[(y * scr.pitch + x) as usize] = argb;
+            }
+            // level.cpp:503
+            mx += step_x;
+            x += 1;
+        }
+        // level.cpp:505
+        my += step_y;
+        y += 1;
     }
 }
 
@@ -465,6 +584,134 @@ mod tests {
             px(&b, 0, 164),
             0xFF00_0000 | 50,
             "reloading text glyph pal[50]"
+        );
+    }
+
+    // A 104×72 level (so step_x = ceil(104/52) = 2, step_y = ceil(72/36) = 2)
+    // with two distinctive materials on known world cells + two visible worms.
+    // At step 2 the miniature starts half a step in (mx=my=1): the first sample
+    // reads world index 1 + 1*104 = 105, the second (mx=3) reads 3 + 104 = 107.
+    fn minimap_state() -> SimState {
+        use sim_core::fixed::itof;
+        let width = 104;
+        let height = 72;
+        let mut material_id = vec![0u8; (width * height) as usize];
+        material_id[105] = 100; // world cell (1,1) -> minimap (map_x,   map_y)
+        material_id[107] = 101; // world cell (3,1) -> minimap (map_x+1, map_y)
+        let level = LevelData {
+            width,
+            height,
+            material_id,
+            palette: None,
+            display: None,
+        };
+        let flags = [0u8; 256];
+        let worms = [
+            WormInit {
+                index: 0,
+                health: 100,
+                lives: 3,
+                stats_x: 0,
+                weapons: [WeaponInit::default(); NUM_WEAPONS],
+                start_pos: Vec2::new(itof(10), itof(20)),
+                visible: true,
+            },
+            WormInit {
+                index: 1,
+                health: 100,
+                lives: 3,
+                stats_x: 218,
+                weapons: [WeaponInit::default(); NUM_WEAPONS],
+                start_pos: Vec2::new(itof(40), itof(30)),
+                visible: true,
+            },
+        ];
+        SimState::new(
+            &level,
+            &worms,
+            0,
+            &flags,
+            vec![],
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            Default::default(),
+            vec![],
+            vec![],
+            vec![],
+            0,
+            false,
+            0,
+        )
+    }
+
+    #[test]
+    fn minimap_samples_material_and_places_worm_dots() {
+        // center_x 160 -> map_x = 134; render_res_y 200 -> map_y = 162.
+        // step_x = step_y = 2.
+        // Terrain: sample (map_x, map_y) reads material_id[105]=100 -> pal[100];
+        //          sample (map_x+1, map_y) reads material_id[107]=101 -> pal[101].
+        // Worm 0 at world (10,20): dot at (10/2+134, 20/2+162) = (139,172),
+        //   index 0 -> color 129+0*4 = 129 -> pal[129].
+        // Worm 1 at world (40,30): dot at (40/2+134, 30/2+162) = (154,177),
+        //   index 1 -> color 129+1*4 = 133 -> pal[133].
+        let pal = ramp_pal();
+        let state = minimap_state();
+        let mut b = filled(320, 200);
+        draw_minimap(&mut b, &pal, &state, 160, 200);
+
+        let px = |b: &Bitmap, x: i32, y: i32| b.pixels[(y * b.pitch + x) as usize];
+
+        assert_eq!(
+            px(&b, 134, 162),
+            0xFF00_0000 | 100,
+            "minimap sample cell 105 -> pal[100]"
+        );
+        assert_eq!(
+            px(&b, 135, 162),
+            0xFF00_0000 | 101,
+            "minimap sample cell 107 -> pal[101]"
+        );
+        assert_eq!(
+            px(&b, 139, 172),
+            0xFF00_0000 | 129,
+            "worm 0 dot -> pal[129] (129+0*4)"
+        );
+        assert_eq!(
+            px(&b, 154, 177),
+            0xFF00_0000 | 133,
+            "worm 1 dot -> pal[133] (129+1*4)"
+        );
+    }
+
+    #[test]
+    fn minimap_clip_gate_suppresses_terrain_and_dots_outside_clip() {
+        // Clip to (144,172)-(164,182). The top-left terrain sample (134,162) and
+        // worm 0's dot (139,172) fall OUTSIDE and must not paint; worm 1's dot
+        // (154,177) is inside and paints pal[133]. Proves both the miniature
+        // `clip.Inside` gate (level.cpp:499) and SetPixel's clip gate.
+        let pal = ramp_pal();
+        let state = minimap_state();
+        let mut b = filled(320, 200);
+        b.clip = crate::bitmap::Rect::new(144, 172, 164, 182);
+        draw_minimap(&mut b, &pal, &state, 160, 200);
+
+        let px = |b: &Bitmap, x: i32, y: i32| b.pixels[(y * b.pitch + x) as usize];
+
+        assert_eq!(
+            px(&b, 134, 162),
+            SENTINEL,
+            "terrain sample outside clip not drawn"
+        );
+        assert_eq!(
+            px(&b, 139, 172),
+            SENTINEL,
+            "worm 0 dot outside clip not drawn"
+        );
+        assert_eq!(
+            px(&b, 154, 177),
+            0xFF00_0000 | 133,
+            "worm 1 dot inside clip drawn pal[133]"
         );
     }
 

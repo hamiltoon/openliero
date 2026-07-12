@@ -445,15 +445,15 @@ what it *proves*.
   stayed **GREEN in the browser** — the **wasm-parity witness** that the same CPU frame renders
   identically off-native. Built: a **`scenario::assets::read_asset` seam** (native = verbatim
   `std::fs::read` — all goldens stay green, the no-op proof; wasm = embed) with `include_dir`
-  (wasm-only dep) embedding sprites/weapons/nobjects/sobjects + `include_bytes!` tc.cfg + a **curated
-  276 KB** of Levels (`render_stage.lev`; sounds/ and the big levels excluded); a **target-scoped
+  (wasm-only dep) embedding sprites/weapons/nobjects/sobjects + `include_bytes!` tc.cfg + the demo
+  level `render_stage.lev` — a **curated 276 KB total** (sounds/ and the big levels excluded); a **target-scoped
   feature split** (base 6 draw-features; `x11`/`wayland` native-only; `webgl2` wasm-only — the union
   verified per target with `cargo tree`) so `cargo build -p game --target wasm32-unknown-unknown` is
   **GREEN first try**; an entry-fork (`const DEFAULT="blood"`, `include_str!` scenario+sidecar, **no**
   `env::args`/`read_dir`/`fs` on wasm; `canvas=None` auto-append verified against the `bevy_window`
   source; the determinism guard hardened with a per-tick wasm-only `frame_hash`); a `.cargo/config.toml`
   (target-scoped `wasm-server-runner`) + `web/index.html` dev-loop (127.0.0.1:1334, 200 html+wasm) and a
-  static `wasm-bindgen` **0.2.126** (lock-matched) bundle (game.js 97 KB + game_bg.wasm 52.9 MB debug); the
+  static `wasm-bindgen` **0.2.126** (lock-matched) bundle (game.js 97 KB + game_bg.wasm 52.9 MB release); the
   run-skill gained a §6 wasm-dev-loop + `--hud` doc; and a new **`game-wasm` CI job** — checkout +
   `dtolnay/rust-toolchain` with `targets: wasm32-unknown-unknown` + `cargo build -p game --target
   wasm32-unknown-unknown`, **build-only** (no browser, no window, no wgpu adapter, no wayland/xkb apt),

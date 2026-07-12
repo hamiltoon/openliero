@@ -195,3 +195,29 @@ jobs:
               }
             }
           ' test-output.txt >> "$GITHUB_STEP_SUMMARY"
+
+  # Prove the `game` crate compiles for the browser target (wasm32). This is the
+  # slice-3f wasm bring-up gate: build-only, no browser, no window, no wgpu
+  # adapter — a green `cargo build --target wasm32-unknown-unknown` is the CI
+  # witness that the WebGL2 build stays healthy. Kept in its OWN job (not a step
+  # of `sim-core`) so it is fully independent of the determinism gate: the
+  # fast bit-for-bit oracle above never waits on, and is never coupled to, the
+  # Bevy/wasm toolchain. No wayland/xkbcommon apt here — those native windowing
+  # backends are compiled out on wasm (the game crate's target-scoped feature
+  # split gates x11/wayland to native and webgl2 to wasm), so the wasm build
+  # needs no system dev headers. Mirrors `sim-core`'s cache posture: neither job
+  # caches the cargo registry/target dir, so this one does not either.
+  game-wasm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (+ wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build game crate for wasm32 (WebGL2)
+        run: cargo build --manifest-path rust/Cargo.toml -p game --target wasm32-unknown-unknown

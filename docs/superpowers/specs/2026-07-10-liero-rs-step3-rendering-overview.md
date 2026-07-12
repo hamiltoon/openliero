@@ -1,6 +1,6 @@
 # Step 3 — Rendering: overview / altitude decisions
 
-Status: **active** · 2026-07-12 · slices **3a + 3b + 3c + 3d + 3e SHIPPED** (see *Slice ordering* below); only **3f** (wasm) pending
+Status: **COMPLETE** · 2026-07-12 · slices **3a + 3b + 3c + 3d + 3e + 3f ALL SHIPPED** (see *Slice ordering* below) — **Step 3 done**; next = **Step 4** (input / `.lrp` replay)
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 3 — Rendering" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-07-10-liero-rs-step3-cpp-render-pipeline-map.md` (C++ map, cited as **render-map §N**)
@@ -434,10 +434,37 @@ what it *proves*.
   `size>1`-advance font test, minimap dot-index discrimination, the reload difftest's own
   suppression control [deliberately omitted]).
 
-- **3f — wasm bring-up.** WebGL2 build, `include_bytes!`/embedded assets (dodge async
-  fetch), serve/deploy recipe to C++ emscripten parity (bevy-research §5). **Proves:**
-  the same frame renders in the browser. **Done-when:** the wasm build renders the
-  world view and is servable.
+- **3f — wasm bring-up. ✅ SHIPPED (2026-07-12).** WebGL2 build, `include_dir`/`include_bytes!`
+  embedded assets (dodge async fetch), a serve/deploy recipe to C++ emscripten parity
+  (bevy-research §5). **Proves:** the same frame renders in the browser. **Done-when:** the
+  wasm build renders the world view and is servable.
+  **RESULT:** 🎉 **MILESTONE — the BROWSER milestone, automated-proven.** A headless-Chrome
+  controller ran the debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) and the screenshot
+  shows the **blood** demo's split-screen world (sky / terrain / worms / blood), the console
+  **PANIC-FREE**, and the determinism guard (per-tick `state_hash` **+** a wasm-only `frame_hash`)
+  stayed **GREEN in the browser** — the **wasm-parity witness** that the same CPU frame renders
+  identically off-native. Built: a **`scenario::assets::read_asset` seam** (native = verbatim
+  `std::fs::read` — all goldens stay green, the no-op proof; wasm = embed) with `include_dir`
+  (wasm-only dep) embedding sprites/weapons/nobjects/sobjects + `include_bytes!` tc.cfg + a **curated
+  276 KB** of Levels (`render_stage.lev`; sounds/ and the big levels excluded); a **target-scoped
+  feature split** (base 6 draw-features; `x11`/`wayland` native-only; `webgl2` wasm-only — the union
+  verified per target with `cargo tree`) so `cargo build -p game --target wasm32-unknown-unknown` is
+  **GREEN first try**; an entry-fork (`const DEFAULT="blood"`, `include_str!` scenario+sidecar, **no**
+  `env::args`/`read_dir`/`fs` on wasm; `canvas=None` auto-append verified against the `bevy_window`
+  source; the determinism guard hardened with a per-tick wasm-only `frame_hash`); a `.cargo/config.toml`
+  (target-scoped `wasm-server-runner`) + `web/index.html` dev-loop (127.0.0.1:1334, 200 html+wasm) and a
+  static `wasm-bindgen` **0.2.126** (lock-matched) bundle (game.js 97 KB + game_bg.wasm 52.9 MB debug); the
+  run-skill gained a §6 wasm-dev-loop + `--hud` doc; and a new **`game-wasm` CI job** — checkout +
+  `dtolnay/rust-toolchain` with `targets: wasm32-unknown-unknown` + `cargo build -p game --target
+  wasm32-unknown-unknown`, **build-only** (no browser, no window, no wgpu adapter, no wayland/xkb apt),
+  in its **own job** fully **independent of the determinism gate**, under the existing `rust/**` path
+  filter, mirroring `sim-core`'s no-cache posture (neither job caches the registry/target dir). **Fyndet**
+  that saved the dev-loop: cargo reads `.cargo/config.toml` from **CWD**, not `--manifest-path`, so the
+  wasm dev-loop runs from `rust/`. Deferrals carried (STEP 3 complete): a `?scenario=` URL query-param
+  (entry hardcodes `blood`); `wasm-opt`/size optimisation (the 52.9 MB is the **Bevy-wasm baseline**, not
+  the 276 KB assets); browser input + audio → **Step 4**; the wasm release-guard is **OFF by design**
+  (the `frame_hash` guard is debug-only — the native frame is already oracle-gated); the RIFLE/`ST_LASER`
+  laser-do-loop remains a *sim* deferral (unrelated to wasm).
 
 ---
 
@@ -504,7 +531,12 @@ what it *proves*.
 > as committed. **Q5 (run-skill location) — RESOLVED at 3d ship: in-repo ratified** (`.claude/skills/liero-shot`,
 > the project's first in-repo run-skill; travels to worktrees). A related 3d question — should the CLI dump
 > **machine-readable** hashes for programmatic compare? — is **resolved YES**: `shot --hashes` ships the
-> per-tick `frame_hash`+`state_hash` sidecar grammar to stdout. Q6 (wasm CI depth) lands with **3f**. The
+> per-tick `frame_hash`+`state_hash` sidecar grammar to stdout. **Q6 (wasm CI depth) — RESOLVED at 3f
+ship: minimal build-only.** The `game-wasm` CI job is a bare `cargo build --target
+wasm32-unknown-unknown` (no headless-browser/Playwright canvas screenshot in CI) — the browser
+milestone was proven **once, out-of-band** by the headless-Chrome controller (SwiftShader-WebGL2,
+determinism guard green); CI's standing job just guards that the wasm target keeps **compiling**,
+independent of the determinism gate. The
 > three **3c** companion-spec questions were **ratified** and are recorded
 > in the 3c **RESULT** above: (1) a shared `scenario` crate owning the parser + loader — ratified; (2)
 > CI `--exclude game` + a separate `game` build step — ratified; (3) Option A fixed ×3 camera as the
@@ -531,9 +563,11 @@ what it *proves*.
    run/screenshot skill lives in-repo (`.claude/skills/liero-shot`, travels to
    worktrees), not `~/.claude`. (Companion: `shot --hashes` dumps machine-readable
    per-tick `frame_hash`+`state_hash` to stdout for programmatic compare — **shipped**.)
-6. **wasm CI depth.** Does 3f only need a servable build + manual check, or a
-   headless-browser (Playwright) canvas screenshot in CI
-   (iteration-exploration open question)?
+6. **wasm CI depth.** ✅ **RESOLVED at 3f — minimal build-only.** CI runs a bare
+   `cargo build -p game --target wasm32-unknown-unknown` (`game-wasm` job, no
+   headless-browser/Playwright canvas screenshot); the browser render was proven **once,
+   out-of-band** by the headless-Chrome controller (SwiftShader-WebGL2, determinism guard
+   green in the browser). CI just guards that the wasm target keeps compiling.
 
 ---
 

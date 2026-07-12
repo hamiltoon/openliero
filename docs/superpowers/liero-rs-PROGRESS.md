@@ -8,8 +8,29 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-12 · **🖥️ STEP 3 — slice 3e SHIPPED: HUD / font / bars / minimap —
-> the full player view is now PIXEL-EXACT vs C++.** 🎯 **MILESTONE (3e):** the in-game overlay
+> **Last updated:** 2026-07-12 · **🎉 STEP 3 COMPLETE — slice 3f SHIPPED: wasm bring-up.
+> Liero-rs now renders in the BROWSER (WebGL2), closing the rendering step (3a–3f).**
+> 🎯 **MILESTONE (3f):** the browser milestone is **automated-proven** — a headless-Chrome
+> controller ran the debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) and the
+> screenshot shows the **blood** demo's split-screen world (sky / terrain / worms / blood),
+> the console **PANIC-FREE**, and the determinism guard (per-tick `state_hash` **+** a wasm-only
+> `frame_hash`) stayed **GREEN in the browser** — the wasm-parity witness that the same CPU
+> frame renders identically off-native. How it was built: a **`scenario::assets::read_asset`
+> seam** (native = verbatim `std::fs::read`, all goldens green = no-op proof; wasm = embed) with
+> `include_dir` (wasm-only dep) embedding sprites/weapons/nobjects/sobjects + `include_bytes!`
+> tc.cfg + a **curated 276 KB** of Levels (`render_stage.lev`; sounds/ and the big levels
+> excluded); a **target-scoped feature split** (`x11`/`wayland` native-only, `webgl2` wasm-only,
+> union verified per target with `cargo tree`) so `cargo build -p game --target
+> wasm32-unknown-unknown` is **GREEN**; an entry-fork (`const DEFAULT="blood"`, `include_str!`
+> scenario+sidecar, **no** `env::args`/`read_dir`/`fs` on wasm; canvas auto-append verified
+> against the `bevy_window` source); a `.cargo/config.toml` (target-scoped `wasm-server-runner`)
+> + `web/index.html` dev-loop (127.0.0.1:1334, 200 html+wasm) and a static `wasm-bindgen`
+> **0.2.126** (lock-matched) bundle (game.js 97 KB + game_bg.wasm 52.9 MB **debug**); and a new
+> **`game-wasm` CI job** (build-only, no browser, own job independent of the determinism gate).
+> **Fyndet** that saved the dev-loop: cargo reads `.cargo/config.toml` from **CWD**, not
+> `--manifest-path` — so the wasm dev-loop runs from `rust/`. Prior (3e): 🖥️ **slice 3e SHIPPED:
+> HUD / font / bars / minimap — the full player view is PIXEL-EXACT vs C++.** 🎯 **MILESTONE (3e):**
+> the in-game overlay
 > is ported verbatim and difference-tested green on the **first run**: a new **`render::font::Font`**
 > (font.tga loader, `common.cpp:414-433` width-detect + 0/50→0/8 palette remap) draws the HUD labels
 > (`font.cpp:8-80` verbatim — the double `c>=2 && c<252` guard preserved, CLIP_IMAGE inlined,
@@ -32,8 +53,7 @@
 > RIFLE = `ST_LASER` tripped the deferred laser do-loop), then re-cut to a **GRENADE** scenario
 > (`ST_NORMAL`, inert hit-arm, no in-window explosion) and turned **GREEN** (71 rows + total; a
 > settled 50/51-tick witness). Finding: tick 0 is a fade-to-black, so the HUD witness reads tick 1.
-> Milestone review: **MILESTONE READY, 0 Critical / 0 Important.** Remaining: **3f** wasm — the LAST
-> render slice. Prior (3d): 📸 **slice 3d — the headless `shot` CLI + golden-test + in-repo run-skill,
+> Milestone review: **MILESTONE READY, 0 Critical / 0 Important.** Prior (3d): 📸 **slice 3d — the headless `shot` CLI + golden-test + in-repo run-skill,
 > the agent screenshot/compare loop:** a Bevy-free **`shot` crate** (lib+bin, deps
 > `scenario`/`render`/`sim`/`assets`/`sim-core` + `image` png-only — `cargo tree` proves **no
 > bevy/jpeg/gif/rayon**) PNG-encodes any 3b scenario at a **fixed tick** (raw RGB, nearest ×scale, no
@@ -133,24 +153,26 @@ the LAST slice of step 2.
 
 ---
 
-## 🔁 Rewrite track — faithful port (~70%)
+## 🔁 Rewrite track — faithful port (~74%)
 
 Strangler-style: the C++ engine is the oracle, every piece differential-tested
 bit-for-bit before moving on. Steps 0–2 merged (the deterministic sim core — the
-hardest part — is bit-exact vs C++); step 3 (rendering) is **in progress**, with slices
-3a + 3b shipping the pixel-exact terrain frame **and** the full world view (shadow +
-sprite pass), **3c** putting it LIVE on screen (`cargo run -p game` — the first Bevy
-code), **3d** the headless screenshot CLI + run-skill, and **3e** the HUD/font/bars/
-minimap overlay (the full player view now pixel-exact); steps 4–5 not started.
+hardest part — is bit-exact vs C++); **step 3 (rendering) is COMPLETE** (3a–3f): slices
+3a + 3b shipped the pixel-exact terrain frame **and** the full world view (shadow +
+sprite pass), **3c** put it LIVE on screen (`cargo run -p game` — the first Bevy
+code), **3d** the headless screenshot CLI + run-skill, **3e** the HUD/font/bars/
+minimap overlay (the full player view pixel-exact), and **3f** the wasm bring-up —
+the same CPU frame now renders in the **browser** (WebGL2), automated-proven in
+headless Chrome. Steps 4–5 (input/replay + netplay) not started.
 
 ```
-REWRITE (steg 0–5)                                          ~70%
+REWRITE (steg 0–5)                                          ~74%
 ├─ ✅ Step 0  sim-core primitives (RNG/fixed/vec/math/tables)   DONE — merged (PR #1)
 ├─ ✅ Step 1  asset IO, slices 1a–1e (level/palette/sprites/    DONE — merged (PR #2)
 │             tc.cfg/objects/WAV)
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
-├─ 🔨 Step 3  Bevy rendering / window (reproduce the SDL3 view) IN PROGRESS — 3a–3e shipped (PR #4)  ◀── YOU ARE HERE
-├─ ⬜ Step 4  input + replay (.lrp) playback                    not started
+├─ ✅ Step 3  Bevy rendering / window (reproduce the SDL3 view) DONE — 3a–3f shipped (PR #4)
+├─ ⬜ Step 4  input + replay (.lrp) playback                    not started  ◀── YOU ARE HERE
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
 
@@ -195,8 +217,9 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~70%** |
-| Step 3 (rendering) | **🔨 IN PROGRESS** (slices 3a + 3b + 3c + 3d + 3e shipped; only 3f wasm remains; PR #4 accumulating) |
+| Rewrite track (steps 0–5) | **~74%** (steps 0–3 done; step 4 input/replay + step 5 netplay remain) |
+| Step 3 (rendering) | **✅ COMPLETE** (slices 3a + 3b + 3c + 3d + 3e + 3f all shipped; PR #4 ready to merge) |
+| Slice 3f (wasm bring-up) | **✅ MILESTONE GREEN** (🎉 the **browser milestone**: the same CPU frame renders in the browser via **WebGL2**, **automated-proven** — a headless-Chrome controller ran the debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) and the screenshot shows the **blood** demo's split-screen world (sky/terrain/worms/blood), the console **PANIC-FREE**, and the determinism guard (per-tick `state_hash` **+** a wasm-only `frame_hash`) stayed **GREEN in the browser** = the wasm-parity witness. Built: a **`scenario::assets::read_asset` seam** (native = verbatim `std::fs::read` — all goldens green = no-op proof; wasm = embed) + `include_dir` (wasm-only dep) embedding sprites/weapons/nobjects/sobjects + `include_bytes!` tc.cfg + a **curated 276 KB** of Levels (`render_stage.lev`; sounds/ and big levels excluded); a **target-scoped feature split** (base 6 draw-features; `x11`/`wayland` native-only; `webgl2` wasm-only — union verified per target via `cargo tree`) making `cargo build -p game --target wasm32-unknown-unknown` **GREEN first try**; an entry-fork (`const DEFAULT="blood"`, `include_str!` scenario+sidecar, **no** `env::args`/`read_dir`/`fs` on wasm; `canvas=None` auto-append verified against the `bevy_window` source; determinism guard hardened with a per-tick wasm-only `frame_hash`); a `.cargo/config.toml` (target-scoped `wasm-server-runner`) + `web/index.html` dev-loop (127.0.0.1:1334, 200 html+wasm) + a static `wasm-bindgen` **0.2.126** (lock-matched) bundle (game.js 97 KB + game_bg.wasm 52.9 MB debug); a new **`game-wasm` CI job** (build-only, no browser/apt, own job independent of the determinism gate, mirrors `sim-core`'s no-cache posture). Fynd: cargo reads `.cargo/config.toml` from **CWD**, not `--manifest-path` — the wasm dev-loop runs from `rust/`) |
 | Slice 3e (HUD / font / bars / minimap) | **✅ MILESTONE GREEN** (🎯 the **full player view is PIXEL-EXACT** vs C++ — the in-game overlay ported verbatim + difftest green first run: new **`render::font::Font`** (font.tga loader `common.cpp:414-433`, width-detect + 0/50→0/8 remap) draws HUD labels (`font.cpp:8-80` verbatim — double `c>=2 && c<252` guard, CLIP_IMAGE inlined, newline on cp 0; ASCII-decode **identity for `cp<0x80`**, bevis-tested as the exact reach of the label corpus); **`blit::draw_bar`** (`blit.cpp:105-113`, unclipped + `width>0` anti-clamp witness); **`render::hud::draw_hud`** (`viewport.cpp:84-153` verbatim — two-arm life bar (`health*100/settings_health`, `100-(killed_timer*25)/37` clamped), two-arm ammo/loading bar, blinking **Reloading** (`(cycles%20)>10 && visible`, y=`164*multiplier` **absolute** — a plan-deviation caught vs C++), kills-always / lives-on-KillEmAll+Scales, `w/10+234` / `w/10+245` / 50 / 10 / 6 colour columns); **`draw_minimap`+`draw_miniature`** (`viewport.cpp:593-613` + `level.cpp:489-507` — the two *different* `step` ceil vs `bounds` round idioms preserved, worm-dots `ftoi(pos)/step` colour `129+worm.index*4`, clip-gated, `AppearanceAt` inlined). `Scene`/`frame::draw` composites per viewport (**HUD full-clip → world world-clip → minimap**, verbatim double-draw); C++ dumper gained opt-in **`render_hud`** mirroring `frame::draw`, **RE-DIFF gate empty** (3a/blood/shake/sim_slice2 byte-identical). 3 scenarios + goldens — **hud** 41t / **reload** 71t / **death** 141t — difftests **GREEN**: hud + death first run (per-tick + total + triple-isolation + suppression + non-vacuity); reload first **blocked** (T7 RIFLE = `ST_LASER` tripped the deferred laser do-loop), re-cut to **GRENADE** (`ST_NORMAL`, inert hit-arm, no in-window explosion) → GREEN (71 rows + total, settled 50/51 witness). Find: tick 0 is fade-to-black ⇒ the HUD witness reads tick 1. Holdazone/GameOfTag/replay HUD-arms tripwired. Milestone review: **0 Critical / 0 Important**; minors on the deferral track: DRY the inlined `clip_image`, a `size>1`-advance font test, minimap dot-index discrimination, reload's own suppression control (deliberately omitted)) |
 | Slice 3d (headless `shot` CLI + run-skill) | **✅ MILESTONE GREEN** (🎯 the agent screenshot/compare loop lands: new **Bevy-free `shot` crate** (lib+bin; deps `scenario`/`render`/`sim`/`assets`/`sim-core` + `image` png-only, **no bevy/jpeg/gif/rayon** per `cargo tree`) PNG-encodes any 3b scenario at a **fixed tick** to a known path — raw RGB, nearest ×scale, pitch-correct, **no fade** (tick 0 is not black) — and dumps **machine-readable** per-tick `frame_hash`+`state_hash` to stdout behind `--hashes` (info to stderr); paths via `CARGO_MANIFEST_DIR`, one tick ⇒ file / many ⇒ dir, `--scale 0` rejected. **Golden-faithfulness test** `rust/shot/tests/golden.rs` locks the CLI render bit-for-bit vs the committed C++ sidecars for **blood** (base path) + **shake** (the CLI copy's ONE new path — per-tick `render_flash`/`render_shake` injection): every per-tick frame+state hash + the folded FNV `total` + row count, **GREEN first run**. Project's **first in-repo run-skill** `.claude/skills/liero-shot` drives change→screenshot→judge→compare (all commands verified run; 960×600 PNG, hashes match golden exactly). Per-tick driver is a deliberate **CLI-local copy** of the T8 harness (**option B** — T8 untouched, the golden-test guards the drift; factoring into `scenario` deferred → third consumer). **CI unchanged** — `--workspace --exclude game` already sweeps `shot` (a member), png-encode is pure Rust (miniz_oxide/flate2, no apt pkg), goldens committed; **11 shot tests (9 unit + 2 golden) green in the exact CI command**. Reviews: T0/T1/T2 two-stage, **0 Critical / 0 Important** blocking (T2's Important fixed in `5dfa9c0`). Minors on the deferral track: parse-quirks (flag-as-value consumed silently, last-wins dup), pitch≠w test's `h=1` non-vacuity) |
 | Slice 3c (Bevy window — native) | **✅ MILESTONE GREEN** (🎯 `cargo run -p game` shows **Liero LIVE** — the project's **first Bevy code**: a native 960×600 window presents the blood scenario in real time, sim on `FixedUpdate` at the **exact C++ cadence** `1000/14 ≈ 71.43 Hz` (`kDelay=14ms`, `gfx.cpp:1176` — **not** the 60 Hz first assumed), CPU frame (Bevy-free `render`) → one `Image` → `Sprite` at **×3 nearest**, scenario **loops bit-identically** off its recorded inputs with a debug determinism guard (per-tick `state_hash` vs golden) **GREEN** over ~26 loops/15 s. New **Bevy-free `scenario` crate** (parser lifted verbatim from oracle-tests + loader factored out of the T8 harness — **3d reuses it**); `game` binary (Bevy 0.19, `default-features=false` + `bevy_sprite`/`winit`/`window`/`x11`/`wayland` + `bevy_render`/`core_pipeline`/`sprite_render`); pure ARGB→RGBA blit + `next_tick` helpers (unit-tested w/ discrimination proofs); CLI scenario picker (default `blood`, 7 selectable); CI **determinism gate stays Bevy-free** (`--exclude game`, proven via `cargo tree`) + separate `cargo build -p game`; dev `render_snapshot.rs` headless BMP dumper. 2 review finds: Bevy `bevy_sprite` alone ships **no GPU backend** (needs `sprite_render`→`core_pipeline`→`render`→`wgpu`/`naga`; window had opened renderer-less) + a brief bug where empty inputs **diverged** (recorded inputs fed instead; guard caught it live)) |
@@ -215,7 +238,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 ---
 
-### Step 3 — Rendering (🔨 IN PROGRESS · PR #4)
+### Step 3 — Rendering (✅ COMPLETE · PR #4)
 
 Port the C++ CPU-bitmap renderer into a **Bevy-free `render` crate**, pixel-gated by an
 FNV-1a **frame hash** differential-tested against C++ over the reused Step 2 scenarios
@@ -267,7 +290,22 @@ FNV-1a **frame hash** differential-tested against C++ over the reused Step 2 sce
 │         opt-in render_hud, RE-DIFF gate empty (all priors byte-identical). 3 goldens: hud 41t +
 │         death 141t GREEN first run (triple-isolation + suppression + non-vacuity); reload re-cut
 │         RIFLE→GRENADE (dodged the deferred ST_LASER do-loop) → GREEN 71t. Milestone review 0/0.
-└─ ⬜ 3f  wasm bring-up — WebGL2 build to C++ emscripten parity
+└─ ✅ 3f  wasm bring-up — WebGL2 browser build, embedded assets, CI wasm-build job   SHIPPED
+          🎉 the BROWSER milestone, automated-proven: a headless-Chrome controller ran the
+          debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) — the screenshot shows the
+          blood demo's split-screen world (sky/terrain/worms/blood), the console PANIC-FREE, and
+          the determinism guard (per-tick state_hash + a wasm-only frame_hash) stayed GREEN in
+          the browser = the wasm-parity witness. read_asset seam (native = verbatim std::fs::read,
+          all goldens green = no-op proof; wasm = embed) + include_dir (wasm-only) sprites/weapons/
+          nobjects/sobjects + include_bytes! tc.cfg + curated 276 KB Levels (sounds/ + big levels
+          excluded); target-scoped feature split (x11/wayland native-only, webgl2 wasm-only, union
+          verified per target via cargo tree) ⇒ cargo build -p game --target wasm32 GREEN; entry-fork
+          (const DEFAULT=blood, include_str! scenario+sidecar, no env::args/read_dir/fs on wasm;
+          canvas auto-append); .cargo/config.toml (wasm-server-runner) + web/index.html dev-loop
+          (127.0.0.1:1334) + static wasm-bindgen 0.2.126 bundle (game.js 97 KB + game_bg.wasm 52.9 MB
+          debug); new game-wasm CI job (build-only, no browser/apt, independent of the determinism
+          gate). Fynd: cargo reads .cargo/config.toml from CWD, not --manifest-path (dev-loop runs
+          from rust/)
 ```
 
 **Deferrals carried after 3b:** Modern `ColorMode` display-halve/`ResolveDisplayAt` arms;
@@ -314,6 +352,18 @@ dot-index discrimination, and the reload difftest's own suppression control (del
 death already carry it). A future scenario reaching any of these lifts the deferral with a matching golden.
 (3e closed the after-3b/3c/3d HUD/font/bars/minimap deferral in full; the draw_char OOB-doc minor from T1
 was fixed in `d4c195f`.)
+
+**Deferrals carried after 3f** (STEP 3 complete — each routed to where it lands): **`?scenario=`
+query-param** (the wasm entry hardcodes `DEFAULT="blood"`; a URL-selectable scenario is a small
+follow-up, not needed to prove the browser milestone); **wasm-opt / size optimisation** (the release
+`game_bg.wasm` is 52.9 MB — that is the **Bevy-wasm baseline**, *not* the embedded assets, which are
+only **276 KB**; `wasm-opt`/`--release` trimming is a later polish, not a correctness gate); **browser
+input + audio** → **Step 4** (the wasm demo is scenario-driven off recorded inputs, same as native 3c);
+the **wasm release-guard is OFF by design** (the per-tick `frame_hash` determinism guard is **debug-only**
+— the native frame is already oracle-gated, the wasm guard is the debug-build parity witness, so release
+carries no guard); the **RIFLE / `ST_LASER` laser-do-loop** still stands (a *sim* deferral inherited from
+3e — unrelated to wasm). C++ render-path edits remain **not** caught by CI's re-diff (gen-scripts are
+local). A future consumer reaching any of these lifts the deferral with a matching golden/test.
 
 ---
 

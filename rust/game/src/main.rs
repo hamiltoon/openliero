@@ -120,10 +120,18 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, tick_and_render)
         .add_systems(Update, close_on_esc)
-        // 4b: flush the recorder once, on graceful exit. `Last` runs after the
-        // `Update` `close_on_esc` / winit window-close in the same frame, so the
-        // `AppExit` message is still observable before the app quits.
-        .add_systems(Last, flush_recorder_on_exit)
+        // 4b: flush the recorder once, on graceful exit. Esc's `AppExit` is written
+        // by `close_on_esc` in `Update`, so it is always observable here in `Last`.
+        // Window-close (the X button) is different: winit's close request becomes
+        // `AppExit` via bevy_window's `exit_on_all_closed`, which itself runs in
+        // `Last`, inside the `ExitSystems` set (bevy_window-0.19.0 src/lib.rs:144,
+        // src/system.rs:9/18-26). Without an explicit order, two `Last` systems can
+        // run in either order, so this system could observe an empty `AppExit`
+        // reader and silently drop the recording — hence `.after(ExitSystems)`.
+        .add_systems(
+            Last,
+            flush_recorder_on_exit.after(bevy::window::ExitSystems),
+        )
         .run();
 }
 
@@ -138,7 +146,16 @@ fn main() {
 /// (Scripted mode only — Live does not load the golden column, see `setup`).
 #[cfg(not(target_arch = "wasm32"))]
 fn resolve_scenario() -> ParsedArgs {
-    let parsed = game::input::parse_args(std::env::args().skip(1), DEFAULT_SCENARIO);
+    let parsed = match game::input::parse_args(std::env::args().skip(1), DEFAULT_SCENARIO) {
+        Ok(parsed) => parsed,
+        // A bare trailing `--record` with no path token (T1 review fix): report
+        // and exit rather than silently falling back to `record: None`, same
+        // pattern as the "--record requires --live" check just below.
+        Err(game::input::ParseArgsError::RecordMissingPath) => {
+            eprintln!("--record requires a path");
+            std::process::exit(2);
+        }
+    };
     let available = available_scenarios();
     if !available.iter().any(|n| n == &parsed.name) {
         eprintln!("unknown scenario {:?}. available scenarios:", parsed.name);
@@ -491,10 +508,13 @@ fn close_on_esc(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit
 }
 
 /// Flush the recorded input stream to the `--record` path once, on graceful exit
-/// (Esc / window close → `AppExit`). Reads the `AppExit` message in `Last`, so it
-/// observes the exit written by `close_on_esc` (or winit's window-close) in the
-/// same frame, before the app quits. A `Local<bool>` guards against a second
-/// write if the exit lingers across frames.
+/// (Esc / window close → `AppExit`). Reads the `AppExit` message in `Last`, ordered
+/// `.after(bevy::window::ExitSystems)` (see the `add_systems` call in `main`):
+/// Esc's exit is written earlier, by `close_on_esc` in `Update`, so it is always
+/// visible by the time `Last` runs; the X-button's exit is written by bevy_window's
+/// `exit_on_all_closed`, which itself runs in `Last` — only the explicit ordering
+/// guarantees this system observes it in the same frame instead of racing it.
+/// A `Local<bool>` guards against a second write if the exit lingers across frames.
 ///
 /// The `Recorder` is inserted only on the native `--live --record` path (see
 /// `setup`), so `recorder` is `None` — and this system inert — for every other

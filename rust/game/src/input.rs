@@ -153,11 +153,27 @@ pub struct ParsedArgs {
     pub record: Option<PathBuf>,
 }
 
+/// A syntactic error `parse_args` can detect on its own, with no external
+/// state (spec §7, T1 review fix). Semantic validation that needs the
+/// caller's context — e.g. "`--record` requires `--live`" — stays the
+/// caller's job (`main.rs::resolve_scenario`), not this parser's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseArgsError {
+    /// `--record` was the last token — no path token followed it. Previously
+    /// this silently parsed as `record: None`, so a dropped/typo'd path was
+    /// indistinguishable from not passing `--record` at all.
+    RecordMissingPath,
+}
+
 /// Parse the native CLI args (post `argv[0]`): leading flags — `--live`
 /// (selects [`Mode::Live`]) and `--record <path>` (4b, T1) — in any order,
 /// then an optional positional scenario name defaulting to `default_name`
-/// (spec §7). Pure and Bevy-free.
-pub fn parse_args<I: IntoIterator<Item = String>>(args: I, default_name: &str) -> ParsedArgs {
+/// (spec §7). Pure and Bevy-free. `Err(ParseArgsError::RecordMissingPath)`
+/// if `--record` has no following path token.
+pub fn parse_args<I: IntoIterator<Item = String>>(
+    args: I,
+    default_name: &str,
+) -> Result<ParsedArgs, ParseArgsError> {
     let mut it = args.into_iter().peekable();
     let mut mode = Mode::Scripted;
     let mut record: Option<PathBuf> = None;
@@ -169,14 +185,16 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, default_name: &str) -
             }
             "--record" => {
                 it.next();
-                // The following token is the flush path (absent => no target).
-                record = it.next().map(PathBuf::from);
+                // The following token is the flush path — required, not optional;
+                // a bare trailing `--record` is a malformed CLI, not "no target".
+                let path = it.next().ok_or(ParseArgsError::RecordMissingPath)?;
+                record = Some(PathBuf::from(path));
             }
             _ => break,
         }
     }
     let name = it.next().unwrap_or_else(|| default_name.to_string());
-    ParsedArgs { mode, name, record }
+    Ok(ParsedArgs { mode, name, record })
 }
 
 impl InputSource {
@@ -444,7 +462,7 @@ input 5 64 96
             (&[], Mode::Scripted, "blood"),
         ];
         for (args, want_mode, want_name) in cases {
-            let p = parse_args(args.iter().map(|s| s.to_string()), "blood");
+            let p = parse_args(args.iter().map(|s| s.to_string()), "blood").unwrap();
             assert_eq!(p.mode, want_mode, "args {args:?}: mode");
             assert_eq!(p.name, want_name, "args {args:?}: name");
             assert_eq!(p.record, None, "args {args:?}: no --record => record None");
@@ -461,7 +479,8 @@ input 5 64 96
                 .iter()
                 .map(|s| s.to_string()),
             "blood",
-        );
+        )
+        .unwrap();
         assert_eq!(p.mode, Mode::Live);
         assert_eq!(p.name, "blood");
         assert_eq!(p.record, Some(PathBuf::from("/tmp/r.txt")));
@@ -472,13 +491,29 @@ input 5 64 96
                 .iter()
                 .map(|s| s.to_string()),
             "blood",
-        );
+        )
+        .unwrap();
         assert_eq!(p.name, "dart");
         assert_eq!(p.record, Some(PathBuf::from("/tmp/r.txt")));
 
         // Plain --live => no record target.
-        let p = parse_args(["--live"].iter().map(|s| s.to_string()), "blood");
+        let p = parse_args(["--live"].iter().map(|s| s.to_string()), "blood").unwrap();
         assert_eq!(p.record, None);
+    }
+
+    /// `--record` with no following path token (spec §7, T1 review fix): a bare
+    /// trailing `--record` must not silently parse as "no record target" — that
+    /// would let `--record` typos through unnoticed. `parse_args` reports it as
+    /// an error, which `main.rs::resolve_scenario` turns into an `eprintln!` +
+    /// `exit(2)`, the same pattern as the "--record requires --live" check.
+    #[test]
+    fn parse_args_record_missing_path_is_error() {
+        let err = parse_args(
+            ["--live", "--record"].iter().map(|s| s.to_string()),
+            "blood",
+        )
+        .unwrap_err();
+        assert_eq!(err, ParseArgsError::RecordMissingPath);
     }
 
     /// A `Recorder` fed a hand-built sequence of `[ControlState; N]` arrays

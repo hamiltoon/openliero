@@ -89,10 +89,7 @@ pub struct Loaded {
 }
 
 fn load_sprites(tc_root: &Path, file: &str, w: i32, h: i32, count: i32) -> SpriteSet {
-    let bytes =
-        std::fs::read(format!("{}/sprites/{file}", tc_root.display())).unwrap_or_else(|e| {
-            panic!("read sprites/{file}: {e}");
-        });
+    let bytes = crate::assets::read_asset(tc_root, &format!("sprites/{file}"));
     let tga = assets::sprite::Tga::load(&bytes).unwrap_or_else(|_| panic!("{file} parses"));
     SpriteSet::from_tga(&tga, w, h, count).unwrap_or_else(|_| panic!("{file} sprite bank"))
 }
@@ -101,19 +98,20 @@ fn load_sprites(tc_root: &Path, file: &str, w: i32, h: i32, count: i32) -> Sprit
 /// directory (`data/TC/openliero`); `scenario` is the already-parsed scenario.
 pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     // Origpal = small.tga's embedded palette (C++ common.exepal), as in 3a.
-    let small_bytes =
-        std::fs::read(format!("{}/sprites/small.tga", tc_root.display())).expect("read small.tga");
+    let small_bytes = crate::assets::read_asset(tc_root, "sprites/small.tga");
     let small_tga = assets::sprite::Tga::load(&small_bytes).expect("small.tga parses");
     let origpal = small_tga.palette.clone();
 
-    let lev_bytes = std::fs::read(format!("{}/{}", tc_root.display(), scenario.level))
-        .unwrap_or_else(|e| panic!("read {}: {e}", scenario.level));
+    let lev_bytes = crate::assets::read_asset(tc_root, &scenario.level);
     let level = assets::level::load(&lev_bytes).expect("level loads");
-    let tc_bytes = std::fs::read(format!("{}/tc.cfg", tc_root.display())).expect("read tc.cfg");
+    let tc_bytes = crate::assets::read_asset(tc_root, "tc.cfg");
     let tc = TcConfig::load(&tc_bytes).expect("tc.cfg parses");
     let color_anim = tc.color_anim.clone();
     let objects = Objects::load(&tc.types, |sub, id| {
-        std::fs::read(format!("{}/{sub}/{id}.cfg", tc_root.display()))
+        Ok(crate::assets::read_asset(
+            tc_root,
+            &format!("{sub}/{id}.cfg"),
+        ))
     })
     .expect("object configs load");
 
@@ -190,8 +188,7 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     // HUD font: `sprites/font.tga` is a plain uncompressed indexed TGA, so the
     // generic `Tga::load` parses it (7 × 250*8, de-flipped); `Font::load` runs the
     // `common.cpp:414-433` per-glyph post-process. No new TGA parser (T0).
-    let font_bytes = std::fs::read(format!("{}/sprites/font.tga", tc_root.display()))
-        .expect("read sprites/font.tga");
+    let font_bytes = crate::assets::read_asset(tc_root, "sprites/font.tga");
     let font_tga = assets::sprite::Tga::load(&font_bytes).expect("font.tga parses");
     let font = Font::load(&font_tga);
     // HUD labels carried verbatim from the TC's `[texts]` (already parsed by `assets::tc`).

@@ -7,6 +7,7 @@
 //! `oracle-tests`. `oracle-tests` re-exports this crate (`pub use scenario;`) so
 //! the existing `oracle_tests::scenario::Scenario` references compile unchanged.
 
+pub mod assets;
 pub mod loader;
 pub mod parser;
 

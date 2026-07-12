@@ -1,6 +1,6 @@
 # Step 3 — Rendering: overview / altitude decisions
 
-Status: **active** · 2026-07-12 · slices **3a + 3b + 3c SHIPPED** (see *Slice ordering* below); 3d–3f pending
+Status: **active** · 2026-07-12 · slices **3a + 3b + 3c + 3d SHIPPED** (see *Slice ordering* below); 3e–3f pending
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 3 — Rendering" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-07-10-liero-rs-step3-cpp-render-pipeline-map.md` (C++ map, cited as **render-map §N**)
@@ -351,11 +351,43 @@ what it *proves*.
   Minor tidy carried: `blit.rs` fmt-drift fixup, scenario-without-sidecar debug-panic comment,
   setup-tick-0 assert gap.
 
-- **3d — headless screenshot CLI + run-skill.** A CLI that PNG-encodes the CPU buffer
-  directly (via the `image` crate — no GPU readback, bevy-research §3b/§4) at a fixed
-  tick, plus an in-repo `.claude/skills/` run/observe skill (iteration-exploration
-  §5/§6). **Proves:** the agent/`verify` loop — change → screenshot → judge — with no
-  GPU. **Done-when:** the CLI writes a deterministic PNG and the skill drives it.
+- **3d — headless screenshot CLI + run-skill. ✅ SHIPPED (2026-07-12).** A CLI that
+  PNG-encodes the CPU buffer directly (via the `image` crate — no GPU readback,
+  bevy-research §3b/§4) at a fixed tick, plus an in-repo `.claude/skills/` run/observe
+  skill (iteration-exploration §5/§6). **Proves:** the agent/`verify` loop — change →
+  screenshot → judge — with no GPU. **Done-when:** met — the CLI writes a deterministic
+  PNG and the skill drives it.
+  **RESULT:** 🎯 **MILESTONE — the agent screenshot/compare loop lands.** A new **Bevy-free
+  `shot` crate** (lib+bin; deps `scenario`/`render`/`sim`/`assets`/`sim-core` + `image` with
+  `default-features=false` png-only — `cargo tree` proves **no bevy/jpeg/gif/rayon**)
+  `render_scenario`-drives a 3b scenario `0..=up_to` rendering **every** tick (viewport-RNG
+  correctness; recorded inputs `input(k-1)`; per-tick flash/shake injection + `draw_shadow`),
+  then `encode_png` writes the CPU buffer as **raw RGB, nearest ×scale, pitch-correct, with NO
+  fade** (so tick 0 is not black — distinct from the frame-hash path). `run` resolves paths via
+  `CARGO_MANIFEST_DIR`, writes one file (single tick) or a dir (many), and emits **machine-readable**
+  per-tick `frame_hash`+`state_hash` sidecar grammar to **stdout** behind `--hashes` (info to
+  stderr); `--scale 0` is rejected. A **golden-faithfulness test** (`rust/shot/tests/golden.rs`)
+  locks the CLI render bit-for-bit against the committed C++ sidecars for **blood** (base path)
+  and **shake** (the CLI copy's ONE new path — the per-tick `render_flash`/`render_shake` injection
+  in `render_tick`): every per-tick frame+state hash, the folded FNV `total`, and the row count,
+  **GREEN on the first run**. The project's **first in-repo run-skill** (`.claude/skills/liero-shot`,
+  resolving **Q5 in-repo** below) drives the build/screenshot/compare loop (all commands verified
+  run; 960×600 PNG; hashes match golden exactly). **CI confirmed unchanged** — the existing
+  `cargo test --workspace --exclude game` already sweeps `shot` (T0 added it to the workspace
+  members), png-encode is pure Rust (miniz_oxide/flate2 — no apt package), and the golden data
+  (TC + `oracle-tests/golden/render_slice3b_*`) is committed and checked out by CI exactly as the
+  3b oracle-tests already rely on; **11 shot tests (9 unit + 2 golden) run green in the exact CI
+  command**. **Per-tick-driver decision — option B:** `render_scenario`/`render_tick` is a
+  deliberate **CLI-local copy** of the T8 frame-hash harness (`render_slice3b_common::run`), NOT a
+  shared factorisation — T8 is left untouched and the golden-test guards the copy against drift;
+  extracting the driver into `scenario` is **deferred until a third consumer** exists. Deferrals
+  carried: HUD/font/bars/minimap → 3e; wasm/headless-browser-canvas → 3f; `.lrp`-replay +
+  input-timelines → Step 4 (`shot` becomes the replay-regression driver then); driver factorisation
+  (third consumer); video/GIF output (out of scope — `image` is png-only by design); a standing CI
+  `--hashes` diff-job (redundant — the golden **test** already gates the render); plus review minors
+  (parse quirks: flag-as-value consumed silently, last-wins duplicates; the pitch≠w test's `h=1`
+  non-vacuity). Reviews: T0/T1/T2 two-stage-reviewed, **0 Critical / 0 Important** blocking (T2's one
+  Important fixed in `5dfa9c0`).
 
 - **3e — HUD / font / bars / minimap.** The full player view: `Font::DrawString`
   (CP437), `DrawTextSmall`, `DrawBar`/`FillRect`/`DrawDashedLineBox`/`Vline`, life/
@@ -431,8 +463,11 @@ what it *proves*.
 > **Resolution status:** Q1–Q3 (3a dumper/scenario/golden-surface mechanics) were **resolved at 3a
 > ship** — the extended `sim_physics_dump.cpp` with the opt-in `render` directive and the joint
 > `frame_hash`+`state_hash` sidecar line are live and byte-identical. Q4 (Modern) stays **Classic-only**
-> as committed. Q5 (run-skill location) lands with **3d** (in-repo recommendation standing). Q6 (wasm CI
-> depth) lands with **3f**. The three **3c** companion-spec questions were **ratified** and are recorded
+> as committed. **Q5 (run-skill location) — RESOLVED at 3d ship: in-repo ratified** (`.claude/skills/liero-shot`,
+> the project's first in-repo run-skill; travels to worktrees). A related 3d question — should the CLI dump
+> **machine-readable** hashes for programmatic compare? — is **resolved YES**: `shot --hashes` ships the
+> per-tick `frame_hash`+`state_hash` sidecar grammar to stdout. Q6 (wasm CI depth) lands with **3f**. The
+> three **3c** companion-spec questions were **ratified** and are recorded
 > in the 3c **RESULT** above: (1) a shared `scenario` crate owning the parser + loader — ratified; (2)
 > CI `--exclude game` + a separate `game` build step — ratified; (3) Option A fixed ×3 camera as the
 > default — ratified.
@@ -454,9 +489,10 @@ what it *proves*.
 4. **Modern deferral.** Ratify Classic-only for 3a–3f, with Modern (+ a `modern_test`
    golden) as a post-step item — or pull Modern into 3e if a demo/share level wants
    the authored-color look?
-5. **run-skill location.** Commit the Step 3 run/screenshot skill in-repo
-   (`.claude/skills/`, travels to worktrees) vs `~/.claude` (iteration-exploration
-   open question). (Recommendation: in-repo.)
+5. **run-skill location.** ✅ **RESOLVED at 3d — in-repo ratified.** The Step 3
+   run/screenshot skill lives in-repo (`.claude/skills/liero-shot`, travels to
+   worktrees), not `~/.claude`. (Companion: `shot --hashes` dumps machine-readable
+   per-tick `frame_hash`+`state_hash` to stdout for programmatic compare — **shipped**.)
 6. **wasm CI depth.** Does 3f only need a servable build + manual check, or a
    headless-browser (Playwright) canvas screenshot in CI
    (iteration-exploration open question)?

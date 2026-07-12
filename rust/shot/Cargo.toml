@@ -10,3 +10,12 @@ sim      = { path = "../sim" }
 assets   = { path = "../assets" }
 sim-core = { path = "../sim-core" }
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# The `golden.rs` integration test lives in a separate test crate that cannot see
+# the library's private (`[dependencies]`) deps. It parses a `Scenario` to drive
+# `render_scenario`, and recomputes the sidecar `total` accumulator from the
+# render-crate FNV constants — so both are surfaced here as dev-dependencies
+# (mirroring `oracle-tests`, where `render` is a dev-dep for exactly this reason).
+[dev-dependencies]
+scenario = { path = "../scenario" }
+render   = { path = "../render" }

@@ -22,6 +22,7 @@
 //! render_shadow                                  # Slice 3b; draw-time-only shadow flip (0 args)
 //! render_shake <tick> <vp> <amount>             # Slice 3b; draw-only shake injection
 //! render_flash <tick> <amount>                  # Slice 3b; draw-only screen-flash injection
+//! render_hud                                     # Slice 3e; draw-time HUD/minimap draw (0 args)
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
@@ -81,6 +82,11 @@ pub struct Scenario {
     /// Slice-3b `render_flash <tick> <amount>` — draw-only screen-flash injections as
     /// `(tick, amount)`. Fed into the palette `LightUp` (C++) / `Scene.screen_flash` (Rust).
     render_flash: Vec<(u32, i32)>,
+    /// Slice-3e `render_hud` (0-arg) — the draw-time HUD/minimap directive. Absent =>
+    /// `false` (the C++ dumper skips the HUD pre-block + minimap; the Rust
+    /// `Scene.draw_hud` stays `false`, so the world-only draw is byte-identical). Both
+    /// parser sides move together (T6).
+    render_hud: bool,
 }
 
 impl Scenario {
@@ -99,6 +105,7 @@ impl Scenario {
         let mut render_shadow = false;
         let mut render_shake: Vec<(u32, usize, i32)> = Vec::new();
         let mut render_flash: Vec<(u32, i32)> = Vec::new();
+        let mut render_hud = false;
 
         for (lineno, raw) in text.lines().enumerate() {
             let n = lineno + 1;
@@ -170,6 +177,14 @@ impl Scenario {
                     let amount = parse_at(1)? as i32;
                     render_flash.push((tick, amount));
                 }
+                "render_hud" => {
+                    // Slice 3e: draw-time HUD/minimap directive (0 args — presence
+                    // enables it). Accepted-and-applied on BOTH sides (mirrors the
+                    // C++ dumper's `render_hud` arm); the T8 frame-hash test maps it
+                    // to `Scene.draw_hud` (and `Scene.map`).
+                    expect_args(n, key, &nums, 0)?;
+                    render_hud = true;
+                }
                 "worm" => {
                     expect_args(n, key, &nums, 7)?;
                     let visible = match parse_at(6)? {
@@ -237,6 +252,7 @@ impl Scenario {
             render_shadow,
             render_shake,
             render_flash,
+            render_hud,
         })
     }
 
@@ -285,6 +301,13 @@ impl Scenario {
             .iter()
             .find(|(t, _)| *t == tick)
             .map(|(_, amount)| *amount)
+    }
+
+    /// Whether the `render_hud` directive is present — the draw-time HUD/minimap
+    /// draw. The T8 frame-hash test maps this to `render::frame::Scene.draw_hud`
+    /// (and, for the minimap, `Scene.map`).
+    pub fn hud(&self) -> bool {
+        self.render_hud
     }
 }
 
@@ -543,5 +566,26 @@ input 5 16 0
         let err =
             Scenario::parse("seed 1\nlevel a.lev\nticks 1\nrender_flash 2\n").unwrap_err();
         assert!(err.contains("expects 2 args"), "got: {err}");
+    }
+
+    // ---- Slice 3e draw-time HUD directive (both parser sides move together) ----
+
+    #[test]
+    fn render_hud_defaults_off_and_parses() {
+        // Absent => off (prior scenarios unchanged).
+        let s = Scenario::parse(SAMPLE).expect("parses");
+        assert!(!s.hud(), "absent render_hud defaults off");
+        // Present (0 args) => on.
+        let s = Scenario::parse("seed 1\nlevel a.lev\nticks 1\nrender player\nrender_hud\n")
+            .expect("parses");
+        assert!(s.hud(), "render_hud enables the draw-time HUD/minimap path");
+    }
+
+    #[test]
+    fn render_hud_wrong_arity_errors() {
+        // render_hud takes NO args; a trailing token is rejected.
+        let err =
+            Scenario::parse("seed 1\nlevel a.lev\nticks 1\nrender_hud 1\n").unwrap_err();
+        assert!(err.contains("expects 0 args"), "got: {err}");
     }
 }

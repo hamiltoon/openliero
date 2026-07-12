@@ -54,6 +54,7 @@
 //   render_shadow                 (Slice 3b; draw-time settings->shadow flip, draw window)
 //   render_shake <tick> <vp> <amount>  (Slice 3b; draw-time viewports[vp]->shake inject)
 //   render_flash <tick> <amount>       (Slice 3b; draw-time LightUp screen_flash inject)
+//   render_hud                         (Slice 3e; draw-time HUD pre-block + minimap draw)
 //
 // Diagnostic: set env OL_PHYS_TRACE=1 to also print per-tick pos/vel for both worms
 // to stderr (does not affect the golden output). Built via the
@@ -65,14 +66,19 @@
 //   render_shadow            (draw-time only: flip settings->shadow for the draw window)
 //   render_shake <tick> <vp> <amount>   (draw-time only: inject viewports[vp]->shake)
 //   render_flash <tick> <amount>        (draw-time only: inject the LightUp screen_flash)
+//   render_hud               (Slice 3e; draw-time only: also draw the HUD pre-block +
+//                             minimap — see render_and_hash. Absent => world-only.)
 // When `render` is PRESENT, the dumper additionally builds a headless `Renderer` + two
 // framehash-layout `Viewport`s and, right after each `dump(tick)`, renders the FULL WORLD
 // frame (the world subset of `Game::Draw`, game.cpp:170-198, + the two-pass
 // `Viewport::Draw` world block, viewport.cpp:196-590) — palette rebuild (with the injected
 // screen_flash -> LightUp) -> Fill(0) -> per viewport Process -> clip -> DrawLevel ->
 // shadow pass (if settings->shadow) -> sprite pass -> restore clip. This mirrors the Rust
-// `frame::draw` 1:1; HUD/minimap/name-labels/holdazone/banners/AI-debug are OMITTED
-// (deferred to 3e / never dumped). It writes a sidecar frame golden to argv[4]: one
+// `frame::draw` 1:1. When `render_hud` is present (Slice 3e) it ALSO draws, per viewport,
+// the HUD pre-block (into the full-surface clip, before the world clip) and the minimap
+// (after the world block) — see render_and_hash. When `render_hud` is absent the HUD /
+// minimap are OMITTED (world-only, byte-identical to 3a/3b); name-labels/holdazone/
+// banners/AI-debug stay omitted regardless. It writes a sidecar frame golden to argv[4]: one
 // `<tick> <frame_hash_hex16> <state_hash_hex8>` line per tick plus a final `total <n>
 // <acc_hex16>`. The frame hash is FNV-1a over the ARGB back buffer with the composition
 // fade (0 on tick 0 => black, 33 => identity after), exactly as framehash_main.cpp.
@@ -118,6 +124,7 @@
 #include "settings.hpp"
 #include "stateHash.hpp"
 #include "stats_recorder.hpp"
+#include "text.hpp"
 #include "viewport.hpp"
 #include "weapon.hpp"
 #include "worm.hpp"
@@ -185,6 +192,16 @@ struct Scenario {
   // for the matching tick only. Sim untouched (screen_flash lives in GameSnapshot,
   // absent from HashGameState).
   std::map<int, int> render_flash;
+  // Opt-in HUD/minimap draw (Slice 3e). When true, render_and_hash additionally
+  // draws the HUD pre-block (viewport.cpp:84-189, KillEmAll/Scales arms,
+  // is_replay=false) into the full-surface clip BEFORE the per-viewport world
+  // clip, and the 52x36 minimap + worm dots (viewport.cpp:593-613) AFTER the
+  // world block, gated on `settings->map`. 1:1 with the Rust `frame::draw` HUD
+  // path (render/src/frame.rs, render/src/hud.rs). Sim-neutral: the draw-window
+  // `settings->map` flip never reaches a sim mutation. Absent (every existing
+  // scenario) => the block is skipped and the world-only draw stays
+  // byte-identical (the re-diff gate).
+  bool render_hud = false;
 };
 
 std::vector<uint8_t> SlurpFile(std::string const& path) {
@@ -246,6 +263,9 @@ Scenario ParseScenario(char const* path) {
       int amount = 0;
       ls >> tick >> amount;
       s.render_flash[tick] = amount;
+    } else if (key == "render_hud") {
+      // Draw-time HUD/minimap draw (Slice 3e). 0 args — presence enables it.
+      s.render_hud = true;
     } else if (key == "worm") {
       WormSpec w;
       ls >> w.index >> w.pos_x >> w.pos_y >> w.health >> w.lives >> w.stats_x >> w.visible;
@@ -444,8 +464,9 @@ int main(int argc, char** argv) {
   // one sidecar line. This is the C++ mirror of the Rust `frame::draw` (render/src/frame.rs):
   // palette build (with the injected screen_flash -> LightUp) -> Fill(0) -> per viewport
   // Process -> clip -> DrawLevel at kOffs -> shadow pass (if settings->shadow) -> sprite
-  // pass -> restore clip. HUD/minimap/name-labels/holdazone/banners/AI-debug are OMITTED
-  // (deferred to 3e / never dumped), exactly as the Rust side omits them. The path reads
+  // pass -> restore clip. When `render_hud` is set (Slice 3e) the HUD pre-block + minimap
+  // are ALSO drawn per viewport (before/after the world block); otherwise HUD/minimap are
+  // omitted (world-only). name-labels/holdazone/banners/AI-debug stay omitted. The path reads
   // only level/objects/worms/cycles and the per-viewport RNG (laser sight + shake); it
   // never touches game.rand or mutates sim state, so the sim output is untouched (design
   // §6). The render_shadow flip window and the render_shake/render_flash injections carry
@@ -460,6 +481,13 @@ int main(int argc, char** argv) {
     // reaches CorrectShadow. Restored below, before the next tick's sim Process.
     bool const saved_shadow = game.settings->shadow;
     if (scn.render_shadow) game.settings->shadow = true;
+
+    // Draw-time map flip (Slice 3e): the HUD path draws the minimap only when
+    // settings->map is set. Flip it for the DRAW WINDOW only (restored below,
+    // before the next tick's sim Process), so — like the shadow flip — it never
+    // reaches a sim mutation and every sim golden stays byte-identical.
+    bool const saved_map = game.settings->map;
+    if (scn.render_hud) game.settings->map = true;
 
     // Draw-only screen-flash injection (spec O4). Absent for this tick => 0 => no LightUp.
     int screen_flash = 0;
@@ -497,6 +525,74 @@ int main(int argc, char** argv) {
       }
       vp->Process(game);
       vp->shake = saved_shake;
+
+      // ---- HUD pre-block (Slice 3e), gated on render_hud. Ported from
+      //      viewport.cpp:84-189 (KillEmAll/Scales arms; is_replay=false, so the
+      //      replay block :134-144 is skipped). Drawn into the FULL-SURFACE clip
+      //      BEFORE the per-viewport world clip is set — 1:1 with the Rust
+      //      frame::draw HUD path (render/src/frame.rs:80-91, render/src/hud.rs).
+      //      Reads only worm/cycles/settings; no sim mutation. ----
+      if (scn.render_hud) {
+        renderer->bmp.clip_rect = Rect(0, 0, renderer->bmp.w, renderer->bmp.h);
+        int const kMultiplier = renderer->bmp.w / 320;  // viewport.cpp:81
+        int const kRenderResY = renderer->bmp.h;        // renderer.render_res_y
+        Worm const& hud_worm = *game.WormByIdx(vp->worm_idx);
+        int const kStatsX = hud_worm.stats_x * kMultiplier;  // viewport.cpp:86
+
+        if (hud_worm.visible) {  // viewport.cpp:84-87
+          int const kLifebarWidth = hud_worm.health * 100 / hud_worm.settings->health;
+          DrawBar(renderer->bmp, kStatsX, kRenderResY - 39, kLifebarWidth,
+                  kLifebarWidth / 10 + 234);
+        } else {  // viewport.cpp:88-95
+          int lifebar_width = 100 - (hud_worm.killed_timer * 25) / 37;
+          if (lifebar_width > 0) {
+            lifebar_width = std::min(lifebar_width, 100);
+            DrawBar(renderer->bmp, kStatsX, kRenderResY - 39, lifebar_width,
+                    lifebar_width / 10 + 234);
+          }
+        }
+
+        WormWeapon const& ww = hud_worm.weapons[hud_worm.current_weapon];  // viewport.cpp:99
+        if (ww.Available()) {                                              // viewport.cpp:101
+          if (ww.ammo > 0) {                                               // viewport.cpp:102
+            int const kAmmoBarWidth = ww.ammo * 100 / ww.type->ammo;       // viewport.cpp:103
+            if (kAmmoBarWidth > 0) {
+              DrawBar(renderer->bmp, kStatsX, kRenderResY - 34, kAmmoBarWidth,
+                      kAmmoBarWidth / 10 + 245);  // viewport.cpp:106-107
+            }
+          }
+        } else {  // viewport.cpp:110-129
+          int ammo_bar_width = 0;
+          if (ww.type->loading_time != 0) {  // viewport.cpp:113-115
+            int const kComputedLoadingTime = ww.type->ComputedLoadingTime(*game.settings);
+            ammo_bar_width = 100 - ww.loading_left * 100 / kComputedLoadingTime;
+          } else {  // viewport.cpp:117
+            ammo_bar_width = 100 - ww.loading_left * 100;
+          }
+          if (ammo_bar_width > 0) {
+            DrawBar(renderer->bmp, kStatsX, kRenderResY - 34, ammo_bar_width,
+                    ammo_bar_width / 10 + 245);  // viewport.cpp:121-122
+          }
+          if ((game.cycles % 20) > 10 && hud_worm.visible) {  // viewport.cpp:125-128
+            common.font.DrawString(renderer->bmp, LS(Reloading), kStatsX, 164 * kMultiplier, 50);
+          }
+        }
+
+        common.font.DrawString(renderer->bmp, (LS(Kills) + ToString(hud_worm.kills)), kStatsX,
+                               kRenderResY - 29, 10);  // viewport.cpp:131-132
+
+        // is_replay == false => the replay HUD (viewport.cpp:134-144) is skipped.
+
+        switch (game.settings->game_mode) {  // viewport.cpp:148-189
+          case Settings::kGmKillEmAll:
+          case Settings::kGmScalesOfJustice: {
+            common.font.DrawString(renderer->bmp, (LS(Lives) + ToString(hud_worm.lives)), kStatsX,
+                                   kRenderResY - 22, 6);  // viewport.cpp:151-152
+          } break;
+          default:
+            break;  // Holdazone/GameOfTag deferred (our render scenarios are KillEmAll).
+        }
+      }
 
       renderer->bmp.clip_rect = vp->rect;
       renderer->bmp.cycles = game.cycles;
@@ -783,10 +879,40 @@ int main(int argc, char** argv) {
           renderer->bmp.SetPixel(ipos.x, ipos.y, static_cast<PalIdx>(i->color));
         }
       }
+
+      // ---- Minimap (Slice 3e), gated on render_hud && settings->map. Ported from
+      //      viewport.cpp:593-613 (terrain miniature + worm dots; the Holdazone
+      //      marker :615-634 is deferred — KillEmAll scenarios only). Drawn AFTER
+      //      the world block into the RESTORED full-surface clip, INSIDE the
+      //      viewport loop so both viewports draw it at the SAME centred position
+      //      and the second overwrites the first (spec §7 Q6) — 1:1 with the Rust
+      //      frame::draw minimap call (render/src/frame.rs:126-134). ----
+      if (scn.render_hud && game.settings->map) {
+        renderer->bmp.clip_rect = Rect(0, 0, renderer->bmp.w, renderer->bmp.h);
+        int const kCenterX = renderer->bmp.w / 2;  // viewport.cpp:82
+        int const kMapX = kCenterX - 26;           // viewport.cpp:594
+        int const kMapY = renderer->bmp.h - 38;    // viewport.cpp:595
+        int const kMinimapStepX =
+            std::max((game.level.width + Level::kHudMinimapW - 1) / Level::kHudMinimapW, 1);
+        int const kMinimapStepY =
+            std::max((game.level.height + Level::kHudMinimapH - 1) / Level::kHudMinimapH, 1);
+        game.level.DrawMiniature(renderer->bmp, kMapX, kMapY, kMinimapStepX, kMinimapStepY);
+
+        for (auto& worm_ptr : game.worms) {  // viewport.cpp:604-613
+          Worm const& w = *worm_ptr;
+          if (w.visible) {
+            int const kX = Ftoi(w.pos.x) / kMinimapStepX + kMapX;
+            int const kY = Ftoi(w.pos.y) / kMinimapStepY + kMapY;
+            renderer->bmp.SetPixel(kX, kY, w.MinimapColor());
+          }
+        }
+      }
     }
 
     // Restore the draw-time shadow flip before the next tick's sim Process (spec O2).
     game.settings->shadow = saved_shadow;
+    // Restore the draw-time map flip before the next tick's sim Process (Slice 3e).
+    game.settings->map = saved_map;
 
     renderer->bmp.clip_rect = Rect(0, 0, renderer->bmp.w, renderer->bmp.h);
     int const fade = (tick == 0) ? 0 : 33;  // frame 0 black, then identity.

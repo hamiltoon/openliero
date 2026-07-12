@@ -4,7 +4,7 @@
 # and for each tick dumps (a) the normal 11-column sim record
 # (render_slice3e_reload_sim.txt, the isolation source) and (b) a sidecar frame golden
 # (render_slice3e_reload.txt: <tick> <frame_hash16> <state_hash8> + a final `total`).
-# worm0's single-ammo RIFLE fires once and reloads for the rest of the window, so the
+# worm0's single-ammo GRENADE fires once and reloads for the rest of the window, so the
 # HUD reload arm (viewport.cpp:110-128) draws the growing loading bar + the blinking
 # Reloading text behind the scenario's `render_hud` directive. LOCAL/MANUAL — needs the
 # full C++ build (links `game`); NOT in the lightweight rust.yml CI. Override PRESET.

@@ -4,6 +4,8 @@
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
 
+mod blit;
+
 fn main() {
     App::new()
         .add_plugins(

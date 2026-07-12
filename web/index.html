@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Liero-rs — 3f wasm demo</title>
+    <style>
+      /* Dark backdrop so the auto-appended canvas is easy to spot. Bevy's
+         winit canvas is created and appended to <body> at run time (the game's
+         WindowPlugin leaves `Window.canvas = None`, so we do NOT hard-code a
+         canvas id here — a bare page is exactly what bevy_winit expects). */
+      html, body { margin: 0; height: 100%; background: #101014; }
+      body { display: flex; align-items: center; justify-content: center; }
+      canvas { image-rendering: pixelated; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Static-bundle harness (Slice 3f T4, spec §Q6 recipe 2 — the C++
+      emscripten/gh-pages analog). This file is the ONLY tracked artifact in
+      web/; the sibling `game.js` + `game_bg.wasm` are GENERATED (gitignored)
+      by wasm-bindgen and must exist next to this page before it will load.
+
+      ── Dev loop (one command, no static bundle, no hand-written page) ──
+        cargo run -p game --target wasm32-unknown-unknown   # run from rust/
+      (wasm-server-runner — set as the wasm `runner` in rust/.cargo/config.toml —
+      builds, bindgens, serves on localhost, and generates its own HTML/canvas.
+      Install once: `cargo install wasm-server-runner`. NOTE: cargo discovers
+      .cargo/config.toml from the CURRENT directory, not --manifest-path, so run
+      from rust/; from elsewhere pass the runner inline:
+        cargo --config 'target.wasm32-unknown-unknown.runner="wasm-server-runner"'
+          run --manifest-path rust/Cargo.toml -p game --target wasm32-unknown-unknown)
+
+      ── Static bundle (this page) ──
+        cargo build -p game --release --target wasm32-unknown-unknown
+        wasm-bindgen --out-dir web --target web \
+          target/wasm32-unknown-unknown/release/game.wasm
+        # then serve web/ with any static server, e.g.:
+        python3 -m http.server --directory web 8080
+      Install once (version MUST match the wasm-bindgen dep in Cargo.lock):
+        cargo install wasm-bindgen-cli --version 0.2.126
+      Optional size knob (not required):
+        wasm-opt -Oz -o web/game_bg.wasm web/game_bg.wasm
+
+      Bevy auto-appends its own <canvas> to <body> (Window.canvas = None in the
+      game binary), so there is no canvas element to wire up here — just load
+      and init the glue.
+    -->
+    <script type="module">
+      import init from './game.js';
+      init();
+    </script>
+  </body>
+</html>

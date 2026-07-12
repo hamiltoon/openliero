@@ -1,0 +1,9 @@
+# Wasm dev-loop runner (Slice 3f T4). Target-scoped: this `runner` is applied
+# ONLY to `--target wasm32-unknown-unknown`, so native `cargo run/test/build`
+# (aarch64-apple-darwin, linux-x64, …) are completely unaffected — they use the
+# default runner. `cargo run -p game --target wasm32-unknown-unknown` then
+# builds + wasm-bindgens + serves on localhost + auto-generates the HTML/canvas
+# harness (no hand-written page needed for the dev loop). Install once with
+# `cargo install wasm-server-runner`.
+[target.wasm32-unknown-unknown]
+runner = "wasm-server-runner"

@@ -8,7 +8,17 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-12 · **🎉 STEP 3 COMPLETE — slice 3f SHIPPED: wasm bring-up.
+> **Last updated:** 2026-07-12 · **STEP 4 STARTED (input + replay + audio) — planning docs landed:
+> the step-4 overview locks the architecture (ggrs-shaped input snapshots stay on `FixedUpdate`;
+> audio = a sim-emitted event stream with ZERO new `rand`; `.lrp` READING byte-faithful, our own
+> record format Rust-native; minimal start flow) and decomposes the step into slices **4a–4g**
+> (live input core → record/replay round-trip = the hard gate → audio → live shake/flash/banners
+> → `.lrp` reader vs C++ `framehash` → minimal start flow → run-skill/CI wiring), built on a
+> C++ fact map (input pipeline `gfx.cpp:596`/`localController.cpp:58-79`, `.lrp` = `LRPF` +
+> deflate + cereal `Game` + XOR-delta stream + `WideRollbackChecksum` every 1050 frames
+> `replay.cpp:112-372`, sound-variant RNG already in the sim ⇒ audio purely additive). No `.lrp`
+> files exist in-repo — the test corpus will be generated from C++. Branch `liero-rs-step-4`.
+> Prior: **🎉 STEP 3 COMPLETE — slice 3f SHIPPED: wasm bring-up.
 > Liero-rs now renders in the BROWSER (WebGL2), closing the rendering step (3a–3f).**
 > 🎯 **MILESTONE (3f):** the browser milestone is **automated-proven** — a headless-Chrome
 > controller ran the debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) and the
@@ -172,7 +182,7 @@ REWRITE (steg 0–5)                                          ~74%
 │             tc.cfg/objects/WAV)
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
 ├─ ✅ Step 3  Bevy rendering / window (reproduce the SDL3 view) DONE — 3a–3f shipped (PR #4)
-├─ ⬜ Step 4  input + replay (.lrp) playback                    not started  ◀── YOU ARE HERE
+├─ 🟡 Step 4  input + replay (.lrp) + audio                     PLANNED — slices 4a–4g  ◀── YOU ARE HERE
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
 
@@ -364,6 +374,37 @@ the **wasm release-guard is OFF by design** (the per-tick `frame_hash` determini
 carries no guard); the **RIFLE / `ST_LASER` laser-do-loop** still stands (a *sim* deferral inherited from
 3e — unrelated to wasm). C++ render-path edits remain **not** caught by CI's re-diff (gen-scripts are
 local). A future consumer reaching any of these lifts the deferral with a matching golden/test.
+
+---
+
+### Step 4 — Input / `.lrp` replay / audio (🟡 PLANNED · branch `liero-rs-step-4`)
+
+Close the play loop: real keyboard input at the fixed cadence, record/replay determinism,
+audio as a pure sim-event consumer, the live viewport (shake/flash/banners), and byte-faithful
+`.lrp` reading. Overview: `specs/2026-07-12-liero-rs-step4-input-replay-overview.md`; C++ fact
+map: `specs/2026-07-12-liero-rs-step4-cpp-input-replay-map.md`.
+
+```
+├─ ⬜ 4a  live input core — keyboard → per-tick ControlState snapshot into process_frame
+│         (Dig→Left+Right chord; scripted pass-through still reproduces scenario goldens)
+├─ ⬜ 4b  record/replay round-trip + CI regression — THE HARD GATE (self-checking, no C++):
+│         record→replay reproduces the identical HashGameState + frame-hash time series
+│         (the Step 5 / ggrs precondition)
+├─ ⬜ 4c  audio — sim emits a sound-event stream (zero new rand; variant RNG already in sim),
+│         thin Bevy-free kira/rodio sink in game; isolation gate; wasm Web Audio
+├─ ⬜ 4d  live shake/flash/banners — the ProcessViewports port Step 3 deferred; render golden
+│         on a live (not injected) flash/shake scenario; steerable_sum decision at slice start
+├─ ⬜ 4e  .lrp byte-faithful reader vs C++ framehash — SPLIT: container + XOR-delta stream +
+│         WideRollbackChecksum first (vs Rust-produced initial state), cereal Game graph as a
+│         bounded follow-on; corpus GENERATED from C++ (none exist in-repo)
+├─ ⬜ 4f  minimal start flow — new match with defaults + respawn + quit/restart (no menu tree)
+└─ ⬜ 4g  run/verify-skill extension + CI replay-checksum regression (woven in per gate)
+```
+
+Adjudicated (controller, 2026-07-12): 4e split as above; corpus generated from C++ over the
+existing scenario inputs; audio backend chosen at 4c start (kira or rodio, NOT bevy_audio);
+minimal menu only; steerable_sum decided at 4d start (leaning add + re-fuzz); TWO input formats
+by design (Rust-native round-trip artifact ≠ foreign `.lrp`).
 
 ---
 

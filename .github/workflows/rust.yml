@@ -70,19 +70,23 @@ jobs:
           set -o pipefail
           cargo test --manifest-path rust/Cargo.toml --workspace --exclude game 2>&1 | tee test-output.txt
 
-      # Gate the Bevy `game` crate compilation in its OWN step (separate cache,
-      # own failure surface) so the fast determinism gate above never pulls in
-      # the Bevy tree (wgpu/winit/naga). `cargo test --workspace` compiles every
-      # binary target in every member, so without `--exclude game` the hard gate
-      # would be coupled to Bevy's compile time and toolchain. The window is
-      # never launched in CI — this only proves `game` builds. Most of the
-      # trimmed feature set dlopens at runtime, but `wayland-sys`'s build script
-      # resolves wayland-client via pkg-config at BUILD time, so this step (and
-      # only this step) needs the wayland/xkbcommon dev headers.
+      # Gate the Bevy `game` crate in its OWN step (separate cache, own failure
+      # surface) so the fast determinism gate above never pulls in the Bevy tree
+      # (wgpu/winit/naga). `cargo test --workspace` compiles every binary target
+      # in every member, so without `--exclude game` the hard gate would be
+      # coupled to Bevy's compile time and toolchain. The window is never
+      # launched in CI — this runs the `game` crate's tests headless: the
+      # Bevy-free sampler units plus the headless pass-through determinism gate
+      # (`tests/passthrough.rs`, Slice 4a), which drives the real
+      # `InputSource::Scripted` and locks every scenario's per-tick state hash to
+      # the committed golden. Most of the trimmed feature set dlopens at runtime,
+      # but `wayland-sys`'s build script resolves wayland-client via pkg-config
+      # at BUILD time, so this step (and only this step) needs the
+      # wayland/xkbcommon dev headers.
       - name: Install game build deps (wayland headers)
         run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
-      - name: Build game crate (Bevy)
-        run: cargo build --manifest-path rust/Cargo.toml -p game
+      - name: Test game crate (Bevy)
+        run: cargo test --manifest-path rust/Cargo.toml -p game
 
       # Render a human-readable summary on the run's Summary page. Runs even on
       # failure (`if: always()`) so a red run still explains what broke. Pure

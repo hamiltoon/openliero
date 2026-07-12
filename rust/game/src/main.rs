@@ -24,10 +24,9 @@ use render::viewport::Viewport;
 use scenario::{Scenario, SceneData};
 use sim::state::SimState;
 
-use input::{InputSource, Mode};
+use game::input::{InputSource, Mode};
 
 mod blit;
-mod input;
 
 /// TC asset root, resolved at compile time relative to this crate so `cargo run
 /// -p game` works from any CWD (constraint: CARGO_MANIFEST_DIR, not CWD).
@@ -127,7 +126,7 @@ fn main() {
 /// (Scripted mode only — Live does not load the golden column, see `setup`).
 #[cfg(not(target_arch = "wasm32"))]
 fn resolve_scenario() -> (Mode, String) {
-    let (mode, name) = input::parse_args(std::env::args().skip(1), DEFAULT_SCENARIO);
+    let (mode, name) = game::input::parse_args(std::env::args().skip(1), DEFAULT_SCENARIO);
     let available = available_scenarios();
     if !available.iter().any(|n| n == &name) {
         eprintln!("unknown scenario {name:?}. available scenarios:");
@@ -259,7 +258,7 @@ fn setup(
     // — only the input source differs.
     let source = match *mode {
         Mode::Scripted => InputSource::Scripted(demo.scenario.clone()),
-        Mode::Live => InputSource::Live(input::default_bindings()),
+        Mode::Live => InputSource::Live(game::input::default_bindings()),
     };
     commands.insert_resource(source);
 

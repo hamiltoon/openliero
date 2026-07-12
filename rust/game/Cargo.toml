@@ -11,7 +11,17 @@ sim-core = { path = "../sim-core" }
 scenario = { path = "../scenario" }
 
 bevy = { version = "0.19", default-features = false, features = [
-    "bevy_sprite",   # sprites / Image / 2D pipeline (pulls bevy_render, bevy_core_pipeline)
+    # --- GPU render backend (REQUIRED for Camera2d/Sprite/Image to actually draw) ---
+    # In Bevy 0.19 the render stack is split OUT of `bevy_sprite`: the plain
+    # `bevy_sprite` feature only pulls the sprite *logic* crate (+ bevy_camera) and
+    # brings in NO GPU backend (no bevy_render, no bevy_core_pipeline, no wgpu/naga).
+    # On-screen rendering needs these three explicit features:
+    "bevy_render",         # wgpu/naga GPU backend + RenderPlugin (the actual device)
+    "bevy_core_pipeline",  # Camera2d + 2D render graph + clear-color (pulls bevy_render)
+    "bevy_sprite_render",  # SpriteRenderPlugin — draws Sprite entities on the GPU
+                           #   (transitively pulls bevy_core_pipeline + bevy_sprite)
+    # --- Sprite/ECS logic + windowing ---
+    "bevy_sprite",   # sprite components / Image type (logic only; no GPU on its own)
     "bevy_winit",    # window + event loop
     "bevy_window",
     "x11",           # Linux windowing (CI + Linux dev); inert on macOS

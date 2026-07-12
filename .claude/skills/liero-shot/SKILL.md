@@ -60,10 +60,13 @@ Each 3b golden exercises a subsystem surface — pick the one you changed:
 Full flag contract (requires `--out` OR `--hashes`):
 
 ```
-shot --scenario <name> --tick <n> [--tick <n> ...] (--out <path> | --hashes) [--scale <n>] [--tc-root <path>]
+shot --scenario <name> --tick <n> [--tick <n> ...] (--out <path> | --hashes) [--scale <n>] [--tc-root <path>] [--hud]
 ```
 
 `--scale` default 3 (0 rejected); `--tc-root` defaults to the bundled TC assets.
+`--hud` (opt-in) draws the FULL player view — HUD bars/text + minimap (slice 3e);
+without it the frame is the world-only view the 3b goldens gate. The 3e corpus
+(`hud`/`reload`/`death` scenarios) resolves too — 3e names are tried before 3b.
 
 ## 5. Fixed-seed note
 
@@ -72,3 +75,24 @@ run and every machine (no adapter dependence). The renderer drives **all** ticks
 to the target — the viewport-local RNG steps per draw, so a skipped tick would
 desync every later frame. That means `--tick 500` is not momentary: it renders
 0..=500 in order.
+
+## 6. Browser (wasm) dev loop — slice 3f
+
+Run the same demo in a browser canvas (WebGL2, embedded assets — no fs, no server
+assets). IMPORTANT: run from the `rust/` directory — cargo discovers the
+target-scoped `wasm-server-runner` in `rust/.cargo/config.toml` from **cwd**, not
+from `--manifest-path`:
+
+```
+cd rust
+cargo run -p game --target wasm32-unknown-unknown
+```
+
+then open the printed `http://127.0.0.1:1334` URL. Prereqs (one-time):
+`rustup target add wasm32-unknown-unknown`, `cargo install wasm-server-runner`.
+A **debug** build keeps the per-tick determinism guard live (`state_hash` +
+`frame_hash` vs the embedded golden) — a clean browser console over a loop IS the
+wasm parity witness; a `debug_assert` panic in the console means a platform
+divergence leaked into the sim (stop and reproduce natively). The eyeball check:
+the blood demo's split-screen world view, animating at the C++ cadence. Static
+bundle recipe: see `web/index.html`.

@@ -387,6 +387,8 @@ if(OPENLIERO_BUILD_ORACLE_DUMP)
   target_link_libraries(oracle_dump_sim PRIVATE game)
   add_executable(oracle_dump_sim_physics src/tools/oracle_dump/sim_physics_dump.cpp)
   target_link_libraries(oracle_dump_sim_physics PRIVATE game)
+  add_executable(oracle_dump_lrp_gen src/tools/oracle_dump/lrp_gen.cpp)
+  target_link_libraries(oracle_dump_lrp_gen PRIVATE game)
 endif()
 
 # binaries

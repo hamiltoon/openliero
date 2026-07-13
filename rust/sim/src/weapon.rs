@@ -201,7 +201,12 @@ pub fn worm_fire(
         worm.leave_shell_timer = w.leave_shell_delay;
     }
 
-    // Launch sound: skipped (no sim / RNG effect).
+    // worm.cpp:1119-1125 launch sound. The `loop_sound` branch (:1120-1122) is a
+    // KEYED loop (Slice-4c T2); the ELSE branch (:1124) is a one-shot `Play(launch_sound)`.
+    // Slice-4c T1 emits only the non-loop one-shot (no rand; not hashed).
+    if !w.loop_sound {
+        crate::sound::one_shot(w.launch_sound);
+    }
 
     let mut speed = w.speed;
     let mut firing_vel = Vec2::zero();
@@ -741,7 +746,9 @@ pub fn blow_up(
         );
     }
 
-    // :94 explo sound (render-only, no sim/RNG) — omitted.
+    // :94 `Play(w.explo_sound)` — unconditional explosion one-shot. Slice-4c T1
+    // (no rand; not hashed).
+    crate::sound::one_shot(weapon.explo_sound);
 
     // :96-115 splinter scatter — AFTER create_on_exp, BEFORE the dart's own
     // dirt_effect. The C++ order is load-bearing: each Create2 draws its RNG

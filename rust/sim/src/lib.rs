@@ -19,5 +19,6 @@ pub mod nobject;
 pub mod physics;
 pub mod pool;
 pub mod sobject;
+pub mod sound;
 pub mod state;
 pub mod weapon;

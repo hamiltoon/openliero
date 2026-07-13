@@ -530,7 +530,10 @@ pub fn worm_pickup_bonuses(
                     worms[wi].weapons[cw].ty = Some(def.id);
                     worms[wi].weapons[cw].ammo = def.ammo;
                 }
-                // :309 SoundReloaded play — sound-only, omitted (draws no rand).
+                // worm.cpp:309 `Play(sound_hook[SoundReloaded])` — UNCONDITIONAL
+                // (no play_reload_sound gate, unlike the countdown reload). Slice-4c
+                // one-shot (no rand; not hashed).
+                crate::sound::play_reloaded();
                 // :311 Free, :313 loading_left = 0.
                 bonuses.free(slot);
                 worms[wi].weapons[cw].loading_left = 0;

@@ -339,7 +339,9 @@ pub fn process_tasks(
             // worm.cpp:975-986 — throw the rope.
             worm.ninjarope.out = true;
             worm.ninjarope.attached = false;
-            // SoundNinjaropeThrow (worm.cpp:979) OMITTED: sound not hashed.
+            // worm.cpp:979 `Play(sound_hook[SoundNinjaropeThrow])` — Slice-4c
+            // one-shot (no rand; not hashed).
+            crate::sound::play_ninjarope_throw();
             worm.ninjarope.pos = worm.pos;
             // worm.cpp:982-983 — vel = cossin[Ftoi(aiming_angle)] << NRThrowVel{X,Y}.
             // `& 0x7f`: the walk-flip residue (`aiming_angle == Itof(128)`, see the
@@ -468,10 +470,21 @@ pub fn process_weapons(
     }
 
     // worm.cpp:829-835 — loading countdown. Now that the reload above can arm
-    // loading_left, this decrement is live; the SoundReloaded play at <= 0 is not
-    // simulated (not hashed).
+    // loading_left, this decrement is live.
     if ww.loading_left > 0 {
         ww.loading_left -= 1;
+        // worm.cpp:832-834 — on the tick loading_left reaches <= 0, iff the current
+        // weapon def sets `play_reload_sound`, Play(sound_hook[SoundReloaded]).
+        // Slice-4c one-shot (no rand; not hashed). `ww` borrows `worm.weapons`; the
+        // Weapon def comes from the disjoint `weapons` table via the slot's `ty`.
+        if ww.loading_left <= 0 {
+            let ty = ww
+                .ty
+                .expect("current weapon slot has no resolved type; InitWeapons always sets one");
+            if weapons[ty as usize].play_reload_sound {
+                crate::sound::play_reloaded();
+            }
+        }
     }
 
     // worm.cpp:837-839 — firecone countdown (non-hashed).

@@ -326,6 +326,34 @@ fn process_frame_increments_cycles_once_per_tick() {
 }
 
 #[test]
+fn process_frame_emits_and_drains_bump_one_shot_end_to_end() {
+    // End-to-end 4c wiring: a grounded worm carrying a hard DOWNWARD velocity
+    // bounces in worm_process_physics (step 9), which plays SoundBump
+    // (worm.cpp:188, HFallDamage off). Pins the whole path through the public
+    // driver: `begin_frame` publishes the hook index, the deep physics callsite
+    // emits, and the tail drain lands exactly this tick's event in `sound_events`.
+    let mut s = grounded_state();
+    s.sound_hooks.Bump = 3;
+    // Downward vel.y above MinBounceDown (53248) so the vertical branch bounces.
+    s.worms[0].vel.y = 200000;
+
+    s.process_frame(&[ControlState::new()]);
+    assert_eq!(
+        s.sound_events,
+        vec![sim::sound::SoundEvent::one_shot(3)],
+        "process_frame drains the SoundBump one-shot into sound_events"
+    );
+
+    // Cleared at the TOP of the next tick (design §2.2): an idle tick that plays
+    // nothing leaves the stream empty — events never accumulate across ticks.
+    s.process_frame(&[ControlState::new()]);
+    assert!(
+        s.sound_events.is_empty(),
+        "sound_events holds only the current tick's events"
+    );
+}
+
+#[test]
 fn empty_input_matches_slice2_reactions_then_physics() {
     // Equivalence guard: under empty input the full per-worm pass must leave
     // pos/vel/health identical to the Slice-2 path (worm_reactions then

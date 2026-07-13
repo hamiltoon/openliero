@@ -11,7 +11,7 @@
 use assets::level::LevelData;
 use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
-use assets::tc::Texture;
+use assets::tc::{SoundHooks, Texture};
 use sim_core::fixed::{ftoi, itof, Fixed};
 use sim_core::math::vector_length;
 use sim_core::rng::Rand;
@@ -29,6 +29,7 @@ use crate::nobject::{
 use crate::physics::{worm_process_physics, worm_reactions, PhysicsConsts};
 use crate::pool::{BloodPool, Pool};
 use crate::sobject::{sobject_process, SObjectOutcome};
+use crate::sound::{HookIndices, SoundEvent};
 use crate::weapon::{blow_up, wobject_process, worm_fire, WObjectOutcome};
 
 /// Number of weapon slots per worm. Mirrors C++ `NUM_WEAPONS` (`worm.hpp:13`).
@@ -1204,6 +1205,24 @@ pub struct SimState {
     /// C++ `LC(WormMinSpawnDistEnemy)` (`game.cpp:621-622`): the reject radius around
     /// the live enemy position in `CheckRespawnPosition`. Real TC value 160.
     pub worm_min_spawn_dist_enemy: i32,
+
+    /// The four resolved worm-hook sound indices (`common.sound_hook[SoundBump]`,
+    /// `[SoundReloaded]`, `[SoundAlive]`, `[SoundNinjaropeThrow]`) the hook-based
+    /// one-shot callsites (Slice-4c T1) play. Published to the per-tick
+    /// [`crate::sound`] context at the top of [`process_frame`](Self::process_frame)
+    /// so a deep callsite can play a hook without threading its index. **Not
+    /// hashed** (a sound-table input, like the object `start_sound`s); defaulted to
+    /// [`SoundHooks::default`] post-`new` (the difftest/game assign the real TC
+    /// values), so every prior golden stays byte-identical (sound never hashes).
+    pub sound_hooks: SoundHooks,
+    /// The per-tick **sound-event stream** (Slice-4c, `sound.rs`): the one-shot /
+    /// loop `Play`/`Stop` records the sim emits at its existing callsites, cleared
+    /// at the TOP of every [`process_frame`](Self::process_frame) and drained by
+    /// the `game` audio backend. **NEVER hashed** ([`crate::hash`] does not walk
+    /// this field — the isolation firewall, design §6.1); carries no `rand` and
+    /// feeds no sim math, so `hash_game_state` stays byte-identical whether it is
+    /// populated or empty. Headless/library callers simply ignore it.
+    pub sound_events: Vec<SoundEvent>,
 }
 
 impl SimState {
@@ -1364,6 +1383,13 @@ impl SimState {
             worm_spawn_rect_h: 0,
             worm_min_spawn_dist_last: 0,
             worm_min_spawn_dist_enemy: 0,
+            // Sound (Slice-4c): the worm-hook indices default to `SoundHooks::default`
+            // (all-zero) and the event stream starts empty. Both are unhashed
+            // side-channel state; the difftest/game assign the real `sound_hooks`
+            // after `new` (post-`new` pattern, like the blood consts). Every prior
+            // golden stays byte-identical (sound never enters the hash).
+            sound_hooks: SoundHooks::default(),
+            sound_events: Vec::new(),
         }
     }
 
@@ -1429,12 +1455,25 @@ impl SimState {
     ///     `key_change_pressed` + [`process_movement`] (walk writes `vel.x`
     ///     **after** physics, so it affects *next* tick's integration).
     pub fn process_frame(&mut self, inputs: &[ControlState]) {
+        // Slice-4c sound: open the tick BEFORE any sim work — clear this thread's
+        // per-frame event buffer and publish the resolved worm-hook indices so a
+        // deep `Play`/`Stop` callsite can emit without threading them. Mirrors the
+        // C++ inline `Play` model: there is no queue; events fire during the tick.
+        // The buffer is drained into `self.sound_events` at the BOTTOM of the tick.
+        crate::sound::begin_frame(HookIndices {
+            bump: self.sound_hooks.Bump,
+            reloaded: self.sound_hooks.Reloaded,
+            alive: self.sound_hooks.Alive,
+            ninjarope_throw: self.sound_hooks.NinjaropeThrow,
+        });
+
         // Disjoint field borrows: destructuring `&mut self` binds each field as a
         // separate `&mut` (default binding mode), so the object loops can hold
         // `&mut wobjects`/`&mut rand` + `&weapons` while the worm loop separately
         // holds a `&mut` into `worms` and the Fire gate borrows the *other* fields
         // — all provably disjoint, which is what makes this borrow-check.
         let SimState {
+            sound_events,
             level,
             physics,
             control,
@@ -2125,6 +2164,13 @@ impl SimState {
             // (Scales' redistribution lives in `do_damage`, not here). No-op.
             _ => {}
         }
+
+        // Slice-4c sound: close the tick — move this thread's collected one-shot /
+        // loop events into `self.sound_events`, leaving the buffer empty for the
+        // next tick. `sound_events` now holds exactly this tick's events (design
+        // §2.2); the `game` backend drains it, headless callers ignore it. This is
+        // the ONLY write to the field and touches no hashed state.
+        *sound_events = crate::sound::take_frame();
     }
 }
 
@@ -2580,7 +2626,9 @@ fn do_respawning(
 
         // :784-786 CorrectShadow — gated on settings->shadow (false) => OMITTED.
 
-        // :788 ready = false; :789 Play(SoundAlive) => sound-only, omitted.
+        // :788 ready = false; :789 `Play(sound_hook[SoundAlive])` — Slice-4c
+        // respawn one-shot (no rand; not hashed).
+        crate::sound::play_alive();
         worm.ready = false;
         // :791-793 revive.
         worm.visible = true;
@@ -2641,9 +2689,10 @@ fn worm_pre_death_drip(
             if rand.bound(3) == 0 {
                 // :358-359 sound index `18 + rand(3)`. The draw is kept (it
                 // advances the shared engine and is pinned outside the
-                // unpredictable IsPlaying branch); the Play side effect is
-                // sound-only and omitted from the sim.
-                let _snd = 18 + rand.bound(3);
+                // unpredictable IsPlaying branch). Slice-4c emits the one-shot at
+                // the ALREADY-computed index (no new rand; not hashed).
+                let snd = 18 + rand.bound(3) as i32;
+                crate::sound::one_shot(snd);
             }
             // :365 Create1 is UNCONDITIONAL within the outer gate (outside the
             // sound gate). Blood is nobject_types[6]; color 0, owner = index.
@@ -2704,8 +2753,10 @@ fn worm_death(
     // with no rand; omitted (loop_sound is not modelled).
 
     // :378 death-sound index `15 + rand(3)`. This is the ONLY draw before the
-    // sprays; the `Play` at :379 is a sound-only side effect the sim omits.
-    let _death_snd = 15 + rand.bound(3);
+    // sprays. Slice-4c emits the one-shot at the ALREADY-computed index (no new
+    // rand; not hashed); the loop_sound Stop at :373-376 is Slice-4c T2.
+    let death_snd = 15 + rand.bound(3) as i32;
+    crate::sound::one_shot(death_snd);
 
     // :381-382 firecone off, rope stowed.
     w.fire_cone = 0;
@@ -3760,6 +3811,44 @@ mod tests {
             "max_bonuses == 0 short-circuits: the bonus-drop roll draws NO rand"
         );
         assert_eq!(state.cycles, 1, "cycles still advances once per tick");
+    }
+
+    #[test]
+    fn sound_events_and_hooks_are_hash_inert() {
+        // Isolation firewall (design §6.1): the sound-event stream and the worm-hook
+        // indices are NEVER walked by the hash. Populating/clearing `sound_events`
+        // and mutating `sound_hooks` must leave BOTH the master hash and every
+        // component hash byte-identical — this is exactly what keeps every committed
+        // golden unchanged after 4c (sound is a pure side channel).
+        use crate::hash::{hash_components, hash_game_state};
+        use crate::sound::SoundEvent;
+
+        let mut state = idle_state(0x00C0FFEE);
+        state.process_frame(&[]);
+        let master = hash_game_state(&state);
+        let components = hash_components(&state);
+
+        state.sound_events.push(SoundEvent::one_shot(7));
+        state.sound_events.push(SoundEvent::one_shot(15));
+        state.sound_hooks.Bump = 123;
+        state.sound_hooks.Reloaded = 4;
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "sound_events / sound_hooks absent from the master hash"
+        );
+        assert_eq!(
+            hash_components(&state),
+            components,
+            "sound_events / sound_hooks absent from every component hash"
+        );
+
+        state.sound_events.clear();
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "clearing sound_events does not move the hash"
+        );
     }
 
     #[test]

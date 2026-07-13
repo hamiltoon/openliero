@@ -138,9 +138,12 @@ pub fn sobject_create(
     });
 
     // :23-25 sound — the FIRST observable rand. Consumed even though `Play` is a
-    // hashing no-op; the rand is the argument, evaluated before `Play`.
+    // hashing no-op; the rand is the argument, evaluated before `Play`. Slice-4c
+    // emits the one-shot at the ALREADY-computed index `start_sound + rand(num_sounds)`
+    // (sobject.cpp:24) — the draw is unchanged (no new rand); not hashed.
     if ty.start_sound >= 0 {
-        rand.bound(ty.num_sounds as u32);
+        let variant = rand.bound(ty.num_sounds as u32) as i32;
+        crate::sound::one_shot(ty.start_sound + variant);
     }
 
     // :27-33 viewport shake + :41 screen_flash: render-only, no rand — omitted.
@@ -562,6 +565,45 @@ mod tests {
             "one rand(num_sounds) consumed first; nothing else drew"
         );
         assert_eq!(nobjects.len(), 0, "no dirt (bg level) -> no debris");
+    }
+
+    #[test]
+    fn create_emits_variant_one_shot_at_already_drawn_index_no_extra_rand() {
+        // Slice-4c: sobject_create emits the one-shot at the ALREADY-computed index
+        // `start_sound + rand(num_sounds)` (sobject.cpp:24), REUSING the single
+        // pre-existing sound draw — no new rand. Pins the emitted index + proves
+        // draw-count parity.
+        let cossin = precompute_cossin();
+        let ty = small_explosion(-1); // start_sound = 0, num_sounds = 2
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+
+        // Reference: the ONE draw the sound consumes, and its value.
+        let mut refr = seeded();
+        let drawn = refr.bound(2) as i32;
+        let expected_sound = ty.start_sound + drawn;
+
+        crate::sound::reset_frame();
+        let draws_before = rand.draws();
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+        let events = crate::sound::take_frame();
+
+        assert_eq!(
+            events,
+            vec![crate::sound::SoundEvent::one_shot(expected_sound)],
+            "one variant one-shot at start_sound + rand(num_sounds)"
+        );
+        assert_eq!(
+            rand.draws() - draws_before,
+            1,
+            "emission reuses the single sound draw — zero new rand"
+        );
     }
 
     #[test]

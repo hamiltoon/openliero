@@ -151,10 +151,12 @@ fn main() {
         .run();
 }
 
-/// Read the CLI args (`cargo run -p game -- [--live] [<name>]`) into a
-/// `(Mode, name)` pair (spec §7, T2) — an optional leading `--live` flag
-/// selects `Mode::Live`, the remaining optional positional is the scenario
-/// name (default `blood`) — and validate the name names a committed
+/// Read the CLI args (`cargo run -p game -- [--live] [--record <path>]
+/// [--replay <path>] [<name>]`) into `(Mode, name)` + the 4b record/replay
+/// paths (spec §7, T2; 4b T1/T2) — `--live` selects `Mode::Live` (optionally
+/// with `--record`), `--replay` plays an arbitrary scenario file, the
+/// remaining optional positional is the scenario name (default `blood`) —
+/// and, except for `--replay`, validate the name names a committed
 /// `render_slice3b_<name>_scenario.txt` under `GOLDEN_DIR`. On an unknown name,
 /// print the available scenarios and exit non-zero — done here, before the Bevy
 /// app starts, so a typo never flashes a window. Every committed 3b scenario is

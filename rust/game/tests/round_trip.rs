@@ -182,11 +182,12 @@ fn record_replay_round_trip_is_bit_exact() {
     // Per-tick (worm0 keys held, worm1 keys held). Words below are `pack()` =
     // raw bitfield: UP=1, DOWN=2, LEFT=4, RIGHT=8, FIRE=16, CHANGE=32, JUMP=64.
     //
-    // Each worm holds Up (aim) for at least one tick before it Fires: firing an
-    // un-aimed worm (`aiming_angle == 0`) right after a walk direction-flip hits
-    // the deferred `cossin[128]` OOB (sim `weapon.rs:170-183`, JOHN-BESLUT #3) —
-    // an UNREACHABLE-in-normal-play edge, not a round-trip concern, so the stream
-    // simply aims-then-fires like a real player would.
+    // Each worm holds Up (aim) for at least one tick before it Fires. Historical
+    // note: this stream originally tripped the then-unguarded `cossin[128]` OOB
+    // (firing un-aimed right after a walk direction-flip) — that reachable edge
+    // was escalated out of this task's review and fixed by the H1 hardening
+    // (`&0x7f` index masks in worm_fire/ninjarope/dig, sim `weapon.rs`), so the
+    // aim-then-fire shape is kept as a realistic-player stream, not a workaround.
     let stream: Vec<(Vec<KeyCode>, Vec<KeyCode>)> = vec![
         // 0: w0 Up(1) aim;                 w1 idle(0)
         (vec![w0::UP], vec![]),

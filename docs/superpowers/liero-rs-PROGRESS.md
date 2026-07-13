@@ -31,8 +31,9 @@
 > table index `&0x7f` (the C++ side already builds the table with the same mask, `math.cpp:91` —
 > matching 3b's precedent for the same table), full sim golden suite stayed **green (313 sim
 > ticks)** — a neutral, state-unchanging fix. All 7 commits (`8bf17cc`/`d6feea7`/`1869a43`/
-> `04c3d2c`/`c7d53d1`/`4c73119`/`7936ce3`) reviewed **0 Critical / 0 Important** throughout (one
-> early NEEDS-FIX on T1 was fixed and re-reviewed clean; H1 was re-committed clean after an
+> `04c3d2c`/`c7d53d1`/`4c73119`/`7936ce3`) landed with **0 Critical / 0 Important** across all
+> reviews (per-task reviews for T0–T3/H1, T4 covered by the broad slice review; one early
+> NEEDS-FIX on T1 was fixed and re-reviewed clean; H1 was re-committed clean after an
 > initial messy diff). Deferred: flush-on-crash (by design — Esc/close only), windowed
 > `--replay`-hold not automation-tested, `.lrp` interop stays 4e. Branch `liero-rs-step-4`.
 > Prior: **STEP 4 — slice 4a SHIPPED: live input core.** 🎯 The game is

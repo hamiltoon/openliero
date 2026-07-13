@@ -7,4 +7,5 @@
 //! this thin library re-exports only the Bevy-free-testable input core. All
 //! binary logic (the Bevy app, the CPU blit, the tick/render loop) stays in
 //! `main.rs`, which uses this module via `game::input`.
+pub mod audio;
 pub mod input;

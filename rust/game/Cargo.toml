@@ -33,6 +33,17 @@ bevy = { version = "0.19", default-features = false, features = [
 # wasm target — hence this non-wasm target table (they'd break the wasm build).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bevy = { version = "0.19", default-features = false, features = ["x11", "wayland"] }
+# Audio backend (Slice 4c, T3), native-only — the wasm sink is T5. `Sink`/
+# `OutputStream`/`SamplesBuffer` are plain (non-optional) deps of `cpal` in
+# this rodio line, not feature-gated, so `default-features = false` alone
+# drops every format decoder (flac/vorbis/wav/mp3) we don't need: WAV bytes
+# are already decoded by `assets::wav` and handed to `SamplesBuffer<i16>`
+# directly (design §5). Pinned to 0.19 (not the newest 0.22) because 0.19 has
+# the classic `Sink`/`OutputStream` API the design is written against; 0.22
+# renamed these to `Player`/`DeviceSinkBuilder` — a real API, just a later
+# one the design predates. Contained behind the `AudioSink` seam, so a future
+# bump only touches this file.
+rodio = { version = "0.19", default-features = false }
 
 # --- Wasm-only backend (Slice 3f) -------------------------------------------------
 # WebGL2 is Bevy 0.19's default web backend (broadest browser reach; the CPU-blit

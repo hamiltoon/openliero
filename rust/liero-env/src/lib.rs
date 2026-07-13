@@ -11,6 +11,14 @@
 //! --workspace` runs; the `cdylib` (built by maturin with the `extension-module`
 //! feature) is the importable Python extension.
 
+pub mod action;
 pub mod env;
+pub mod obs;
+pub mod reward;
+#[cfg(test)]
+mod test_fixtures;
 
+pub use action::{decode as decode_action, encode as encode_action};
 pub use env::{LieroEnv, StepOutcome, N_WORMS};
+pub use obs::{observe, OBS_DIM};
+pub use reward::{reward, RewardConfig, WormSnapshot};

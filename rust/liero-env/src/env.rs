@@ -75,6 +75,10 @@ pub struct LieroEnv {
     /// wide_checksum.rs module doc). `[0; N]` at reset, matching the tick-0
     /// convention (`oracle-tests` `wide_checksum_tick0`).
     prev_istates: [u32; N_WORMS],
+    /// The checksum computed by the most recent `reset`/`step` call (T1 review
+    /// fix, see [`checksum`](Self::checksum)) — cached rather than recomputed so
+    /// the accessor always agrees with the last-returned `StepOutcome.checksum`.
+    last_checksum: u32,
 }
 
 impl LieroEnv {
@@ -96,6 +100,8 @@ impl LieroEnv {
             "the RL fixture must define exactly {N_WORMS} worms"
         );
         let loaded = load(&tc_root, &base);
+        let prev_istates = [0; N_WORMS];
+        let last_checksum = wide_rollback_checksum(&loaded.state, &prev_istates);
         LieroEnv {
             tc_root,
             base,
@@ -103,7 +109,8 @@ impl LieroEnv {
             tick: 0,
             max_ticks,
             frame_skip: frame_skip.max(1),
-            prev_istates: [0; N_WORMS],
+            prev_istates,
+            last_checksum,
         }
     }
 
@@ -126,7 +133,8 @@ impl LieroEnv {
         self.loaded = load(&self.tc_root, &scenario);
         self.tick = 0;
         self.prev_istates = [0; N_WORMS];
-        wide_rollback_checksum(&self.loaded.state, &self.prev_istates)
+        self.last_checksum = wide_rollback_checksum(&self.loaded.state, &self.prev_istates);
+        self.last_checksum
     }
 
     /// Advance the episode by one env step: apply `actions[i]` to worm `i` for
@@ -141,6 +149,7 @@ impl LieroEnv {
         }
         let checksum = wide_rollback_checksum(&self.loaded.state, &self.prev_istates);
         self.prev_istates = words;
+        self.last_checksum = checksum;
 
         let round_over = self.loaded.state.worms.iter().any(worm_out_of_lives);
         StepOutcome {
@@ -155,9 +164,20 @@ impl LieroEnv {
         self.tick
     }
 
-    /// The current post-step [`wide_rollback_checksum`] fingerprint.
+    /// The current [`wide_rollback_checksum`] fingerprint. Returns the **cached**
+    /// value set by the last `reset`/`step` call (T1 review fix): recomputing it
+    /// here from `self.prev_istates` would be wrong, because `step` overwrites
+    /// `prev_istates` with the just-applied action word AFTER folding the
+    /// checksum against the *prior* baseline — so a fresh
+    /// `wide_rollback_checksum(&self.loaded.state, &self.prev_istates)` call at
+    /// this point uses a different (post-update) baseline than the one
+    /// `StepOutcome.checksum` was computed with, and disagrees with it whenever
+    /// the two baselines differ (any non-zero action). Caching sidesteps the
+    /// baseline mismatch entirely: `checksum()` always agrees with the
+    /// most-recently-returned `StepOutcome.checksum` / `reset` value by
+    /// construction.
     pub fn checksum(&self) -> u32 {
-        wide_rollback_checksum(&self.loaded.state, &self.prev_istates)
+        self.last_checksum
     }
 
     /// Borrow the live simulation state (obs extraction, T2, reads this).
@@ -165,8 +185,11 @@ impl LieroEnv {
         &self.loaded.state
     }
 
-    /// Mutably borrow the live simulation state. Used by tests to inject a scripted
-    /// lethal hit; obs/reward paths (T2) read through the shared [`state`](Self::state).
+    /// Mutably borrow the live simulation state. Test-only (T1 review fix): this
+    /// must never reach the Python binding — obs/reward extraction (T2) reads
+    /// through the immutable [`state`](Self::state) accessor, which is all they
+    /// need. `#[cfg(test)]` makes a non-test caller a compile error.
+    #[cfg(test)]
     pub fn state_mut(&mut self) -> &mut SimState {
         &mut self.loaded.state
     }
@@ -292,5 +315,41 @@ mod tests {
             "round over => both agents terminate together (design §5)"
         );
         assert!(!out.truncated, "terminated, not truncated");
+    }
+
+    /// T1-review RED test: `checksum()` must agree with the checksum on the
+    /// `StepOutcome` the immediately preceding `step` call returned. Before the
+    /// fix, `checksum()` recomputes `wide_rollback_checksum` against
+    /// `self.prev_istates`, but `step` has already overwritten that field with
+    /// the just-applied action word (the POST-update baseline) by the time
+    /// `checksum()` runs — a different baseline than the one `StepOutcome.checksum`
+    /// was folded against, so the two disagree whenever the applied action is
+    /// non-zero (`0 != 0` never differs, so an all-noop action would pass
+    /// vacuously; this test uses non-zero actions to actually exercise the bug).
+    #[test]
+    fn checksum_accessor_matches_last_step_outcome() {
+        let mut env = LieroEnv::new(1000, 1);
+        env.reset(99);
+        let mut cs0 = ControlState::new();
+        cs0.press(ControlState::RIGHT);
+        let mut cs1 = ControlState::new();
+        cs1.press(ControlState::LEFT);
+        let out = env.step(&[cs0, cs1]);
+        assert_eq!(
+            env.checksum(),
+            out.checksum,
+            "checksum() must match the just-returned StepOutcome.checksum"
+        );
+    }
+
+    /// T1-review RED test companion: `checksum()` must also agree with the
+    /// checksum `reset` itself returns (the baseline case, already true before
+    /// the fix — kept as a regression guard once `checksum()` switches to a
+    /// cached value).
+    #[test]
+    fn checksum_accessor_matches_reset_checksum() {
+        let mut env = LieroEnv::new(1000, 1);
+        let reset_checksum = env.reset(99);
+        assert_eq!(env.checksum(), reset_checksum);
     }
 }

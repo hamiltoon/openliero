@@ -1,0 +1,19 @@
+[package]
+name = "replay"
+version = "0.1.0"
+edition = "2021"
+
+# Bevy-free, read-only reader for the FOREIGN `.lrp` replay format (overview
+# §Open Q6 — "two formats by design"). Phase 1 reads the container + per-worm
+# XOR-delta input stream + the embedded `WideRollbackChecksum` words, skipping
+# the length-prefixed cereal `Game`/settings blobs whole. Its only dependency is
+# `flate2` (pure-Rust `miniz_oxide` backend, already in the workspace lock via
+# `png`) for the whole-stream zlib inflate — no `sim`/`bevy`, so `cargo tree -p
+# replay` stays minimal and wasm-safe.
+[dependencies]
+flate2 = "1"
+
+# The corpus test reconstructs the scenario the C++ `lrp_gen` tool recorded so it
+# can diff the decoded per-tick inputs against the scenario grammar (the facit).
+[dev-dependencies]
+scenario = { path = "../scenario" }

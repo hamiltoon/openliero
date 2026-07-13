@@ -1,4 +1,4 @@
-# Maturin build backend for the `liero_env` PyO3 extension (plan T3, design §6).
+# Maturin build backend for the `liero_env` PyO3 extension (plan T3/T4, design §6).
 #
 # `maturin develop` (editable) / `maturin build` (wheel) compile the `liero-env`
 # crate's cdylib with the `extension-module` cargo feature ON (see [tool.maturin]
@@ -7,6 +7,13 @@
 # builds the same crate with the feature OFF and links libpython, so the rlib unit
 # tests still run in the workspace — that is why `extension-module` is an
 # off-by-default feature that only maturin enables.
+#
+# Mixed Rust/Python layout (T4): the pure-Python package lives under
+# `python/liero_env/` (`python-source = "python"`), and the compiled extension is
+# built as the PRIVATE submodule `liero_env._liero_env` (`module-name` below). This
+# resolves the name clash between the compiled module and the user-facing package:
+# `python/liero_env/__init__.py` re-exports `RawEnv` from `._liero_env` and adds
+# the PettingZoo `ParallelEnv` + Gymnasium frozen-opponent wrapper (design §6).
 [build-system]
 requires = ["maturin>=1.14,<2.0"]
 build-backend = "maturin"
@@ -14,12 +21,16 @@ build-backend = "maturin"
 [project]
 name = "liero_env"
 version = "0.1.0"
-description = "Liero-rs RL harness — raw PyO3 env surface (RawEnv) over the Bevy-free sim."
+description = "Liero-rs RL harness — PettingZoo ParallelEnv + Gymnasium wrapper over the Bevy-free sim."
 requires-python = ">=3.9"
-# The obs bridge returns numpy `float32` arrays; the exact pin lives in
-# constraints.txt (numpy==2.5.1), this is the compatible floor.
-dependencies = ["numpy>=1.24"]
+# The obs bridge returns numpy `float32` arrays; PettingZoo / Gymnasium are the T4
+# ecosystem glue. Exact pins live in constraints.txt (numpy==2.5.1,
+# pettingzoo==1.26.1, gymnasium==1.3.0); these are the compatible floors.
+dependencies = ["numpy>=1.24", "pettingzoo>=1.26", "gymnasium>=1.0"]
 
 [tool.maturin]
 # Turn the off-by-default cargo feature ON for the importable extension (T0 §3).
 features = ["extension-module"]
+# Mixed layout (T4): pure-Python package root + compiled ext as a private submodule.
+python-source = "python"
+module-name = "liero_env._liero_env"

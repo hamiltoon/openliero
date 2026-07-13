@@ -207,12 +207,16 @@ impl RawEnv {
     }
 }
 
-/// The importable extension module `liero_env` (maturin builds it with the
-/// `extension-module` feature on; the module name must match the library name).
+/// The importable extension module `liero_env._liero_env` (maturin builds it
+/// with the `extension-module` feature on; `module-name` in `pyproject.toml` is
+/// `liero_env._liero_env`, so the init symbol name — this fn — must be
+/// `_liero_env`). It is a **private** submodule: the user-facing `liero_env`
+/// package (`python/liero_env/__init__.py`, T4) re-exports [`RawEnv`] and the
+/// layout constants from here and adds the PettingZoo / Gymnasium glue on top.
 /// Exposes [`RawEnv`] plus the layout constants Python needs to size spaces
 /// (`OBS_DIM`, `N_ACTION_BITS`, `N_WORMS`).
 #[pymodule]
-fn liero_env(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _liero_env(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RawEnv>()?;
     m.add("OBS_DIM", OBS_DIM)?;
     m.add("N_ACTION_BITS", N_ACTION_BITS)?;

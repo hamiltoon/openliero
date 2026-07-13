@@ -43,6 +43,16 @@ fn mix32(h: u32, v: u32) -> u32 {
 /// reader-tracked `prev_control_states.istate` (the XOR baseline); missing
 /// entries fold as `0`.
 pub fn wide_rollback_checksum(state: &SimState, prev_istates: &[u32]) -> u32 {
+    // Release semantics stay as-is (`prev_istates.get(i)…unwrap_or(0)` below),
+    // but a length mismatch means some worm's baseline is silently masked to 0.
+    // Catch that caller bug in test/debug without changing release behaviour.
+    debug_assert_eq!(
+        prev_istates.len(),
+        state.worms.len(),
+        "wide_rollback_checksum expects one XOR baseline per worm \
+         (prev_istates.len() == worms.len()); a shorter slice masks per-worm \
+         istate via unwrap_or(0)"
+    );
     let mut h: u32 = state.rand.last(); // seed (replay.cpp:181)
     h = mix32(h, state.cycles as u32);
 
@@ -500,5 +510,19 @@ mod tests {
         let a = wide_rollback_checksum(&state, &[0x00]);
         let b = wide_rollback_checksum(&state, &[0x7f]);
         assert_ne!(a, b, "prev_control_states.istate is folded per worm");
+    }
+
+    /// A caller that passes a `prev_istates` slice shorter than the worm count
+    /// would have its per-worm baseline silently masked to `0` by the
+    /// `unwrap_or(0)` default. Release semantics are unchanged (T1 keeps the
+    /// tick-0 `unwrap_or(0)` sound), but a `debug_assert` turns that latent
+    /// caller bug into a hard failure under test/debug.
+    #[test]
+    #[should_panic(expected = "one XOR baseline per worm")]
+    fn wide_checksum_debug_asserts_prev_len_matches_worms() {
+        let mut state = empty_state(0, 0, 1);
+        state.worms = vec![worm_fixture()];
+        // One worm, zero baselines -> length mismatch.
+        let _ = wide_rollback_checksum(&state, &[]);
     }
 }

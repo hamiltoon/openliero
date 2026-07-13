@@ -525,4 +525,155 @@ mod tests {
             Some(&(0xC0DE_0000 + CHECKSUM_PERIOD as u32))
         );
     }
+
+    // --- hostile-input hardening (T4) --------------------------------------
+    //
+    // The reader will take arbitrary files from a future CLI, so every
+    // malformed stream must yield a clean `Err` — never a panic, an over-read,
+    // or an allocation blow-up. The forward-only checked `Cursor` (`u8`/`u32_be`
+    // bounds-check via `get`; `skip` uses `checked_add` + a `len()` bound)
+    // already guarantees this structurally; these tests pin each hostile path,
+    // covering the gaps the generated corpus and T2's happy-path fixtures leave.
+    // Every field/frame read short-circuits to `UnexpectedEof`, mirroring the
+    // C++ `MemReader` throwing `EndOfStream` past its buffer (stream.hpp:177).
+
+    /// A header (magic + version) with no initial-`Game` length prefix at all.
+    fn header_only(version: u8) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&be(REPLAY_MAGIC));
+        v.push(version);
+        v.extend_from_slice(&be(0)); // empty Game blob
+        v
+    }
+
+    #[test]
+    fn truncated_mid_checksum_word_errors() {
+        // Frame 0 (cycle 0) demands a trailing 4-byte checksum word; supply only
+        // two of its bytes -> the `u32_be` read must fail, not over-read.
+        let mut data = header_only(9);
+        data.extend_from_slice(&[2, 2]); // frame 0
+        data.extend_from_slice(&[0xDE, 0xAD]); // only 2 of 4 checksum bytes
+        assert_eq!(
+            Replay::parse_inflated(&data, 2),
+            Err(ReplayError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn truncated_cereal_length_prefix_errors() {
+        // Magic + version, then only two bytes of the initial `Game`'s uint32
+        // length prefix -> the length read itself must fail cleanly.
+        let mut data = Vec::new();
+        data.extend_from_slice(&be(REPLAY_MAGIC));
+        data.push(9);
+        data.extend_from_slice(&[0x00, 0x10]); // partial u32 length prefix
+        assert_eq!(
+            Replay::parse_inflated(&data, 2),
+            Err(ReplayError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn giant_cereal_length_prefix_errors_without_oom() {
+        // A hostile `Game` length of 0xFFFF_FFFF (~4 GiB) must NOT allocate or
+        // over-read: `skip` bounds-checks against the remaining bytes (its
+        // `checked_add` also guards the usize overflow on 32-bit wasm), so this
+        // resolves to a plain EOF error in O(1) with no allocation.
+        let mut data = Vec::new();
+        data.extend_from_slice(&be(REPLAY_MAGIC));
+        data.push(9);
+        data.extend_from_slice(&be(u32::MAX)); // absurd Game blob length
+        assert_eq!(
+            Replay::parse_inflated(&data, 2),
+            Err(ReplayError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn giant_settings_length_prefix_errors_without_oom() {
+        // The same guard on a mid-stream `0x81` settings blob length.
+        let mut body = Vec::new();
+        body.push(TAG_SETTINGS);
+        body.extend_from_slice(&be(u32::MAX));
+        // `stream()` appends 0x83, but the skip fails long before we reach it.
+        assert_eq!(
+            Replay::parse_inflated(&stream(9, &body), 2),
+            Err(ReplayError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn truncated_input_frame_errors() {
+        // Two worms, but the frame carries only worm 0's delta byte; worm 1's
+        // byte is missing -> the per-worm read must fail, not read past the end.
+        let mut data = header_only(9);
+        data.push(2); // worm 0 delta only; worm 1 byte absent
+        assert_eq!(
+            Replay::parse_inflated(&data, 2),
+            Err(ReplayError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn truncated_worm_settings_header_errors() {
+        // `0x82` promises [u32 worm_idx][u32 len][blob]; give only two bytes of
+        // the worm index.
+        let mut data = header_only(9);
+        data.push(TAG_WORM_SETTINGS);
+        data.extend_from_slice(&[0x00, 0x01]); // partial worm_idx u32
+        assert_eq!(
+            Replay::parse_inflated(&data, 2),
+            Err(ReplayError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn unterminated_stream_errors() {
+        // A frame + its cycle-0 checksum but no `0x83` end tag: the next inner
+        // `u8` read hits EOF and must error (mirroring the C++ `MemReader`
+        // throwing past its buffer) rather than loop forever.
+        let mut data = header_only(9);
+        data.extend_from_slice(&[1, 1]); // frame 0
+        data.extend_from_slice(&be(CYCLE0)); // cycle-0 checksum
+                                             // (no TAG_END)
+        assert_eq!(
+            Replay::parse_inflated(&data, 2),
+            Err(ReplayError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn trailing_bytes_after_end_are_ignored() {
+        // C++ stops reading at `0x83` (PlaybackFrame returns false,
+        // replay.cpp:290); anything after the end tag — including a second
+        // `0x83` — is never read.
+        let mut data = header_only(9);
+        data.extend_from_slice(&[5, 6]); // frame 0
+        data.extend_from_slice(&be(CYCLE0)); // cycle-0 checksum
+        data.push(TAG_END); // end of stream
+        data.extend_from_slice(&[TAG_END, 0xFF, 0x00]); // ignored trailing bytes
+        let replay = Replay::parse_inflated(&data, 2).unwrap();
+        assert_eq!(replay.ticks(), 1);
+        assert_eq!(replay.frames[0].inputs, vec![5, 6]);
+    }
+
+    #[test]
+    fn zero_worms_terminates_cleanly() {
+        // A degenerate caller worm count: the reader must still terminate on the
+        // end tag with zero frames rather than panic or underflow.
+        let replay = Replay::parse_inflated(&stream(9, &[]), 0).unwrap();
+        assert_eq!(replay.ticks(), 0);
+        assert_eq!(replay.num_worms, 0);
+    }
+
+    #[test]
+    fn non_zlib_data_is_inflate_error_not_panic() {
+        // The compressed entry point on hostile bytes: a non-deflate buffer must
+        // surface as `ReplayError::Inflate`, never a panic.
+        let junk = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        match Replay::parse(&junk, 2) {
+            Err(ReplayError::Inflate(_)) => {}
+            other => panic!("expected Inflate error, got {other:?}"),
+        }
+    }
 }

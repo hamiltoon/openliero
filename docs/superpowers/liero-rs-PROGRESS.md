@@ -8,7 +8,37 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-13 · **STEP 4 — slice 4d SHIPPED: LIVE VIEWPORT.** 🎯 **flash,
+> **Last updated:** 2026-07-13 · **STEP 4 — slice 4e phase 1 SHIPPED: `.lrp` REPLAY READER.**
+> 🎯 **Liero-rs LÄSER RIKTIGA `.lrp`-REPLAYS byte-troget** — en genuin C++-producerad replay
+> driver Rust-simmen och reproducerar C++-facit **bit-exakt över 1120 ticks**, inklusive
+> `WideRollbackChecksum`-ordet vid cycle 1050 (`0xf6211087`), och `Prior:`-kedjan nedan förblir
+> byte-identisk. **Fas-gräns-upptäckten:** `.lrp`-containerns per-worm-blobbar (cereal
+> `Game`-grafen) är **längd-prefixade**, så fas 1 kan skippa hela cereal-grafen rakt av —
+> initialtillståndet kommer istället från befintliga `scenario::load` — och
+> **`WideRollbackChecksum` är en HÅRDARE gate än `HashGameState`**, eftersom den foldar hela
+> rollback-inventariet (21 worm-fält + pooler + materialbuffert + `prev_control_states` +
+> terräng), inte bara tickens synliga tillstånd. **T0** byggde `lrp_gen`, en C++
+> headless-replay-writer (setup verbatim från befintliga dumpern) plus en tvåfixtur-korpus
+> (320t + 1120t, checksum-ord vid cycle 0 och 1050) och bevisade tick-0-alignment. **T1** porterade
+> själva `WideRollbackChecksum`-porten (Mix32 exakt, alla 21 worm-fält + pooler + materialbuffert,
+> `prev_istates` caller-supplied) — cycle-0-facit (`0x031057d7`) matchade **första körningen**.
+> **T2** byggde den Bevy-fria `rust/replay`-craten (flate2): BE-container, cereal-blob-**skip** via
+> dess längdprefix, taggar `0x80`–`0x83`, XOR-delta-avkodning, checksum-extraktion — verifierad mot
+> alla 1120×2 input-ord via scenario-grammatiken (en XOR-baslinje-caveat — muterande fixtures —
+> dokumenterad, routad till fas 2). **T3 MILSTOLPE:** fas-1-gaten gick **GRÖN FÖRSTA KÖRNINGEN** —
+> 1120 ticks uppspelade bit-exakt inkl. cycle-1050-checksumordet, backad av en per-tick-tripwire mot
+> en ny sidecar plus ett negativtest (muterat ord). **T4** härdade läsaren mot fientlig indata
+> (10 tester — ingen panik på skräp, `O(1)` `Err` på ett jätte-längdprefix etc.) plus
+> `debug_assert`, och bokförde formellt fas 2 (spec §8: cereal-grafen / ett version-<7-lyft
+> [**adjudikerat: avvisas för fas 1** — den enda version-<7-skillnaden inuti cereal-blobben är
+> palett-only] / `decode_with_baseline` / framehash-diffen). **Scope-notering:** fas 1:s orakel är
+> `WideRollbackChecksum`-tidsserien, inte den C++-`framehash`-diff det ursprungliga done-when-läget
+> förutsåg — se overview-dokumentets uppdaterade done-when §5 nedan. Alla 6 commits (`fb9b9b7` plan /
+> `d0cca91` T0 / `0a08d54` T1 / `b5fb884` T2 / `cd711fc` T3 / `b8bd8cb` T4) granskade **READY på 0
+> Critical / 0 Important** genomgående. Deferred: fas 2 i sin helhet (cereal `Game`-grafens
+> deserialisering, möjligen egen slice/post-step-punkt per overview-dokumentets Open Q1-scope-gate).
+> Branch `liero-rs-step-4`.
+> Prior: **STEP 4 — slice 4d SHIPPED: LIVE VIEWPORT.** 🎯 **flash,
 > shake, camera and death banners now evolve from real explosions and a real spawn/death** —
 > not injected directives — and match a new C++ `render_live` golden **bit-exact over 321
 > ticks**. The **T0 headline correction**: C++ `HashGameState` never folds `screen_flash`
@@ -271,7 +301,7 @@ the LAST slice of step 2.
 
 ---
 
-## 🔁 Rewrite track — faithful port (~78%)
+## 🔁 Rewrite track — faithful port (~79%)
 
 Strangler-style: the C++ engine is the oracle, every piece differential-tested
 bit-for-bit before moving on. Steps 0–2 merged (the deterministic sim core — the
@@ -282,17 +312,19 @@ code), **3d** the headless screenshot CLI + run-skill, **3e** the HUD/font/bars/
 minimap overlay (the full player view pixel-exact), and **3f** the wasm bring-up —
 the same CPU frame now renders in the **browser** (WebGL2), automated-proven in
 headless Chrome. Step 4 (input/replay/audio) is in progress — slices 4a (live input),
-4b (record→replay round-trip, the Step 5 precondition), 4c (audio, native + wasm), and
-4d (live viewport — flash/shake/camera/banners) are shipped; step 5 (netplay) is not started.
+4b (record→replay round-trip, the Step 5 precondition), 4c (audio, native + wasm),
+4d (live viewport — flash/shake/camera/banners), and 4e phase 1 (`.lrp` replay reader —
+container + delta stream + `WideRollbackChecksum`, bit-exact over 1120 ticks) are shipped;
+4e phase 2 (cereal `Game` graph) is a bounded follow-on; step 5 (netplay) is not started.
 
 ```
-REWRITE (steg 0–5)                                          ~78%
+REWRITE (steg 0–5)                                          ~79%
 ├─ ✅ Step 0  sim-core primitives (RNG/fixed/vec/math/tables)   DONE — merged (PR #1)
 ├─ ✅ Step 1  asset IO, slices 1a–1e (level/palette/sprites/    DONE — merged (PR #2)
 │             tc.cfg/objects/WAV)
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
 ├─ ✅ Step 3  Bevy rendering / window (reproduce the SDL3 view) DONE — 3a–3f shipped (PR #4)
-├─ 🟡 Step 4  input + replay (.lrp) + audio                     IN PROGRESS — 4a+4b+4c+4d shipped, 4e–4g remain  ◀── YOU ARE HERE
+├─ 🟡 Step 4  input + replay (.lrp) + audio                     IN PROGRESS — 4a+4b+4c+4d+4e-phase1 shipped, 4e-phase2+4f+4g remain  ◀── YOU ARE HERE
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
 
@@ -337,7 +369,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~78%** (steps 0–3 done; step 4 input/replay slices 4a+4b+4c+4d shipped, 4e–4g + step 5 netplay remain) |
+| Rewrite track (steps 0–5) | **~79%** (steps 0–3 done; step 4 input/replay slices 4a+4b+4c+4d+4e-phase1 shipped, 4e-phase2+4f+4g + step 5 netplay remain) |
 | Step 3 (rendering) | **✅ COMPLETE** (slices 3a + 3b + 3c + 3d + 3e + 3f all shipped; PR #4 ready to merge) |
 | Slice 3f (wasm bring-up) | **✅ MILESTONE GREEN** (🎉 the **browser milestone**: the same CPU frame renders in the browser via **WebGL2**, **automated-proven** — a headless-Chrome controller ran the debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) and the screenshot shows the **blood** demo's split-screen world (sky/terrain/worms/blood), the console **PANIC-FREE**, and the determinism guard (per-tick `state_hash` **+** a wasm-only `frame_hash`) stayed **GREEN in the browser** = the wasm-parity witness. Built: a **`scenario::assets::read_asset` seam** (native = verbatim `std::fs::read` — all goldens green = no-op proof; wasm = embed) + `include_dir` (wasm-only dep) embedding sprites/weapons/nobjects/sobjects + `include_bytes!` tc.cfg + the demo level `render_stage.lev` — a **curated 276 KB total** (sounds/ and big levels excluded); a **target-scoped feature split** (base 6 draw-features; `x11`/`wayland` native-only; `webgl2` wasm-only — union verified per target via `cargo tree`) making `cargo build -p game --target wasm32-unknown-unknown` **GREEN first try**; an entry-fork (`const DEFAULT="blood"`, `include_str!` scenario+sidecar, **no** `env::args`/`read_dir`/`fs` on wasm; `canvas=None` auto-append verified against the `bevy_window` source; determinism guard hardened with a per-tick wasm-only `frame_hash`); a `.cargo/config.toml` (target-scoped `wasm-server-runner`) + `web/index.html` dev-loop (127.0.0.1:1334, 200 html+wasm) + a static `wasm-bindgen` **0.2.126** (lock-matched) bundle (game.js 97 KB + game_bg.wasm 52.9 MB release); a new **`game-wasm` CI job** (build-only, no browser/apt, own job independent of the determinism gate, mirrors `sim-core`'s no-cache posture). Fynd: cargo reads `.cargo/config.toml` from **CWD**, not `--manifest-path` — the wasm dev-loop runs from `rust/`) |
 | Slice 3e (HUD / font / bars / minimap) | **✅ MILESTONE GREEN** (🎯 the **full player view is PIXEL-EXACT** vs C++ — the in-game overlay ported verbatim + difftest green first run: new **`render::font::Font`** (font.tga loader `common.cpp:414-433`, width-detect + 0/50→0/8 remap) draws HUD labels (`font.cpp:8-80` verbatim — double `c>=2 && c<252` guard, CLIP_IMAGE inlined, newline on cp 0; ASCII-decode **identity for `cp<0x80`**, bevis-tested as the exact reach of the label corpus); **`blit::draw_bar`** (`blit.cpp:105-113`, unclipped + `width>0` anti-clamp witness); **`render::hud::draw_hud`** (`viewport.cpp:84-153` verbatim — two-arm life bar (`health*100/settings_health`, `100-(killed_timer*25)/37` clamped), two-arm ammo/loading bar, blinking **Reloading** (`(cycles%20)>10 && visible`, y=`164*multiplier` **absolute** — a plan-deviation caught vs C++), kills-always / lives-on-KillEmAll+Scales, `w/10+234` / `w/10+245` / 50 / 10 / 6 colour columns); **`draw_minimap`+`draw_miniature`** (`viewport.cpp:593-613` + `level.cpp:489-507` — the two *different* `step` ceil vs `bounds` round idioms preserved, worm-dots `ftoi(pos)/step` colour `129+worm.index*4`, clip-gated, `AppearanceAt` inlined). `Scene`/`frame::draw` composites per viewport (**HUD full-clip → world world-clip → minimap**, verbatim double-draw); C++ dumper gained opt-in **`render_hud`** mirroring `frame::draw`, **RE-DIFF gate empty** (3a/blood/shake/sim_slice2 byte-identical). 3 scenarios + goldens — **hud** 41t / **reload** 71t / **death** 141t — difftests **GREEN**: hud + death first run (per-tick + total + triple-isolation + suppression + non-vacuity); reload first **blocked** (T7 RIFLE = `ST_LASER` tripped the deferred laser do-loop), re-cut to **GRENADE** (`ST_NORMAL`, inert hit-arm, no in-window explosion) → GREEN (71 rows + total, settled 50/51 witness). Find: tick 0 is fade-to-black ⇒ the HUD witness reads tick 1. Holdazone/GameOfTag/replay HUD-arms tripwired. Milestone review: **0 Critical / 0 Important**; minors on the deferral track: DRY the inlined `clip_image`, a `size>1`-advance font test, minimap dot-index discrimination, reload's own suppression control (deliberately omitted)) |
@@ -563,9 +595,28 @@ map: `specs/2026-07-12-liero-rs-step4-cpp-input-replay-map.md`.
 │         SetCenter + debug_assert guard stand); YoureIt/GameOfTag banner arm (comment, not a
 │         hard tripwire); minor — the harness hand-copy is a theoretical frame-level blind
 │         spot, mitigated (not eliminated) by double-anchoring
-├─ ⬜ 4e  .lrp byte-faithful reader vs C++ framehash — SPLIT: container + XOR-delta stream +
-│         WideRollbackChecksum first (vs Rust-produced initial state), cereal Game graph as a
-│         bounded follow-on; corpus GENERATED from C++ (none exist in-repo)
+├─ ✅ 4e  .lrp byte-faithful reader — phase 1 SHIPPED (container + XOR-delta stream +
+│         WideRollbackChecksum); phase 2 (cereal Game graph) is a bounded follow-on
+│         🎯 MILESTONE: a real C++-produced .lrp drives the Rust sim bit-exact over 1120 ticks,
+│         incl. the WideRollbackChecksum word at cycle 1050 (0xf6211087). Phase-boundary finding:
+│         cereal blobs are length-prefixed, so phase 1 skips the whole cereal Game graph outright
+│         — initial state comes from scenario::load instead — and WideRollbackChecksum is a
+│         HARDER gate than HashGameState (folds the whole rollback inventory incl.
+│         prev_control_states + terrain, not just the tick's visible state). T0: lrp_gen (C++
+│         headless replay-writer, setup verbatim from the dumper) + 320t/1120t corpus,
+│         tick-0-alignment proven. T1: the WideRollbackChecksum port (Mix32 exact, 21 worm fields
+│         + pools + material buffer, prev_istates caller-supplied), cycle-0 facit matched first
+│         run. T2: Bevy-free rust/replay crate (flate2) — BE container, cereal-skip, tags
+│         0x80-0x83, XOR-delta decode, checksum extraction, verified against all 1120x2 input
+│         words via the scenario grammar (XOR-baseline caveat routed to phase 2). T3 MILESTONE:
+│         phase-1 gate GREEN first run — 1120 ticks bit-exact incl. the cycle-1050 word, per-tick
+│         tripwire + negative test. T4: hostile-input hardening (10 tests, no panic on garbage,
+│         O(1) Err on a huge length-prefix) + debug_asserts + phase-2 bookkeeping (spec §8: cereal
+│         graph / version<7 lift [adjudicated: rejected for phase 1 — palette-only inside the
+│         cereal blob] / decode_with_baseline / framehash diff). 6 commits (fb9b9b7 plan/
+│         d0cca91 T0/0a08d54 T1/b5fb884 T2/cd711fc T3/b8bd8cb T4), 0 Critical/0 Important
+│         throughout. Deferred: phase 2 in full (cereal Game graph — possibly its own post-step
+│         item, spec Open Q1)
 ├─ ⬜ 4f  minimal start flow — new match with defaults + respawn + quit/restart (no menu tree)
 └─ ⬜ 4g  run/verify-skill extension + CI replay-checksum regression (woven in per gate)
 ```

@@ -40,8 +40,15 @@ replays byte-faithfully — all without perturbing the determinism firewall.
 3. **Audio** plays from sim events (fire/explosion/bump/reload/…) with the Step 2/3 `HashGameState`
    **provably unchanged** (isolation), native and wasm.
 4. **Live shake/flash/banners** render in a real match (the `ProcessViewports` port Step 3 deferred).
-5. A **real `.lrp` reads byte-faithfully** and its playback frame-hash time series matches C++
-   `framehash` over a committed `.lrp` corpus (the C++-interop gate) — *scope-gated, see §Open Q1*.
+5. A **real `.lrp` reads byte-faithfully** — **phase-1 semantics (LANDED 2026-07-13):** proven by
+   matching the C++ **`WideRollbackChecksum`** time series bit-exact over a committed `.lrp`
+   corpus (the phase-1 C++-interop gate; a *harder* gate than `HashGameState` — it folds the whole
+   rollback inventory, not just the tick's visible state). The `WideRollbackChecksum` diff
+   **replaces** the framehash diff as the phase-1 proof, because phase 1 skips the cereal `Game`
+   graph entirely (length-prefixed blobs let the reader skip them) and instead seeds the initial
+   state from `scenario::load`. The original literal reading of this line — a C++ **`framehash`**
+   diff driven by the full cereal-deserialized initial state — is **phase 2**, a bounded follow-on
+   (possibly its own post-step item) — *scope-gated, see §Open Q1*.
 6. The in-repo **run-skill** drives the replay loop and CI runs the **replay-checksum regression**
    (iter §6).
 
@@ -250,14 +257,36 @@ the largest surface and depends on nothing the earlier slices produce.
   whichever later slice needs GameOfTag presentation); a spec-flagged minor — the harness hand-copy
   is a theoretical frame-level blind spot, mitigated (not eliminated) by double-anchoring.
 
-- **4e — `.lrp` byte-faithful reader (the C++-interop gate).** Read a real `.lrp`: `LRPF` magic +
-  version byte, deflate inflate-to-memory, the cereal `Game` initial state, the per-worm XOR-delta
-  stream + tags, the every-1050-frame `WideRollbackChecksum` verify, version-legacy branches
-  (input-map §3, §5). Drive the sim; diff the frame-hash time series vs C++ `framehash` over the
-  generated corpus (§Open Q2). **Proves:** the rewrite can consume authentic Liero replays.
-  **Oracle/gate:** hard diff vs C++ `framehash`. **Risks:** ⚠ **the cereal `Game` graph is the
-  large surface** — scope-gate this (§Open Q1); the `WideRollbackChecksum` is a *second* hash to
-  port (input-map §5).
+- **4e — `.lrp` byte-faithful reader (the C++-interop gate). Phase 1 LANDED (2026-07-13, commits
+  `fb9b9b7` plan/`d0cca91` T0/`0a08d54` T1/`b5fb884` T2/`cd711fc` T3/`b8bd8cb` T4, all reviews
+  READY 0 Critical/0 Important); phase 2 (cereal `Game` graph) is a bounded follow-on.** Delivered
+  per the §Open Q1 split recommendation, with the split boundary sharper than proposed: the
+  **phase-boundary finding** is that the `.lrp` container's per-worm cereal blobs are
+  **length-prefixed**, so phase 1 doesn't need to parse them at all — it **skips** the whole
+  cereal `Game` graph via its length prefix and seeds the initial sim state from the existing
+  `scenario::load` instead. That makes **`WideRollbackChecksum`** (folded every 1050 cycles over
+  the *entire* rollback inventory — 21 worm fields + pools + material buffer +
+  `prev_control_states` + terrain) a strictly **harder** gate than `HashGameState`, so it stands in
+  as the phase-1 oracle in place of the originally-envisioned `framehash` diff (see done-when §5
+  above). **T0** built `lrp_gen`, a C++ headless replay-writer (setup verbatim from the existing
+  dumper), and a two-fixture corpus (320t + 1120t, checksum words at cycle 0 and 1050), proving
+  tick-0 alignment. **T1** ported `WideRollbackChecksum` itself (Mix32 exact, all 21 worm fields +
+  pools + material buffer, `prev_istates` caller-supplied) — the cycle-0 facit (`0x031057d7`)
+  matched on the first run. **T2** built the Bevy-free `rust/replay` crate (`flate2`, no Bevy): the
+  big-endian container, cereal-blob skip via its length prefix, tags `0x80`–`0x83`, the XOR-delta
+  decode, checksum extraction — verified against all 1120×2 input words via the scenario grammar
+  (an XOR-baseline caveat — mutating fixtures — documented and routed to phase 2). **T3
+  MILESTONE:** the phase-1 gate went green on the first run — 1120 ticks replayed bit-exact
+  including the cycle-1050 checksum word (`0xf6211087`), backed by a per-tick tripwire against a
+  fresh sidecar and a negative (mutated-word) test. **T4** hardened the reader against hostile
+  input (10 tests — no panic on garbage, `O(1)` `Err` on a huge length-prefix, etc.) plus
+  `debug_assert`s, and formally booked phase 2 (spec §8: the cereal graph / a version-<7 lift
+  [**adjudicated: rejected for phase 1** — the only version-<7 difference inside the cereal blob is
+  palette-only] / `decode_with_baseline` / the `framehash` diff). **Proved:** the rewrite can
+  consume authentic Liero replays byte-faithfully for the container/stream/checksum surface.
+  **Oracle/gate — MET (phase 1):** hard diff vs the C++ `WideRollbackChecksum` time series over the
+  generated corpus. **Deferred:** phase 2 in full — the cereal `Game` graph deserialization and the
+  `framehash` diff it would enable, per §Open Q1's scope-gate (possibly its own post-step item).
 
 - **4f — Minimal start flow.** A "new match with defaults" entry (level + default weapons, no full
   weapon-select), respawn, quit/restart — the smallest thing that makes single-player a loop rather

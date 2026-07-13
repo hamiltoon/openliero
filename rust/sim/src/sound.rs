@@ -59,11 +59,21 @@ pub enum SoundAction {
 /// carry `None`; loop channels (Slice-4c T2) carry `Some(..)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LoopKey {
-    /// Keyed on the worm handle (`&worm` / `this`): worm/hit/death loops
-    /// (`worm.cpp:360-361`, `weapon.cpp:311`, `nobject.cpp:183`, `sobject.cpp:108`).
+    /// **Reserved — no callsite currently keys a loop on this.** The design
+    /// originally read `worm.cpp:360-361`/`:379`, `weapon.cpp:311`,
+    /// `nobject.cpp:183`, `sobject.cpp:108` as worm-keyed loops; implementing
+    /// T2 found `SoundPlayer::Play`'s `loops` parameter defaults to `0`
+    /// (`player.hpp:15`), and none of those sites pass an explicit `loops=-1` —
+    /// they are one-shots (the C++ `IsPlaying` wrapper is a restart-dedup, not a
+    /// loop). Those sites now emit `key=None` one-shots (audio-design
+    /// `2026-07-13-liero-rs-step4-slice4c-audio-design.md` §3.4, "CORRECTED
+    /// (T2)"). This variant stays for the game-side liveness reaper/tests to
+    /// have a value to reason about, and as a forward hook if a future site
+    /// ever does key a loop on the worm handle.
     Worm(u8),
     /// Keyed on the worm's current weapon slot (`&weapons[current_weapon]`): the
-    /// launch loop (`worm.cpp:1120-1121`, `Stop` at `:341`/`:375`/`:1076`).
+    /// **only** true loop reached by `ProcessFrame` — `worm.cpp:1120-1121`
+    /// explicitly passes `loops=-1`; `Stop` at `:341`/`:375`/`:1076`.
     WormWeapon(u8, u8),
 }
 

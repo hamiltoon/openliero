@@ -8,7 +8,43 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-13 · **STEP 4 — slice 4b SHIPPED: record→replay round-trip,
+> **Last updated:** 2026-07-13 · **STEP 4 — slice 4c SHIPPED: audio.** 🎯 **Liero-rs LÅTER** —
+> sound plays natively AND in the browser, driven end-to-end by a sim-emitted per-tick
+> event stream that adds **zero new `rand`** (every variant draw already existed pre-4c;
+> `hash_game_state` stays byte-identical, proven structurally, not by a runtime flag).
+> **T1** laid the stream itself: a new Bevy-free `sim::sound` module records `Play`/`Stop` at
+> all 10 `ProcessFrame` callsites via a thread-local per-frame collector (deep call trees made
+> threading an out-param prohibitive), drained into `SimState.sound_events` at
+> `process_frame`'s tail — hash-inert, with the Step-5 speculative-suppression hook already
+> documented (not wired; no resim exists yet). **T2 — the classification finding:** re-reading
+> C++ `SoundPlayer::Play(int, void* id = nullptr, int loops = 0)` (`player.hpp:15`) against
+> every callsite showed `loops` **defaults to `0`** — only `worm.cpp:1120-1121`
+> (`Play(launch_sound, &weapons[cur], -1)`) passes an explicit `loops = -1`. It is the **only
+> true loop** `ProcessFrame` reaches. The design's other 5 "worm-keyed loops" were `loops=0`
+> one-shots, deduplicated only by the caller's `IsPlaying` guard — felklassade in the original
+> spec, now corrected there (`specs/2026-07-13-liero-rs-step4-slice4c-audio-design.md` §3.4,
+> "CORRECTED (T2)") and in `sim/src/sound.rs`'s `LoopKey::Worm` doc comment. Per John's
+> Väg-A call, the hit/blood trio (`weapon.cpp:311-312`/`nobject.cpp:183-184`/
+> `sobject.cpp:108-109`) is emitted as `key=None` one-shots — correct sound, C++'s restart-dedup
+> lost, an audio-advisory-only difference. **T3** built the backend seam: an `AudioSink` trait
+> mirroring C++ `SoundPlayer`, `rodio` 0.19 (`default-features=false`) behind it, a `Drainer`
+> that makes `Play` idempotent per loop key (the game-side analog of C++'s `IsPlaying` gate) with
+> a belt-and-braces reaper, and a `SoundTable` in the TC's `tc.types.sounds` order. **T4
+> MILESTONE:** audio wired live in windowed play — `RodioSink` lives behind a Bevy `NonSend`
+> resource (the `cpal::Stream` is `!Send`), falls back to a silent `NullSink` on init failure
+> instead of crashing, drains/reaps inside the existing `!replay_finished` guard, and a
+> liveness-superset reap closes the worm-death channel-leak edge; headless stays structurally
+> silent (no sink constructed); every suite plus the wasm build stayed green. John's ear-check
+> remains advisory (same posture as prior eyeball checks). **T5:** `rodio` ships on **wasm too**
+> — the `wasm-bindgen` cargo feature routes `cpal` to its WebAudio backend, so the *same*
+> `RodioSink` covers both targets (no `kira` fallback needed after all); `sounds/` (~505 KB) is
+> now embedded via the existing `read_asset` seam; autoplay stays silent until a user gesture,
+> no panic. One real deviation: `load_sound_table_wasm` panics on a missing embedded file (the
+> embed catalogue is exhaustively verified at build time) where the native loader silently
+> leaves the slot empty — a debug/wasm inconsistency, not a correctness bug (documented, not yet
+> unified). Commits `5f10312`(T1)/`966c362`(T2)/`59b6fef`(T3)/`1ffc68e`(T4)/`2b8fc6c`(T5), every
+> review READY / MILESTONE-READY at **0 Critical / 0 Important**. Branch `liero-rs-step-4`.
+> Prior: **STEP 4 — slice 4b SHIPPED: record→replay round-trip,
 > bit-exact.** 🎯 The **Step 5 / ggrs precondition is delivered**: a `Recorder` taps the same
 > sampled `ControlState` array `--live` already feeds into `process_frame` (Dig-chord already
 > resolved, never re-derived), flushes on `AppExit` (ordered `.after(bevy::window::ExitSystems)`
@@ -196,7 +232,7 @@ the LAST slice of step 2.
 
 ---
 
-## 🔁 Rewrite track — faithful port (~76%)
+## 🔁 Rewrite track — faithful port (~77%)
 
 Strangler-style: the C++ engine is the oracle, every piece differential-tested
 bit-for-bit before moving on. Steps 0–2 merged (the deterministic sim core — the
@@ -206,18 +242,18 @@ sprite pass), **3c** put it LIVE on screen (`cargo run -p game` — the first Be
 code), **3d** the headless screenshot CLI + run-skill, **3e** the HUD/font/bars/
 minimap overlay (the full player view pixel-exact), and **3f** the wasm bring-up —
 the same CPU frame now renders in the **browser** (WebGL2), automated-proven in
-headless Chrome. Step 4 (input/replay/audio) is in progress — slices 4a (live input)
-and 4b (record→replay round-trip, the Step 5 precondition) are shipped; step 5 (netplay)
-is not started.
+headless Chrome. Step 4 (input/replay/audio) is in progress — slices 4a (live input),
+4b (record→replay round-trip, the Step 5 precondition), and 4c (audio, native + wasm) are
+shipped; step 5 (netplay) is not started.
 
 ```
-REWRITE (steg 0–5)                                          ~76%
+REWRITE (steg 0–5)                                          ~77%
 ├─ ✅ Step 0  sim-core primitives (RNG/fixed/vec/math/tables)   DONE — merged (PR #1)
 ├─ ✅ Step 1  asset IO, slices 1a–1e (level/palette/sprites/    DONE — merged (PR #2)
 │             tc.cfg/objects/WAV)
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
 ├─ ✅ Step 3  Bevy rendering / window (reproduce the SDL3 view) DONE — 3a–3f shipped (PR #4)
-├─ 🟡 Step 4  input + replay (.lrp) + audio                     IN PROGRESS — 4a+4b shipped, 4c–4g remain  ◀── YOU ARE HERE
+├─ 🟡 Step 4  input + replay (.lrp) + audio                     IN PROGRESS — 4a+4b+4c shipped, 4d–4g remain  ◀── YOU ARE HERE
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
 
@@ -262,7 +298,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~76%** (steps 0–3 done; step 4 input/replay slices 4a+4b shipped, 4c–4g + step 5 netplay remain) |
+| Rewrite track (steps 0–5) | **~77%** (steps 0–3 done; step 4 input/replay slices 4a+4b+4c shipped, 4d–4g + step 5 netplay remain) |
 | Step 3 (rendering) | **✅ COMPLETE** (slices 3a + 3b + 3c + 3d + 3e + 3f all shipped; PR #4 ready to merge) |
 | Slice 3f (wasm bring-up) | **✅ MILESTONE GREEN** (🎉 the **browser milestone**: the same CPU frame renders in the browser via **WebGL2**, **automated-proven** — a headless-Chrome controller ran the debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) and the screenshot shows the **blood** demo's split-screen world (sky/terrain/worms/blood), the console **PANIC-FREE**, and the determinism guard (per-tick `state_hash` **+** a wasm-only `frame_hash`) stayed **GREEN in the browser** = the wasm-parity witness. Built: a **`scenario::assets::read_asset` seam** (native = verbatim `std::fs::read` — all goldens green = no-op proof; wasm = embed) + `include_dir` (wasm-only dep) embedding sprites/weapons/nobjects/sobjects + `include_bytes!` tc.cfg + the demo level `render_stage.lev` — a **curated 276 KB total** (sounds/ and big levels excluded); a **target-scoped feature split** (base 6 draw-features; `x11`/`wayland` native-only; `webgl2` wasm-only — union verified per target via `cargo tree`) making `cargo build -p game --target wasm32-unknown-unknown` **GREEN first try**; an entry-fork (`const DEFAULT="blood"`, `include_str!` scenario+sidecar, **no** `env::args`/`read_dir`/`fs` on wasm; `canvas=None` auto-append verified against the `bevy_window` source; determinism guard hardened with a per-tick wasm-only `frame_hash`); a `.cargo/config.toml` (target-scoped `wasm-server-runner`) + `web/index.html` dev-loop (127.0.0.1:1334, 200 html+wasm) + a static `wasm-bindgen` **0.2.126** (lock-matched) bundle (game.js 97 KB + game_bg.wasm 52.9 MB release); a new **`game-wasm` CI job** (build-only, no browser/apt, own job independent of the determinism gate, mirrors `sim-core`'s no-cache posture). Fynd: cargo reads `.cargo/config.toml` from **CWD**, not `--manifest-path` — the wasm dev-loop runs from `rust/`) |
 | Slice 3e (HUD / font / bars / minimap) | **✅ MILESTONE GREEN** (🎯 the **full player view is PIXEL-EXACT** vs C++ — the in-game overlay ported verbatim + difftest green first run: new **`render::font::Font`** (font.tga loader `common.cpp:414-433`, width-detect + 0/50→0/8 remap) draws HUD labels (`font.cpp:8-80` verbatim — double `c>=2 && c<252` guard, CLIP_IMAGE inlined, newline on cp 0; ASCII-decode **identity for `cp<0x80`**, bevis-tested as the exact reach of the label corpus); **`blit::draw_bar`** (`blit.cpp:105-113`, unclipped + `width>0` anti-clamp witness); **`render::hud::draw_hud`** (`viewport.cpp:84-153` verbatim — two-arm life bar (`health*100/settings_health`, `100-(killed_timer*25)/37` clamped), two-arm ammo/loading bar, blinking **Reloading** (`(cycles%20)>10 && visible`, y=`164*multiplier` **absolute** — a plan-deviation caught vs C++), kills-always / lives-on-KillEmAll+Scales, `w/10+234` / `w/10+245` / 50 / 10 / 6 colour columns); **`draw_minimap`+`draw_miniature`** (`viewport.cpp:593-613` + `level.cpp:489-507` — the two *different* `step` ceil vs `bounds` round idioms preserved, worm-dots `ftoi(pos)/step` colour `129+worm.index*4`, clip-gated, `AppearanceAt` inlined). `Scene`/`frame::draw` composites per viewport (**HUD full-clip → world world-clip → minimap**, verbatim double-draw); C++ dumper gained opt-in **`render_hud`** mirroring `frame::draw`, **RE-DIFF gate empty** (3a/blood/shake/sim_slice2 byte-identical). 3 scenarios + goldens — **hud** 41t / **reload** 71t / **death** 141t — difftests **GREEN**: hud + death first run (per-tick + total + triple-isolation + suppression + non-vacuity); reload first **blocked** (T7 RIFLE = `ST_LASER` tripped the deferred laser do-loop), re-cut to **GRENADE** (`ST_NORMAL`, inert hit-arm, no in-window explosion) → GREEN (71 rows + total, settled 50/51 witness). Find: tick 0 is fade-to-black ⇒ the HUD witness reads tick 1. Holdazone/GameOfTag/replay HUD-arms tripwired. Milestone review: **0 Critical / 0 Important**; minors on the deferral track: DRY the inlined `clip_image`, a `size>1`-advance font test, minimap dot-index discrimination, reload's own suppression control (deliberately omitted)) |
@@ -444,8 +480,22 @@ map: `specs/2026-07-12-liero-rs-step4-cpp-input-replay-map.md`.
 │         after all (spawn→walk→fire; clamp gated on aiming_speed!=0) — 3 sites masked &0x7f
 │         (worm_fire, ninjarope-throw, dig), full sim golden suite green (313 sim tests, neutral
 │         fix). 7 commits, 0 Critical/0 Important throughout (one early NEEDS-FIX fixed + re-reviewed)
-├─ ⬜ 4c  audio — sim emits a sound-event stream (zero new rand; variant RNG already in sim),
-│         thin Bevy-free kira/rodio sink in game; isolation gate; wasm Web Audio
+├─ ✅ 4c  audio — sim emits a sound-event stream (zero new rand; variant RNG already in sim),
+│         thin Bevy-free rodio sink in game (native + wasm); isolation gate      SHIPPED
+│         🎯 Liero-rs LÅTER (native + browser): T1 sim::sound event stream (10 callsites,
+│         thread-local collector, hash-inert). T2 CLASSIFICATION FINDING — C++
+│         `Play(sound, id, loops=0)` default means the design's 5 "worm-keyed loops" were
+│         actually `IsPlaying`-dedup'd ONE-SHOTS; the only true loop is the weapon-launch
+│         site (`worm.cpp:1120-1121`, WormWeapon-keyed, 3 verbatim Stop sites) — design spec
+│         + `LoopKey::Worm` doc corrected; hit/blood trio emitted as `key=None` one-shots
+│         (Väg A, dedup lost = audio-advisory). T3 `AudioSink` trait + rodio 0.19 (no default
+│         features) + idempotent Drainer + reaper + `SoundTable`. T4 MILESTONE: wired live in
+│         windowed play (`NonSend` cpal stream, Null-fallback, liveness-superset reap closes
+│         the death-leak edge); headless stays structurally silent. T5: rodio on wasm too
+│         (same `RodioSink`, no kira needed) — `sounds/` (~505 KB) embedded, silent-until-gesture
+│         autoplay, no panic (one native/wasm asset-miss inconsistency documented, not unified).
+│         Commits `5f10312`/`966c362`/`59b6fef`/`1ffc68e`/`2b8fc6c`, 0 Critical/0 Important
+│         throughout. Ear-check advisory (not gated)
 ├─ ⬜ 4d  live shake/flash/banners — the ProcessViewports port Step 3 deferred; render golden
 │         on a live (not injected) flash/shake scenario; steerable_sum decision at slice start
 ├─ ⬜ 4e  .lrp byte-faithful reader vs C++ framehash — SPLIT: container + XOR-delta stream +

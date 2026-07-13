@@ -174,13 +174,36 @@ the largest surface and depends on nothing the earlier slices produce.
   ninjarope-throw, dig) now mask the table index `&0x7f` (3b precedent, same table; golden-neutral,
   full suite green).
 
-- **4c — Audio.** Sim emits a per-tick sound-event stream (id / already-chosen variant / object
-  handle / loop flag) at the existing `Play` call sites — **adding zero `rand`** (input-map §6);
-  `game` drains it into an audio backend, looping sounds keyed by object handle with play/stop;
-  `speculative` suppresses draining. Wasm (Web Audio) path. **Proves:** a match makes the right
-  sounds; the sim is untouched. **Oracle/gate:** `HashGameState` byte-identical (isolation);
-  output advisory. **Risks:** ⚠ backend choice (§Open Q4), loop-channel leaks (input-map §6 `Stop`
-  not speculative-gated), wasm audio-context init.
+- **4c — Audio. LANDED (2026-07-13, commits `5f10312`/`966c362`/`59b6fef`/`1ffc68e`/`2b8fc6c`,
+  all reviews READY/MILESTONE-READY 0 Critical/0 Important).** Delivered as specified: a Bevy-free
+  `sim::sound` module records `Play`/`Stop` at all 10 `ProcessFrame` callsites via a thread-local
+  per-frame collector, drained into `SimState.sound_events` at the tick's tail —
+  **adding zero `rand`**, `hash_game_state` byte-identical (isolation proven structurally, not by
+  a runtime flag). **Classification finding (T2):** re-reading C++ `SoundPlayer::Play(int,
+  void* id = nullptr, int loops = 0)` (`player.hpp:15`) against every callsite found `loops`
+  defaults to `0` — only `worm.cpp:1120-1121` passes an explicit `loops = -1`. It is the **only
+  true loop** `ProcessFrame` reaches (`WormWeapon`-keyed, 3 verbatim `Stop` sites); the slice
+  design's other 5 "worm-keyed loops" were `loops=0` one-shots deduplicated only by the caller's
+  `IsPlaying` guard — corrected in the design spec and in `sim/src/sound.rs`'s `LoopKey::Worm` doc.
+  Per John's Väg-A call, the hit/blood trio is emitted as `key=None` one-shots (correct sound,
+  C++'s restart-dedup lost — an audio-advisory-only difference). `game` drains the stream through
+  a new `AudioSink` trait (`RodioSink` + `NullSink`, mirroring C++ `SoundPlayer`) backed by
+  `rodio` 0.19 (`default-features=false`); an idempotent `Drainer` reproduces the C++ `IsPlaying`
+  gate per loop key plus a belt-and-braces liveness reaper (closes the worm-death channel-leak
+  edge). **MILESTONE (T4):** wired live in windowed play — `RodioSink` behind a Bevy `NonSend`
+  resource (`cpal::Stream` is `!Send`), falls back to a silent `NullSink` instead of crashing on
+  init failure; headless stays structurally silent (no sink constructed). **Wasm (T5):** the
+  *same* `RodioSink` covers wasm too — the `wasm-bindgen` cargo feature routes `cpal` to its
+  WebAudio backend, no `kira` fallback needed after all; `sounds/` (~505 KB) embedded via the
+  existing `read_asset` seam; autoplay stays silent until a user gesture, no panic (one
+  documented native/wasm asset-miss inconsistency: `load_sound_table_wasm` panics on a missing
+  embedded file where native silently leaves the slot empty). **Proved:** a match makes the right
+  sounds, native and browser; the sim is untouched. **Oracle/gate — MET:** `HashGameState` stayed
+  byte-identical on every golden; output is advisory (John's ear-check, not yet run — same
+  posture as prior eyeball checks). **Risk resolutions:** backend choice (§Open Q3) resolved to
+  `rodio` for both targets, no `kira` needed; loop-channel leaks (input-map §6, `Stop` not
+  speculative-gated) closed by the explicit C++ Stops **and** the liveness reaper; wasm
+  audio-context init needs a user gesture as expected, handled without panic.
 
 - **4d — Live shake / flash / banners (the `ProcessViewports` port).** Wire the render-only viewport
   side effects Step 3 deferred: top-of-frame `screen_flash`/`shake`/`banner_y` stepping and

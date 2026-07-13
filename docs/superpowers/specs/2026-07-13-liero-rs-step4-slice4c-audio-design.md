@@ -119,8 +119,16 @@ Step 4; overview §Open Q4). The Rust "sound not hashed / omitted" markers alrea
 |---|---|---|---|
 | `worm.cpp:175` | `SoundBump` | `sim/src/physics.rs` worm-bump (bounce X) | `Play` idx=`sound_hooks.Bump`, key=None |
 | `worm.cpp:188` | `SoundBump` | `sim/src/physics.rs` worm-bump (bounce Y) | same |
-| `worm.cpp:309` | `SoundReloaded` | `sim/src/control.rs:471` reload-complete | `Play` idx=`sound_hooks.Reloaded` |
-| `worm.cpp:833` | `SoundReloaded` | bonus/full-ammo reload — `sim/src/bonus.rs:533` | `Play` idx=`sound_hooks.Reloaded` |
+| `worm.cpp:309` | `SoundReloaded` | bonus/full-ammo reload — `sim/src/bonus.rs:533` | `Play` idx=`sound_hooks.Reloaded` |
+| `worm.cpp:832-834` | `SoundReloaded` | `sim/src/control.rs:471` reload-complete (loading-countdown) | `Play` idx=`sound_hooks.Reloaded` |
+
+> **CORRECTED (T2):** the two rows above were transposed in the original table (bonus reload
+> mislabelled `:833`, countdown reload mislabelled `:309`/single-line). Re-read against
+> `worm.cpp` directly: `:309` is inside the bonus-pickup block (`Worm::Process`'s bonus arm,
+> `rand(BonusExplodeRisk) > 1` branch) and is unconditional; `:832-834` is the current-weapon
+> loading-countdown reaching zero, gated on `w.play_reload_sound`. The Rust sites
+> (`sim/src/bonus.rs:533-536`, `sim/src/control.rs:472-485`) were already correct — only this
+> table's citations were swapped.
 | `worm.cpp:789` | `SoundAlive` | `sim/src/state.rs:2583` respawn (`AfterSpawn`) | `Play` idx=`sound_hooks.Alive` |
 | `worm.cpp:979` | `SoundNinjaropeThrow` | `sim/src/control.rs:342` ninjarope throw | `Play` idx=`sound_hooks.NinjaropeThrow` |
 | `game.cpp:512` | `SoundBegin` | *(no `StartGame` port; match starts pre-initialised)* | **DEFERRED — see §7** |
@@ -145,28 +153,68 @@ draw is already there); the event just captures the number the sim computed.
 
 ### 3.4 Loop sounds — keyed by object handle (Play + Stop)
 
+> **CORRECTED (T2):** the table below originally listed **six** "worm-keyed loop" `Play` sites
+> (`worm.cpp:360-361`/`:379`, `weapon.cpp:311-312`, `nobject.cpp:183-184`, `sobject.cpp:108-109`,
+> plus the genuine `worm.cpp:1120-1121`), all assumed to share the `loops=-1` semantics of the
+> weapon-launch site. Implementing T2 found this reading of the C++ was wrong: `SoundPlayer::Play`
+> (`player.hpp:15`) is `Play(int sound, void* id = nullptr, int loops = 0)` — **`loops` defaults to
+> `0`**, meaning "not a loop." Checking every callsite directly: only `worm.cpp:1120-1121` passes an
+> explicit `loops = -1` argument. **It is the ONLY true loop reached by `ProcessFrame`.** Every other
+> row below is a plain `Play(sound, id)` two/three-arg call — a **one-shot**, whose only special
+> behaviour is that the caller wraps it in `if (!IsPlaying(id)) Play(...)` so it doesn't restart every
+> tick the surrounding condition holds (a *dedup*, not a loop). Two of the six rows
+> (`worm.cpp:360-361`, `:379`) turned out not to be distinct callsites at all — they are the exact
+> statements already correctly tabled in §3.2 as the worm hit/blood (`18+rand(3)`, self low-health
+> drip) and death-spray (`15+rand(3)`) one-shots; restating them here as "loops" was simply the
+> original table double-counting them. The other three (`weapon.cpp:311-312`, `nobject.cpp:183-184`,
+> `sobject.cpp:108-109`) are real, distinct `18+rand(3)` hit-sound gates (the wobject/nobject/sobject
+> arms of the same worm-hit family, one call site per object kind) that do need their own event — just
+> as a one-shot, not a loop. Corrected split below; §3.4.2's "Väg A" is the John-approved
+> implementation decision for the newly-corrected trio.
+
+#### 3.4.1 The one true loop — weapon-slot-keyed (Play + Stop)
+
 | C++ site | action | key | Rust target | Event |
 |---|---|---|---|---|
-| `worm.cpp:1120-1121` | `Play(launch_sound, &weapons[cur], -1)` | `WormWeapon(worm, cur)` | `sim/src/weapon.rs` fire loop | `Play` idx=`launch_sound`, key=`WormWeapon` |
-| `worm.cpp:341` | `Stop(&weapons[cur])` | `WormWeapon` | `sim/src/control.rs:568` loop-stop | `Stop` key=`WormWeapon` |
-| `worm.cpp:375` | `Stop(&weapons[cur])` | `WormWeapon` | fire-cease / weapon-switch | `Stop` key=`WormWeapon` |
-| `worm.cpp:1076` | `Stop(&weapons[cur])` | `WormWeapon` | `sim/src/control.rs:568` | `Stop` key=`WormWeapon` |
-| `worm.cpp:360-361` | `Play(kSnd, this)` | `Worm(idx)` | worm fire loop | `Play`, key=`Worm` |
-| `worm.cpp:379` | `Play(kDeathSnd, this)` | `Worm(idx)` | `sim/src/state.rs` death path | `Play`, key=`Worm` |
-| `weapon.cpp:311-312` | `Play(kSnd, &worm)` | `Worm(idx)` | `sim/src/weapon.rs:618` hit-loop | `Play`, key=`Worm` |
-| `nobject.cpp:183-184` | `Play(kSnd, &w)` | `Worm(idx)` | `sim/src/nobject.rs:570-574` hit-loop | `Play`, key=`Worm` |
-| `sobject.cpp:108-109` | `Play(kSnd, &w)` | `Worm(idx)` | `sim/src/sobject.rs:249` | `Play`, key=`Worm` |
+| `worm.cpp:1120-1121` | `Play(launch_sound, &weapons[cur], -1)` — explicit `loops=-1` | `WormWeapon(worm, cur)` | `sim/src/weapon.rs:212-216` fire loop | `Play` idx=`launch_sound`, key=`WormWeapon` |
+| `worm.cpp:341` | `Stop(&weapons[cur])` | `WormWeapon` | `sim/src/state.rs:1955`/`:1991`/`:2031` loop-stop | `Stop` key=`WormWeapon` |
+| `worm.cpp:375` | `Stop(&weapons[cur])` | `WormWeapon` | fire-cease / weapon-switch / death | `Stop` key=`WormWeapon` |
+| `worm.cpp:1076` | `Stop(&weapons[cur])` | `WormWeapon` | `sim/src/state.rs:1955`/`:1991`/`:2031` | `Stop` key=`WormWeapon` |
 
-**Sizing:** ~13 `Play` sites (7 one-shot families + 6 loop) + ~3 distinct `Stop` sites, across **5
-families**: (a) worm-hook one-shots (bump/reload/alive/ninja), (b) object-variant one-shots
-(sobject/death/blood), (c) weapon one-shots (explo/launch), (d) worm-keyed loops (fire/hit/death), (e)
-weapon-slot-keyed loops (launch loop + its 3 stops). Every site has an existing Rust omit-marker to
-convert — no new sim search needed.
+The C++ `IsPlaying` guard at `:1120` is deliberately **not** modelled — the sim emits `Play(loop,
+key)` every tick the loop should sound; the *game backend* makes it idempotent (start iff not
+already playing on that key, design §4.1). This keeps the sim free of audio-channel state (which is
+not deterministic and must not be). `LoopKey::Worm(u8)` stays **reserved** in
+`sim/src/sound.rs` — no callsite keys a loop on it after this correction; it exists for the game-side
+liveness reaper/tests (design §4.2) to have a value type to reason about, not because a Worm-keyed
+loop is ever emitted.
 
-**C++ `IsPlaying` guard:** several loop plays are wrapped `if (!IsPlaying(id)) Play(...)`. The sim need
-**not** model `IsPlaying` — it emits a `Play(loop, key)` every tick the loop should sound; the *game
-backend* makes it idempotent (start iff not already playing on that key). This keeps the sim free of
-audio-channel state (which is not deterministic and must not be).
+#### 3.4.2 CORRECTED — the misclassified "worm-keyed loops" are one-shots (the hit/blood trio)
+
+Removed as duplicates of §3.2 (not new sites): `worm.cpp:360-361` (`18+rand(3)`, already
+`sim/src/state.rs` worm self low-health drip) and `worm.cpp:379` (`15+rand(3)`, already
+`sim/src/state.rs` death-spray). The three real, distinct sites:
+
+| C++ site | sound | Rust target | Event |
+|---|---|---|---|
+| `weapon.cpp:311-312` | `Play(kSnd, &worm)`, default `loops=0` | `sim/src/weapon.rs:634-636` wobject hit | `Play` idx=`18+<drawn>`, key=None |
+| `nobject.cpp:183-184` | `Play(kSnd, &w)`, default `loops=0` | `sim/src/nobject.rs:572-579` nobject hit | `Play` idx=`18+<drawn>`, key=None |
+| `sobject.cpp:108-109` | `Play(kSnd, &w)`, default `loops=0` | `sim/src/sobject.rs:247-255` sobject hit | `Play` idx=`18+<drawn>`, key=None |
+
+**Väg A (John-approved, adopted by T2):** emit all three as `key=None` one-shots. This plays the
+correct sound at the correct tick but drops the C++ `IsPlaying(id)` restart-suppression (a
+sustained hit condition would re-`Play` every tick it holds, where C++ would dedup to the first).
+This is an **audio-advisory-only** difference — `sound` is never hashed and this path draws no
+extra `rand` (the index reuses the already-drawn value, per the code comments at each site) — so it
+does not touch the isolation gate. Recorded here as a deliberate, scoped deviation rather than a
+bug.
+
+**Sizing (corrected):** **1** true loop (+ its 3 `Stop` sites) + **~14** one-shot `Play` sites,
+across four families: (a) worm-hook one-shots (bump ×2 / reload ×2 / alive / ninja — §3.1), (b)
+object-variant one-shots (sobject-`start_sound` / death-spray / worm-self hit-blood — §3.2), (c)
+weapon one-shots (explo / non-loop launch — §3.2/§3.3), (d) the hit/blood trio (§3.4.2) — plus the
+single weapon-slot-keyed loop (§3.4.1). Every site has an existing Rust omit-marker to convert — no
+new sim search needed.
 
 ---
 
@@ -189,14 +237,17 @@ avoids this by (a) explicit `Stop` at fire-cease/weapon-switch/death, and (b) **
 
 1. **Object freed without a Stop.** If a worm dies or a weapon slot changes and the corresponding
    `Stop` site is not reached, the loop leaks. Mitigation: the sim emits `Stop` at exactly the C++ Stop
-   sites (§3.4). The death path (`state.rs:2703-2707`) already notes the loop-sound stop is *omitted* —
-   4c must **emit** the `Stop(Worm(idx))` / `Stop(WormWeapon(..))` there.
+   sites (§3.4.1). The death path (`state.rs:2703-2707` era / now `~2805-2810`) already notes the
+   loop-sound stop is *omitted* — 4c must **emit** the `Stop(WormWeapon(..))` there. **CORRECTED
+   (T2):** the original text here also named `Stop(Worm(idx))` — per §3.4's classification fix there
+   is no Worm-keyed loop to stop; `LoopKey::Worm` is never used as a `Play`/`Stop` key.
 2. **Belt-and-braces reaper (recommended).** Because the sim owns object lifetimes and the game does
-   not, the game additionally reaps any `LoopKey::Worm(i)` whose worm is dead/invisible and any
-   `WormWeapon(i, w)` whose worm's `current_weapon != w`, read from the (already-available) sim state
-   each tick. This makes a *dropped* Stop event self-heal instead of leaking — the closest safe analog
-   to the C++ "a spurious stop self-heals, a suppressed stop leaks" comment. Cheap: iterate the small
-   `loops` map, drop entries whose key is no longer live.
+   not, the game additionally reaps any `LoopKey::Worm(i)` whose worm is dead/invisible (defensive —
+   currently always vacuous, since no site keys a loop on `Worm`; kept for forward-safety if a future
+   change ever does) and any `WormWeapon(i, w)` whose worm's `current_weapon != w`, read from the
+   (already-available) sim state each tick. This makes a *dropped* Stop event self-heal instead of
+   leaking — the closest safe analog to the C++ "a spurious stop self-heals, a suppressed stop leaks"
+   comment. Cheap: iterate the small `loops` map, drop entries whose key is no longer live.
 
 Design decision: **emit the explicit C++ Stops (correctness parity) AND run the liveness reaper
 (robustness).** The reaper is not an RNG or hashed path — pure game-side.

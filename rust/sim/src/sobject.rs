@@ -245,11 +245,14 @@ pub fn sobject_create(
                     }
 
                     // :105-111 hit-sound gate: rand(3) is ALWAYS drawn; on `== 0`
-                    // a SECOND rand(3) picks `18 + rand(3)`. The `Play` is a hashing
-                    // no-op (skipped) but the rand draws are the contract.
+                    // a SECOND rand(3) picks `18 + rand(3)`. The `Play(kSnd, &w)`
+                    // uses the DEFAULT loops = 0 (`player.hpp:15`) — a DEDUP'd
+                    // ONE-SHOT, not a loop; the IsPlaying(&w) dedup is
+                    // deliberately dropped (T1 precedent for the 18+rand(3)
+                    // family). The index reuses the drawn value; no extra rand.
                     if rand.bound(3) == 0 {
-                        let _k_snd = 18 + rand.bound(3) as i32;
-                        // sound_player->Play(kSnd) — omitted (no sim/RNG).
+                        let k_snd = 18 + rand.bound(3) as i32;
+                        crate::sound::one_shot(k_snd);
                     }
                 }
             }
@@ -880,6 +883,76 @@ mod tests {
             rand.last(),
             expected_last,
             "blood-spray + hit-sound RNG order/count matches the reference stream"
+        );
+    }
+
+    #[test]
+    fn worm_in_box_hit_sound_gate_emits_one_shot_at_the_drawn_index() {
+        // sobject.cpp:105-111: `Play(kSnd, &w)` with the DEFAULT loops = 0
+        // (`player.hpp:15`) — a DEDUP'd ONE-SHOT (the `IsPlaying(&w)` guard is
+        // a dedup, NOT a loop), emitted `key = None` at the ALREADY-drawn
+        // `18 + rand(3)` index. The IsPlaying dedup is deliberately dropped
+        // (T1 precedent for the 18+rand(3) family). blood = 0 silences the fan
+        // (kBloodAmount = 0), so the stream is exactly: the :24 start_sound
+        // variant one-shot (T1), then — on a seed whose gate rand(3) is 0 —
+        // this hit one-shot.
+        let cossin = precompute_cossin();
+        let ty = small_explosion(-1); // start_sound 0, num_sounds 2
+        let nts = nts_with_blood();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms = vec![worm_at(57, 50, 100)];
+        let blood = 0;
+
+        // Find a seed that opens the gate; compute the expected indices from
+        // the reference stream: rand(2) variant, rand(3) gate, rand(3) kSnd.
+        let (seed, expected_variant, expected_snd) = (0u32..)
+            .find_map(|seed| {
+                let mut refr = Rand::new();
+                refr.seed(seed);
+                let variant = refr.bound(2) as i32;
+                (refr.bound(3) == 0).then(|| (seed, variant, 18 + refr.bound(3) as i32))
+            })
+            .expect("some seed opens the rand(3) gate");
+
+        let mut rand = Rand::new();
+        rand.seed(seed);
+
+        crate::sound::reset_frame();
+        sobject_create(
+            &ty,
+            50,
+            50,
+            1,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &nts,
+            &mut level,
+            &cossin,
+            &SpriteSet::default(),
+            &[],
+            &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
+            &[],
+            blood,
+            0,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(
+            crate::sound::take_frame(),
+            vec![
+                crate::sound::SoundEvent::one_shot(ty.start_sound + expected_variant),
+                crate::sound::SoundEvent::one_shot(expected_snd),
+            ],
+            "the :24 variant one-shot THEN the gate-open 18+rand(3) hit one-shot"
+        );
+        assert!(
+            (18..=20).contains(&expected_snd),
+            "index in the hardcoded hit-sound band"
         );
     }
 

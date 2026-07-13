@@ -92,6 +92,32 @@ impl SoundEvent {
             action: SoundAction::Play,
         }
     }
+
+    /// A **keyed loop start** (`action = Play`, `key = Some(key)`) at the
+    /// resolved index `sound` — the C++ `Play(sound, id, loops = -1)`
+    /// (`worm.cpp:1121`, the only true-loop callsite in `ProcessFrame`). The sim
+    /// emits this every tick the loop should sound; the game backend makes it
+    /// idempotent per key (design §3.4/§4.1).
+    #[inline]
+    pub fn loop_play(sound: i32, key: LoopKey) -> Self {
+        SoundEvent {
+            sound,
+            key: Some(key),
+            action: SoundAction::Play,
+        }
+    }
+
+    /// A **keyed loop stop** (`action = Stop`) — the C++ `Stop(id)`
+    /// (`worm.cpp:341`/`:375`/`:1076`). `sound` is meaningless for a Stop (the
+    /// game stops whatever plays on `key`), pinned to `-1`.
+    #[inline]
+    pub fn loop_stop(key: LoopKey) -> Self {
+        SoundEvent {
+            sound: -1,
+            key: Some(key),
+            action: SoundAction::Stop,
+        }
+    }
 }
 
 /// The four resolved **worm-hook** sound indices the hook-based one-shot
@@ -163,6 +189,29 @@ pub fn one_shot(sound: i32) {
     if sound >= 0 {
         emit(SoundEvent::one_shot(sound));
     }
+}
+
+/// Start (or keep sounding) the **looping channel** `key` at the
+/// already-resolved index `sound`. The faithful analog of the C++ loop `Play`
+/// (`worm.cpp:1120-1121`, `Play(launch_sound, &weapons[cur], -1)`): the same
+/// negative-index no-op guard as [`one_shot`] (`player.hpp:15-21`), so a loop
+/// weapon whose `launch_sound` is unset (`-1`) starts nothing. Emitted every
+/// tick the loop should sound — the sim carries no `IsPlaying` channel state;
+/// per-key idempotency is the game backend's job (design §3.4).
+#[inline]
+pub fn play_loop(sound: i32, key: LoopKey) {
+    if sound >= 0 {
+        emit(SoundEvent::loop_play(sound, key));
+    }
+}
+
+/// Stop the looping channel `key` — the C++ `Stop(id)` (`worm.cpp:341`/`:375`/
+/// `:1076`). **Unconditional**: C++ never speculative-gates `Stop` (input-map
+/// §6 — a suppressed stop leaks a channel, a spurious stop self-heals), and a
+/// Stop on an idle key is a game-side no-op (design §4.1).
+#[inline]
+pub fn stop_loop(key: LoopKey) {
+    emit(SoundEvent::loop_stop(key));
 }
 
 /// Play the `SoundBump` worm hook (`worm.cpp:175`/`:188`) — the wall-bounce
@@ -257,5 +306,45 @@ mod tests {
         play_alive();
         play_ninjarope_throw();
         assert!(take_frame().is_empty(), "unset (-1) hooks play nothing");
+    }
+
+    #[test]
+    fn loop_play_carries_key_and_play_action() {
+        // The T2 loop constructor: a keyed Play at the resolved index.
+        let key = LoopKey::WormWeapon(1, 3);
+        let ev = SoundEvent::loop_play(9, key);
+        assert_eq!(ev.sound, 9);
+        assert_eq!(ev.key, Some(key));
+        assert_eq!(ev.action, SoundAction::Play);
+    }
+
+    #[test]
+    fn loop_stop_carries_key_and_stop_action() {
+        // The T2 stop constructor: `sound` is meaningless for a Stop (the game
+        // stops whatever plays on the key), pinned to -1.
+        let key = LoopKey::Worm(2);
+        let ev = SoundEvent::loop_stop(key);
+        assert_eq!(ev.sound, -1);
+        assert_eq!(ev.key, Some(key));
+        assert_eq!(ev.action, SoundAction::Stop);
+    }
+
+    #[test]
+    fn play_loop_negative_index_is_a_no_op_but_stop_loop_always_emits() {
+        // `play_loop` mirrors the C++ `Play` guard (`player.hpp:15-21`,
+        // `if (sound >= 0)`): a loop weapon with launch_sound unset (-1) starts
+        // nothing. `stop_loop` is UNCONDITIONAL — C++ never speculative-gates
+        // Stop (input-map §6, a suppressed stop leaks a channel); a Stop on an
+        // idle key is a game-side no-op (design §4.1).
+        reset_frame();
+        let key = LoopKey::WormWeapon(0, 1);
+        play_loop(-1, key);
+        play_loop(4, key);
+        stop_loop(key);
+        assert_eq!(
+            take_frame(),
+            vec![SoundEvent::loop_play(4, key), SoundEvent::loop_stop(key)],
+            "negative-index play skipped; valid play + unconditional stop emitted"
+        );
     }
 }

@@ -1941,6 +1941,19 @@ impl SimState {
                     && w.weapons[cw].delay_left <= 0
                 {
                     worm_fire(w, weapons, cossin, h_signed_recoil, rand, wobjects);
+                } else if !w.control_states.get(ControlState::FIRE)
+                    || w.control_states.get(ControlState::CHANGE)
+                    || !w.weapons[cw].available()
+                {
+                    // worm.cpp:339-343 cease-fire Stop (Slice-4c T2): the
+                    // else-arm mirrors C++ verbatim — NOT plain `else` (a held
+                    // trigger waiting out delay_left neither fires nor stops).
+                    // Guarded on loop_sound like C++ :340; unconditional beyond
+                    // that (Stop is never speculative-gated, input-map §6).
+                    // Determinism-inert: no rand, no hashed write.
+                    if current_weapon_loops(w, weapons) {
+                        crate::sound::stop_loop(current_weapon_loop_key(w, i as i32));
+                    }
                 }
 
                 // 9. physics — reads the SAME reacts computed in step 2.
@@ -1969,6 +1982,14 @@ impl SimState {
 
                 // 11. change/movement gate (worm.cpp:348-353).
                 if w.control_states.get(ControlState::CHANGE) {
+                    // worm.cpp:1075-1077: the top of ProcessWeaponChange stops
+                    // the CURRENT (pre-cycle) slot's loop (Slice-4c T2).
+                    // Emitted at the call-site — `process_weapon_change` has no
+                    // view of the weapon def table and nothing runs between
+                    // here and the C++ Stop, so the order is identical.
+                    if current_weapon_loops(w, weapons) {
+                        crate::sound::stop_loop(current_weapon_loop_key(w, i as i32));
+                    }
                     process_weapon_change(w, load_change);
                 } else {
                     w.key_change_pressed = false;
@@ -1998,6 +2019,17 @@ impl SimState {
                 //     worm-gibs. Returns the killer index (if any) to defer its
                 //     `kills++`. Inert for slices 1-5c (worms never reach
                 //     health <= 0), so those goldens stay byte-identical.
+                //
+                //     worm.cpp:373-376: on the death tick the block FIRST stops
+                //     the current weapon's loop (Slice-4c T2). Emitted at the
+                //     call-site under the same `health <= 0` gate (:369) —
+                //     `worm_death` has no view of the weapon def table — and
+                //     BEFORE the call, so the Stop precedes the 15+rand(3)
+                //     death one-shot `worm_death` emits (:378-379), exactly the
+                //     C++ statement order. Determinism-inert (no rand/hash).
+                if w.health <= 0 && current_weapon_loops(w, weapons) {
+                    crate::sound::stop_loop(current_weapon_loop_key(w, i as i32));
+                }
                 if let Some(killer) = worm_death(
                     w,
                     i as i32,
@@ -2701,6 +2733,27 @@ fn worm_pre_death_drip(
     }
 }
 
+/// Whether `w`'s CURRENT weapon slot resolves to a **looping** weapon — the C++
+/// `weapons[current_weapon].type->loop_sound` guard shared by every loop-`Stop`
+/// site (`worm.cpp:340`, `:373-375`, `:1075`). A slot with no resolved type or
+/// an out-of-table id (empty test weapon tables) is simply "no loop" — C++
+/// never hits that case (`InitWeapons` fills every slot).
+///
+/// Determinism-inert: reads only to gate a sound event (no rand, no hashed
+/// write).
+fn current_weapon_loops(w: &WormState, weapons: &[Weapon]) -> bool {
+    w.weapons[w.current_weapon as usize]
+        .ty
+        .and_then(|ty| weapons.get(ty as usize))
+        .is_some_and(|def| def.loop_sound)
+}
+
+/// The loop-channel key for `w`'s current weapon slot — the value analog of the
+/// C++ `&weapons[current_weapon]` pointer id every loop `Play`/`Stop` uses.
+fn current_weapon_loop_key(w: &WormState, index: i32) -> crate::sound::LoopKey {
+    crate::sound::LoopKey::WormWeapon(index as u8, w.current_weapon as u8)
+}
+
 /// Port of the **death block** (`worm.cpp:369-426`) — the tail of the visible arm
 /// that runs when a worm's `health` reaches `<= 0`: it plays a death sound,
 /// decrements `lives`, does the kill bookkeeping, hides the worm, arms the
@@ -2749,12 +2802,15 @@ fn worm_death(
     w.leave_shell_timer = 0;
     w.make_sight_green = false;
 
-    // :373-376 stop the current weapon's loop_sound — a sound-only side effect
-    // with no rand; omitted (loop_sound is not modelled).
+    // :373-376 stop the current weapon's loop_sound — emitted by the CALLER
+    // (process_frame step 13) under the same `health <= 0` gate, immediately
+    // before this call: this fn has no view of the weapon def table, and no
+    // statement separates the C++ Stop from the gate, so the order and the
+    // event stream are identical.
 
     // :378 death-sound index `15 + rand(3)`. This is the ONLY draw before the
     // sprays. Slice-4c emits the one-shot at the ALREADY-computed index (no new
-    // rand; not hashed); the loop_sound Stop at :373-376 is Slice-4c T2.
+    // rand; not hashed).
     let death_snd = 15 + rand.bound(3) as i32;
     crate::sound::one_shot(death_snd);
 
@@ -3830,6 +3886,12 @@ mod tests {
 
         state.sound_events.push(SoundEvent::one_shot(7));
         state.sound_events.push(SoundEvent::one_shot(15));
+        // T2: keyed loop Play/Stop events are equally hash-inert.
+        let key = crate::sound::LoopKey::WormWeapon(0, 3);
+        state.sound_events.push(SoundEvent::loop_play(5, key));
+        state
+            .sound_events
+            .push(SoundEvent::loop_stop(crate::sound::LoopKey::Worm(1)));
         state.sound_hooks.Bump = 123;
         state.sound_hooks.Reloaded = 4;
         assert_eq!(

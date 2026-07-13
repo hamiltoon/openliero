@@ -281,7 +281,18 @@ fn resolve_scenario() -> ParsedArgs {
     // `render_slice3b_*` golden (spec §1.2). `parse_args` already set
     // `Mode::Live` for the bare case; `setup` sources the fixture by seeing this
     // sentinel name. No `--record` check needed: the bare path carries none.
-    if parsed.name == game::input::DEFAULT_MATCH {
+    //
+    // T0 fix (4f review): gated on `Mode::Live`, not on the name alone. A
+    // POSITIONAL `default_match` (e.g. `cargo run -p game -- default_match`,
+    // no `--live`) parses to `Mode::Scripted` with this same sentinel name —
+    // without the mode check it slipped through this bypass too, then panicked
+    // in `setup`'s debug self-check (`load_golden_hashes`), since the sentinel
+    // has no committed `render_slice3b_default_match` golden to load (only
+    // `--live`/bare skip the golden column, see `setup`). Gating on
+    // `Mode::Live` sends that case into `available_scenarios` below instead,
+    // where it is correctly rejected (unknown scenario, exit 2) — the doc
+    // comment on `DEFAULT_MATCH` already promised this outcome.
+    if parsed.name == game::input::DEFAULT_MATCH && parsed.mode == Mode::Live {
         return parsed;
     }
 
@@ -581,7 +592,20 @@ fn tick_and_render(
     // `input::default_bindings`; `R` is P0 fire, so it is NOT reused). Scripted
     // is untouched: it has its own bit-identical loop reload at the `ticks`
     // boundary below.
+    //
+    // T0 fix (4f review): F5 also restarts the RECORDING, not just the sim.
+    // `Recorder` is only present on the Live + `--record` path (`setup`); when
+    // it is, `clear()` drops every snapshot buffered before this restart so
+    // the eventual flush covers only ticks since the latest F5 — replaying it
+    // reproduces the session from that restart point, not the original
+    // launch. Without this the buffer kept appending across the restart
+    // boundary and a replay of the flushed file silently diverged from the
+    // live session at the restart tick (see `Recorder::clear`'s doc for the
+    // full semantics).
     if (*mode == Mode::Live || *mode == Mode::Replay) && keys.just_pressed(KeyCode::F5) {
+        if let Some(recorder) = recorder.as_deref_mut() {
+            recorder.clear();
+        }
         let loaded = scenario::load(Path::new(TC_ROOT), &demo.scenario);
         sim.0 = loaded.state;
         demo.viewports = loaded.viewports;

@@ -350,6 +350,22 @@ impl Recorder {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Empty the buffered snapshots (4f T0 fix: an F5 restart in Live mode).
+    ///
+    /// **F5 semantics:** F5 does not merely reload the sim — it also RESTARTS
+    /// the recording. `snapshots` is cleared, so the eventual `build()` covers
+    /// only ticks recorded SINCE the latest restart; `base`/`path` are left
+    /// untouched (the restart reloads the same base scenario, so its tick-0
+    /// metadata is identical to what a fresh recording would carry — replaying
+    /// the built file reproduces the session from the last F5, not the
+    /// original launch). Without this, snapshots kept appending across the
+    /// restart boundary and the replay silently diverged from the live match
+    /// at the point of restart (see the flush caveat above for the sibling
+    /// caveat on *when* the buffer is written).
+    pub fn clear(&mut self) {
+        self.snapshots.clear();
+    }
 }
 
 /// Headless per-tick `hash_game_state` time series for `scenario`, driven
@@ -729,6 +745,45 @@ input 5 64 96
         assert_eq!(Scenario::parse(&built.to_text()).unwrap(), built);
         // The recorder targets the CLI path.
         assert_eq!(rec.path(), Path::new("/tmp/rec.txt"));
+    }
+
+    /// `Recorder::clear` (4f T0 fix): an F5 restart nukes the buffered
+    /// snapshots so the recording begins again from the restart point,
+    /// instead of silently splicing the pre-restart and post-restart streams
+    /// into one incoherent replay. Snapshots recorded before `clear()` must
+    /// not surface in `build()`; snapshots recorded after must.
+    #[test]
+    fn recorder_clear_resets_buffered_snapshots() {
+        use std::path::PathBuf;
+
+        let base = Scenario::parse("seed 7\nlevel a.lev\nticks 0\n").expect("base parses");
+        let mut rec = Recorder::new(base, PathBuf::from("/tmp/rec.txt"));
+
+        let mut fire = ControlState::new();
+        fire.set(ControlState::FIRE, true);
+
+        // Pre-restart: two ticks buffered.
+        rec.record(&[fire, ControlState::new()]);
+        rec.record(&[fire, ControlState::new()]);
+        assert_eq!(rec.build().ticks, 2, "pre-clear: two buffered ticks");
+
+        rec.clear();
+        assert_eq!(rec.build().ticks, 0, "clear empties the buffer");
+        assert_eq!(
+            rec.build().input(0, 0),
+            0,
+            "clear leaves no stale snapshot to read back"
+        );
+
+        // Post-restart: the buffer accumulates fresh from zero.
+        let mut left = ControlState::new();
+        left.set(ControlState::LEFT, true);
+        rec.record(&[left, ControlState::new()]);
+        rec.record(&[left, fire]);
+        let built = rec.build();
+        assert_eq!(built.ticks, 2, "post-clear: only the two new ticks count");
+        assert_eq!(built.input(0, 0), left.pack());
+        assert_eq!(built.input(1, 1), fire.pack());
     }
 
     /// Original-Liero TC data root (relative to this crate's manifest — same

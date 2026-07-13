@@ -1,0 +1,22 @@
+# The RL episode fixture (design §5). `LieroEnv::reset(seed)` parses THIS, overrides
+# `seed` for per-episode variety, and `scenario::load`s it into a tick-0 `SimState`.
+#
+# KillEmAll (game_mode absent => 0, the cleanest reward signal, design §4), two
+# VISIBLE worms grounded on the shipped render_stage level, each with a full default
+# loadout (slot 0 = DART). It is deliberately `default_match`-like (same level, same
+# landable spawn positions) but tuned for RL: `lives 1`, so a single death exhausts a
+# worm and ends the round — the short, sparse-signal KillEmAll episode the milestone
+# trains against.
+#
+# The env drives every tick via `step()`, so this file carries NO `input` lines and
+# `ticks 0`: both are unused here (the agent, not a scripted stream, supplies each
+# tick's `ControlState`). `ticks` is present only because the grammar requires it.
+# `seed` is a placeholder — `reset(seed)` overwrites it before `load`.
+seed 42
+level Levels/render_stage.lev
+ticks 0
+# Both VISIBLE and grounded (py = 7602176 == 116.0px, proven landable on this level).
+# worm0 px=100 (6553600), worm1 px=50 (3276800); stats_x mirrors the two HUD columns.
+worm 0 6553600 7602176 100 1 0   1
+worm 1 3276800 7602176 100 1 218 1
+weapon 0 DART

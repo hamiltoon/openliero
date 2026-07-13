@@ -1,0 +1,30 @@
+[package]
+name = "liero-env"
+version = "0.1.0"
+edition = "2021"
+
+# `cdylib` = the importable Python extension (built by maturin, T3); `rlib` = the
+# pure-Rust core so `cargo test --workspace` exercises the env logic like every
+# other crate (T0 workspace-membership decision, research note §3).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The Bevy-free surfaces the harness reads (design §1). `scenario` pulls in
+# `render` transitively, but `render` is itself Bevy-free (research note §3.1), so
+# the env still links no Bevy / no GPU. The env is a *consumer* — none of these is
+# edited.
+sim = { path = "../sim" }
+scenario = { path = "../scenario" }
+sim-core = { path = "../sim-core" }
+assets = { path = "../assets" }
+
+# PyO3 is declared now (T0 pin: 0.29, `abi3-py39`) but not USED until the T3
+# binding. `extension-module` is an OFF-by-default feature that maturin turns on
+# (research note §3): with it OFF, pyo3 links libpython so plain
+# `cargo test --workspace` builds and runs the rlib unit tests; with it ON the
+# crate produces the importable extension whose Python symbols the host supplies.
+pyo3 = { version = "0.29", default-features = false, features = ["abi3-py39"] }
+
+[features]
+extension-module = ["pyo3/extension-module"]

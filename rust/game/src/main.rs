@@ -84,8 +84,11 @@ struct Demo {
     golden_state: Vec<u32>,
     /// Per-tick `frame_hash` column of the committed golden (index = tick) — the
     /// CPU render-parity witness. **Wasm-only:** the embedded demo (`blood`) has
-    /// no `render_flash`/`render_shake` directives, so the demo's world-only draw
-    /// (`screen_flash = 0`, no shake) reproduces the sidecar's frame hash exactly.
+    /// no `render_flash`/`render_shake` directives, and since 4d's live stepping
+    /// its tick-10 explosion DOES fire the shake path (amount 1) — frame parity
+    /// survives because the `rand(2)-1 <= 0` jitter is eaten by the origin-pinned
+    /// camera clamp, netting zero pixels (NOT because "no shake runs"). A demo
+    /// change to `shake >= 2` or a non-origin camera would break this witness.
     /// Not asserted natively: the native demo does not replay a scenario's
     /// flash/shake, so a flashy scenario's frame would (correctly) diverge — and
     /// the native CPU frame is already gated far more thoroughly by the
@@ -642,9 +645,10 @@ fn tick_and_render(
     //    the proof that the *render* (not just the sim) is bit-identical to native
     //    in the browser (spec §Q3). The fade rule matches the 3b harness exactly:
     //    tick 0 is the black open (`fade = 0`), every later tick is identity
-    //    (`fade = 33`). Wasm-only because the embedded `blood` demo has no
-    //    flash/shake (so the demo's world-only draw reproduces the sidecar), and
-    //    the native CPU frame is already gated by the `render_slice3b_*` oracle.
+    //    (`fade = 33`). Since 4d, blood's tick-10 explosion fires the live shake
+    //    path — parity survives via the origin-clamped `<= 0` jitter (see the
+    //    `golden_frame` doc); the native CPU frame is already gated by the
+    //    `render_slice3b_*` oracle.
     #[cfg(all(target_arch = "wasm32", debug_assertions))]
     {
         let fade = if demo.tick == 0 { 0 } else { 33 };

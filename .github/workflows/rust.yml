@@ -82,9 +82,11 @@ jobs:
       # the committed golden. Most of the trimmed feature set dlopens at runtime,
       # but `wayland-sys`'s build script resolves wayland-client via pkg-config
       # at BUILD time, so this step (and only this step) needs the
-      # wayland/xkbcommon dev headers.
-      - name: Install game build deps (wayland headers)
-        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
+      # wayland/xkbcommon dev headers. Slice 4c adds rodio -> cpal -> alsa-sys,
+      # whose build script resolves ALSA via pkg-config at BUILD time too, so
+      # libasound2-dev joins the list (not preinstalled on ubuntu-latest).
+      - name: Install game build deps (wayland + alsa headers)
+        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev libasound2-dev
       - name: Test game crate (Bevy)
         run: cargo test --manifest-path rust/Cargo.toml -p game
 

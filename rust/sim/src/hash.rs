@@ -279,6 +279,7 @@ mod tests {
             worm_min_spawn_dist_enemy: 0,
             sound_hooks: assets::tc::SoundHooks::default(),
             sound_events: Vec::new(),
+            shake_events: Vec::new(),
         }
     }
 

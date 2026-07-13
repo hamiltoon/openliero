@@ -29,6 +29,7 @@ use crate::nobject::{
 use crate::physics::{worm_process_physics, worm_reactions, PhysicsConsts};
 use crate::pool::{BloodPool, Pool};
 use crate::sobject::{sobject_process, SObjectOutcome};
+use crate::shake::ShakeEvent;
 use crate::sound::{HookIndices, SoundEvent};
 use crate::weapon::{blow_up, wobject_process, worm_fire, WObjectOutcome};
 
@@ -1231,6 +1232,17 @@ pub struct SimState {
     /// feeds no sim math, so `hash_game_state` stays byte-identical whether it is
     /// populated or empty. Headless/library callers simply ignore it.
     pub sound_events: Vec<SoundEvent>,
+    /// The per-tick **explosion-shake event stream** (Slice-4d T1, `shake.rs`): the
+    /// `(x, y, amount)` records the sim emits at sobject creation when
+    /// `type.shake > 0` (`sobject.cpp:27-33`), cleared at the TOP of every
+    /// [`process_frame`](Self::process_frame) and drained by the `game` layer
+    /// ([`drain_shake_events`](Self::drain_shake_events)), which does the
+    /// per-viewport rect test + `itof(amount)` + `max` (T2). **NEVER hashed**
+    /// ([`crate::hash`] does not walk this field — the isolation firewall); carries
+    /// no `rand` and feeds no sim math, so `hash_game_state` stays byte-identical
+    /// whether it is populated or empty (design §0, §3b). Headless/library callers
+    /// simply ignore it.
+    pub shake_events: Vec<ShakeEvent>,
 }
 
 impl SimState {
@@ -1399,7 +1411,20 @@ impl SimState {
             // golden stays byte-identical (sound never enters the hash).
             sound_hooks: SoundHooks::default(),
             sound_events: Vec::new(),
+            // Shake (Slice-4d T1): the explosion-shake event stream starts empty.
+            // Unhashed side-channel output; the `game` layer drains it per tick and
+            // applies it to the live viewports (T2). Every prior golden stays
+            // byte-identical (shake never enters the hash, draws no rand).
+            shake_events: Vec::new(),
         }
+    }
+
+    /// Take this tick's collected explosion-shake events, leaving
+    /// [`shake_events`](Self::shake_events) empty — the `game` layer calls this each
+    /// tick (after `process_frame`) to apply them against the live viewports (Slice
+    /// 4d T2). A side-channel drain: touches no hashed state and draws no `rand`.
+    pub fn drain_shake_events(&mut self) -> Vec<ShakeEvent> {
+        std::mem::take(&mut self.shake_events)
     }
 
     /// The 256-byte 16x16 worm sprite for `(frame, direction, colour)`, mirroring
@@ -1476,6 +1501,12 @@ impl SimState {
             ninjarope_throw: self.sound_hooks.NinjaropeThrow,
         });
 
+        // Slice-4d shake: open the tick — clear this thread's per-tick shake-event
+        // buffer so it holds exactly this tick's explosion-shake events (a prior
+        // panic or a direct unit-test call can never leak stale ones in). Drained
+        // into `self.shake_events` at the BOTTOM of the tick. Determinism-inert.
+        crate::shake::begin_frame();
+
         // Disjoint field borrows: destructuring `&mut self` binds each field as a
         // separate `&mut` (default binding mode), so the object loops can hold
         // `&mut wobjects`/`&mut rand` + `&weapons` while the worm loop separately
@@ -1483,6 +1514,7 @@ impl SimState {
         // — all provably disjoint, which is what makes this borrow-check.
         let SimState {
             sound_events,
+            shake_events,
             level,
             physics,
             control,
@@ -2229,6 +2261,13 @@ impl SimState {
         // §2.2); the `game` backend drains it, headless callers ignore it. This is
         // the ONLY write to the field and touches no hashed state.
         *sound_events = crate::sound::take_frame();
+
+        // Slice-4d shake: close the tick — move this thread's collected
+        // explosion-shake events into `self.shake_events`, leaving the buffer empty
+        // for the next tick. Holds exactly this tick's events; the `game` layer
+        // drains + applies them to the live viewports (T2), headless callers ignore
+        // them. Unhashed side channel; touches no hashed state.
+        *shake_events = crate::shake::take_frame();
 
         // Close the tick: fold this tick's accumulated explosion flash back into the
         // persisted `screen_flash` (seeded decremented at the top; `raise`d to
@@ -3995,6 +4034,84 @@ mod tests {
             hash_game_state(&state),
             master,
             "clearing screen_flash does not move the hash"
+        );
+    }
+
+    #[test]
+    fn shake_events_are_hash_inert() {
+        // Design §0 / §3b: the explosion-shake event stream is NEVER walked by the
+        // hash (it is a render/game side channel — C++ writes viewport `shake`,
+        // which HashGameState omits). Populating/clearing `shake_events` must leave
+        // BOTH the master hash and every component hash byte-identical — this is
+        // exactly what keeps every committed sim_slice* golden unchanged after 4d
+        // (re-diff, no re-fuzz).
+        use crate::hash::{hash_components, hash_game_state};
+        use crate::shake::ShakeEvent;
+
+        let mut state = idle_state(0x5417_A6E5);
+        state.process_frame(&[]);
+        let master = hash_game_state(&state);
+        let components = hash_components(&state);
+
+        state.shake_events.push(ShakeEvent { x: 10, y: 20, amount: 4 });
+        state.shake_events.push(ShakeEvent { x: 1, y: 2, amount: 9 });
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "shake_events absent from the master hash"
+        );
+        assert_eq!(
+            hash_components(&state),
+            components,
+            "shake_events absent from every component hash"
+        );
+
+        state.shake_events.clear();
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "clearing shake_events does not move the hash"
+        );
+    }
+
+    #[test]
+    fn drain_shake_events_empties_and_returns() {
+        // The game-layer accessor (T2) takes this tick's events, leaving the vec
+        // empty for the next tick.
+        use crate::shake::ShakeEvent;
+        let mut state = idle_state(0xD8A1_7000);
+        state.shake_events.push(ShakeEvent { x: 3, y: 4, amount: 5 });
+        state.shake_events.push(ShakeEvent { x: 6, y: 7, amount: 8 });
+
+        let drained = state.drain_shake_events();
+        assert_eq!(
+            drained,
+            vec![
+                ShakeEvent { x: 3, y: 4, amount: 5 },
+                ShakeEvent { x: 6, y: 7, amount: 8 },
+            ],
+            "drain returns this tick's events in emit order"
+        );
+        assert!(state.shake_events.is_empty(), "drain empties the vec");
+        assert!(
+            state.drain_shake_events().is_empty(),
+            "a second drain is empty"
+        );
+    }
+
+    #[test]
+    fn process_frame_clears_shake_events_when_no_explosion() {
+        // begin_frame clears the per-tick buffer at the TOP of every process_frame,
+        // so a stale direct emit (or a prior tick's events) never leaks in. With no
+        // explosion this tick, `shake_events` ends empty. Draws no rand either
+        // (idle_state: bonus roll gated off), so the tick is fully shake-neutral.
+        let mut state = idle_state(0x0000_5EA1);
+        // Stale direct emit outside process_frame must NOT survive into the tick.
+        crate::shake::emit(9, 9, 9);
+        state.process_frame(&[]);
+        assert!(
+            state.shake_events.is_empty(),
+            "no explosion -> no shake events; stale emit cleared at top of tick"
         );
     }
 

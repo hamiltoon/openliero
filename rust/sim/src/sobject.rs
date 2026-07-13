@@ -149,7 +149,17 @@ pub fn sobject_create(
         crate::sound::one_shot(ty.start_sound + variant);
     }
 
-    // :27-33 viewport shake: render-only, no rand — omitted (game-layer, 4d T1).
+    // :27-33 viewport shake (4d T1). C++ walks `game.viewports` and, for every
+    // viewport whose rect contains the RAW blast (x, y), does `v.shake =
+    // max(Itof(shake), v.shake)`. Viewports do not exist inside the sim firewall,
+    // so the sim emits ONE (x, y, amount) event per explosion with shake > 0 into
+    // the crate::shake per-tick buffer (drained into SimState.shake_events); the
+    // game layer (T2) does the per-viewport rect test + itof + max. Coords are the
+    // RAW blast (x, y) (PRE the -8 sprite offset). Determinism-inert: draws no rand,
+    // never hashed. shake == 0 is a no-op `max(0, v.shake)` in C++, so emit nothing.
+    if ty.shake > 0 {
+        crate::shake::emit(x, y, ty.shake);
+    }
     // :41 screen_flash write: `game.screen_flash = std::max(flash, game.screen_flash)`.
     // Unhashed sim scalar (drives the render palette LightUp); draws no rand. Routed
     // through the crate::flash per-tick accumulator so the deep create path writes it
@@ -651,6 +661,90 @@ mod tests {
             &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
         );
         assert_eq!(crate::flash::take_frame(), 8, "max(flash 8, seed 3) = 8");
+    }
+
+    #[test]
+    fn create_emits_one_shake_event_at_raw_blast_coords_when_shake_positive() {
+        // sobject.cpp:27-33: the viewport loop `max`es `Itof(shake)` into every
+        // viewport containing the RAW blast (x, y). The sim has no viewports, so it
+        // emits ONE (x, y, amount) event per explosion with shake > 0; the game
+        // layer (T2) does the per-viewport rect test + itof + max. The coords are
+        // the RAW blast (x, y) (PRE the -8 sobject offset), amount = ty.shake.
+        let cossin = precompute_cossin();
+        let mut ty = small_explosion(-1); // no carve: isolate the shake write
+        ty.shake = 7;
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+
+        crate::shake::reset_frame();
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+
+        // The RAW blast (50, 50) — NOT the -8-offset obj coords (42, 42).
+        assert_eq!(
+            crate::shake::take_frame(),
+            vec![crate::shake::ShakeEvent { x: 50, y: 50, amount: 7 }],
+            "one shake event at the RAW blast (x, y) with amount = ty.shake"
+        );
+    }
+
+    #[test]
+    fn create_shake_event_draws_zero_rand() {
+        // The shake emit is determinism-inert: with start_sound < 0 (no sound draw),
+        // a bg level (no dirt-throw) and no carve, the whole explosion draws ZERO
+        // rand — yet the shake event is still emitted. Proves the seam adds no rand.
+        let cossin = precompute_cossin();
+        let mut ty = small_explosion(-1);
+        ty.shake = 7;
+        ty.start_sound = -1; // silence the only other draw
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+
+        crate::shake::reset_frame();
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+
+        assert_eq!(rand.last(), 0, "shake emission draws zero rand");
+        assert_eq!(
+            crate::shake::take_frame(),
+            vec![crate::shake::ShakeEvent { x: 50, y: 50, amount: 7 }],
+            "shake event still emitted with no rand drawn"
+        );
+    }
+
+    #[test]
+    fn create_shake_zero_pushes_no_event() {
+        // C++ `max(Itof(0), v.shake)` is a no-op, so shake == 0 must emit NOTHING —
+        // keeping the drained vec minimal. small_explosion defaults shake to 0.
+        let cossin = precompute_cossin();
+        let ty = small_explosion(-1); // shake defaults to 0
+        assert_eq!(ty.shake, 0, "fixture has no shake");
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+
+        crate::shake::reset_frame();
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+
+        assert!(
+            crate::shake::take_frame().is_empty(),
+            "shake == 0 emits no event"
+        );
     }
 
     #[test]

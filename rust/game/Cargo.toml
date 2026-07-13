@@ -51,6 +51,19 @@ rodio = { version = "0.19", default-features = false }
 # non-WebGPU browsers. NEVER `x11`/`wayland` here (they do not build for wasm32).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 bevy = { version = "0.19", default-features = false, features = ["webgl2"] }
+# Wasm audio backend (Slice 4c, T5). Same `rodio` line as the native table
+# (design §5's "swappable seam"), plus the `wasm-bindgen` feature: it flips
+# on `cpal`'s optional `wasm-bindgen` dep, which is the exact `cfg` cpal's
+# `platform/mod.rs` gates its WebAudio host behind
+# (`cfg(all(target_arch = "wasm32", feature = "wasm-bindgen"))`, checked
+# against cpal 0.15.3 source) — without it cpal compiles a host with zero
+# devices on wasm32 and `RodioSink::try_new` would always `Err`. cpal's
+# WebAudio backend builds an `AudioContext` synchronously (no
+# `wasm-bindgen-futures` needed); `Sink`/`Stream::play()` calls
+# `AudioContext::resume()`, which the browser's autoplay policy holds
+# `suspended` until a user gesture — no error, just silence until then (T5
+# task note; documented on `build_native_sink`'s wasm branch below).
+rodio = { version = "0.19", default-features = false, features = ["wasm-bindgen"] }
 
 # Dev-only fast-iteration linking. NEVER a default; never enabled in CI; NEVER with
 # the wasm target (`dynamic_linking` cannot build for wasm32).

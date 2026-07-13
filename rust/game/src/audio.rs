@@ -13,7 +13,12 @@
 //! caller), it stops and drops any loop whose key is no longer live, self-
 //! healing a dropped `Stop` event instead of leaking a channel.
 //!
-//! [`RodioSink`] (native only) plays real audio; [`NullSink`] is the C++
+//! [`RodioSink`] plays real audio on native AND wasm (Slice 4c, T5: `rodio`'s
+//! `wasm-bindgen` feature turns on `cpal`'s WebAudio host — `game/Cargo.toml`'s
+//! wasm target table — so this is the SAME struct/impl on both targets, not a
+//! separate wasm sink; only the sample-table *load* forks, since wasm has no
+//! filesystem: [`load_sound_table_wasm`] reads through the `read_asset` embed
+//! seam (`scenario::assets`) instead of `std::fs`). [`NullSink`] is the C++
 //! `NullSoundPlayer` (`mixer/player.hpp:88-94`) analog for headless callers —
 //! `replay_state_series`, the 4b round-trip, and the passthrough gate never
 //! construct a real sink (design §6.4). [`MockSink`] records calls for tests.
@@ -23,7 +28,6 @@ use std::path::Path;
 
 use sim::sound::{LoopKey, SoundAction, SoundEvent};
 
-#[cfg(not(target_arch = "wasm32"))]
 use rodio::Source as _;
 
 /// The `game`-side audio backend seam. Mirrors the C++ `SoundPlayer`
@@ -180,8 +184,9 @@ pub const SAMPLE_RATE: u32 = 44100;
 pub type SoundTable = Vec<Vec<i16>>;
 
 /// Load the sample table from `tc_root/sounds/<name>.wav` in `sound_names`
-/// order (native only — this reads the filesystem directly, no wasm path;
-/// the wasm embed is T5). Mirrors C++ `Common::load`'s per-sound loop
+/// order by reading the filesystem directly (native path; the wasm embed
+/// path is [`load_sound_table_wasm`], T5). Mirrors C++ `Common::load`'s
+/// per-sound loop
 /// (`common.cpp:325-362`): a missing WAV keeps the slot (preserving stable
 /// indices for its siblings) but leaves it silent (empty samples) rather than
 /// failing the whole table load.
@@ -199,13 +204,43 @@ pub fn load_sound_table(tc_root: &Path, sound_names: &[String]) -> SoundTable {
         .collect()
 }
 
-/// Native `rodio`-backed [`AudioSink`] (design §5). Holds the output stream
-/// alive for the sink's lifetime (dropping `OutputStream` ends playback —
-/// `rodio` 0.19 `stream.rs`), one transient `Sink` per one-shot (`.detach()`d
-/// so it survives past this call, matching fire-and-forget), and one `Sink`
-/// per active [`LoopKey`] (`.repeat_infinite()`, dropped/stopped on
-/// `stop_loop` — `rodio::Sink`'s `Drop` stops playback unless `detach`ed).
-#[cfg(not(target_arch = "wasm32"))]
+/// Wasm sample-table load (Slice 4c, T5): mirrors [`load_sound_table`] but
+/// reads each `sounds/<name>.wav` through [`scenario::assets::read_asset`]'s
+/// wasm embed branch (`scenario/src/assets.rs`) instead of `std::fs` — the
+/// browser has no filesystem. `tc_root` is threaded through unused (the wasm
+/// `read_asset` ignores it, same as every other wasm asset read) purely to
+/// keep the call shape identical to [`load_sound_table`]'s.
+///
+/// Unlike the native loader this does NOT degrade a missing file to a silent
+/// slot: the wasm embed (`assets.rs`) is exhaustive for this TC (`sounds/`'s
+/// 30 WAVs cover every name `tc.cfg`'s `[types] sounds` lists — verified
+/// against the shipped TC) and a build-time-known key set makes a miss a bug,
+/// not a runtime condition (mirroring `read_asset`'s own "a miss is a bug"
+/// policy for every other wasm embed). A malformed WAV still degrades to a
+/// silent (empty) slot, same as native — only the "file present" step differs.
+#[cfg(target_arch = "wasm32")]
+pub fn load_sound_table_wasm(tc_root: &Path, sound_names: &[String]) -> SoundTable {
+    sound_names
+        .iter()
+        .map(|name| {
+            let bytes = scenario::assets::read_asset(tc_root, &format!("sounds/{name}.wav"));
+            assets::wav::WavSound::load(&bytes)
+                .map(|snd| snd.upsampled())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// `rodio`-backed [`AudioSink`] (design §5) — native AND wasm (T5: `rodio`'s
+/// `wasm-bindgen` feature selects `cpal`'s WebAudio host on `wasm32`, so this
+/// struct needs no per-target variant; only [`RodioSink::try_new`]'s caller
+/// differs by target, in `load_sound_table` vs [`load_sound_table_wasm`]).
+/// Holds the output stream alive for the sink's lifetime (dropping
+/// `OutputStream` ends playback — `rodio` 0.19 `stream.rs`), one transient
+/// `Sink` per one-shot (`.detach()`d so it survives past this call, matching
+/// fire-and-forget), and one `Sink` per active [`LoopKey`] (`.repeat_infinite()`,
+/// dropped/stopped on `stop_loop` — `rodio::Sink`'s `Drop` stops playback
+/// unless `detach`ed).
 pub struct RodioSink {
     // Held only to keep the output stream alive; never read after
     // construction (dropping it would silence every sink).
@@ -215,11 +250,11 @@ pub struct RodioSink {
     loop_sinks: HashMap<LoopKey, rodio::Sink>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl RodioSink {
     /// Open the default output device and build a sink over `sounds` (design
-    /// §5). `Err` iff no output device is available (e.g. a headless CI box);
-    /// the caller (T4's `setup`) falls back to [`NullSink`].
+    /// §5). `Err` iff no output device is available (e.g. a headless CI box,
+    /// or a wasm build with no `AudioContext`); the caller (T4/T5's `setup`)
+    /// falls back to [`NullSink`].
     pub fn try_new(sounds: SoundTable) -> Result<Self, rodio::StreamError> {
         let (stream, handle) = rodio::OutputStream::try_default()?;
         Ok(RodioSink {
@@ -250,7 +285,6 @@ impl RodioSink {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl AudioSink for RodioSink {
     fn play_one_shot(&mut self, sound: i32) {
         let Some(buf) = self.buffer(sound) else {

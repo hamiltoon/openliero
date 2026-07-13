@@ -26,11 +26,8 @@ use scenario::{Scenario, SceneData};
 use sim::sound::LoopKey;
 use sim::state::SimState;
 
-use game::input::{InputSource, Mode, ParsedArgs, Recorder};
-#[cfg(not(target_arch = "wasm32"))]
 use game::audio::{AudioSink, Drainer, NullSink, RodioSink};
-#[cfg(target_arch = "wasm32")]
-use game::audio::{Drainer, NullSink};
+use game::input::{InputSource, Mode, ParsedArgs, Recorder};
 
 mod blit;
 
@@ -101,19 +98,18 @@ struct Demo {
 #[derive(Resource)]
 struct FrameImage(Handle<Image>);
 
-/// Native audio backend (Slice 4c, T4): either a real device or the C++
-/// `NullSoundPlayer` analog when `RodioSink::try_new` finds no output device
-/// (`setup_audio`'s fallback — audio §4c GREEN bullet: no crash without a
-/// sound card). `Drainer<Sink>` needs one concrete sink type per build; an
-/// enum (rather than `Box<dyn AudioSink>`) keeps every call statically
-/// dispatched.
-#[cfg(not(target_arch = "wasm32"))]
+/// The audio backend, native AND wasm (Slice 4c, T4 native / T5 wasm): either
+/// a real device (`RodioSink` — since T5, the SAME struct on both targets,
+/// `audio.rs`) or the C++ `NullSoundPlayer` analog when `RodioSink::try_new`
+/// finds no output device (`setup_audio`'s fallback — audio §4c GREEN bullet:
+/// no crash without a sound card; on wasm, no `AudioContext`, e.g. a very old
+/// browser). `Drainer<Sink>` needs one concrete sink type per build; an enum
+/// (rather than `Box<dyn AudioSink>`) keeps every call statically dispatched.
 enum NativeAudio {
     Rodio(RodioSink),
     Null(NullSink),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl AudioSink for NativeAudio {
     fn play_one_shot(&mut self, sound: i32) {
         match self {
@@ -135,24 +131,26 @@ impl AudioSink for NativeAudio {
     }
 }
 
-/// The `AudioDrainer`'s sink type: `NativeAudio` (Rodio-or-Null) natively,
-/// bare `NullSink` on wasm — rodio's native backend is gated out of the wasm
-/// target entirely (`game/Cargo.toml`'s `cfg(not(target_arch = "wasm32"))`
-/// dependency table); the wasm Web-Audio sink is T5 (plan). Wasm plays
-/// silently until then, exactly like a native run with no output device.
-#[cfg(not(target_arch = "wasm32"))]
+/// The `AudioDrainer`'s sink type: `NativeAudio` (Rodio-or-Null) on BOTH
+/// targets since T5 — `RodioSink` compiles for wasm32 too (`audio.rs`'s
+/// unconditional `impl`; `game/Cargo.toml`'s wasm target table adds `rodio`
+/// with the `wasm-bindgen` feature, which is what selects `cpal`'s WebAudio
+/// host for `wasm32`). `RodioSink::try_new` failing (no output device / no
+/// `AudioContext`) is the one remaining fallback to `NullSink`, on either
+/// target — see `open_native_audio`.
 type Sink = NativeAudio;
-#[cfg(target_arch = "wasm32")]
-type Sink = NullSink;
 
 /// Drains `sim.0.sound_events` into the sink each real tick and runs the
 /// liveness reaper (`tick_and_render`, spec §4.2). `NonSend` (not an ordinary
-/// `Resource`) because the native backend holds a `cpal::Stream` inside
-/// `RodioSink`'s `OutputStream` — a platform audio-device handle that is
-/// **not** `Send` (confirmed against `cpal` 0.15's CoreAudio backend:
-/// `StreamInner` holds a raw `AudioUnit` handle with no `unsafe impl Send`).
-/// `NonSend`/`NonSendMut` pin the resource to the main thread instead of
-/// requiring `Send`, unlike `Resource`/`Res`/`ResMut`.
+/// `Resource`) because the backend holds a platform audio handle that is
+/// **not** `Send`: natively, a `cpal::Stream` inside `RodioSink`'s
+/// `OutputStream` (confirmed against `cpal` 0.15's CoreAudio backend:
+/// `StreamInner` holds a raw `AudioUnit` handle with no `unsafe impl Send`);
+/// on wasm, the `AudioContext`/`web_sys` types inside cpal's WebAudio host are
+/// built on `JsValue`, which is `!Send` by construction (wasm32 is
+/// single-threaded, so this costs nothing either way). `NonSend`/`NonSendMut`
+/// pin the resource to the main thread instead of requiring `Send`, unlike
+/// `Resource`/`Res`/`ResMut`.
 struct AudioDrainer(Drainer<Sink>);
 
 fn main() {
@@ -470,6 +468,34 @@ fn build_native_sink(tc_root: &Path) -> NativeAudio {
         .unwrap_or_else(|e| panic!("read {}: {e}", tc_cfg_path.display()));
     let tc = assets::tc::TcConfig::load(&tc_bytes).expect("tc.cfg parses");
     let table = game::audio::load_sound_table(tc_root, &tc.types.sounds);
+    open_native_audio(table)
+}
+
+/// Wasm (T5): the same `RodioSink` (`audio.rs`), but the sample table is
+/// loaded through the `read_asset` embed seam (`load_sound_table_wasm`)
+/// instead of the filesystem the browser doesn't have — mirroring how
+/// `setup` already loads sprites/level/tc.cfg for wasm (`scenario::load`).
+/// `RodioSink::try_new` opens a Web Audio `AudioContext` synchronously (no
+/// `wasm-bindgen-futures` needed — verified against cpal 0.15.3's
+/// `webaudio/mod.rs`), but the context starts `suspended` per the browser's
+/// autoplay policy until a user gesture calls `resume()` (which
+/// `rodio::Sink::play`/`append` triggers via `cpal::Stream::play`) — so a
+/// fresh page plays **silently** until the first click/keypress, with no
+/// error and no console spam (T5 task requirement). `open_native_audio`'s
+/// `Err` fallback additionally covers a browser with no Web Audio support at
+/// all.
+#[cfg(target_arch = "wasm32")]
+fn build_native_sink(tc_root: &Path) -> NativeAudio {
+    let tc_bytes = scenario::assets::read_asset(tc_root, "tc.cfg");
+    let tc = assets::tc::TcConfig::load(&tc_bytes).expect("tc.cfg parses");
+    let table = game::audio::load_sound_table_wasm(tc_root, &tc.types.sounds);
+    open_native_audio(table)
+}
+
+/// Shared `RodioSink`-or-`NullSink` fallback (T4/T5): `Err` from
+/// `RodioSink::try_new` (no output device / no `AudioContext`) degrades to
+/// silent play rather than a crash, on either target.
+fn open_native_audio(table: game::audio::SoundTable) -> NativeAudio {
     match RodioSink::try_new(table) {
         Ok(sink) => NativeAudio::Rodio(sink),
         Err(e) => {
@@ -477,15 +503,6 @@ fn build_native_sink(tc_root: &Path) -> NativeAudio {
             NativeAudio::Null(NullSink)
         }
     }
-}
-
-/// Wasm: rodio's native backend is not compiled in for this target
-/// (`game/Cargo.toml`'s `cfg(not(target_arch = "wasm32"))` dependency table);
-/// the wasm Web-Audio sink is T5 (plan). Until then wasm plays silently, the
-/// same observable behavior as a native run with no output device.
-#[cfg(target_arch = "wasm32")]
-fn build_native_sink(_tc_root: &Path) -> NullSink {
-    NullSink
 }
 
 /// This tick's live loop-channel keys, read from `sim` right after

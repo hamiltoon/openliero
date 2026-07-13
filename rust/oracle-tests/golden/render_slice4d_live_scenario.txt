@@ -1,0 +1,80 @@
+# Step 4 Slice 4d — LIVE flash / shake / banner / centering MILESTONE scenario.
+#
+# Read by BOTH the C++ dumper (oracle_dump_sim_physics, the opt-in `render_live` path:
+# real Game::ProcessFrame + wired viewports) and the Rust 4d oracle-test, which drives
+# the same scenario through the LIVE game-layer path (viewport_step: top-of-frame shake
+# decrement + banner walk BEFORE process_frame, explosion-shake-event drain AFTER, then
+# frame::draw's Viewport::process = centering + shake-RNG + banner reset). Grammar = the
+# sim slices + `render player` + `render_live`.
+#
+# === WHAT THIS PROVES: flash / shake / banner / centering, LIVE (design §3-§5) =========
+# Reuses the slice-5d DEATH+RESPAWN geometry (physics_fall_test.lev, worm0 EXPLOSIVES
+# kills the low-health worm1) and adds the render+live-viewport wiring so the render-only
+# side effects Step 3 deferred now run from REAL events:
+#
+#   * FLASH (global, palette LightUp): the `large_explosion` sobject (flash=8) sets
+#     game.screen_flash=8 at sobject-create; the top-of-frame decrement walks it 8->0 over
+#     the following 8 ticks. The palette LightUp blip changes EVERY pixel while flash>0 —
+#     the flash-decay non-vacuity window (frame differs from the screen_flash=0 control).
+#
+#   * SHAKE (per-viewport, position-dependent): `large_explosion` (shake=4) emits a
+#     (x,y,4) shake event; the game layer maxes viewports[vp].shake = itof(4) for every
+#     viewport whose CURRENT window contains the blast. worm1 DIES ~tick 90 (health 12 <=
+#     first blast's ~15 dmg); from the death tick its viewport (vp1) SetCenters on the
+#     corpse at (~115,196) via the dead-arm (viewport.cpp:40-45). A SECOND worm0 fire
+#     after reload (Fire tick 155, EXPLOSIVES loadingTime=113 so it is reloaded by ~t151)
+#     lobs the same LOW-LEFT trajectory and air-bursts at x~94-110, y~196 — INSIDE vp1's
+#     now-centred window [36,194) x [117,275) — so the blast sets vp1.shake LIVE. The
+#     viewport-local RNG then jitters x/y for ~50 ticks (itof(4)=262144, -4000/tick until
+#     Ftoi<1) — the shake-decay non-vacuity window (viewport (x,y) differs from a
+#     centering-only re-render with shake zeroed).
+#
+#   * BANNER (per-viewport walk): worm1's death sets killed_timer=150; the dead-arm resets
+#     banner_y=-8 at killed_timer==150, then the (cycles&1) every-other-cycle walk steps
+#     banner_y toward +2 while killed_timer>16 (a death is showing) and back toward -8 as
+#     the timer drains past 16 near respawn — banner_y reaches -8 then walks up then back.
+#
+#   * CENTERING (camera follows a LIVE worm): after the 150-tick countdown worm1 runs
+#     BeginRespawn/DoRespawning (the 5d path: a Fire-to-latch `ready` at tick 150 while
+#     dead), flips visible=true with killed_timer<=0, and DROPS to a new spawn — so the
+#     alive-visible arm SetCenters and the camera MOVES as worm1 falls/settles (frame
+#     changes tick-to-tick purely from the camera follow — the centering non-vacuity).
+#
+# The `killed_timer` trap (spec §4): every worm starts killed_timer=150, so WITHOUT a real
+# death+respawn the centering arms never fire and SetCenter is vacuous (camera pinned at
+# origin, the 3b/3e posture). This scenario is the deliberate escape: a real kill then a
+# real respawn drive both centering arms live.
+#
+# No steerable weapon (EXPLOSIVES shot_type != kStSteerable), so the steerable_count==0
+# live guard (viewport.rs:86) stays quiet (spec §6).
+seed 42
+level Levels/physics_fall_test.lev
+# ticks: fire 38 -> air-burst+DEATH ~t90 -> 2nd fire 155 -> air-burst (shake, vp1 centred)
+# ~t207 -> BeginRespawn ~t240 -> DoRespawning + fall/settle. 320 covers the full cycle with
+# margin so the post-respawn camera-follow window is non-empty.
+ticks 320
+max_bonuses 0
+# worm0 = KILLER (x=150, y=195, health 100, EXPLOSIVES). worm1 = VICTIM at rest (x=115,
+# y~=196), VISIBLE + grounded, LOW health 12 (< settings->health/4=25) so the first
+# air-burst kills it. Identical start to slices 5d / 3e-death.
+worm 0  9830400 12779520 100 10 0   1
+worm 1  7536640 12845520  12 10 218 1
+weapon 0 EXPLOSIVES
+render player
+render_live
+# input <tick> <worm0_7bit> <worm1_7bit>  (Up=1 Down=2 Left=4 Right=8 Fire=16 Change=32 Jump=64)
+# worm0: raise the gun (Up ticks 13-20) then Fire tick 38 — the 5d/5b kill sequence.
+input 13 1 0
+input 14 1 0
+input 15 1 0
+input 16 1 0
+input 17 1 0
+input 18 1 0
+input 19 1 0
+input 20 1 0
+input 38 16 0
+# worm1: a single Fire PRESS at tick 150 (dead by then) to latch `ready` for DoRespawning.
+input 150 0 16
+# worm0: SECOND Fire at tick 155 (reloaded ~t151) — the in-window explosion that shakes
+# vp1 while it is centred on worm1's corpse during the death countdown.
+input 155 16 0

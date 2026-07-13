@@ -56,6 +56,16 @@ type ObsPair<'py> = (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>);
 /// `PyReadonlyArray` dtype match. Must be called with the GIL held (it reads
 /// Python objects), i.e. never inside `allow_threads`.
 fn extract_action(obj: &Bound<'_, PyAny>) -> PyResult<ControlState> {
+    // Exact-length gate: an over-length action (e.g. a stray length-8 vector
+    // or an accidentally batched array) must be a loud error, never a silent
+    // truncation — an RL loop feeds millions of these. Under-length already
+    // fails via `get_item`, this closes the over-length half.
+    let len = obj.len()?;
+    if len != N_ACTION_BITS as usize {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "action must have exactly {N_ACTION_BITS} elements, got {len}"
+        )));
+    }
     let mut bits = [false; N_ACTION_BITS as usize];
     for (n, bit) in bits.iter_mut().enumerate() {
         *bit = obj.get_item(n)?.is_truthy()?;

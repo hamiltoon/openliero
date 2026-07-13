@@ -1,0 +1,25 @@
+# Maturin build backend for the `liero_env` PyO3 extension (plan T3, design §6).
+#
+# `maturin develop` (editable) / `maturin build` (wheel) compile the `liero-env`
+# crate's cdylib with the `extension-module` cargo feature ON (see [tool.maturin]
+# below), producing an abi3 wheel (`abi3-py39` in Cargo.toml → one forward-
+# compatible wheel across CPython >= 3.9, T0 §3). A plain `cargo test --workspace`
+# builds the same crate with the feature OFF and links libpython, so the rlib unit
+# tests still run in the workspace — that is why `extension-module` is an
+# off-by-default feature that only maturin enables.
+[build-system]
+requires = ["maturin>=1.14,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "liero_env"
+version = "0.1.0"
+description = "Liero-rs RL harness — raw PyO3 env surface (RawEnv) over the Bevy-free sim."
+requires-python = ">=3.9"
+# The obs bridge returns numpy `float32` arrays; the exact pin lives in
+# constraints.txt (numpy==2.5.1), this is the compatible floor.
+dependencies = ["numpy>=1.24"]
+
+[tool.maturin]
+# Turn the off-by-default cargo feature ON for the importable extension (T0 §3).
+features = ["extension-module"]

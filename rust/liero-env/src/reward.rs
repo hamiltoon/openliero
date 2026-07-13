@@ -93,11 +93,17 @@ pub struct RewardConfig {
 
 impl Default for RewardConfig {
     /// `w_damage_dealt > w_damage_taken` (trading damage nets positive, but
-    /// taking it is discouraged, design §4); `w_kill`/`w_death` dominate a full
-    /// health bar's worth of chip damage so the terminal events matter most;
-    /// `w_time` is deliberately tiny — one full stalled 3000-tick episode
-    /// (`LieroEnv::DEFAULT_MAX_TICKS`) costs `3000 * 0.001 = 3.0`, well under a
-    /// single kill/death.
+    /// taking it is discouraged, design §4). Note the shaped **damage** term
+    /// deliberately DOMINATES early: a full health bar of chip damage is worth
+    /// `100 * w_damage_dealt = 100`, an order of magnitude above a single
+    /// `w_kill`/`w_death = 10` terminal event — so dense damage shaping is what
+    /// drives learning at the start, by design. The sparse kill/death objective
+    /// only takes over as the caller **anneals** the shaping weights down toward
+    /// the `±1` kill/death signal (design §4's "shaped-then-annealed"); that
+    /// annealing is the Python-side path, not a property of these starting
+    /// values. `w_time` is deliberately tiny — one full stalled 3000-tick
+    /// episode (`LieroEnv::DEFAULT_MAX_TICKS`) costs `3000 * 0.001 = 3.0`, well
+    /// under a single kill/death.
     fn default() -> Self {
         RewardConfig {
             w_damage_dealt: 1.0,

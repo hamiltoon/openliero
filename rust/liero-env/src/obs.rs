@@ -173,6 +173,15 @@ fn push_self_kinematics(
 /// Append one worm's weapon block (design §3.1 "Weapons:"), `3 * NUM_WEAPONS`
 /// scalars: a `current_weapon` one-hot, then per-slot `ammo`, then per-slot
 /// `loading_left`.
+///
+/// **Deviation from design §3.1:** the design's "Weapons:" list names `ammo`,
+/// `delay_left`, AND `loading_left` per slot; `delay_left` is intentionally
+/// OMITTED here. `delay_left` is the short between-shots cooldown, largely
+/// redundant with `loading_left` (the dominant reload/ammo-discipline signal
+/// design §3.1 calls out) at this obs fidelity, and adding it would widen every
+/// slot by one scalar (`OBS_DIM` would grow by `NUM_WEAPONS`). It can be added
+/// later behind an `OBS_DIM` bump and a matching layout-table row if reload
+/// timing proves under-observed — tracked as a v1.1 obs tweak, not a silent gap.
 fn push_weapons(out: &mut Vec<f32>, w: &WormState) {
     for slot in 0..NUM_WEAPONS {
         out.push(if w.current_weapon == slot as i32 {

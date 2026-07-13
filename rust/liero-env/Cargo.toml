@@ -25,6 +25,12 @@ assets = { path = "../assets" }
 # `cargo test --workspace` builds and runs the rlib unit tests; with it ON the
 # crate produces the importable extension whose Python symbols the host supplies.
 pyo3 = { version = "0.29", default-features = false, features = ["abi3-py39"] }
+# The obs bridge (T3): returns each per-agent observation as a contiguous
+# `f32` numpy array across the FFI boundary (design §3.3/§8 — only compact float
+# arrays cross). PyO3-0.29-compatible, abi3 via pyo3; loads the numpy C-API
+# lazily at call time, so it needs no numpy present to *build* the workspace
+# rlib tests (which never call it).
+numpy = { version = "0.29", default-features = false }
 
 [features]
 extension-module = ["pyo3/extension-module"]

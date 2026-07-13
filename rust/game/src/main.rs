@@ -11,6 +11,7 @@
 //! The sim is a plain `Resource` that Bevy only *ticks and presents*: `SimState`
 //! is mutated ONLY in `tick_and_render`, only via `process_frame`, and no Bevy
 //! value ever flows into it — the Step-5 `bevy_ggrs` rollback shape.
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use bevy::asset::RenderAssetUsages;
@@ -22,9 +23,14 @@ use bevy::window::WindowResolution;
 use render::bitmap::Bitmap;
 use render::viewport::Viewport;
 use scenario::{Scenario, SceneData};
+use sim::sound::LoopKey;
 use sim::state::SimState;
 
 use game::input::{InputSource, Mode, ParsedArgs, Recorder};
+#[cfg(not(target_arch = "wasm32"))]
+use game::audio::{AudioSink, Drainer, NullSink, RodioSink};
+#[cfg(target_arch = "wasm32")]
+use game::audio::{Drainer, NullSink};
 
 mod blit;
 
@@ -95,6 +101,60 @@ struct Demo {
 #[derive(Resource)]
 struct FrameImage(Handle<Image>);
 
+/// Native audio backend (Slice 4c, T4): either a real device or the C++
+/// `NullSoundPlayer` analog when `RodioSink::try_new` finds no output device
+/// (`setup_audio`'s fallback — audio §4c GREEN bullet: no crash without a
+/// sound card). `Drainer<Sink>` needs one concrete sink type per build; an
+/// enum (rather than `Box<dyn AudioSink>`) keeps every call statically
+/// dispatched.
+#[cfg(not(target_arch = "wasm32"))]
+enum NativeAudio {
+    Rodio(RodioSink),
+    Null(NullSink),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl AudioSink for NativeAudio {
+    fn play_one_shot(&mut self, sound: i32) {
+        match self {
+            NativeAudio::Rodio(s) => s.play_one_shot(sound),
+            NativeAudio::Null(s) => s.play_one_shot(sound),
+        }
+    }
+    fn play_loop(&mut self, key: LoopKey, sound: i32) {
+        match self {
+            NativeAudio::Rodio(s) => s.play_loop(key, sound),
+            NativeAudio::Null(s) => s.play_loop(key, sound),
+        }
+    }
+    fn stop_loop(&mut self, key: LoopKey) {
+        match self {
+            NativeAudio::Rodio(s) => s.stop_loop(key),
+            NativeAudio::Null(s) => s.stop_loop(key),
+        }
+    }
+}
+
+/// The `AudioDrainer`'s sink type: `NativeAudio` (Rodio-or-Null) natively,
+/// bare `NullSink` on wasm — rodio's native backend is gated out of the wasm
+/// target entirely (`game/Cargo.toml`'s `cfg(not(target_arch = "wasm32"))`
+/// dependency table); the wasm Web-Audio sink is T5 (plan). Wasm plays
+/// silently until then, exactly like a native run with no output device.
+#[cfg(not(target_arch = "wasm32"))]
+type Sink = NativeAudio;
+#[cfg(target_arch = "wasm32")]
+type Sink = NullSink;
+
+/// Drains `sim.0.sound_events` into the sink each real tick and runs the
+/// liveness reaper (`tick_and_render`, spec §4.2). `NonSend` (not an ordinary
+/// `Resource`) because the native backend holds a `cpal::Stream` inside
+/// `RodioSink`'s `OutputStream` — a platform audio-device handle that is
+/// **not** `Send` (confirmed against `cpal` 0.15's CoreAudio backend:
+/// `StreamInner` holds a raw `AudioUnit` handle with no `unsafe impl Send`).
+/// `NonSend`/`NonSendMut` pin the resource to the main thread instead of
+/// requiring `Send`, unlike `Resource`/`Res`/`ResMut`.
+struct AudioDrainer(Drainer<Sink>);
+
 fn main() {
     // Resolve + validate the scenario BEFORE opening a window: an unknown name
     // prints the available scenarios and exits non-zero (no window flash).
@@ -134,6 +194,12 @@ fn main() {
         // wall-clock. `Time<Fixed>` gives the fixed-timestep accumulator for free.
         .insert_resource(Time::<Fixed>::from_hz(1000.0 / 14.0))
         .add_systems(Startup, setup)
+        // Exclusive (main-thread-only) Startup system: builds the audio
+        // backend and inserts it as a NonSend resource (see `AudioDrainer`).
+        // Independent of `setup`'s Commands-based resource inserts, so
+        // ordering between the two Startup systems is unconstrained — both
+        // complete before the first FixedUpdate regardless.
+        .add_systems(Startup, setup_audio)
         .add_systems(FixedUpdate, tick_and_render)
         .add_systems(Update, close_on_esc)
         // 4b: flush the recorder once, on graceful exit. Esc's `AppExit` is written
@@ -378,6 +444,76 @@ fn setup(
     commands.insert_resource(FrameImage(handle));
 }
 
+/// Startup (T4, exclusive — see `AudioDrainer`): build the native audio
+/// backend and insert it as a `NonSend` resource. Split out of `setup`
+/// because `Commands`-queued insertion goes through `bevy_ecs`'s `Command`
+/// trait, which requires `Send + 'static`, and `RodioSink` is not `Send`;
+/// `World::insert_non_send` carries no such bound, and an exclusive
+/// system (`fn(&mut World)`) is guaranteed to run on the main thread, so it is
+/// a safe place to open the audio device. Runs unconditionally (Live,
+/// Scripted, and Replay are all windowed — `main.rs` never runs headless;
+/// the headless callers — `replay_state_series`, the round-trip/passthrough
+/// tests, `shot` — never construct this App at all, spec §6.4).
+fn setup_audio(world: &mut World) {
+    let sink = build_native_sink(Path::new(TC_ROOT));
+    world.insert_non_send(AudioDrainer(Drainer::new(sink)));
+}
+
+/// Load the TC's sample table and open the default output device (design
+/// §5). `Err` (no output device — e.g. a headless CI box or a machine with no
+/// sound card) falls back to `NullSink` and reports why on stderr instead of
+/// crashing (T4 GREEN bullet).
+#[cfg(not(target_arch = "wasm32"))]
+fn build_native_sink(tc_root: &Path) -> NativeAudio {
+    let tc_cfg_path = tc_root.join("tc.cfg");
+    let tc_bytes = std::fs::read(&tc_cfg_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", tc_cfg_path.display()));
+    let tc = assets::tc::TcConfig::load(&tc_bytes).expect("tc.cfg parses");
+    let table = game::audio::load_sound_table(tc_root, &tc.types.sounds);
+    match RodioSink::try_new(table) {
+        Ok(sink) => NativeAudio::Rodio(sink),
+        Err(e) => {
+            eprintln!("audio: no output device available ({e}); running with sound disabled");
+            NativeAudio::Null(NullSink)
+        }
+    }
+}
+
+/// Wasm: rodio's native backend is not compiled in for this target
+/// (`game/Cargo.toml`'s `cfg(not(target_arch = "wasm32"))` dependency table);
+/// the wasm Web-Audio sink is T5 (plan). Until then wasm plays silently, the
+/// same observable behavior as a native run with no output device.
+#[cfg(target_arch = "wasm32")]
+fn build_native_sink(_tc_root: &Path) -> NullSink {
+    NullSink
+}
+
+/// This tick's live loop-channel keys, read from `sim` right after
+/// `process_frame` — the belt-and-braces reaper's input (design §4.2). A
+/// `Worm(i)` key is live iff worm `i` is currently visible; a
+/// `WormWeapon(i, slot)` key is live iff the worm is ALSO visible and `slot`
+/// is its current weapon slot. Gating the weapon key on visibility too (not
+/// just the slot match the design text spells out) closes the leak the
+/// design's risk item 1 names directly ("a worm dies... the loop leaks"): a
+/// dead worm's `current_weapon` field is untouched by death, so a
+/// slot-only check would never reap a weapon loop whose explicit death-site
+/// `Stop` (`sim/src/state.rs`) was somehow missed. This is a strict superset
+/// of the design's literal "current_weapon != w" example — it still reaps a
+/// live worm's stale weapon-switch key exactly the same way, via the current
+/// slot simply not matching (so the stale key is absent from this set).
+fn live_loop_keys(sim: &SimState) -> HashSet<LoopKey> {
+    let mut keys = HashSet::new();
+    for (i, w) in sim.worms.iter().enumerate() {
+        if !w.visible {
+            continue;
+        }
+        let idx = i as u8;
+        keys.insert(LoopKey::Worm(idx));
+        keys.insert(LoopKey::WormWeapon(idx, w.current_weapon as u8));
+    }
+    keys
+}
+
 /// FixedUpdate: advance the sim EXACTLY one tick, run the loop step, render the
 /// current tick, upload, then (debug) assert the sim hash against the golden.
 /// This is the ONLY system that mutates `Sim` (the determinism firewall).
@@ -391,6 +527,9 @@ fn tick_and_render(
     mode: Res<Mode>,
     // 4b: present only on the Live + `--record` path; `None` (no-op) otherwise.
     mut recorder: Option<ResMut<Recorder>>,
+    // T4: the audio backend (see `AudioDrainer`) — NonSend because native
+    // `RodioSink` is not `Send`.
+    mut audio: NonSendMut<AudioDrainer>,
 ) {
     // 4b (T2): `--replay` has no loop/reload (spec §5/§9) — once `tick` reaches
     // `ticks` the replay HOLDS on the final rendered frame: no further
@@ -418,6 +557,15 @@ fn tick_and_render(
             recorder.record(&inputs);
         }
         sim.0.process_frame(&inputs);
+
+        // T4 (spec §4.2): drain this tick's sound-event stream into the sink,
+        // then run the liveness reaper. Both are gated behind the SAME
+        // `!replay_finished` real-tick condition as `process_frame` itself —
+        // a held replay's final frame must not re-fire one-shots (or
+        // spuriously reap live loops) every FixedUpdate while holding.
+        audio.0.drain(&sim.0.sound_events);
+        let live = live_loop_keys(&sim.0);
+        audio.0.reap(&live);
     }
 
     // 2. Loop step. Scripted-only reload (spec §4.3 step 4 / §9): when `tick`

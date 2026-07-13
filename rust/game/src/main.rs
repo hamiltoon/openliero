@@ -573,7 +573,16 @@ fn tick_and_render(
         if let Some(recorder) = recorder.as_mut() {
             recorder.record(&inputs);
         }
-        sim.0.process_frame(&inputs);
+        // 4d T2: the live viewport stepping owns the C++ `Game::ProcessFrame`
+        // phase order around the sim's atomic `process_frame` — top-of-frame
+        // shake decrement + banner walk BEFORE, explosion-shake event-max AFTER
+        // (`viewport_step::tick_viewports`, design §3). The per-viewport
+        // `shake`/`banner_y` live on `demo.viewports`; `sim.0.screen_flash`
+        // (decremented inside `process_frame`, raised at sobject-create) is read
+        // by the render below. Scripted/Live/Replay all drive it — the shake
+        // events only fire on real explosions, so a no-explosion scenario steps
+        // nothing (byte-identical to the pre-4d `process_frame` call).
+        game::viewport_step::tick_viewports(&mut demo.viewports, &mut sim.0, &inputs);
 
         // T4 (spec §4.2): drain this tick's sound-event stream into the sink,
         // then run the liveness reaper. Both are gated behind the SAME
@@ -659,7 +668,11 @@ fn render_and_upload(
     handle: &Handle<Image>,
 ) {
     let draw_shadow = demo.scenario.shadow();
-    let scene = demo.scene.as_scene(0, draw_shadow);
+    // 4d T2: thread the LIVE `screen_flash` (drop the 3c hardcoded `0`) — a real
+    // explosion raises it in `process_frame`, decrementing one per tick, driving
+    // the palette `LightUp` blip at draw. For a no-flash scenario it stays 0, so
+    // the frame is byte-identical to the pre-4d hardcoded `0`.
+    let scene = demo.scene.as_scene(sim.screen_flash, draw_shadow);
     render::frame::draw(&mut demo.surface, sim, &mut demo.viewports, &scene);
 
     // `get_mut` marks the Image dirty => Bevy re-uploads it to the GPU.

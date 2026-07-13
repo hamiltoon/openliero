@@ -54,7 +54,8 @@ pub struct SceneData {
 
 impl SceneData {
     /// Borrow the owned ingredients into a `render::frame::Scene` for one draw.
-    /// `screen_flash`/`draw_shadow` are per-draw (demo passes 0 / scenario.shadow()).
+    /// `screen_flash`/`draw_shadow` are per-draw (since 4d T2 the `game` binary
+    /// passes the live `sim.screen_flash`; `scenario.shadow()` for the shadow gate).
     /// `draw_hud`/`map` default to `false` — the world-only path every existing
     /// caller (shot, game, the 3b harness) drives, so 3a/3b frame hashes stay
     /// byte-identical. A HUD-enabling caller (3e T8) sets them on the returned

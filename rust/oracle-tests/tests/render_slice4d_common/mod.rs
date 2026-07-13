@@ -346,14 +346,22 @@ pub fn run(name: &str) -> RunResult {
 /// final `target_tick` draw — the non-vacuity controls. `force_flash` overrides
 /// that draw's palette `screen_flash` (e.g. `Some(0)` suppresses the flash);
 /// `suppress_shake` zeroes every viewport's `shake` right before that draw
-/// (centering-only, no shake jitter). Returns `(frame_hash, [vp0 (x,y), vp1
-/// (x,y)])` — the post-draw camera positions. All prior ticks render with their
-/// real live values, so the state entering `target_tick` matches `run` bit-for-bit.
+/// (centering-only, no shake jitter). `suppress_banner` forces every viewport's
+/// `banner_y` to -8 right before that draw so the cross-viewport death banner is
+/// suppressed (`banner_y > -8` is false) — the banner-text non-vacuity control
+/// (on a banner-visible tick the frame must differ from this suppressed draw).
+/// Setting `banner_y` post-`step_before_frame`/pre-`frame::draw` survives the
+/// draw's `Viewport::process` (its only `banner_y` write is the
+/// `killed_timer==150` reset, which does not fire on a banner-visible tick).
+/// Returns `(frame_hash, [vp0 (x,y), vp1 (x,y)])` — the post-draw camera
+/// positions. All prior ticks render with their real live values, so the state
+/// entering `target_tick` matches `run` bit-for-bit.
 pub fn modified(
     name: &str,
     target_tick: u32,
     force_flash: Option<i32>,
     suppress_shake: bool,
+    suppress_banner: bool,
 ) -> (u64, [(i32, i32); 2]) {
     let mut b = build(name);
     assert!(target_tick <= b.scenario.ticks, "target tick in range");
@@ -368,6 +376,11 @@ pub fn modified(
             if suppress_shake {
                 for vp in b.viewports.iter_mut() {
                     vp.shake = 0;
+                }
+            }
+            if suppress_banner {
+                for vp in b.viewports.iter_mut() {
+                    vp.banner_y = -8;
                 }
             }
         }

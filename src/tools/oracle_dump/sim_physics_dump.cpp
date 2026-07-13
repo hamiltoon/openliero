@@ -516,7 +516,9 @@ int main(int argc, char** argv) {
   // Process -> clip -> DrawLevel at kOffs -> shadow pass (if settings->shadow) -> sprite
   // pass -> restore clip. When `render_hud` is set (Slice 3e) the HUD pre-block + minimap
   // are ALSO drawn per viewport (before/after the world block); otherwise HUD/minimap are
-  // omitted (world-only). name-labels/holdazone/banners/AI-debug stay omitted. The path reads
+  // omitted (world-only). When `render_live` is set (Slice 4d) the cross-viewport death
+  // banners are ALSO drawn (after DrawLevel, before the shadow pass); name-labels/holdazone/
+  // the YoureIt GameOfTag banner/AI-debug stay omitted. The path reads
   // only level/objects/worms/cycles and the per-viewport RNG (laser sight + shake); it
   // never touches game.rand or mutates sim state, so the sim output is untouched (design
   // §6). The render_shadow flip window and the render_shake/render_flash injections carry
@@ -675,6 +677,35 @@ int main(int argc, char** argv) {
       DrawLevel(renderer->bmp, game.level, kOffs.x, kOffs.y);  // viewport.cpp:210
 
       Worm const& vp_worm = *game.WormByIdx(vp->worm_idx);
+
+      // ---- Cross-viewport death banners (viewport.cpp:256-270), gated on
+      //      render_live. Only the live path walks `banner_y` and centres the
+      //      viewports (ProcessViewports), so in the injection path (3a/3b/3e)
+      //      every viewport's `banner_y` rests at -8 and this block draws
+      //      nothing anyway — the gate makes the re-diff byte-identical without
+      //      relying on that invariant. For every OTHER viewport whose worm is
+      //      dead and whose banner has walked into view, draw the kill/suicide
+      //      message in THIS viewport's column at the other's banner_y (shadow
+      //      colour 0 at +3/+1, text colour 50 at +2/+0). Keyed by
+      //      `last_killed_by_idx`. The own-worm YoureIt/GameOfTag arm
+      //      (viewport.cpp:249-254) is DEFERRED (needs got_changed + game-mode,
+      //      spec §7). ----
+      if (scn.render_live) {
+        for (auto const& other : viewports) {
+          if (other.get() == vp.get()) continue;  // v != this
+          Worm const& other_worm = *game.WormByIdx(other->worm_idx);
+          if (other_worm.health <= 0 && other->banner_y > -8) {
+            std::string kMsg;
+            if (other_worm.last_killed_by_idx == vp_worm.index) {
+              kMsg = LS(KilledMsg) + other_worm.settings->name;  // viewport.cpp:261
+            } else {
+              kMsg = other_worm.settings->name + LS(CommittedSuicideMsg);  // viewport.cpp:265
+            }
+            common.font.DrawString(renderer->bmp, kMsg, vp->rect.x1 + 3, other->banner_y + 1, 0);
+            common.font.DrawString(renderer->bmp, kMsg, vp->rect.x1 + 2, other->banner_y, 50);
+          }
+        }
+      }
 
       // ---- Pass 1: all shadows (viewport.cpp:274-398), gated on settings->shadow. ----
       if (game.settings->shadow) {

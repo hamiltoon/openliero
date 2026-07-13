@@ -197,6 +197,8 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
         kills: tc.texts.Kills.clone(),
         lives: tc.texts.Lives.clone(),
         reloading: tc.texts.Reloading.clone(),
+        killed_msg: tc.texts.KilledMsg.clone(),
+        committed_suicide_msg: tc.texts.CommittedSuicideMsg.clone(),
     };
 
     Loaded {
@@ -247,5 +249,8 @@ weapon 0 DART
         assert_eq!(loaded.scene.labels.kills, "Kills: ");
         assert_eq!(loaded.scene.labels.lives, "Lives: ");
         assert_eq!(loaded.scene.labels.reloading, "Reloading...");
+        // Death-banner strings (Slice 4d T5): the KilledMsg prefix / suicide suffix.
+        assert_eq!(loaded.scene.labels.killed_msg, "Killed ");
+        assert_eq!(loaded.scene.labels.committed_suicide_msg, " committed suicide");
     }
 }

@@ -42,7 +42,7 @@ fn render_slice4d_live_frame_hash_matches_cpp_oracle() {
         r.screen_flash[flash_tick] > 0,
         "tick {flash_tick}: the live screen_flash must be raised by the explosion"
     );
-    let (fh_no_flash, _) = modified("live", flash_tick as u32, Some(0), false);
+    let (fh_no_flash, _) = modified("live", flash_tick as u32, Some(0), false, false);
     assert_ne!(
         r.frame_hashes[flash_tick], fh_no_flash,
         "tick {flash_tick}: flash-on frame must differ from screen_flash=0 (the LightUp blip is live)"
@@ -59,7 +59,7 @@ fn render_slice4d_live_frame_hash_matches_cpp_oracle() {
         "tick {shake_tick}: vp1.shake must be >= itof(1) so the render RNG draws"
     );
     let live_xy = (r.vps[shake_tick][1].x, r.vps[shake_tick][1].y);
-    let (_, centering_only) = modified("live", shake_tick as u32, None, true);
+    let (_, centering_only) = modified("live", shake_tick as u32, None, true, false);
     assert_ne!(
         live_xy, centering_only[1],
         "tick {shake_tick}: vp1 (x,y) with shake must differ from the centering-only \
@@ -95,13 +95,41 @@ fn render_slice4d_live_frame_hash_matches_cpp_oracle() {
         "vp1 banner_y must reset to -8 in a single >1 step at the death (killed_timer==150)"
     );
 
+    // ---- BANNER TEXT non-vacuity (the KilledMsg glyphs are live pixels) --------
+    // worm1 was killed by worm0, so on a tick where vp1.banner_y has walked well
+    // into view the cross-viewport `KilledMsg` text lands in worm0's viewport
+    // (viewport.cpp:256-270, keyed by last_killed_by_idx). Suppressing the banner
+    // (forcing every banner_y to -8 for that draw only) must change the frame —
+    // the death-banner glyphs are real drawn pixels, not a golden that matched
+    // while the banner drew nothing.
+    // Anchor to the death reset (the >1 drop to -8), so we pick a banner-visible
+    // tick INSIDE the death window — not the vacuous killed_timer==150 spawn walk
+    // (every worm starts killed_timer=150, so banner_y climbs to +2 before any
+    // death, but health>0 there suppresses the banner). After the reset worm1 is
+    // dead until respawn, so the first banner_y that walks back to +1 is drawn.
+    let reset_tick = (1..=r.ticks)
+        .find(|&t| {
+            let prev = r.vps[(t - 1) as usize][1].banner_y;
+            let cur = r.vps[t as usize][1].banner_y;
+            cur == -8 && prev - cur > 1
+        })
+        .expect("death resets banner_y to -8");
+    let banner_tick = (reset_tick..=r.ticks)
+        .find(|&t| r.vps[t as usize][1].banner_y >= 1)
+        .expect("banner_y walks back to >= 1 during the death window");
+    let (fh_no_banner, _) = modified("live", banner_tick, None, false, true);
+    assert_ne!(
+        r.frame_hashes[banner_tick as usize], fh_no_banner,
+        "tick {banner_tick}: the death banner is live pixels (suppressing banner_y changes the frame)"
+    );
+
     // ---- CENTERING non-vacuity (camera follows the live worm) -----------------
     // After respawn worm1 is alive+visible with killed_timer<=0, so the
     // alive-visible arm SetCenters on it as it falls. Compare the PURE-centering
     // (shake-suppressed) camera y at two post-respawn ticks: the worm fell, so y
     // moves — the live camera follow.
-    let (_, early) = modified("live", 240, None, true);
-    let (_, late) = modified("live", 254, None, true);
+    let (_, early) = modified("live", 240, None, true, false);
+    let (_, late) = modified("live", 254, None, true, false);
     assert_ne!(
         early[1].1, late[1].1,
         "vp1 pure-centering y must move across the post-respawn fall (camera follows the worm)"

@@ -44,6 +44,14 @@ pub struct HudLabels {
     pub lives: String,
     /// `Texts::Reloading` — the blinking "Reloading..." label (`viewport.cpp:125-128`).
     pub reloading: String,
+    /// `Texts::KilledMsg` — the death-banner prefix drawn ahead of the killer's
+    /// worm name when a worm was killed by another (`viewport.cpp:261`, Slice 4d).
+    /// Not a HUD element (it is a world-block banner), but carried on the same
+    /// `Scene.labels` the banner draw already threads.
+    pub killed_msg: String,
+    /// `Texts::CommittedSuicideMsg` — the death-banner suffix drawn after the
+    /// dead worm's name when it died without a killer (`viewport.cpp:265`).
+    pub committed_suicide_msg: String,
 }
 
 /// Port of `Weapon::ComputedLoadingTime` (`weapon.cpp:8-14`):
@@ -385,6 +393,7 @@ mod tests {
             kills: "Kills: ".to_string(),
             lives: "Lives: ".to_string(),
             reloading: "Reloading...".to_string(),
+            ..Default::default()
         }
     }
 

@@ -23,6 +23,7 @@
 //! render_shake <tick> <vp> <amount>             # Slice 3b; draw-only shake injection
 //! render_flash <tick> <amount>                  # Slice 3b; draw-only screen-flash injection
 //! render_hud                                     # Slice 3e; draw-time HUD/minimap draw (0 args)
+//! render_live                                    # Slice 4d; opt-in live-viewport path (0 args)
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
@@ -87,6 +88,13 @@ pub struct Scenario {
     /// `Scene.draw_hud` stays `false`, so the world-only draw is byte-identical). Both
     /// parser sides move together (T6).
     render_hud: bool,
+    /// Slice-4d `render_live` (0-arg) — the opt-in live-viewport directive. Absent =>
+    /// `false` (prior scenarios untouched). Present (requires `render`) => the C++ dumper
+    /// wires the two viewports and drives the real `Game::ProcessFrame` so shake/flash/
+    /// banner/centering evolve live from real explosions/spawn/death; the Rust 4d
+    /// oracle-test drives the matching live game-layer path. Both parser sides move
+    /// together (the shared scenario file must parse on both).
+    render_live: bool,
 }
 
 impl Scenario {
@@ -106,6 +114,7 @@ impl Scenario {
         let mut render_shake: Vec<(u32, usize, i32)> = Vec::new();
         let mut render_flash: Vec<(u32, i32)> = Vec::new();
         let mut render_hud = false;
+        let mut render_live = false;
 
         for (lineno, raw) in text.lines().enumerate() {
             let n = lineno + 1;
@@ -185,6 +194,14 @@ impl Scenario {
                     expect_args(n, key, &nums, 0)?;
                     render_hud = true;
                 }
+                "render_live" => {
+                    // Slice 4d: opt-in live-viewport directive (0 args — presence enables
+                    // it). Accepted-and-stored on BOTH sides (mirrors the C++ dumper's
+                    // `render_live` arm); the 4d oracle-test keys the live game-layer path
+                    // off it.
+                    expect_args(n, key, &nums, 0)?;
+                    render_live = true;
+                }
                 "worm" => {
                     expect_args(n, key, &nums, 7)?;
                     let visible = match parse_at(6)? {
@@ -253,6 +270,7 @@ impl Scenario {
             render_shake,
             render_flash,
             render_hud,
+            render_live,
         })
     }
 
@@ -308,6 +326,13 @@ impl Scenario {
     /// (and, for the minimap, `Scene.map`).
     pub fn hud(&self) -> bool {
         self.render_hud
+    }
+
+    /// Whether the `render_live` directive is present — the opt-in live-viewport path.
+    /// The 4d oracle-test keys the live game-layer path (top-of-frame decrement +
+    /// shake-event drain + `frame::draw`) off this.
+    pub fn live(&self) -> bool {
+        self.render_live
     }
 
     /// Serialize this scenario back to its text form. `Scenario::parse` reads the
@@ -370,6 +395,9 @@ impl Scenario {
         }
         if self.render_hud {
             out.push_str("render_hud\n");
+        }
+        if self.render_live {
+            out.push_str("render_live\n");
         }
         // Sparse `input` lines in ascending tick order; skip all-zero ticks (they
         // decode to (0,0) from absence — the parser convention, `parser.rs:262`).
@@ -684,13 +712,34 @@ input 5 16 0
         assert!(err.contains("expects 0 args"), "got: {err}");
     }
 
+    // ---- Slice 4d live-viewport directive (both parser sides move together) ----
+
+    #[test]
+    fn render_live_defaults_off_and_parses() {
+        // Absent => off (prior scenarios unchanged).
+        let s = Scenario::parse(SAMPLE).expect("parses");
+        assert!(!s.live(), "absent render_live defaults off");
+        // Present (0 args) => on.
+        let s = Scenario::parse("seed 1\nlevel a.lev\nticks 1\nrender player\nrender_live\n")
+            .expect("parses");
+        assert!(s.live(), "render_live enables the live-viewport path");
+    }
+
+    #[test]
+    fn render_live_wrong_arity_errors() {
+        // render_live takes NO args; a trailing token is rejected.
+        let err =
+            Scenario::parse("seed 1\nlevel a.lev\nticks 1\nrender_live 1\n").unwrap_err();
+        assert!(err.contains("expects 0 args"), "got: {err}");
+    }
+
     // ---- Slice 4b: `to_text` serializer + `with_recorded_inputs` builder ----
 
     // A scenario exercising EVERY directive the parser stores: seed/level/ticks,
     // both defaulted globals (max_bonuses, game_mode), two worms (one visible, one
     // not; distinct fields), a bare weapon + a weapon with an ammo token,
     // render_shadow, two render_shake (same tick, order-sensitive), render_flash,
-    // render_hud, and sparse input incl. the max 7-bit word (127). No explicit
+    // render_hud, render_live, and sparse input incl. the max 7-bit word (127). No explicit
     // all-zero `input` line (those don't round-trip — see the risk note in the
     // done-report; they are semantically absence and the recorder never emits them).
     const RICH: &str = "\
@@ -708,6 +757,7 @@ render_shake 3 1 7
 render_shake 3 0 4
 render_flash 2 20
 render_hud
+render_live
 input 5 16 0
 input 10 127 64
 ";

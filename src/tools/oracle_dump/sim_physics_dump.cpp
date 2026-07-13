@@ -55,6 +55,9 @@
 //   render_shake <tick> <vp> <amount>  (Slice 3b; draw-time viewports[vp]->shake inject)
 //   render_flash <tick> <amount>       (Slice 3b; draw-time LightUp screen_flash inject)
 //   render_hud                         (Slice 3e; draw-time HUD pre-block + minimap draw)
+//   render_live                        (Slice 4d; opt-in — wire viewports + real
+//                                       Game::ProcessFrame so shake/flash/banner/centering
+//                                       evolve LIVE. Requires `render player`.)
 //
 // Diagnostic: set env OL_PHYS_TRACE=1 to also print per-tick pos/vel for both worms
 // to stderr (does not affect the golden output). Built via the
@@ -68,6 +71,17 @@
 //   render_flash <tick> <amount>        (draw-time only: inject the LightUp screen_flash)
 //   render_hud               (Slice 3e; draw-time only: also draw the HUD pre-block +
 //                             minimap — see render_and_hash. Absent => world-only.)
+//   render_live              (Slice 4d; opt-in. When set (requires `render`), the two
+//                             viewports are wired into `game.viewports` and each tick is
+//                             driven through the REAL `Game::ProcessFrame` — not the
+//                             reduced TAIL — so the top-of-frame screen_flash/shake
+//                             decrements, the (cycles&1) banner_y walk, the sobject-create
+//                             viewport-shake + game.screen_flash writes, and
+//                             ProcessViewports (centering + shake-RNG + banner reset) all
+//                             run LIVE. render_and_hash then draws WITHOUT re-processing
+//                             the viewports and feeds the live game.screen_flash into
+//                             LightUp. Absent => the reduced-tail + injection path, so
+//                             every prior golden stays byte-identical (the re-diff gate).)
 // When `render` is PRESENT, the dumper additionally builds a headless `Renderer` + two
 // framehash-layout `Viewport`s and, right after each `dump(tick)`, renders the FULL WORLD
 // frame (the world subset of `Game::Draw`, game.cpp:170-198, + the two-pass
@@ -202,6 +216,19 @@ struct Scenario {
   // scenario) => the block is skipped and the world-only draw stays
   // byte-identical (the re-diff gate).
   bool render_hud = false;
+  // Opt-in LIVE viewport path (Slice 4d). When true (requires `render player`),
+  // the dumper wires the two framehash Viewports into `game.viewports` (AddViewport)
+  // and drives each tick through the REAL `Game::ProcessFrame` instead of the reduced
+  // ProcessFrame TAIL — so the top-of-frame `screen_flash`/viewport-`shake` decrements
+  // and the `(cycles&1)` `banner_y` walk run, sobject-create sets `game.screen_flash`
+  // + each covering viewport's `shake`, and `ProcessViewports` (game.cpp:463) centers +
+  // shake-RNGs + walks `banner_y` LIVE from real explosions/spawn/death. render_and_hash
+  // then draws WITHOUT re-processing the viewports (ProcessFrame already did) and feeds
+  // the LIVE `game.screen_flash` into the palette LightUp. The 3b injection path
+  // (render_shake/render_flash + the reduced tail) is untouched for every non-live
+  // scenario, so priors stay byte-identical (the re-diff gate, spec §5). Absent (every
+  // existing scenario) => the reduced-tail path runs exactly as before.
+  bool render_live = false;
 };
 
 std::vector<uint8_t> SlurpFile(std::string const& path) {
@@ -266,6 +293,10 @@ Scenario ParseScenario(char const* path) {
     } else if (key == "render_hud") {
       // Draw-time HUD/minimap draw (Slice 3e). 0 args — presence enables it.
       s.render_hud = true;
+    } else if (key == "render_live") {
+      // Live viewport path (Slice 4d). 0 args — presence drives the real
+      // Game::ProcessFrame + wires the two viewports into ProcessViewports.
+      s.render_live = true;
     } else if (key == "worm") {
       WormSpec w;
       ls >> w.index >> w.pos_x >> w.pos_y >> w.health >> w.lives >> w.stats_x >> w.visible;
@@ -296,6 +327,11 @@ Scenario ParseScenario(char const* path) {
   }
   if (s.worms.size() != 2) {
     std::fprintf(stderr, "scenario must define exactly 2 worms (got %zu)\n", s.worms.size());
+    std::exit(1);
+  }
+  // render_live needs the render path (renderer + viewports) to draw the live frame.
+  if (s.render_live && s.render_layout.empty()) {
+    std::fprintf(stderr, "render_live requires a `render player` directive\n");
     std::exit(1);
   }
   return s;
@@ -457,6 +493,20 @@ int main(int argc, char** argv) {
     viewports.push_back(std::make_unique<Viewport>(Rect(0, 0, 158, 158), game.worms[0]->index));
     viewports.push_back(
         std::make_unique<Viewport>(Rect(160, 0, 158 + 160, 158), game.worms[1]->index));
+
+    // Slice 4d: wire the viewports into `game.viewports` so the REAL Game::ProcessFrame
+    // (driven below when render_live is set) runs its top-of-frame shake decrement +
+    // banner walk over them, sobject-create sets their `shake`, and ProcessViewports
+    // (game.cpp:463) centers + shake-RNGs them. `game.viewports` holds NON-owning raw
+    // pointers (ClearViewports only `.clear()`s — game.cpp:120-123); the unique_ptrs above
+    // own the objects and outlive `game` (declared earlier => destroyed after). Only wired
+    // for render_live; the reduced-tail (injection) path keeps its viewports unregistered,
+    // exactly as the 3a/3b/3e goldens expect.
+    if (scn.render_live) {
+      for (auto const& vp : viewports) {
+        game.AddViewport(vp.get());
+      }
+    }
   }
 
   // Renders the FULL world block (the world subset of Game::Draw, game.cpp:170-198, plus
@@ -489,9 +539,14 @@ int main(int argc, char** argv) {
     bool const saved_map = game.settings->map;
     if (scn.render_hud) game.settings->map = true;
 
-    // Draw-only screen-flash injection (spec O4). Absent for this tick => 0 => no LightUp.
+    // Screen-flash for the LightUp. Slice 4d (render_live): read the LIVE `game.screen_flash`
+    // — decremented at the top of this tick's real ProcessFrame (phase 1) and set by any
+    // sobject-create explosion (phase 2), so the palette blip evolves from real events.
+    // Otherwise (3b): the draw-only injection map (absent for this tick => 0 => no LightUp).
     int screen_flash = 0;
-    {
+    if (scn.render_live) {
+      screen_flash = game.screen_flash;
+    } else {
       auto const it = scn.render_flash.find(tick);
       if (it != scn.render_flash.end()) screen_flash = it->second;
     }
@@ -511,20 +566,29 @@ int main(int argc, char** argv) {
     for (std::size_t vi = 0; vi < viewports.size(); ++vi) {
       auto const& vp = viewports[vi];
 
-      // Draw-only shake injection (spec O4). shake is `fixed`, so inject Itof(amount) and
-      // the shake branch (viewport.cpp:47-52) recovers the pixel amount via Ftoi. Set
-      // BEFORE Process (which reads it), restored immediately after so the next viewport /
-      // tick starts clean and the sim never sees it.
-      fixed const saved_shake = vp->shake;
-      {
-        auto const tit = scn.render_shake.find(tick);
-        if (tit != scn.render_shake.end()) {
-          auto const vit = tit->second.find(static_cast<int>(vi));
-          if (vit != tit->second.end()) vp->shake = Itof(vit->second);
+      // Slice 4d (render_live): the viewport was ALREADY processed this tick by the real
+      // Game::ProcessFrame's ProcessViewports (game.cpp:463) — centering + shake-RNG +
+      // clamp + banner reset ran there, reading live post-worm-loop state and the live
+      // sobject-set `shake`. Re-processing here would double the shake-RNG draws, so skip
+      // it (and the injection, which live scenarios never set). The per-viewport RNG order
+      // is preserved: ProcessViewports drew shake x/y before this draw's laser sight, same
+      // relative order as the 3b path (shake then laser on the viewport-local Rand).
+      if (!scn.render_live) {
+        // Draw-only shake injection (spec O4). shake is `fixed`, so inject Itof(amount) and
+        // the shake branch (viewport.cpp:47-52) recovers the pixel amount via Ftoi. Set
+        // BEFORE Process (which reads it), restored immediately after so the next viewport /
+        // tick starts clean and the sim never sees it.
+        fixed const saved_shake = vp->shake;
+        {
+          auto const tit = scn.render_shake.find(tick);
+          if (tit != scn.render_shake.end()) {
+            auto const vit = tit->second.find(static_cast<int>(vi));
+            if (vit != tit->second.end()) vp->shake = Itof(vit->second);
+          }
         }
+        vp->Process(game);
+        vp->shake = saved_shake;
       }
-      vp->Process(game);
-      vp->shake = saved_shake;
 
       // ---- HUD pre-block (Slice 3e), gated on render_hud. Ported from
       //      viewport.cpp:84-189 (KillEmAll/Scales arms; is_replay=false, so the
@@ -954,6 +1018,30 @@ int main(int argc, char** argv) {
   // Drive N ticks: apply scripted input, Process each worm in game.worms order,
   // then dump. The input for the pass advancing tick t -> t+1 is keyed on t.
   for (int t = 0; t < scn.ticks; ++t) {
+    // Slice 4d LIVE path: run the REAL Game::ProcessFrame (with the viewports wired above)
+    // instead of the reduced TAIL below. Set this tick's control states first — the real
+    // ProcessFrame reads them in its worm loop (and stores prev_control_states) exactly as
+    // the reduced tail's `Unpack` does — then advance one full frame: top-of-frame
+    // screen_flash/shake decrements + (cycles&1) banner walk, the object loops (sobject-
+    // create sets each covering viewport's `shake` + `game.screen_flash`), ++cycles, the
+    // bonus-drop roll, the worm loop, the ninjarope loop, the game-mode switch, and
+    // ProcessViewports (centering + shake-RNG + banner_y reset). `continue` skips the
+    // reduced-tail branch below, which stays byte-identical for every non-live scenario.
+    if (scn.render_live) {
+      std::array<uint32_t, 2> in{0, 0};
+      auto const it = scn.inputs.find(t);
+      if (it != scn.inputs.end()) {
+        in = it->second;
+      }
+      for (int idx = 0; idx < static_cast<int>(game.worms.size()); ++idx) {
+        game.worms[idx]->control_states.Unpack(idx < 2 ? in[idx] : 0);
+      }
+      game.ProcessFrame();
+      dump(t + 1);
+      if (renderer) render_and_hash(t + 1);
+      continue;
+    }
+
     // Bonuses Process loop (game.cpp:287-290), at the TOP of ProcessFrame, BEFORE
     // the object loops AND before `++cycles`. `bonuses` is an ExactObjectList (slot
     // order; All() skips free slots); `Bonus::Process` (fall/bounce/expire) may

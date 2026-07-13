@@ -1,0 +1,44 @@
+# Liero-rs RL harness — pinned Python dependency versions (T0, 2026-07-13).
+#
+# Resolved and verified on: macOS 15 (Darwin 25) / Apple Silicon (M2 Max, arm64),
+# CPython 3.13.1, in a project-local venv (rust/liero-env/.venv, gitignored).
+# Install with:  pip install -c constraints.txt <the packages you need>
+# or pin directly:  pip install -r this-file
+#
+# torch ships a native arm64 wheel with the MPS (Metal) backend built in
+# (torch.backends.mps.is_available() == True on this machine) — no CUDA.
+#
+# API assumptions verified against these exact versions (see the T0 research note,
+# docs/superpowers/specs/2026-07-13-liero-rs-rl-harness-t0-research.md):
+#   - PettingZoo ParallelEnv: reset(seed, options) -> (obs, infos);
+#     step(actions) -> (obs, rewards, terminated, truncated, infos);
+#     observation_space(agent) / action_space(agent) are METHODS.
+#   - SB3 make_proba_distribution(MultiBinary(7)) -> BernoulliDistribution
+#     (PPO consumes MultiBinary natively, no action re-encoding needed).
+#   - gymnasium.utils.env_checker.check_env + pettingzoo.test.parallel_api_test
+#     both import and are the T4 gates.
+
+# --- core RL stack (direct) ---
+stable_baselines3==2.9.0
+pettingzoo==1.26.1
+gymnasium==1.3.0
+torch==2.13.0
+numpy==2.5.1
+
+# --- build backend (Rust extension via PyO3) ---
+maturin==1.14.1
+
+# --- transitive pins captured for reproducibility ---
+cloudpickle==3.1.2
+Farama-Notifications==0.0.6
+filelock==3.29.7
+networkx==3.6.1
+sympy==1.14.0
+typing_extensions==4.16.0
+
+# --- Rust-side crate pins (NOT pip; recorded here for the single source of truth) ---
+# pyo3  = "0.29"  (features: extension-module gated OFF by default; abi3-py39 for a
+#                  single forward-compatible wheel — see the workspace decision).
+# numpy = "0.29"  (rust `numpy` crate, PyO3 0.29-compatible; for the T3 obs array
+#                  bridge — not yet a dependency in T0).
+# maturin build backend pinned >=1.14,<2.0 in pyproject (T3).

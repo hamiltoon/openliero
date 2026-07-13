@@ -1,0 +1,11 @@
+# Project-local Python virtualenv for the RL harness (never committed — torch et al.
+# are ~GB; recreate with `python3 -m venv .venv` + `pip install -c constraints.txt`).
+.venv/
+
+# Python / maturin build artifacts
+__pycache__/
+*.py[cod]
+*.so
+build/
+dist/
+*.egg-info/

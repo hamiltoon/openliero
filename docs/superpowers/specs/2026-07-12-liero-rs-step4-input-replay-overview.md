@@ -156,12 +156,23 @@ the largest surface and depends on nothing the earlier slices produce.
   witness per 3f, browser input revisited later); gamepad (unchanged, still later/optional);
   recording → **4b**.
 
-- **4b — Record / replay round-trip + regression (the hard gate).** Record the per-tick
-  `ControlState` stream (+ seed/level/weapon) to the recorded-input artifact; a headless replay
-  player (extend `scenario`/`shot`) drives the sim from it; CI asserts **record→replay→identical**
-  `HashGameState` + frame-hash. **Proves:** determinism survives real input — the Step 4 headline
-  and Step 5 precondition. **Oracle/gate:** self-checking round-trip (no C++). **Risks:**
-  `prev_control_states` baseline reproduction (input-map §1b, §3c), worm iteration order.
+- **4b — Record / replay round-trip + regression (the hard gate). — LANDED (2026-07-13, commits
+  `8bf17cc`..`7936ce3` + hardening `4c73119`; all reviews 0 Critical / 0 Important).** Delivered as
+  specified, with the format decision made literal: **the recorded artifact IS a scenario file** —
+  `Scenario::to_text` (the crate's first serializer, every parsed field covered) +
+  `with_recorded_inputs`; a `Recorder` taps the sampled `ControlState` array (Dig chord already
+  resolved) and flushes on `AppExit` ordered `.after(bevy::window::ExitSystems)` (review-caught
+  window-close race); `--replay <path>` drives any scenario through the **unchanged**
+  `InputSource::Scripted` (play once, then hold); `replay_state_series` is the headless library
+  entry. The round-trip gate (`round_trip.rs`) proves live-sampler-record → text → parse → scripted
+  replay reproduces the live `HashGameState` series tick-for-tick, non-vacuously (3 asymmetries +
+  hardcoded raw-text facit); a committed 12-tick corpus + sim-produced sidecar backstops
+  symmetric drift. **Risk resolutions:** the `prev_control_states` concern was a non-issue (the
+  Rust sim stores absolute per-tick words, no delta baseline — delta applies only to 4e's `.lrp`).
+  **Hardening (H1):** the T3 review found the C++ `cossin[128]` UB **reachable in `--live`**
+  (spawn→walk→fire; the aim clamp is gated on `aiming_speed != 0`) — three sim sites (`worm_fire`,
+  ninjarope-throw, dig) now mask the table index `&0x7f` (3b precedent, same table; golden-neutral,
+  full suite green).
 
 - **4c — Audio.** Sim emits a per-tick sound-event stream (id / already-chosen variant / object
   handle / loop flag) at the existing `Play` call sites — **adding zero `rand`** (input-map §6);

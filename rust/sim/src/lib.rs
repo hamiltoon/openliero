@@ -24,3 +24,4 @@ pub mod sobject;
 pub mod sound;
 pub mod state;
 pub mod weapon;
+pub mod wide_checksum;

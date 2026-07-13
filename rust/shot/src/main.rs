@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: shot --scenario <name> --tick <n> [--tick <n> ...] \
-(--out <path> | --hashes) [--scale <n>] [--tc-root <path>] [--hud]";
+const USAGE: &str = "usage: shot (--scenario <name> | --scenario-path <file>) --tick <n> \
+[--tick <n> ...] (--out <path> | --hashes) [--scale <n>] [--tc-root <path>] [--hud]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

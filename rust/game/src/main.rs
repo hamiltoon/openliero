@@ -169,7 +169,14 @@ fn main() {
         record,
         replay,
     } = resolve_scenario();
-    let title = format!("Liero-rs — 3c demo ({name})");
+    // Title: drop the stale "3c demo" string (flagged since 4a T2). The bare 4f
+    // default match reads as "default match" (its sentinel name); every other
+    // run shows its scenario name.
+    let title = if name == game::input::DEFAULT_MATCH {
+        "Liero-rs — default match".to_string()
+    } else {
+        format!("Liero-rs — {name}")
+    };
 
     App::new()
         .add_plugins(
@@ -268,6 +275,16 @@ fn resolve_scenario() -> ParsedArgs {
         };
     }
 
+    // 4f: the default match (a bare invocation, or an explicit `--live
+    // default_match`) bypasses the golden-dir name validation below — its
+    // scenario is the committed `scenarios/default_match.txt` fixture, NOT a
+    // `render_slice3b_*` golden (spec §1.2). `parse_args` already set
+    // `Mode::Live` for the bare case; `setup` sources the fixture by seeing this
+    // sentinel name. No `--record` check needed: the bare path carries none.
+    if parsed.name == game::input::DEFAULT_MATCH {
+        return parsed;
+    }
+
     let available = available_scenarios();
     if !available.iter().any(|n| n == &parsed.name) {
         eprintln!("unknown scenario {:?}. available scenarios:", parsed.name);
@@ -346,6 +363,11 @@ fn setup(
             .as_ref()
             .expect("Mode::Replay implies a --replay path (resolve_scenario invariant)");
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    } else if name == game::input::DEFAULT_MATCH {
+        // 4f: the bare-invocation default match — the committed default-match
+        // fixture (Mode::Live), sourced here instead of a `render_slice3b_*`
+        // golden. See `default_match_text`.
+        default_match_text()
     } else {
         load_scenario_text(name)
     };
@@ -551,6 +573,24 @@ fn tick_and_render(
     // `RodioSink` is not `Send`.
     mut audio: NonSendMut<AudioDrainer>,
 ) {
+    // 4f: F5 restarts a Live/Replay match — rebuild tick 0 through the SAME
+    // `scenario::load` reload the `Mode::Scripted` loop arm uses (reset `sim.0`,
+    // `demo.viewports`, `demo.scene`, `demo.tick`), then render the fresh frame
+    // and skip this tick's advance so the restart shows tick 0. `F5` is
+    // verified-unbound (the default bindings use R/F/D/G + arrows + modifiers —
+    // `input::default_bindings`; `R` is P0 fire, so it is NOT reused). Scripted
+    // is untouched: it has its own bit-identical loop reload at the `ticks`
+    // boundary below.
+    if (*mode == Mode::Live || *mode == Mode::Replay) && keys.just_pressed(KeyCode::F5) {
+        let loaded = scenario::load(Path::new(TC_ROOT), &demo.scenario);
+        sim.0 = loaded.state;
+        demo.viewports = loaded.viewports;
+        demo.scene = loaded.scene;
+        demo.tick = 0;
+        render_and_upload(&mut demo, &sim.0, &mut images, &frame.0);
+        return;
+    }
+
     // 4b (T2): `--replay` has no loop/reload (spec §5/§9) — once `tick` reaches
     // `ticks` the replay HOLDS on the final rendered frame: no further
     // `process_frame`, no further tick advance. Scripted/Live are unaffected
@@ -701,6 +741,22 @@ fn load_scenario_text(_name: &str) -> String {
     include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../oracle-tests/golden/render_slice3b_blood_scenario.txt"
+    ))
+    .to_string()
+}
+
+/// The committed default-match scenario text (Slice 4f) — bare `cargo run -p
+/// game` loads this in `Mode::Live`. Embedded via `include_str!` so the single
+/// `setup` call site compiles on BOTH targets; on wasm it is never reached
+/// (that arm hard-codes `Mode::Scripted`/`blood` and never yields the
+/// `DEFAULT_MATCH` sentinel), so embedding the tiny fixture is harmless. Unlike
+/// `load_scenario_text`, this fixture lives OUTSIDE `oracle-tests/golden/`
+/// (`game/scenarios/`), so it never enters `available_scenarios` or any golden
+/// enumeration and carries no frame/state sidecar (Live loads no golden column).
+fn default_match_text() -> String {
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scenarios/default_match.txt"
     ))
     .to_string()
 }

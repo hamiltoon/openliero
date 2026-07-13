@@ -148,6 +148,17 @@ pub enum Mode {
     Replay,
 }
 
+/// The scenario `name` [`parse_args`] returns for a **bare** invocation
+/// (`cargo run -p game`, no flags and no positional) — the Slice-4f playable
+/// default match. It is a sentinel, not a committed golden name: the caller
+/// (`main.rs::resolve_scenario`) treats it specially — skipping the golden-dir
+/// name validation the positional `<name>` keeps — and `setup` sources the
+/// committed `scenarios/default_match.txt` fixture for it (Mode::Live, so no
+/// golden column and no self-check). Chosen to never collide with a
+/// `render_slice3b_<name>` golden, so a stray positional `default_match` is
+/// still rejected by `available_scenarios` before it can reach `setup`.
+pub const DEFAULT_MATCH: &str = "default_match";
+
 /// The parsed native CLI args (spec §7): the run [`Mode`], the scenario `name`
 /// (positional, defaulting to the caller's default), and the optional 4b
 /// `--record <path>` / `--replay <path>` flush/load targets. Bevy-free and pure
@@ -200,11 +211,16 @@ pub fn parse_args<I: IntoIterator<Item = String>>(
     let mut mode = Mode::Scripted;
     let mut record: Option<PathBuf> = None;
     let mut replay: Option<PathBuf> = None;
+    // Whether any leading flag was consumed — distinguishes a truly bare
+    // invocation (the 4f default match) from `--live` (Live over a named
+    // scenario, default `blood`).
+    let mut saw_flag = false;
     while let Some(arg) = it.peek().map(String::as_str) {
         match arg {
             "--live" => {
                 it.next();
                 mode = Mode::Live;
+                saw_flag = true;
             }
             "--record" => {
                 it.next();
@@ -212,17 +228,34 @@ pub fn parse_args<I: IntoIterator<Item = String>>(
                 // a bare trailing `--record` is a malformed CLI, not "no target".
                 let path = it.next().ok_or(ParseArgsError::RecordMissingPath)?;
                 record = Some(PathBuf::from(path));
+                saw_flag = true;
             }
             "--replay" => {
                 it.next();
                 // Same "required, not optional" rule as `--record`.
                 let path = it.next().ok_or(ParseArgsError::ReplayMissingPath)?;
                 replay = Some(PathBuf::from(path));
+                saw_flag = true;
             }
             _ => break,
         }
     }
-    let name = it.next().unwrap_or_else(|| default_name.to_string());
+    let positional = it.next();
+    // Slice 4f: a bare invocation — no leading flag AND no positional name —
+    // is the playable default match: `Mode::Live` over the [`DEFAULT_MATCH`]
+    // sentinel scenario. `main.rs::resolve_scenario` reads the sentinel to source
+    // the committed `scenarios/default_match.txt` fixture (bypassing the
+    // golden-dir name validation). `--live` / `--replay` / `--record` / a
+    // positional `<name>` all take their existing paths, unchanged.
+    if !saw_flag && positional.is_none() {
+        return Ok(ParsedArgs {
+            mode: Mode::Live,
+            name: DEFAULT_MATCH.to_string(),
+            record: None,
+            replay: None,
+        });
+    }
+    let name = positional.unwrap_or_else(|| default_name.to_string());
     Ok(ParsedArgs {
         mode,
         name,
@@ -511,14 +544,14 @@ input 5 64 96
     /// `parse_args` (spec §7): a leading `--live` flag selects `Mode::Live`;
     /// otherwise `Mode::Scripted`. The remaining positional arg is the scenario
     /// name, defaulting to the caller-supplied default when absent. With no
-    /// `--record`, the record target is `None`.
+    /// `--record`, the record target is `None`. (The **bare** no-arg case is the
+    /// 4f default match — covered separately by `parse_args_bare_is_default_match`.)
     #[test]
     fn parse_args_live_flag_and_scenario_name() {
-        let cases: [(&[&str], Mode, &str); 4] = [
+        let cases: [(&[&str], Mode, &str); 3] = [
             (&["--live"], Mode::Live, "blood"),
             (&["--live", "dart"], Mode::Live, "dart"),
             (&["dart"], Mode::Scripted, "dart"),
-            (&[], Mode::Scripted, "blood"),
         ];
         for (args, want_mode, want_name) in cases {
             let p = parse_args(args.iter().map(|s| s.to_string()), "blood").unwrap();
@@ -527,6 +560,43 @@ input 5 64 96
             assert_eq!(p.record, None, "args {args:?}: no --record => record None");
             assert_eq!(p.replay, None, "args {args:?}: no --replay => replay None");
         }
+    }
+
+    /// Slice 4f: a **bare** invocation (no flags AND no positional name) resolves
+    /// to the playable default match — `Mode::Live` over the [`DEFAULT_MATCH`]
+    /// sentinel — while a positional `<name>` still resolves `Mode::Scripted`
+    /// (the self-check demo path) and `--live` alone stays Live over the caller's
+    /// default name (NOT the default match). This is the parse-level pin of the
+    /// default-mode flip; `main.rs::resolve_scenario` reads the sentinel to source
+    /// the `scenarios/default_match.txt` fixture and skip golden-name validation.
+    #[test]
+    fn parse_args_bare_is_default_match() {
+        // Bare: no args at all => Live over the default-match sentinel.
+        let p = parse_args(std::iter::empty::<String>(), "blood").unwrap();
+        assert_eq!(
+            p.mode,
+            Mode::Live,
+            "bare invocation is the playable default match (Live)"
+        );
+        assert_eq!(
+            p.name, DEFAULT_MATCH,
+            "bare invocation names the default-match fixture"
+        );
+        assert_eq!(p.record, None, "bare invocation has no --record");
+        assert_eq!(p.replay, None, "bare invocation has no --replay");
+
+        // A positional name still resolves Scripted (self-check demo unaffected).
+        let p = parse_args(["blood"].iter().map(|s| s.to_string()), "blood").unwrap();
+        assert_eq!(p.mode, Mode::Scripted, "positional <name> stays Scripted");
+        assert_eq!(p.name, "blood");
+
+        // `--live` alone is Live over the DEFAULT name (blood), not the default match.
+        let p = parse_args(["--live"].iter().map(|s| s.to_string()), "blood").unwrap();
+        assert_eq!(p.mode, Mode::Live, "--live is Live");
+        assert_eq!(
+            p.name, "blood",
+            "--live alone uses the caller default, not the sentinel"
+        );
     }
 
     /// `--record <path>` (4b, T1) is parsed into `ParsedArgs::record`, alongside

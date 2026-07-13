@@ -188,10 +188,10 @@ Two ways to check a recording without a display:
   <recording> --tick <n> --out <path>` reads an arbitrary scenario/recording
   file directly (bypassing `--scenario <name>`'s golden-dir lookup) and renders
   it through the same `render_scenario` path as every other `shot` screenshot.
-  This flag is landing in the same slice (4g) as a parallel change to
-  `shot/src/lib.rs` — not yet verified from this pass; treat as unverified
-  until that lands, then it slots into the change → screenshot → judge loop
-  (§2) for a recorded match exactly like any committed scenario.
+  Landed in the same slice (4g); integration-tested against the committed
+  recorded corpus (`rust/shot/tests/scenario_path.rs`). It slots into the
+  change → screenshot → judge loop (§2) for a recorded match exactly like
+  any committed scenario.
 
 ### 7.4 CI coverage (already wired, no new job needed)
 

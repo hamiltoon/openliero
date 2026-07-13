@@ -50,8 +50,10 @@ fi
 rm -f "$HASH_TMP"
 echo "cross-check OK: lrp_render_slice4d_live HashGameState == render_slice4d_live_sim.txt"
 
-# --- Long fixture (> 1050 ticks; dug material buffer at the 1050 checksum boundary). ---
-"$GEN" "$GOLD/lrp_slice4e_long_scenario.txt" "$GOLD/lrp_slice4e_long.lrp" 42
+# --- Long fixture (> 1050 ticks; dug material buffer at the 1050 checksum boundary).
+#     The 4th arg regenerates the committed HashGameState sidecar the phase-1 gate
+#     cross-checks per tick (lrp_slice4e_long_sim.txt). ---
+"$GEN" "$GOLD/lrp_slice4e_long_scenario.txt" "$GOLD/lrp_slice4e_long.lrp" 42 "$GOLD/lrp_slice4e_long_sim.txt"
 
 # --- Sanity: each .lrp plays back through the real C++ ReplayReader/framehash without
 #     desync (a valid, non-desyncing replay). The long fixture crosses the 1050 boundary,

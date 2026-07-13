@@ -136,7 +136,8 @@ pub struct Frame {
     /// frame — i.e. the previous frame's decoded inputs (all `0` at tick 0).
     /// This is the value `WideRollbackChecksum` folds for `prev_control_states`
     /// at a checksum boundary (`replay.cpp:206`); the Phase-1 gate passes it to
-    /// [`sim::wide_checksum::wide_rollback_checksum`] as `prev_istates`.
+    /// `sim::wide_checksum::wide_rollback_checksum` as `prev_istates` (the sim
+    /// crate is deliberately not a dependency of this crate).
     pub prev_inputs: Vec<u32>,
 }
 

@@ -908,6 +908,14 @@ fn build_worm_sprites(large: &SpriteSet) -> SpriteSet {
 pub struct SimState {
     pub rand: Rand,
     pub cycles: i32,
+    /// C++ `Game::screen_flash` (`game.hpp:129`): the palette-flash countdown.
+    /// Decremented at the top of every tick (`game.cpp:271-273`) and raised to
+    /// `max(type.flash, screen_flash)` when an explosion sobject spawns
+    /// (`sobject.cpp:41`, routed through the [`crate::flash`] per-tick
+    /// accumulator). Drives the render `LightUp` (`game.cpp:179-181`). **Never
+    /// hashed** — C++ `HashGameState` omits it (`stateHash.hpp:15-113`), so every
+    /// committed `sim_slice*` golden stays byte-identical (design §0). Init 0.
+    pub screen_flash: i32,
     pub level: LevelSim,
     pub worms: Vec<WormState>,
     pub bonuses: Pool<Bonus>,
@@ -1272,6 +1280,7 @@ impl SimState {
         SimState {
             rand,
             cycles: 0,
+            screen_flash: 0,
             level: LevelSim {
                 width: level.width,
                 height: level.height,
@@ -1532,6 +1541,7 @@ impl SimState {
             worm_spawn_rect_h,
             worm_min_spawn_dist_last,
             worm_min_spawn_dist_enemy,
+            screen_flash,
             ..
         } = self;
         let h_signed_recoil = *h_signed_recoil;
@@ -1574,6 +1584,22 @@ impl SimState {
         // object loops run BEFORE `++cycles` (game.cpp:357). So snapshot the value
         // here, run the loops with it, then `++cycles` after the loops (see below).
         let cycles_now = *cycles;
+
+        // ----- Top-of-frame screen_flash decrement (game.cpp:271-273), the FIRST
+        // thing ProcessFrame does after PreTick — BEFORE the bonus/object loops and
+        // BEFORE `++cycles`. Uses the previous tick's value, floored at 0 by the
+        // `> 0` guard. screen_flash is unhashed and has no in-tick reader (only the
+        // render palette LightUp reads it), so its exact ordering vs the loops is
+        // immaterial to the hash — placed here to mirror the C++ phase order.
+        if *screen_flash > 0 {
+            *screen_flash -= 1;
+        }
+        // Seed the per-tick flash accumulator with the decremented value so a deep
+        // sobject-create `crate::flash::raise(type.flash)` computes
+        // max(type.flash, screen_flash) — the C++ `sobject.cpp:41` write — without
+        // threading a &mut i32 through the object call tree (the sound-side-channel
+        // idiom). Folded back into `*screen_flash` at the bottom of the tick.
+        crate::flash::begin_frame(*screen_flash);
 
         // ----- Bonuses Process loop (game.cpp:287-290), at the TOP of the tick,
         // BEFORE the object loops AND before `++cycles`. `bonuses` is an
@@ -2203,6 +2229,12 @@ impl SimState {
         // §2.2); the `game` backend drains it, headless callers ignore it. This is
         // the ONLY write to the field and touches no hashed state.
         *sound_events = crate::sound::take_frame();
+
+        // Close the tick: fold this tick's accumulated explosion flash back into the
+        // persisted `screen_flash` (seeded decremented at the top; `raise`d to
+        // max(type.flash, screen_flash) at each sobject-create). Unhashed side
+        // channel — the render reads it, the hash never does (design §0).
+        *screen_flash = crate::flash::take_frame();
     }
 }
 
@@ -3910,6 +3942,59 @@ mod tests {
             hash_game_state(&state),
             master,
             "clearing sound_events does not move the hash"
+        );
+    }
+
+    #[test]
+    fn process_frame_decrements_screen_flash_and_floors_at_zero() {
+        // C++ game.cpp:271-273: `if (screen_flash > 0) --screen_flash;` at the TOP
+        // of every ProcessFrame. With no explosion this tick, screen_flash walks
+        // down by one per tick and floors at 0 (never negative). Pins the
+        // top-of-frame decrement independently of the sobject-create raise.
+        let mut state = idle_state(0x0000_F1A5);
+        state.screen_flash = 2;
+
+        state.process_frame(&[]);
+        assert_eq!(state.screen_flash, 1, "decrement by one per tick");
+
+        state.process_frame(&[]);
+        assert_eq!(state.screen_flash, 0, "reaches zero");
+
+        state.process_frame(&[]);
+        assert_eq!(state.screen_flash, 0, "floored at zero (the > 0 guard)");
+    }
+
+    #[test]
+    fn screen_flash_is_hash_inert() {
+        // Design §0 / §9 risk 4: screen_flash is NEVER folded into the hash (C++
+        // HashGameState omits it, stateHash.hpp:15-113). Mutating it must leave BOTH
+        // the master hash and every component hash byte-identical — this is exactly
+        // what keeps every committed sim_slice* golden unchanged after 4d (re-diff,
+        // no re-fuzz).
+        use crate::hash::{hash_components, hash_game_state};
+
+        let mut state = idle_state(0x5CEE_EF1A);
+        state.process_frame(&[]);
+        let master = hash_game_state(&state);
+        let components = hash_components(&state);
+
+        state.screen_flash = 33;
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "screen_flash absent from the master hash"
+        );
+        assert_eq!(
+            hash_components(&state),
+            components,
+            "screen_flash absent from every component hash"
+        );
+
+        state.screen_flash = 0;
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "clearing screen_flash does not move the hash"
         );
     }
 

@@ -14,6 +14,7 @@ pub mod bobject;
 pub mod bonus;
 pub mod control;
 pub mod debug;
+pub mod flash;
 pub mod hash;
 pub mod nobject;
 pub mod physics;

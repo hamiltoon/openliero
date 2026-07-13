@@ -55,9 +55,12 @@
 //! `sim` stays Bevy- and float-free: every `vel` nudge uses `wrapping_*`, the
 //! `cossin * speed / 100` scaling inside [`nobject_create2`] truncates, and
 //! `Ftoi` is the arithmetic `>> 16` ([`ftoi`]). The stats calls
-//! (`DamagePotential`/`Hit`/`DamageDealt`), the viewport `shake` loop, and the
-//! `screen_flash` write draw no rand and touch no hashed state, so they are
-//! omitted exactly as the other ports omit their stats/render side effects.
+//! (`DamagePotential`/`Hit`/`DamageDealt`) and the viewport `shake` loop draw no
+//! rand and touch no hashed state, so they are omitted exactly as the other ports
+//! omit their stats/render side effects. The `:41 screen_flash` write is LIVE
+//! (Slice 4d T0) but likewise unhashed and rand-free: it folds `type.flash` into
+//! the [`crate::flash`] per-tick accumulator (`process_frame` seeds it decremented
+//! and folds it back into `SimState.screen_flash`).
 
 use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
@@ -146,7 +149,15 @@ pub fn sobject_create(
         crate::sound::one_shot(ty.start_sound + variant);
     }
 
-    // :27-33 viewport shake + :41 screen_flash: render-only, no rand — omitted.
+    // :27-33 viewport shake: render-only, no rand — omitted (game-layer, 4d T1).
+    // :41 screen_flash write: `game.screen_flash = std::max(flash, game.screen_flash)`.
+    // Unhashed sim scalar (drives the render palette LightUp); draws no rand. Routed
+    // through the crate::flash per-tick accumulator so the deep create path writes it
+    // WITHOUT threading a &mut i32 through nobject/weapon/bonus (~120 call sites) —
+    // the sound-module side-channel idiom. process_frame seeds the accumulator with
+    // the top-of-frame-decremented screen_flash and folds it back at tick end, so
+    // `raise` computes exactly max(flash, screen_flash).
+    crate::flash::raise(ty.flash);
 
     let dr = ty.detect_range;
 
@@ -607,6 +618,39 @@ mod tests {
             1,
             "emission reuses the single sound draw — zero new rand"
         );
+    }
+
+    #[test]
+    fn create_raises_screen_flash_to_max_of_flash_and_seed() {
+        // sobject.cpp:41: `game.screen_flash = std::max(flash, game.screen_flash)`.
+        // The create path routes the write through the crate::flash per-tick
+        // accumulator (process_frame seeds it with the decremented screen_flash and
+        // folds it back into SimState.screen_flash). Here we drive that seam
+        // directly: begin_frame(seed) then Create(ty.flash) then take_frame.
+        let cossin = precompute_cossin();
+        let mut ty = small_explosion(-1); // no carve: isolate the flash write
+        ty.flash = 8;
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+
+        // Seed (previous screen_flash) larger than ty.flash: the seed wins.
+        crate::flash::begin_frame(20);
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+        assert_eq!(crate::flash::take_frame(), 20, "max(flash 8, seed 20) = 20");
+
+        // Seed smaller than ty.flash: the type's flash wins (a real flash blip).
+        crate::flash::begin_frame(3);
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+        assert_eq!(crate::flash::take_frame(), 8, "max(flash 8, seed 3) = 8");
     }
 
     #[test]

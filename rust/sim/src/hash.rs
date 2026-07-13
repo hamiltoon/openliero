@@ -215,6 +215,7 @@ mod tests {
         SimState {
             rand,
             cycles,
+            screen_flash: 0,
             level: LevelSim {
                 width: 1,
                 height: 1,

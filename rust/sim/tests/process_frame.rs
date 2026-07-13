@@ -326,6 +326,266 @@ fn process_frame_increments_cycles_once_per_tick() {
 }
 
 #[test]
+fn process_frame_emits_and_drains_bump_one_shot_end_to_end() {
+    // End-to-end 4c wiring: a grounded worm carrying a hard DOWNWARD velocity
+    // bounces in worm_process_physics (step 9), which plays SoundBump
+    // (worm.cpp:188, HFallDamage off). Pins the whole path through the public
+    // driver: `begin_frame` publishes the hook index, the deep physics callsite
+    // emits, and the tail drain lands exactly this tick's event in `sound_events`.
+    let mut s = grounded_state();
+    s.sound_hooks.Bump = 3;
+    // Downward vel.y above MinBounceDown (53248) so the vertical branch bounces.
+    s.worms[0].vel.y = 200000;
+
+    s.process_frame(&[ControlState::new()]);
+    assert_eq!(
+        s.sound_events,
+        vec![sim::sound::SoundEvent::one_shot(3)],
+        "process_frame drains the SoundBump one-shot into sound_events"
+    );
+
+    // Cleared at the TOP of the next tick (design §2.2): an idle tick that plays
+    // nothing leaves the stream empty — events never accumulate across ticks.
+    s.process_frame(&[ControlState::new()]);
+    assert!(
+        s.sound_events.is_empty(),
+        "sound_events holds only the current tick's events"
+    );
+}
+
+// ---- Slice 4c T2: loop-sound Play/Stop lifecycle (worm.cpp:336-343/1075-1077/
+// 373-376) ------------------------------------------------------------------
+
+// A SimState whose weapon table holds ONE looping weapon (loop_sound = true,
+// launch_sound = 5). parts = 0 spawns nothing and distribution/leave_shells = 0
+// draw nothing, so fire ticks are RNG-silent — isolating the loop events.
+// delay = 0 lets the Fire gate re-fire every tick while held. The 7 default
+// nobject types cover the death block's blood ([6]) and per-worm gib ([index]).
+fn loop_weapon_state() -> SimState {
+    let (level, flags) = all_background_level(200, 200);
+    let w = assets::object::Weapon {
+        loop_sound: true,
+        launch_sound: 5,
+        ammo: 10,
+        loading_time: 100,
+        ..Default::default()
+    };
+    SimState::new(
+        &level,
+        &[worm_init(Vec2::new(itof(100), itof(196)))],
+        42,
+        &flags,
+        vec![w],
+        PhysicsConsts::default(),
+        ControlConsts::default(),
+        false,
+        assets::sprite::SpriteSet::default(),
+        Vec::new(),
+        Vec::new(),
+        vec![assets::object::NObjectType::default(); 7],
+        100,
+        true,
+        100,
+    )
+}
+
+fn fire_input() -> ControlState {
+    let mut cs = ControlState::new();
+    cs.press(ControlState::FIRE);
+    cs
+}
+
+// The loop key for this fixture's worm 0, weapon slot 0.
+fn key00() -> sim::sound::LoopKey {
+    sim::sound::LoopKey::WormWeapon(0, 0)
+}
+
+#[test]
+fn firing_loop_weapon_emits_keyed_play_every_fire_tick_with_stable_key() {
+    // worm.cpp:1119-1122: each fire tick emits Play(launch_sound,
+    // WormWeapon(worm, slot), loop). No IsPlaying state in the sim — the Play
+    // repeats every tick the trigger is held (idempotency is the game's job),
+    // and the key is STABLE across ticks (the same map slot game-side).
+    let mut s = loop_weapon_state();
+    for tick in 0..3 {
+        s.process_frame(&[fire_input()]);
+        assert_eq!(
+            s.sound_events,
+            vec![sim::sound::SoundEvent::loop_play(5, key00())],
+            "tick {tick}: exactly one keyed loop Play, stable key"
+        );
+    }
+}
+
+#[test]
+fn releasing_fire_emits_the_cease_fire_stop() {
+    // worm.cpp:339-343: the else-arm of the Fire gate (`!Pressed(kFire) || ...`)
+    // stops the current weapon's loop. Fire one tick, release the next: the
+    // release tick's stream is exactly one Stop on the same key.
+    let mut s = loop_weapon_state();
+    s.process_frame(&[fire_input()]);
+    assert_eq!(
+        s.sound_events,
+        vec![sim::sound::SoundEvent::loop_play(5, key00())],
+        "fire tick: loop Play"
+    );
+
+    s.process_frame(&[ControlState::new()]);
+    assert_eq!(
+        s.sound_events,
+        vec![sim::sound::SoundEvent::loop_stop(key00())],
+        "release tick: the cease-fire Stop (worm.cpp:341), same key"
+    );
+}
+
+#[test]
+fn holding_change_emits_both_cpp_stop_sites() {
+    // Fire+Change held: C++ reaches TWO Stop sites the same tick — the Fire
+    // gate's else-arm (`Pressed(kChange)` -> worm.cpp:341) and the top of
+    // ProcessWeaponChange (worm.cpp:1075-1077). Both stop the SAME key (the
+    // first Change tick only latches; current_weapon has not cycled yet), and
+    // the game-side map treats the second as a no-op. Pinning both preserves
+    // C++ Stop-site parity (never speculative-gate or dedup a Stop in the sim).
+    let mut s = loop_weapon_state();
+    s.process_frame(&[fire_input()]);
+
+    let mut fc = fire_input();
+    fc.press(ControlState::CHANGE);
+    s.process_frame(&[fc]);
+    assert_eq!(
+        s.sound_events,
+        vec![
+            sim::sound::SoundEvent::loop_stop(key00()),
+            sim::sound::SoundEvent::loop_stop(key00()),
+        ],
+        "change tick: the fire-gate Stop THEN the weapon-change Stop"
+    );
+}
+
+#[test]
+fn death_emits_the_death_stop_before_the_death_one_shot() {
+    // worm.cpp:369-379: the death block stops the current weapon's loop
+    // (:373-376) BEFORE playing the 15+rand(3) death one-shot (:378-379).
+    // Fire is HELD on the death tick so the fire gate re-fires (a fresh Play)
+    // and the ONLY Stop in the stream is the death-site one — isolating it
+    // from the cease-fire site.
+    let mut s = loop_weapon_state();
+    s.process_frame(&[fire_input()]);
+
+    s.worms[0].health = 0;
+    s.process_frame(&[fire_input()]);
+
+    let events = &s.sound_events;
+    let stops: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.action == sim::sound::SoundAction::Stop)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        stops.len(),
+        1,
+        "exactly ONE Stop (the death site): {events:?}"
+    );
+    let stop_at = stops[0];
+    assert_eq!(
+        events[stop_at],
+        sim::sound::SoundEvent::loop_stop(key00()),
+        "the death Stop carries the WormWeapon key"
+    );
+
+    let play_at = events
+        .iter()
+        .position(|e| *e == sim::sound::SoundEvent::loop_play(5, key00()))
+        .expect("the held-fire tick re-emits the loop Play");
+    assert!(
+        play_at < stop_at,
+        "fire-gate Play precedes the death Stop (C++ statement order)"
+    );
+
+    let death_at = events
+        .iter()
+        .position(|e| e.key.is_none() && (15..=17).contains(&e.sound))
+        .expect("the 15+rand(3) death one-shot is emitted");
+    assert!(
+        stop_at < death_at,
+        "death Stop (:373-376) precedes the death one-shot (:378-379)"
+    );
+}
+
+#[test]
+fn ammo_depletion_reload_emits_the_not_available_stop() {
+    // The third leg of worm.cpp:339 (`!weapons[cur].Available()`): ammo runs
+    // out -> process_weapons arms loading_left (worm.cpp:820-827) -> the SAME
+    // held-fire tick takes the else-arm and stops the loop, with Fire still
+    // pressed. No release, no switch, no death — the reload itself stops it.
+    let mut s = loop_weapon_state();
+    // ammo 10, delay 0: 10 fire ticks deplete the slot to 0.
+    for tick in 0..10 {
+        s.process_frame(&[fire_input()]);
+        assert_eq!(
+            s.sound_events,
+            vec![sim::sound::SoundEvent::loop_play(5, key00())],
+            "tick {tick}: still firing"
+        );
+    }
+    assert_eq!(s.worms[0].weapons[0].ammo, 0, "ammo depleted");
+
+    // Tick 11 (fire still held): reload arms -> Available() false -> Stop.
+    s.process_frame(&[fire_input()]);
+    assert_eq!(
+        s.sound_events,
+        vec![sim::sound::SoundEvent::loop_stop(key00())],
+        "reload tick: the !Available() Stop fires while the trigger is held"
+    );
+}
+
+#[test]
+fn loop_events_leave_no_dangling_keys_across_fire_cease_death() {
+    // Sim-side leak parity (design §4.2): replaying the whole event stream into
+    // a keyed set (insert on Play, remove on Stop — the game drainer's model)
+    // ends EMPTY after fire->cease and after fire->death. Every Play has a
+    // reachable Stop; a leaked key here would leak a mixer channel in T3.
+    use std::collections::HashSet;
+
+    let mut live: HashSet<sim::sound::LoopKey> = HashSet::new();
+    let drain = |events: &[sim::sound::SoundEvent], live: &mut HashSet<sim::sound::LoopKey>| {
+        for e in events {
+            if let Some(k) = e.key {
+                match e.action {
+                    sim::sound::SoundAction::Play => {
+                        live.insert(k);
+                    }
+                    sim::sound::SoundAction::Stop => {
+                        live.remove(&k);
+                    }
+                }
+            }
+        }
+    };
+
+    // fire 3 ticks -> cease.
+    let mut s = loop_weapon_state();
+    for _ in 0..3 {
+        s.process_frame(&[fire_input()]);
+        drain(&s.sound_events, &mut live);
+    }
+    assert!(!live.is_empty(), "loop live while firing");
+    s.process_frame(&[ControlState::new()]);
+    drain(&s.sound_events, &mut live);
+    assert!(live.is_empty(), "cease-fire: no dangling loop keys");
+
+    // fire -> death (fire held through the death tick).
+    let mut s2 = loop_weapon_state();
+    s2.process_frame(&[fire_input()]);
+    drain(&s2.sound_events, &mut live);
+    s2.worms[0].health = 0;
+    s2.process_frame(&[fire_input()]);
+    drain(&s2.sound_events, &mut live);
+    assert!(live.is_empty(), "death: no dangling loop keys");
+}
+
+#[test]
 fn empty_input_matches_slice2_reactions_then_physics() {
     // Equivalence guard: under empty input the full per-worm pass must leave
     // pos/vel/health identical to the Slice-2 path (worm_reactions then

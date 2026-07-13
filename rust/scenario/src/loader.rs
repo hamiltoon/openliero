@@ -54,7 +54,8 @@ pub struct SceneData {
 
 impl SceneData {
     /// Borrow the owned ingredients into a `render::frame::Scene` for one draw.
-    /// `screen_flash`/`draw_shadow` are per-draw (demo passes 0 / scenario.shadow()).
+    /// `screen_flash`/`draw_shadow` are per-draw (since 4d T2 the `game` binary
+    /// passes the live `sim.screen_flash`; `scenario.shadow()` for the shadow gate).
     /// `draw_hud`/`map` default to `false` — the world-only path every existing
     /// caller (shot, game, the 3b harness) drives, so 3a/3b frame hashes stay
     /// byte-identical. A HUD-enabling caller (3e T8) sets them on the returned
@@ -196,6 +197,8 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
         kills: tc.texts.Kills.clone(),
         lives: tc.texts.Lives.clone(),
         reloading: tc.texts.Reloading.clone(),
+        killed_msg: tc.texts.KilledMsg.clone(),
+        committed_suicide_msg: tc.texts.CommittedSuicideMsg.clone(),
     };
 
     Loaded {
@@ -246,5 +249,8 @@ weapon 0 DART
         assert_eq!(loaded.scene.labels.kills, "Kills: ");
         assert_eq!(loaded.scene.labels.lives, "Lives: ");
         assert_eq!(loaded.scene.labels.reloading, "Reloading...");
+        // Death-banner strings (Slice 4d T5): the KilledMsg prefix / suicide suffix.
+        assert_eq!(loaded.scene.labels.killed_msg, "Killed ");
+        assert_eq!(loaded.scene.labels.committed_suicide_msg, " committed suicide");
     }
 }

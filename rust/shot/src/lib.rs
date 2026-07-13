@@ -14,8 +14,13 @@ use sim_core::fixed::itof;
 /// Only the argument-parsing surface is populated in this slice (T0); the
 /// render/PNG behaviour lands in later tasks.
 pub struct Config {
-    /// Scenario name to load.
-    pub scenario: String,
+    /// Scenario name to load (name→golden-dir resolution). Mutually exclusive
+    /// with `scenario_path`; exactly one of the two is populated.
+    pub scenario: Option<String>,
+    /// Arbitrary scenario/recording file to load directly, bypassing
+    /// `resolve_scenario_text`'s name→golden-dir lookup. Mutually exclusive
+    /// with `scenario`; exactly one of the two is populated.
+    pub scenario_path: Option<PathBuf>,
     /// One or more `--tick` values, in the order they appeared.
     pub ticks: Vec<u32>,
     /// PNG path (single tick) or directory (multiple ticks). `None` when only
@@ -35,7 +40,10 @@ pub struct Config {
 /// Parse the CLI arguments (already stripped of the program name).
 ///
 /// Recognised flags:
-/// - `--scenario <name>` (required)
+/// - `--scenario <name>` (name→golden-dir resolution; mutually exclusive with
+///   `--scenario-path`)
+/// - `--scenario-path <file>` (load an arbitrary scenario/recording file
+///   directly; mutually exclusive with `--scenario`)
 /// - `--tick <u32>` (required, repeatable — accumulates)
 /// - `--out <path>`
 /// - `--scale <u32>` (default 3)
@@ -43,9 +51,11 @@ pub struct Config {
 /// - `--tc-root <path>`
 /// - `--hud` (opt-in full player view: HUD bars + minimap; default off)
 ///
-/// At least one of `--out` / `--hashes` must be present.
+/// Exactly one of `--scenario` / `--scenario-path` must be present. At least
+/// one of `--out` / `--hashes` must be present.
 pub fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut scenario: Option<String> = None;
+    let mut scenario_path: Option<PathBuf> = None;
     let mut ticks: Vec<u32> = Vec::new();
     let mut out: Option<PathBuf> = None;
     let mut scale: u32 = 3;
@@ -60,6 +70,10 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
             "--scenario" => {
                 let v = value_for(args, &mut i, "--scenario")?;
                 scenario = Some(v);
+            }
+            "--scenario-path" => {
+                let v = value_for(args, &mut i, "--scenario-path")?;
+                scenario_path = Some(PathBuf::from(v));
             }
             "--tick" => {
                 let v = value_for(args, &mut i, "--tick")?;
@@ -95,7 +109,15 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         i += 1;
     }
 
-    let scenario = scenario.ok_or_else(|| "missing required --scenario".to_string())?;
+    match (&scenario, &scenario_path) {
+        (None, None) => {
+            return Err("missing required --scenario or --scenario-path".to_string());
+        }
+        (Some(_), Some(_)) => {
+            return Err("--scenario and --scenario-path are mutually exclusive".to_string());
+        }
+        _ => {}
+    }
     if ticks.is_empty() {
         return Err("missing required --tick".to_string());
     }
@@ -112,6 +134,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
 
     Ok(Config {
         scenario,
+        scenario_path,
         ticks,
         out,
         scale,
@@ -373,7 +396,26 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         ))
     });
 
-    let text = resolve_scenario_text(&cfg.scenario)?;
+    // `label` names the scenario for logging + the multi-tick PNG filename
+    // stem. On the `--scenario <name>` path it is the resolved name
+    // (byte-identical to today); on `--scenario-path <file>` it is the file
+    // stem, since there is no golden-dir name to fall back on.
+    let (text, label) = if let Some(path) = &cfg.scenario_path {
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let label = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("scenario")
+            .to_string();
+        (text, label)
+    } else {
+        let name = cfg
+            .scenario
+            .as_ref()
+            .expect("parse_args guarantees exactly one of --scenario/--scenario-path");
+        (resolve_scenario_text(name)?, name.clone())
+    };
     let scenario = Scenario::parse(&text)?;
 
     let up_to = *cfg
@@ -391,7 +433,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
 
     eprintln!(
         "shot: scenario={} up_to={} scale={} hud={} capture={:?}",
-        cfg.scenario, up_to, cfg.scale, cfg.hud, cfg.ticks
+        label, up_to, cfg.scale, cfg.hud, cfg.ticks
     );
     let frames = render_scenario_hud(&tc_root, &scenario, up_to, &wanted, cfg.scale, cfg.hud);
 
@@ -414,7 +456,7 @@ pub fn run(cfg: &Config) -> Result<(), String> {
             for &tick in &cfg.ticks {
                 let f = find(tick);
                 let png = f.png.as_ref().expect("captured tick has PNG");
-                let path = out.join(format!("{}_tick{}.png", cfg.scenario, tick));
+                let path = out.join(format!("{}_tick{}.png", label, tick));
                 std::fs::write(&path, png).map_err(|e| format!("write {}: {e}", path.display()))?;
                 eprintln!("shot: wrote {} ({} bytes)", path.display(), png.len());
             }
@@ -454,7 +496,8 @@ mod parse_tests {
             "/tmp/x.png",
         ]))
         .unwrap();
-        assert_eq!(c.scenario, "blood");
+        assert_eq!(c.scenario.as_deref(), Some("blood"));
+        assert!(c.scenario_path.is_none());
         assert_eq!(c.ticks, vec![35]);
         assert_eq!(c.out.as_deref(), Some(std::path::Path::new("/tmp/x.png")));
         assert_eq!(c.scale, 3);
@@ -508,6 +551,47 @@ mod parse_tests {
     #[test]
     fn missing_scenario_is_error() {
         assert!(parse_args(&v(&["--tick", "1", "--out", "/tmp/x.png"])).is_err());
+    }
+    #[test]
+    fn scenario_path_sets_config() {
+        // `--scenario-path <file>` is a new alternative source: it populates
+        // `scenario_path` and leaves `scenario` unset.
+        let c = parse_args(&v(&[
+            "--scenario-path",
+            "/tmp/some_scenario.txt",
+            "--tick",
+            "3",
+            "--out",
+            "/tmp/x.png",
+        ]))
+        .unwrap();
+        assert_eq!(
+            c.scenario_path.as_deref(),
+            Some(std::path::Path::new("/tmp/some_scenario.txt"))
+        );
+        assert!(c.scenario.is_none());
+    }
+    #[test]
+    fn scenario_and_scenario_path_together_is_error() {
+        // Mutually exclusive: giving both is a parse error, not a silent
+        // tie-break.
+        let r = parse_args(&v(&[
+            "--scenario",
+            "blood",
+            "--scenario-path",
+            "/tmp/some_scenario.txt",
+            "--tick",
+            "1",
+            "--out",
+            "/tmp/x.png",
+        ]));
+        match r {
+            Err(e) => assert!(
+                e.contains("mutually exclusive"),
+                "error names the conflict: {e}"
+            ),
+            Ok(_) => panic!("--scenario + --scenario-path together must be rejected"),
+        }
     }
     #[test]
     fn missing_tick_is_error() {

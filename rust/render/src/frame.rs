@@ -69,9 +69,26 @@ pub fn draw(bmp: &mut Bitmap, state: &SimState, viewports: &mut [Viewport], scen
     let multiplier = bmp.w / 320;
     let center_x = bmp.w / 2;
     let full_clip = bmp.clip;
+    // Phase 5 (`ProcessViewports`, game.cpp:463): center + shake-RNG + banner
+    // reset for ALL viewports BEFORE any is drawn. C++ runs `ProcessViewports`
+    // fully (over every viewport) before `Game::Draw` renders them, so a
+    // cross-viewport death banner reads the OTHER viewport's POST-process
+    // `banner_y` — critically its `killed_timer==150` reset to -8 on the death
+    // tick. Splitting this out of the draw loop is hash-neutral: each viewport's
+    // OWN local RNG still draws shake (here) then laser sights (in its own
+    // `sprite_pass`) in the same relative order, and `process` never touches the
+    // shared surface. (An interleaved snapshot would read the pre-reset `banner_y`
+    // and mis-draw the banner on the death tick.)
     for vp in viewports.iter_mut() {
         let worm = &state.worms[vp.worm_idx];
         vp.process(worm, state.level.width, state.level.height);
+    }
+    // Cross-viewport banner inputs (viewport.cpp:256-270), captured POST-process
+    // (matches C++, above). `(worm_idx, banner_y)` per viewport; the draw loop
+    // reads the OTHERs from here without a second mutable borrow.
+    let banner_state: Vec<(usize, i32)> =
+        viewports.iter().map(|v| (v.worm_idx, v.banner_y)).collect();
+    for (self_idx, vp) in viewports.iter_mut().enumerate() {
         // C++ `Viewport::Draw` (viewport.cpp:78-635) does, PER VIEWPORT, in one
         // call: HUD pre-block (full clip, :84-189) -> world block (rect clip,
         // :196-591) -> minimap (full clip, :593-635). The Rust loop mirrors that
@@ -96,6 +113,38 @@ pub fn draw(bmp: &mut Bitmap, state: &SimState, viewports: &mut [Viewport], scen
         let off_x = ulx - vp.x;
         let off_y = uly - vp.y;
         draw_level(bmp, &state.level, &pal, off_x, off_y, ColorMode::Classic);
+        // Cross-viewport death banners (viewport.cpp:256-270): for every OTHER
+        // viewport whose worm is dead and whose banner has walked into view
+        // (banner_y > -8), draw the kill/suicide message in THIS viewport's
+        // column at the OTHER's banner_y. Shadow (colour 0) at (+3,+1) then text
+        // (colour 50) at (+2,+0), size 1 — the C++ DrawString default. Keyed by
+        // `last_killed_by_idx`. The own-worm YoureIt/GameOfTag arm
+        // (viewport.cpp:249-254) is DEFERRED (needs got_changed + game-mode,
+        // spec §7). The worm-name suffix/prefix (`other_worm.settings->name`) is
+        // empty in every render scenario (the dumper leaves WormSettings::name
+        // default ""), so only the label draws; the C++ concatenation ORDER is
+        // preserved (prefix for a kill, suffix for a suicide) for when worm names
+        // are threaded later.
+        let this_index = state.worms[vp.worm_idx].index;
+        for (other_idx, &(other_worm_idx, other_banner_y)) in banner_state.iter().enumerate() {
+            if other_idx == self_idx {
+                continue; // v != this
+            }
+            let other_worm = &state.worms[other_worm_idx];
+            if other_worm.health <= 0 && other_banner_y > -8 {
+                let msg: &str = if other_worm.last_killed_by_idx == this_index {
+                    &scene.labels.killed_msg
+                } else {
+                    &scene.labels.committed_suicide_msg
+                };
+                scene
+                    .font
+                    .draw_string(bmp, &pal, msg, vp.rect.x1 + 3, other_banner_y + 1, 0, 1);
+                scene
+                    .font
+                    .draw_string(bmp, &pal, msg, vp.rect.x1 + 2, other_banner_y, 50, 1);
+            }
+        }
         // Pass 1: all shadows (world_offset = -kOffs). Scoped so its immutable
         // borrows of `pal`/`state.level` drop before `sprite_pass` takes `&mut vp`.
         if scene.draw_shadow {
@@ -273,6 +322,7 @@ mod tests {
             kills: "Kills: ".to_string(),
             lives: "Lives: ".to_string(),
             reloading: "Reloading...".to_string(),
+            ..Default::default()
         }
     }
 

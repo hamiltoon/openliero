@@ -570,8 +570,13 @@ pub fn nobject_process(
                 // (the C++ `NOTE: MUST be outside the unpredictable branch`); Play is
                 // render-only (omitted), but the draws are the contract.
                 if ty.hit_damage > 0 && worms[w_idx].health > 0 && rand.bound(3) == 0 {
-                    let _k_snd = 18 + rand.bound(3) as i32;
-                    // sound_player->Play(kSnd, &w) — omitted (no sim/RNG).
+                    // The `Play(kSnd, &w)` uses the DEFAULT loops = 0
+                    // (`player.hpp:15`) — a DEDUP'd ONE-SHOT, not a loop; the
+                    // IsPlaying(&w) dedup is deliberately dropped (T1 precedent
+                    // for the 18+rand(3) family). The index reuses the drawn
+                    // value; no extra rand.
+                    let k_snd = 18 + rand.bound(3) as i32;
+                    crate::sound::one_shot(k_snd);
                 }
 
                 // :188-193 BLOOD FAN SECOND. kBlood = blood_on_hit * blood / 100
@@ -2084,6 +2089,63 @@ mod tests {
             100,
             rand,
         )
+    }
+
+    #[test]
+    fn nobject_worm_hit_sound_gate_emits_one_shot_at_the_drawn_index() {
+        // nobject.cpp:180-186: `Play(kSnd, &w)` with the DEFAULT loops = 0
+        // (`player.hpp:15`) — a DEDUP'd ONE-SHOT (the `IsPlaying(&w)` guard is
+        // a dedup, NOT a loop), emitted `key = None` at the ALREADY-drawn
+        // `18 + rand(3)` index. The IsPlaying dedup is deliberately dropped
+        // (T1 precedent for the 18+rand(3) family). blood = 0 silences the fan
+        // so the gate draws are the ONLY rng — a seed whose outer rand(3) is 0
+        // opens the gate, and the reference stream computes the index.
+        let cossin = precompute_cossin();
+        let (worm_bank, flags) = worm_hit_fixture();
+        let mut level = bg_level(1000, 1000);
+        level.material_flags = flags;
+        let ty = hit_nobject_type(false, false);
+        let nobject_types = hit_blood_nobject_types();
+        let blood = 0;
+
+        // Find a seed that opens the gate; compute the expected index.
+        let (seed, expected_snd) = (0u32..)
+            .find_map(|seed| {
+                let mut refr = Rand::new();
+                refr.seed(seed);
+                (refr.bound(3) == 0).then(|| (seed, 18 + refr.bound(3) as i32))
+            })
+            .expect("some seed opens the rand(3) gate");
+
+        let mut worms = [hit_worm(50, 50, 3, Vec2::zero())];
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut rand = Rand::new();
+        rand.seed(seed);
+        let mut obj = hit_nobject(Vec2::new(itof(3), itof(-2)), 4);
+
+        crate::sound::reset_frame();
+        run_process_hit(
+            &mut obj,
+            &ty,
+            &nobject_types,
+            &mut level,
+            &worm_bank,
+            &cossin,
+            &mut worms,
+            &mut nobjects,
+            blood,
+            &mut rand,
+        );
+
+        assert_eq!(
+            crate::sound::take_frame(),
+            vec![crate::sound::SoundEvent::one_shot(expected_snd)],
+            "hit gate open: ONE key-less one-shot at the already-drawn 18+rand(3)"
+        );
+        assert!(
+            (18..=20).contains(&expected_snd),
+            "index in the hardcoded hit-sound band"
+        );
     }
 
     #[test]

@@ -215,6 +215,7 @@ mod tests {
         SimState {
             rand,
             cycles,
+            screen_flash: 0,
             level: LevelSim {
                 width: 1,
                 height: 1,
@@ -276,6 +277,9 @@ mod tests {
             worm_spawn_rect_h: 0,
             worm_min_spawn_dist_last: 0,
             worm_min_spawn_dist_enemy: 0,
+            sound_hooks: assets::tc::SoundHooks::default(),
+            sound_events: Vec::new(),
+            shake_events: Vec::new(),
         }
     }
 

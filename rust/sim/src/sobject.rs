@@ -55,9 +55,12 @@
 //! `sim` stays Bevy- and float-free: every `vel` nudge uses `wrapping_*`, the
 //! `cossin * speed / 100` scaling inside [`nobject_create2`] truncates, and
 //! `Ftoi` is the arithmetic `>> 16` ([`ftoi`]). The stats calls
-//! (`DamagePotential`/`Hit`/`DamageDealt`), the viewport `shake` loop, and the
-//! `screen_flash` write draw no rand and touch no hashed state, so they are
-//! omitted exactly as the other ports omit their stats/render side effects.
+//! (`DamagePotential`/`Hit`/`DamageDealt`) and the viewport `shake` loop draw no
+//! rand and touch no hashed state, so they are omitted exactly as the other ports
+//! omit their stats/render side effects. The `:41 screen_flash` write is LIVE
+//! (Slice 4d T0) but likewise unhashed and rand-free: it folds `type.flash` into
+//! the [`crate::flash`] per-tick accumulator (`process_frame` seeds it decremented
+//! and folds it back into `SimState.screen_flash`).
 
 use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
@@ -138,12 +141,33 @@ pub fn sobject_create(
     });
 
     // :23-25 sound — the FIRST observable rand. Consumed even though `Play` is a
-    // hashing no-op; the rand is the argument, evaluated before `Play`.
+    // hashing no-op; the rand is the argument, evaluated before `Play`. Slice-4c
+    // emits the one-shot at the ALREADY-computed index `start_sound + rand(num_sounds)`
+    // (sobject.cpp:24) — the draw is unchanged (no new rand); not hashed.
     if ty.start_sound >= 0 {
-        rand.bound(ty.num_sounds as u32);
+        let variant = rand.bound(ty.num_sounds as u32) as i32;
+        crate::sound::one_shot(ty.start_sound + variant);
     }
 
-    // :27-33 viewport shake + :41 screen_flash: render-only, no rand — omitted.
+    // :27-33 viewport shake (4d T1). C++ walks `game.viewports` and, for every
+    // viewport whose rect contains the RAW blast (x, y), does `v.shake =
+    // max(Itof(shake), v.shake)`. Viewports do not exist inside the sim firewall,
+    // so the sim emits ONE (x, y, amount) event per explosion with shake > 0 into
+    // the crate::shake per-tick buffer (drained into SimState.shake_events); the
+    // game layer (T2) does the per-viewport rect test + itof + max. Coords are the
+    // RAW blast (x, y) (PRE the -8 sprite offset). Determinism-inert: draws no rand,
+    // never hashed. shake == 0 is a no-op `max(0, v.shake)` in C++, so emit nothing.
+    if ty.shake > 0 {
+        crate::shake::emit(x, y, ty.shake);
+    }
+    // :41 screen_flash write: `game.screen_flash = std::max(flash, game.screen_flash)`.
+    // Unhashed sim scalar (drives the render palette LightUp); draws no rand. Routed
+    // through the crate::flash per-tick accumulator so the deep create path writes it
+    // WITHOUT threading a &mut i32 through nobject/weapon/bonus (~120 call sites) —
+    // the sound-module side-channel idiom. process_frame seeds the accumulator with
+    // the top-of-frame-decremented screen_flash and folds it back at tick end, so
+    // `raise` computes exactly max(flash, screen_flash).
+    crate::flash::raise(ty.flash);
 
     let dr = ty.detect_range;
 
@@ -242,11 +266,14 @@ pub fn sobject_create(
                     }
 
                     // :105-111 hit-sound gate: rand(3) is ALWAYS drawn; on `== 0`
-                    // a SECOND rand(3) picks `18 + rand(3)`. The `Play` is a hashing
-                    // no-op (skipped) but the rand draws are the contract.
+                    // a SECOND rand(3) picks `18 + rand(3)`. The `Play(kSnd, &w)`
+                    // uses the DEFAULT loops = 0 (`player.hpp:15`) — a DEDUP'd
+                    // ONE-SHOT, not a loop; the IsPlaying(&w) dedup is
+                    // deliberately dropped (T1 precedent for the 18+rand(3)
+                    // family). The index reuses the drawn value; no extra rand.
                     if rand.bound(3) == 0 {
-                        let _k_snd = 18 + rand.bound(3) as i32;
-                        // sound_player->Play(kSnd) — omitted (no sim/RNG).
+                        let k_snd = 18 + rand.bound(3) as i32;
+                        crate::sound::one_shot(k_snd);
                     }
                 }
             }
@@ -565,6 +592,162 @@ mod tests {
     }
 
     #[test]
+    fn create_emits_variant_one_shot_at_already_drawn_index_no_extra_rand() {
+        // Slice-4c: sobject_create emits the one-shot at the ALREADY-computed index
+        // `start_sound + rand(num_sounds)` (sobject.cpp:24), REUSING the single
+        // pre-existing sound draw — no new rand. Pins the emitted index + proves
+        // draw-count parity.
+        let cossin = precompute_cossin();
+        let ty = small_explosion(-1); // start_sound = 0, num_sounds = 2
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+
+        // Reference: the ONE draw the sound consumes, and its value.
+        let mut refr = seeded();
+        let drawn = refr.bound(2) as i32;
+        let expected_sound = ty.start_sound + drawn;
+
+        crate::sound::reset_frame();
+        let draws_before = rand.draws();
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+        let events = crate::sound::take_frame();
+
+        assert_eq!(
+            events,
+            vec![crate::sound::SoundEvent::one_shot(expected_sound)],
+            "one variant one-shot at start_sound + rand(num_sounds)"
+        );
+        assert_eq!(
+            rand.draws() - draws_before,
+            1,
+            "emission reuses the single sound draw — zero new rand"
+        );
+    }
+
+    #[test]
+    fn create_raises_screen_flash_to_max_of_flash_and_seed() {
+        // sobject.cpp:41: `game.screen_flash = std::max(flash, game.screen_flash)`.
+        // The create path routes the write through the crate::flash per-tick
+        // accumulator (process_frame seeds it with the decremented screen_flash and
+        // folds it back into SimState.screen_flash). Here we drive that seam
+        // directly: begin_frame(seed) then Create(ty.flash) then take_frame.
+        let cossin = precompute_cossin();
+        let mut ty = small_explosion(-1); // no carve: isolate the flash write
+        ty.flash = 8;
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+
+        // Seed (previous screen_flash) larger than ty.flash: the seed wins.
+        crate::flash::begin_frame(20);
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+        assert_eq!(crate::flash::take_frame(), 20, "max(flash 8, seed 20) = 20");
+
+        // Seed smaller than ty.flash: the type's flash wins (a real flash blip).
+        crate::flash::begin_frame(3);
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+        assert_eq!(crate::flash::take_frame(), 8, "max(flash 8, seed 3) = 8");
+    }
+
+    #[test]
+    fn create_emits_one_shake_event_at_raw_blast_coords_when_shake_positive() {
+        // sobject.cpp:27-33: the viewport loop `max`es `Itof(shake)` into every
+        // viewport containing the RAW blast (x, y). The sim has no viewports, so it
+        // emits ONE (x, y, amount) event per explosion with shake > 0; the game
+        // layer (T2) does the per-viewport rect test + itof + max. The coords are
+        // the RAW blast (x, y) (PRE the -8 sobject offset), amount = ty.shake.
+        let cossin = precompute_cossin();
+        let mut ty = small_explosion(-1); // no carve: isolate the shake write
+        ty.shake = 7;
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+
+        crate::shake::reset_frame();
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+
+        // The RAW blast (50, 50) — NOT the -8-offset obj coords (42, 42).
+        assert_eq!(
+            crate::shake::take_frame(),
+            vec![crate::shake::ShakeEvent { x: 50, y: 50, amount: 7 }],
+            "one shake event at the RAW blast (x, y) with amount = ty.shake"
+        );
+    }
+
+    #[test]
+    fn create_shake_event_draws_zero_rand() {
+        // The shake emit is determinism-inert: with start_sound < 0 (no sound draw),
+        // a bg level (no dirt-throw) and no carve, the whole explosion draws ZERO
+        // rand — yet the shake event is still emitted. Proves the seam adds no rand.
+        let cossin = precompute_cossin();
+        let mut ty = small_explosion(-1);
+        ty.shake = 7;
+        ty.start_sound = -1; // silence the only other draw
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+
+        crate::shake::reset_frame();
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+
+        assert_eq!(rand.last(), 0, "shake emission draws zero rand");
+        assert_eq!(
+            crate::shake::take_frame(),
+            vec![crate::shake::ShakeEvent { x: 50, y: 50, amount: 7 }],
+            "shake event still emitted with no rand drawn"
+        );
+    }
+
+    #[test]
+    fn create_shake_zero_pushes_no_event() {
+        // C++ `max(Itof(0), v.shake)` is a no-op, so shake == 0 must emit NOTHING —
+        // keeping the drained vec minimal. small_explosion defaults shake to 0.
+        let cossin = precompute_cossin();
+        let ty = small_explosion(-1); // shake defaults to 0
+        assert_eq!(ty.shake, 0, "fixture has no shake");
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+
+        crate::shake::reset_frame();
+        sobject_create(
+            &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+        );
+
+        assert!(
+            crate::shake::take_frame().is_empty(),
+            "shake == 0 emits no event"
+        );
+    }
+
+    #[test]
     fn create_start_sound_negative_draws_no_sound_rand() {
         // start_sound < 0 -> the sound rand is NOT drawn. With a bg level + no
         // carve, the whole explosion draws zero rand.
@@ -838,6 +1021,76 @@ mod tests {
             rand.last(),
             expected_last,
             "blood-spray + hit-sound RNG order/count matches the reference stream"
+        );
+    }
+
+    #[test]
+    fn worm_in_box_hit_sound_gate_emits_one_shot_at_the_drawn_index() {
+        // sobject.cpp:105-111: `Play(kSnd, &w)` with the DEFAULT loops = 0
+        // (`player.hpp:15`) — a DEDUP'd ONE-SHOT (the `IsPlaying(&w)` guard is
+        // a dedup, NOT a loop), emitted `key = None` at the ALREADY-drawn
+        // `18 + rand(3)` index. The IsPlaying dedup is deliberately dropped
+        // (T1 precedent for the 18+rand(3) family). blood = 0 silences the fan
+        // (kBloodAmount = 0), so the stream is exactly: the :24 start_sound
+        // variant one-shot (T1), then — on a seed whose gate rand(3) is 0 —
+        // this hit one-shot.
+        let cossin = precompute_cossin();
+        let ty = small_explosion(-1); // start_sound 0, num_sounds 2
+        let nts = nts_with_blood();
+        let mut level = bg_level(100, 100);
+        let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
+        let mut worms = vec![worm_at(57, 50, 100)];
+        let blood = 0;
+
+        // Find a seed that opens the gate; compute the expected indices from
+        // the reference stream: rand(2) variant, rand(3) gate, rand(3) kSnd.
+        let (seed, expected_variant, expected_snd) = (0u32..)
+            .find_map(|seed| {
+                let mut refr = Rand::new();
+                refr.seed(seed);
+                let variant = refr.bound(2) as i32;
+                (refr.bound(3) == 0).then(|| (seed, variant, 18 + refr.bound(3) as i32))
+            })
+            .expect("some seed opens the rand(3) gate");
+
+        let mut rand = Rand::new();
+        rand.seed(seed);
+
+        crate::sound::reset_frame();
+        sobject_create(
+            &ty,
+            50,
+            50,
+            1,
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            &nts,
+            &mut level,
+            &cossin,
+            &SpriteSet::default(),
+            &[],
+            &mut sobjects,
+            &mut Pool::<Bonus>::new(1),
+            &[],
+            blood,
+            0,
+            100,
+            &mut rand,
+        );
+
+        assert_eq!(
+            crate::sound::take_frame(),
+            vec![
+                crate::sound::SoundEvent::one_shot(ty.start_sound + expected_variant),
+                crate::sound::SoundEvent::one_shot(expected_snd),
+            ],
+            "the :24 variant one-shot THEN the gate-open 18+rand(3) hit one-shot"
+        );
+        assert!(
+            (18..=20).contains(&expected_snd),
+            "index in the hardcoded hit-sound band"
         );
     }
 

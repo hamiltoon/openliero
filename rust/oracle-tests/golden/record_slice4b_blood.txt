@@ -1,0 +1,23 @@
+# record_slice4b_blood — sim-produced state_hash sidecar (slice 4b, T4).
+# Column 2 is hash_game_state(tick), produced by replay_state_series driving
+# InputSource::Scripted over record_slice4b_blood_scenario.txt (headless — no
+# render pass, so unlike render_slice3b_* there is no frame_hash column).
+# This is the drift backstop of spec §6b: the round-trip gate (T3) is a pure
+# self-check (record == replay) and is blind to a bug that shifts BOTH sides
+# identically; this sidecar pins ABSOLUTE sim-produced values against a frozen
+# committed scenario, so a symmetric drift still turns record_regression.rs red.
+# Regenerate via: cargo run -p game --example gen_record_slice4b_corpus
+0 53b84fb7
+1 867f4ee1
+2 c2b75381
+3 9c096dc7
+4 ded0f2a3
+5 0e69993c
+6 b624e877
+7 f9b045e1
+8 94d147d9
+9 70b6c986
+10 73296227
+11 b5fb2b4c
+12 13a3f2bc
+total 13

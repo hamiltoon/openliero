@@ -1,6 +1,6 @@
 ---
 name: liero-shot
-description: Run and observe the Liero-rs renderer headless via the shot CLI — screenshot a scenario at a fixed tick to a PNG, and diff frame/state hashes against the committed goldens for regression comparison. Use in the change → screenshot → judge loop and as the run/verify harness's project run-skill for the renderer.
+description: Run and observe the Liero-rs renderer headless via the shot CLI — screenshot a scenario at a fixed tick to a PNG, and diff frame/state hashes against the committed goldens for regression comparison. Also documents the `game` binary's live/record/replay loop (play, capture a session, play it back headless-verified). Use in the change → screenshot → judge loop and as the run/verify harness's project run-skill for the renderer.
 ---
 
 # liero-shot — headless render/observe loop
@@ -96,3 +96,126 @@ wasm parity witness; a `debug_assert` panic in the console means a platform
 divergence leaked into the sim (stop and reproduce natively). The eyeball check:
 the blood demo's split-screen world view, animating at the C++ cadence. Static
 bundle recipe: see `web/index.html`.
+
+## 7. Play the live game — Slices 4a–4g
+
+Everything above drives `shot`, the headless renderer. This section drives the
+other binary: `game` — the real windowed Bevy app, native-only, keyboard-driven.
+
+### 7.1 Live play
+
+```
+cargo run --manifest-path rust/Cargo.toml -p game
+```
+
+Bare invocation (no flags, no positional name, since 4f) opens a **playable
+default match**: a fixed committed fixture (`game/scenarios/default_match.txt`
+— shipped `render_stage` level, two visible worms, seed 42, `weapon 0 DART`),
+keyboard-driven, indefinite (no tick bound, no self-check). Window title
+`"Liero-rs — default match"`.
+
+```
+cargo run --manifest-path rust/Cargo.toml -p game -- --live [name]
+```
+
+`--live` alone plays the caller's default scenario (`blood`) live instead of
+the fixed replay demo; `--live <name>` plays any committed
+`render_slice3b_<name>_scenario.txt` live (its recorded inputs are ignored —
+only its level + worm-init are used). A **positional `<name>` with no
+`--live`** still resolves the old `Mode::Scripted` self-check demo
+(`cargo run -p game -- blood` replays the committed inputs and asserts every
+tick against the golden — unchanged, the CI regression path never runs off
+the bare invocation).
+
+Default key bindings (`game::input::default_bindings`), decoded from the C++
+DOS scancode table:
+
+| | Up | Down | Left | Right | Fire | Change | Jump |
+|---|---|---|---|---|---|---|---|
+| P0 | R | F | D | G | Ctrl(L) | Shift(L) | Alt(L) |
+| P1 | ↑ | ↓ | ← | → | Ctrl(R) | Alt(R) | Shift(R) |
+
+Dig is **unbound** for both worms by default — hold a worm's own Left+Right
+together to dig (the C++ default). `F5` restarts the match from tick 0 (reruns
+the same scenario load the Scripted loop-reload uses) — verified unbound
+against the table above (`R` is P0 fire, so it was never a restart-key
+candidate). `Esc` or the window-close button quits.
+
+### 7.2 Record → replay round-trip
+
+```
+cargo run --manifest-path rust/Cargo.toml -p game -- --live --record /tmp/x.txt
+```
+
+Plays live exactly as 7.1, and additionally buffers every sampled per-tick
+input snapshot in memory. **Quit gracefully** (`Esc`, or the window-close
+button) to flush: the buffer is written to `/tmp/x.txt` only in the
+`AppExit`-triggered `flush_recorder_on_exit` system (`main.rs`, ordered
+`.after(bevy::window::ExitSystems)`). **A signal kill (`alarm`/`timeout`/Ctrl-C)
+never reaches that system and writes no file** — window closure via Esc/X is
+the only path that flushes, so a headless/scripted smoke test cannot exercise
+this half of the loop (see 7.3 for the headless-safe verification instead).
+`F5` during a recording also **restarts the recording**: it clears the
+buffered snapshots so the eventual flush covers only ticks since the last
+restart, not a spliced pre/post-restart stream (`Recorder::clear`).
+
+Then play the recording back:
+
+```
+cargo run --manifest-path rust/Cargo.toml -p game -- --replay /tmp/x.txt
+```
+
+`--replay <path>` loads *any* scenario/recording file (bypassing the
+golden-dir name lookup `<name>` uses) as `Mode::Replay`: the same
+`InputSource::Scripted` feed as the self-check demo, but with the loop and the
+debug self-check both retired (no golden exists for an arbitrary recording).
+It plays once through the recording's `ticks` and then **holds** on the final
+frame — it does not loop. `--replay` is mutually exclusive with
+`--live`/`--record` (rejected before any window opens, e.g.
+`--replay excludes --live/--record`).
+
+### 7.3 Headless replay verification (no window)
+
+Two ways to check a recording without a display:
+
+- **State-hash time series** — `game::input::replay_state_series(tc_root,
+  &scenario)` drives `InputSource::Scripted` over any parsed `Scenario`
+  headlessly (no Bevy `App`) and returns the per-tick `hash_game_state`
+  series. This is the library call both `tests/round_trip.rs` (the record →
+  replay round-trip gate) and `tests/record_regression.rs` (the committed-corpus
+  drift backstop) build on — see 7.4.
+- **Screenshot a recording at a fixed tick** — `shot --scenario-path
+  <recording> --tick <n> --out <path>` reads an arbitrary scenario/recording
+  file directly (bypassing `--scenario <name>`'s golden-dir lookup) and renders
+  it through the same `render_scenario` path as every other `shot` screenshot.
+  Landed in the same slice (4g); integration-tested against the committed
+  recorded corpus (`rust/shot/tests/scenario_path.rs`). It slots into the
+  change → screenshot → judge loop (§2) for a recorded match exactly like
+  any committed scenario.
+
+### 7.4 CI coverage (already wired, no new job needed)
+
+Every input/replay gate already runs in the two existing CI steps — nothing in
+4g adds a new job:
+
+- `cargo test -p game` — `tests/passthrough.rs` (4a, live-sampler pass-through
+  state gate), `tests/round_trip.rs` (4b, **the hard gate**: record through
+  `Live`, replay through `Scripted`, assert the two independently-derived
+  series match tick-for-tick), `tests/record_regression.rs` (4b, committed-corpus
+  drift backstop — catches a *symmetric* serializer drift the round-trip gate
+  is blind to), `tests/viewport_stepping.rs` (4d, live shake/banner stepping).
+- `cargo test --workspace --exclude game` — `replay/tests/corpus.rs` (4e,
+  phase-1 `.lrp` `WideRollbackChecksum` gate over the committed `.lrp` corpus),
+  plus every `sim`/`scenario`/`render`/`oracle-tests` golden.
+
+The `.lrp` `framehash` diff (phase 2) is a booked follow-on, explicitly out of
+scope here.
+
+### 7.5 Audio note
+
+Sound only plays in windowed mode: `setup_audio` opens the real output device
+(`RodioSink`, falling back silently to a no-op `NullSink` if none is found —
+never a crash). Every headless caller — `shot`, `replay_state_series`, the
+round-trip/passthrough/corpus tests — never constructs the Bevy `App` at all,
+so they never touch audio; a headless verification run is always silent by
+construction, not by a special-cased flag.

@@ -8,7 +8,177 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-12 · **🎉 STEP 3 COMPLETE — slice 3f SHIPPED: wasm bring-up.
+> **Last updated:** 2026-07-13 · **🎉 STEP 4 COMPLETE — slices 4f+4g SHIPPED: bare run =
+> playable match; the harness covers the whole loop.** 🎯 **`cargo run -p game` now starts a
+> genuinely PLAYABLE default match** — no flags — closing the loop the whole step built toward:
+> live input (4a) → record/replay (4b) → audio (4c) → live viewport (4d) → `.lrp` reading (4e)
+> all converge on a bare invocation that just works. **4f** ships the default-match fixture
+> (Live mode, `render_stage`-level, two visible worms on blood-bevised positions, DART, seed 42;
+> the fixture sits outside the golden dir so it cannot perturb any golden enumeration), F5-restart
+> (adjudicated to also zero an in-flight recording — restart means restart), a clean positional-arg
+> rejection for `default_match` (fixed after an initial review pass), and a tidied window title; the
+> wasm arm stays byte-unchanged (the parity witness holds). `GenerateFromSettings`/random-level
+> generation stays deferred. **4g** ships `shot --scenario-path <file>` (renders any recording or
+> arbitrary scenario file, not just the golden corpus — the golden path itself stays byte-identical,
+> 19 shot tests green), a new SKILL.md §7 (live play + the full key-binding table, the
+> record→replay loop incl. the flush caveat — Esc/window-close flush, a killed process writes
+> nothing, F5 zeroes an in-flight recording — headless verification, and a CI-coverage inventory
+> showing every gate is already wired into CI); the CI half of 4g was in fact delivered
+> incrementally across 4a–4e, so 4g's own diff is thin by design. **All 5 commits** (`80cb75c` plan /
+> `7146490` T0 / `41a1af2` T0-fix / `f566404` T1 / `e22c90a` T2) landed; T0 was reviewed
+> NEEDS-FIX → fixed by 2 Important-severity implementer fixes → clean, T1/T2 were self-verified
+> under the broad step-4 review (T4) that follows. **STEP 4 (4a–4g) IS NOW COMPLETE.** What remains
+> for John: the PR #5 merge decision and the `.lrp` phase-2 (cereal `Game` graph) follow-on decision
+> — both bookkept, neither blocking. Branch `liero-rs-step-4`.
+> Prior: **STEP 4 — slice 4e phase 1 SHIPPED: `.lrp` REPLAY READER.**
+> 🎯 **Liero-rs LÄSER RIKTIGA `.lrp`-REPLAYS byte-troget** — en genuin C++-producerad replay
+> driver Rust-simmen och reproducerar C++-facit **bit-exakt över 1120 ticks**, inklusive
+> `WideRollbackChecksum`-ordet vid cycle 1050 (`0xf6211087`), och `Prior:`-kedjan nedan förblir
+> byte-identisk. **Fas-gräns-upptäckten:** `.lrp`-containerns per-worm-blobbar (cereal
+> `Game`-grafen) är **längd-prefixade**, så fas 1 kan skippa hela cereal-grafen rakt av —
+> initialtillståndet kommer istället från befintliga `scenario::load` — och
+> **`WideRollbackChecksum` är en HÅRDARE gate än `HashGameState`**, eftersom den foldar hela
+> rollback-inventariet (21 worm-fält + pooler + materialbuffert + `prev_control_states` +
+> terräng), inte bara tickens synliga tillstånd. **T0** byggde `lrp_gen`, en C++
+> headless-replay-writer (setup verbatim från befintliga dumpern) plus en tvåfixtur-korpus
+> (320t + 1120t, checksum-ord vid cycle 0 och 1050) och bevisade tick-0-alignment. **T1** porterade
+> själva `WideRollbackChecksum`-porten (Mix32 exakt, alla 21 worm-fält + pooler + materialbuffert,
+> `prev_istates` caller-supplied) — cycle-0-facit (`0x031057d7`) matchade **första körningen**.
+> **T2** byggde den Bevy-fria `rust/replay`-craten (flate2): BE-container, cereal-blob-**skip** via
+> dess längdprefix, taggar `0x80`–`0x83`, XOR-delta-avkodning, checksum-extraktion — verifierad mot
+> alla 1120×2 input-ord via scenario-grammatiken (en XOR-baslinje-caveat — muterande fixtures —
+> dokumenterad, routad till fas 2). **T3 MILSTOLPE:** fas-1-gaten gick **GRÖN FÖRSTA KÖRNINGEN** —
+> 1120 ticks uppspelade bit-exakt inkl. cycle-1050-checksumordet, backad av en per-tick-tripwire mot
+> en ny sidecar plus ett negativtest (muterat ord). **T4** härdade läsaren mot fientlig indata
+> (10 tester — ingen panik på skräp, `O(1)` `Err` på ett jätte-längdprefix etc.) plus
+> `debug_assert`, och bokförde formellt fas 2 (spec §8: cereal-grafen / ett version-<7-lyft
+> [**adjudikerat: avvisas för fas 1** — den enda version-<7-skillnaden inuti cereal-blobben är
+> palett-only] / `decode_with_baseline` / framehash-diffen). **Scope-notering:** fas 1:s orakel är
+> `WideRollbackChecksum`-tidsserien, inte den C++-`framehash`-diff det ursprungliga done-when-läget
+> förutsåg — se overview-dokumentets uppdaterade done-when §5 nedan. Alla 6 commits (`fb9b9b7` plan /
+> `d0cca91` T0 / `0a08d54` T1 / `b5fb884` T2 / `cd711fc` T3 / `b8bd8cb` T4) granskade **READY på 0
+> Critical / 0 Important** genomgående. Deferred: fas 2 i sin helhet (cereal `Game`-grafens
+> deserialisering, möjligen egen slice/post-step-punkt per overview-dokumentets Open Q1-scope-gate).
+> Branch `liero-rs-step-4`.
+> Prior: **STEP 4 — slice 4d SHIPPED: LIVE VIEWPORT.** 🎯 **flash,
+> shake, camera and death banners now evolve from real explosions and a real spawn/death** —
+> not injected directives — and match a new C++ `render_live` golden **bit-exact over 321
+> ticks**. The **T0 headline correction**: C++ `HashGameState` never folds `screen_flash`
+> (`stateHash.hpp` omits it; it lives only in the rollback `GameSnapshot`) — so adding it to
+> `SimState` (decrement `game.cpp:271-273`, sobject-create max-write `sobject.cpp:41`, drained
+> by `flash.rs`) is **hash-neutral**, gated by re-diff, not re-fuzz. **T1** added the mirror
+> seam for `shake`: the sole writer (`sobject.cpp:31`) emits **raw** blast-coordinate + amount
+> events; the game layer does the `itof`/rect-test/max, keeping the sim itself viewport-blind.
+> **T2** is the game-layer live-stepping core (`viewport_step.rs`): decrement-without-floor
+> `-4000` on **raw** values, banner-walk on **pre-frame** state, **then** `process_frame`,
+> **then** apply the shake max, **then** `as_scene(sim.screen_flash)` — reviewed as genuinely
+> C++-trogen against `ProcessViewports`'s real call site (`game.cpp:463`, after the worm loop).
+> **T3** built the C++ dumper's opt-in `render_live` directive (full `ProcessFrame` + wired
+> viewports) with a **green re-diff** (every prior golden byte-identical) plus the Rust parser
+> arm. **T4 MILESTONE:** the `render_slice4d_live` golden matched on the **first run** — 321
+> ticks bit-exact across a death→respawn window, flash/shake tracking real explosions, the
+> camera moving live as the respawned worm falls (the `SetCenter` arm reached via a fire-triggered
+> spawn — the `killed_timer` vacuity trap from the design doc solved), triple-isolation held
+> throughout, and four non-vacuity witnesses (flash-decay-to-zero, shake RNG jitter, banner-range
+> walk, live centering) rule out an accidental all-static pass. The harness is a documented
+> hand-copy of `viewport_step.rs` (Bevy's `!Send`/ECS shape forces the duplication), **double-
+> anchored** against drift (byte-comparison assertion + a doc comment cross-referencing the
+> source). **T5:** death-banner **text**, via the 3e font — a genuinely cross-viewport effect
+> (the dying worm's banner draws in the *other* player's viewport, `viewport.cpp:256-270`;
+> shadow colour 0 + text colour 50). **Finding + fix:** `frame::draw` interleaved
+> process-then-draw **per viewport**, which is wrong relative to C++'s process-**all**-viewports-
+> first (`ProcessViewports`, `game.cpp:463`) — refactored to match, and the refactor is
+> **hash-neutral** (each viewport's RNG stream is fully local; the 3a/3b/3e goldens are
+> unchanged). The 4d golden was regenerated with **only the frame-hash column** touched, and
+> **only** inside the death window (ticks 93–236) — the state-hash column stayed byte-identical.
+> The `YoureIt`/GameOfTag banner arm stays deferred (a comment, not a hard tripwire). All 6
+> commits (`370be59`/`6f01ea6`/`e72b561`/`e6d483a`/`ad8eaeb`/`bf36497`) reviewed **READY /
+> MILESTONE-READY at 0 Critical / 0 Important**. Deferred: `steerable_sum`/steerable centering
+> (a real DEFER call — `ProcessSteerables` mutates the *hashed* `wobject.cur_frame`, is unported,
+> and no scenario reaches it — the non-steerable `SetCenter` + its `debug_assert` guard stand);
+> the `YoureIt`/GameOfTag banner arm; a spec-flagged minor — the 15-line harness hand-copy is a
+> theoretical frame-level blind spot, mitigated by the double-anchoring above, not eliminated.
+> Branch `liero-rs-step-4`.
+> Prior: **STEP 4 — slice 4c SHIPPED: audio.** 🎯 **Liero-rs LÅTER** —
+> sound plays natively AND in the browser, driven end-to-end by a sim-emitted per-tick
+> event stream that adds **zero new `rand`** (every variant draw already existed pre-4c;
+> `hash_game_state` stays byte-identical, proven structurally, not by a runtime flag).
+> **T1** laid the stream itself: a new Bevy-free `sim::sound` module records `Play`/`Stop` at
+> all 10 `ProcessFrame` callsites via a thread-local per-frame collector (deep call trees made
+> threading an out-param prohibitive), drained into `SimState.sound_events` at
+> `process_frame`'s tail — hash-inert, with the Step-5 speculative-suppression hook already
+> documented (not wired; no resim exists yet). **T2 — the classification finding:** re-reading
+> C++ `SoundPlayer::Play(int, void* id = nullptr, int loops = 0)` (`player.hpp:15`) against
+> every callsite showed `loops` **defaults to `0`** — only `worm.cpp:1120-1121`
+> (`Play(launch_sound, &weapons[cur], -1)`) passes an explicit `loops = -1`. It is the **only
+> true loop** `ProcessFrame` reaches. The design's other 5 "worm-keyed loops" were `loops=0`
+> one-shots, deduplicated only by the caller's `IsPlaying` guard — felklassade in the original
+> spec, now corrected there (`specs/2026-07-13-liero-rs-step4-slice4c-audio-design.md` §3.4,
+> "CORRECTED (T2)") and in `sim/src/sound.rs`'s `LoopKey::Worm` doc comment. Per John's
+> Väg-A call, the hit/blood trio (`weapon.cpp:311-312`/`nobject.cpp:183-184`/
+> `sobject.cpp:108-109`) is emitted as `key=None` one-shots — correct sound, C++'s restart-dedup
+> lost, an audio-advisory-only difference. **T3** built the backend seam: an `AudioSink` trait
+> mirroring C++ `SoundPlayer`, `rodio` 0.19 (`default-features=false`) behind it, a `Drainer`
+> that makes `Play` idempotent per loop key (the game-side analog of C++'s `IsPlaying` gate) with
+> a belt-and-braces reaper, and a `SoundTable` in the TC's `tc.types.sounds` order. **T4
+> MILESTONE:** audio wired live in windowed play — `RodioSink` lives behind a Bevy `NonSend`
+> resource (the `cpal::Stream` is `!Send`), falls back to a silent `NullSink` on init failure
+> instead of crashing, drains/reaps inside the existing `!replay_finished` guard, and a
+> liveness-superset reap closes the worm-death channel-leak edge; headless stays structurally
+> silent (no sink constructed); every suite plus the wasm build stayed green. John's ear-check
+> remains advisory (same posture as prior eyeball checks). **T5:** `rodio` ships on **wasm too**
+> — the `wasm-bindgen` cargo feature routes `cpal` to its WebAudio backend, so the *same*
+> `RodioSink` covers both targets (no `kira` fallback needed after all); `sounds/` (~505 KB) is
+> now embedded via the existing `read_asset` seam; autoplay stays silent until a user gesture,
+> no panic. One real deviation: `load_sound_table_wasm` panics on a missing embedded file (the
+> embed catalogue is exhaustively verified at build time) where the native loader silently
+> leaves the slot empty — a debug/wasm inconsistency, not a correctness bug (documented, not yet
+> unified). Commits `5f10312`(T1)/`966c362`(T2)/`59b6fef`(T3)/`1ffc68e`(T4)/`2b8fc6c`(T5), every
+> review READY / MILESTONE-READY at **0 Critical / 0 Important**. Branch `liero-rs-step-4`.
+> Prior: **STEP 4 — slice 4b SHIPPED: record→replay round-trip,
+> bit-exact.** 🎯 The **Step 5 / ggrs precondition is delivered**: a `Recorder` taps the same
+> sampled `ControlState` array `--live` already feeds into `process_frame` (Dig-chord already
+> resolved, never re-derived), flushes on `AppExit` (ordered `.after(bevy::window::ExitSystems)`
+> — a review-caught race: without that ordering, closing the window by the X button can race
+> `exit_on_all_closed` and drop the recording; the Esc quit path was always safe), and writes the
+> **same scenario grammar** `scenario::to_text` already parses — **the recorded artifact IS a
+> scenario file**, no new format. `--replay <path>` drives *any* scenario headless through the
+> **unchanged** `InputSource::Scripted` (play once, then hold — `demo.tick` can never advance past
+> the recorded ticks). The headline proof, `round_trip.rs`: a synthetic key-stream through the
+> **real** `--live` sampler → `Recorder` → `to_text` → `parse` → replay reproduces the **live**
+> `HashGameState` series **tick-for-tick**, non-vacuously (3 asymmetric fixtures + an
+> `assert_ne` against the empty series + hardcoded raw-text assertions pinning the Dig chord's
+> `"input 6 12 0"` encoding); a mutated word diverges at the exact expected tick (RED-proven). A
+> committed corpus (`record_slice4b_blood_scenario.txt`, 12 ticks off the T3 stream) backstops
+> drift against a sim-produced 2-column `state_hash` sidecar. **Hardening finding (H1,
+> escalated out of the T3 review):** the C++ `cossin[128]` UB from 3b was **reachable in `--live`**
+> after all — spawn → walk right → fire — because the masking clamp is gated on
+> `aiming_speed != 0`, which live aiming can hit (falsifying John's Decision #3 "unreachable"
+> premise from before 4a); three call sites (`worm_fire`, ninjarope-throw, dig) now mask the
+> table index `&0x7f` (the C++ side already builds the table with the same mask, `math.cpp:91` —
+> matching 3b's precedent for the same table), full sim golden suite stayed **green (313 sim
+> ticks)** — a neutral, state-unchanging fix. All 7 commits (`8bf17cc`/`d6feea7`/`1869a43`/
+> `04c3d2c`/`c7d53d1`/`4c73119`/`7936ce3`) landed with **0 Critical / 0 Important** across all
+> reviews (per-task reviews for T0–T3/H1, T4 covered by the broad slice review; one early
+> NEEDS-FIX on T1 was fixed and re-reviewed clean; H1 was re-committed clean after an
+> initial messy diff). Deferred: flush-on-crash (by design — Esc/close only), windowed
+> `--replay`-hold not automation-tested, `.lrp` interop stays 4e. Branch `liero-rs-step-4`.
+> Prior: **STEP 4 — slice 4a SHIPPED: live input core.** 🎯 The game is
+> **playable from the keyboard, native** (`cargo run -p game -- --live`) — 1-player and 2-player
+> hotseat, one input snapshot sampled per `FixedUpdate` tick (never `Update`/edges), Dig = a pure
+> Left+Right chord (never a stored bit), default bindings mirror the decoded C++ keymap
+> (`settings.cpp:36-37` via `keys.cpp:9-58`, P0 = R/F/D/G+LCtrl/LShift/LAlt, P1 = arrows+RCtrl/
+> RAlt/RShift, Dig unbound both — index-for-index verified against C++). The headless
+> **pass-through determinism gate** (`game/tests/passthrough.rs`) proves the new sampler
+> reproduces every one of the **7** `render_slice3b_*` scenario goldens **bit-exact**, tick-for-tick,
+> in CI (`cargo test -p game`); the scripted path, its debug self-check, and the `Prior:`-chain
+> below are all preserved byte-identical. A real finding: **no focus-loss backstop was needed** —
+> Bevy 0.19 already releases held keys on window-focus-loss (`bevy_winit` → synthetic `Released` →
+> `bevy_input::release_all`). John's manual 30-second play-test remains an open advisory (same
+> posture as 3c's Srgb eyeball check). Deferred: live-wasm (browser keyboard input; wasm stays on
+> the scripted witness), gamepad, and recording (→ 4b). Commits `072817b`/`642adeb`/`e189de2`/
+> `d9a54a3`, each reviewed READY (0 Critical / 0 Important). Branch `liero-rs-step-4`.
+> Prior: **🎉 STEP 3 COMPLETE — slice 3f SHIPPED: wasm bring-up.
 > Liero-rs now renders in the BROWSER (WebGL2), closing the rendering step (3a–3f).**
 > 🎯 **MILESTONE (3f):** the browser milestone is **automated-proven** — a headless-Chrome
 > controller ran the debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) and the
@@ -153,7 +323,7 @@ the LAST slice of step 2.
 
 ---
 
-## 🔁 Rewrite track — faithful port (~74%)
+## 🔁 Rewrite track — faithful port (~80%)
 
 Strangler-style: the C++ engine is the oracle, every piece differential-tested
 bit-for-bit before moving on. Steps 0–2 merged (the deterministic sim core — the
@@ -163,17 +333,23 @@ sprite pass), **3c** put it LIVE on screen (`cargo run -p game` — the first Be
 code), **3d** the headless screenshot CLI + run-skill, **3e** the HUD/font/bars/
 minimap overlay (the full player view pixel-exact), and **3f** the wasm bring-up —
 the same CPU frame now renders in the **browser** (WebGL2), automated-proven in
-headless Chrome. Steps 4–5 (input/replay + netplay) not started.
+headless Chrome. **Step 4 (input/replay/audio) is COMPLETE** (4a–4g): 4a (live input),
+4b (record→replay round-trip, the Step 5 precondition), 4c (audio, native + wasm),
+4d (live viewport — flash/shake/camera/banners), 4e phase 1 (`.lrp` replay reader —
+container + delta stream + `WideRollbackChecksum`, bit-exact over 1120 ticks), 4f
+(minimal start flow — bare `cargo run -p game` is a playable default match), and 4g
+(run/verify-skill extension + CI replay-checksum regression) are all shipped; 4e phase 2
+(cereal `Game` graph) is a bounded follow-on; step 5 (netplay) is not started.
 
 ```
-REWRITE (steg 0–5)                                          ~74%
+REWRITE (steg 0–5)                                          ~80%
 ├─ ✅ Step 0  sim-core primitives (RNG/fixed/vec/math/tables)   DONE — merged (PR #1)
 ├─ ✅ Step 1  asset IO, slices 1a–1e (level/palette/sprites/    DONE — merged (PR #2)
 │             tc.cfg/objects/WAV)
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
 ├─ ✅ Step 3  Bevy rendering / window (reproduce the SDL3 view) DONE — 3a–3f shipped (PR #4)
-├─ ⬜ Step 4  input + replay (.lrp) playback                    not started  ◀── YOU ARE HERE
-└─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
+├─ ✅ Step 4  input + replay (.lrp) + audio                     COMPLETE — 4a–4g shipped (4e-phase2 bounded follow-on)
+└─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started  ◀── YOU ARE HERE
 ```
 
 > Everything above EXISTS in the original openliero — this track reproduces it in
@@ -217,7 +393,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~74%** (steps 0–3 done; step 4 input/replay + step 5 netplay remain) |
+| Rewrite track (steps 0–5) | **~80%** (steps 0–4 done; step 4 (input/replay/audio, 4a–4g) COMPLETE — 4e-phase2 bounded follow-on + step 5 netplay remain) |
 | Step 3 (rendering) | **✅ COMPLETE** (slices 3a + 3b + 3c + 3d + 3e + 3f all shipped; PR #4 ready to merge) |
 | Slice 3f (wasm bring-up) | **✅ MILESTONE GREEN** (🎉 the **browser milestone**: the same CPU frame renders in the browser via **WebGL2**, **automated-proven** — a headless-Chrome controller ran the debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) and the screenshot shows the **blood** demo's split-screen world (sky/terrain/worms/blood), the console **PANIC-FREE**, and the determinism guard (per-tick `state_hash` **+** a wasm-only `frame_hash`) stayed **GREEN in the browser** = the wasm-parity witness. Built: a **`scenario::assets::read_asset` seam** (native = verbatim `std::fs::read` — all goldens green = no-op proof; wasm = embed) + `include_dir` (wasm-only dep) embedding sprites/weapons/nobjects/sobjects + `include_bytes!` tc.cfg + the demo level `render_stage.lev` — a **curated 276 KB total** (sounds/ and big levels excluded); a **target-scoped feature split** (base 6 draw-features; `x11`/`wayland` native-only; `webgl2` wasm-only — union verified per target via `cargo tree`) making `cargo build -p game --target wasm32-unknown-unknown` **GREEN first try**; an entry-fork (`const DEFAULT="blood"`, `include_str!` scenario+sidecar, **no** `env::args`/`read_dir`/`fs` on wasm; `canvas=None` auto-append verified against the `bevy_window` source; determinism guard hardened with a per-tick wasm-only `frame_hash`); a `.cargo/config.toml` (target-scoped `wasm-server-runner`) + `web/index.html` dev-loop (127.0.0.1:1334, 200 html+wasm) + a static `wasm-bindgen` **0.2.126** (lock-matched) bundle (game.js 97 KB + game_bg.wasm 52.9 MB release); a new **`game-wasm` CI job** (build-only, no browser/apt, own job independent of the determinism gate, mirrors `sim-core`'s no-cache posture). Fynd: cargo reads `.cargo/config.toml` from **CWD**, not `--manifest-path` — the wasm dev-loop runs from `rust/`) |
 | Slice 3e (HUD / font / bars / minimap) | **✅ MILESTONE GREEN** (🎯 the **full player view is PIXEL-EXACT** vs C++ — the in-game overlay ported verbatim + difftest green first run: new **`render::font::Font`** (font.tga loader `common.cpp:414-433`, width-detect + 0/50→0/8 remap) draws HUD labels (`font.cpp:8-80` verbatim — double `c>=2 && c<252` guard, CLIP_IMAGE inlined, newline on cp 0; ASCII-decode **identity for `cp<0x80`**, bevis-tested as the exact reach of the label corpus); **`blit::draw_bar`** (`blit.cpp:105-113`, unclipped + `width>0` anti-clamp witness); **`render::hud::draw_hud`** (`viewport.cpp:84-153` verbatim — two-arm life bar (`health*100/settings_health`, `100-(killed_timer*25)/37` clamped), two-arm ammo/loading bar, blinking **Reloading** (`(cycles%20)>10 && visible`, y=`164*multiplier` **absolute** — a plan-deviation caught vs C++), kills-always / lives-on-KillEmAll+Scales, `w/10+234` / `w/10+245` / 50 / 10 / 6 colour columns); **`draw_minimap`+`draw_miniature`** (`viewport.cpp:593-613` + `level.cpp:489-507` — the two *different* `step` ceil vs `bounds` round idioms preserved, worm-dots `ftoi(pos)/step` colour `129+worm.index*4`, clip-gated, `AppearanceAt` inlined). `Scene`/`frame::draw` composites per viewport (**HUD full-clip → world world-clip → minimap**, verbatim double-draw); C++ dumper gained opt-in **`render_hud`** mirroring `frame::draw`, **RE-DIFF gate empty** (3a/blood/shake/sim_slice2 byte-identical). 3 scenarios + goldens — **hud** 41t / **reload** 71t / **death** 141t — difftests **GREEN**: hud + death first run (per-tick + total + triple-isolation + suppression + non-vacuity); reload first **blocked** (T7 RIFLE = `ST_LASER` tripped the deferred laser do-loop), re-cut to **GRENADE** (`ST_NORMAL`, inert hit-arm, no in-window explosion) → GREEN (71 rows + total, settled 50/51 witness). Find: tick 0 is fade-to-black ⇒ the HUD witness reads tick 1. Holdazone/GameOfTag/replay HUD-arms tripwired. Milestone review: **0 Critical / 0 Important**; minors on the deferral track: DRY the inlined `clip_image`, a `size>1`-advance font test, minimap dot-index discrimination, reload's own suppression control (deliberately omitted)) |
@@ -364,6 +540,137 @@ the **wasm release-guard is OFF by design** (the per-tick `frame_hash` determini
 carries no guard); the **RIFLE / `ST_LASER` laser-do-loop** still stands (a *sim* deferral inherited from
 3e — unrelated to wasm). C++ render-path edits remain **not** caught by CI's re-diff (gen-scripts are
 local). A future consumer reaching any of these lifts the deferral with a matching golden/test.
+
+---
+
+### Step 4 — Input / `.lrp` replay / audio (✅ COMPLETE · branch `liero-rs-step-4`)
+
+Close the play loop: real keyboard input at the fixed cadence, record/replay determinism,
+audio as a pure sim-event consumer, the live viewport (shake/flash/banners), and byte-faithful
+`.lrp` reading. Overview: `specs/2026-07-12-liero-rs-step4-input-replay-overview.md`; C++ fact
+map: `specs/2026-07-12-liero-rs-step4-cpp-input-replay-map.md`.
+
+```
+├─ ✅ 4a  live input core — keyboard → per-tick ControlState snapshot into process_frame   SHIPPED
+│         🎯 native `cargo run -p game -- --live` is PLAYABLE (1P + 2P hotseat): a pure
+│         generic per-worm sampler (PlayerBindings<K>+control_state), Dig = a pure L+R chord
+│         (never stored), default bindings mirror C++ index-for-index; sampled once per
+│         FixedUpdate tick via a new InputSource{Scripted,Live}; the headless pass-through
+│         gate (game/tests/passthrough.rs) proves the sampler reproduces all 7 render_slice3b_*
+│         goldens bit-exact in CI. Focus-loss needs no backstop (Bevy 0.19 auto-releases held
+│         keys). Deferred: live-wasm, gamepad, recording (→4b)
+├─ ✅ 4b  record/replay round-trip + CI regression — THE HARD GATE (self-checking, no C++)   SHIPPED
+│         🎯 the Step 5 / ggrs precondition is delivered: Recorder taps the same sampled
+│         ControlState array --live feeds process_frame, flushes on AppExit (.after(ExitSystems) —
+│         review-caught window-close race); the recorded artifact IS a scenario file (to_text
+│         serializer, no new format); --replay <path> drives any scenario headless through the
+│         unchanged InputSource::Scripted (play once then hold). round_trip.rs: a synthetic
+│         key-stream through the REAL --live sampler → Recorder → to_text → parse → replay
+│         reproduces the live HashGameState series tick-for-tick, non-vacuously (3 asymmetric
+│         fixtures + assert_ne vs empty + hardcoded raw-text facit pinning the Dig chord); RED
+│         (mutated word) diverges at the exact tick. Committed corpus
+│         (record_slice4b_blood_scenario.txt, 12 ticks) + sim-produced state_hash sidecar
+│         drift-backstop test + reproducible generator (gen_record_slice4b_corpus). Hardening
+│         finding H1 (escalated from the T3 review): C++ cossin[128] UB was reachable in --live
+│         after all (spawn→walk→fire; clamp gated on aiming_speed!=0) — 3 sites masked &0x7f
+│         (worm_fire, ninjarope-throw, dig), full sim golden suite green (313 sim tests, neutral
+│         fix). 7 commits, 0 Critical/0 Important throughout (one early NEEDS-FIX fixed + re-reviewed)
+├─ ✅ 4c  audio — sim emits a sound-event stream (zero new rand; variant RNG already in sim),
+│         thin Bevy-free rodio sink in game (native + wasm); isolation gate      SHIPPED
+│         🎯 Liero-rs LÅTER (native + browser): T1 sim::sound event stream (10 callsites,
+│         thread-local collector, hash-inert). T2 CLASSIFICATION FINDING — C++
+│         `Play(sound, id, loops=0)` default means the design's 5 "worm-keyed loops" were
+│         actually `IsPlaying`-dedup'd ONE-SHOTS; the only true loop is the weapon-launch
+│         site (`worm.cpp:1120-1121`, WormWeapon-keyed, 3 verbatim Stop sites) — design spec
+│         + `LoopKey::Worm` doc corrected; hit/blood trio emitted as `key=None` one-shots
+│         (Väg A, dedup lost = audio-advisory). T3 `AudioSink` trait + rodio 0.19 (no default
+│         features) + idempotent Drainer + reaper + `SoundTable`. T4 MILESTONE: wired live in
+│         windowed play (`NonSend` cpal stream, Null-fallback, liveness-superset reap closes
+│         the death-leak edge); headless stays structurally silent. T5: rodio on wasm too
+│         (same `RodioSink`, no kira needed) — `sounds/` (~505 KB) embedded, silent-until-gesture
+│         autoplay, no panic (one native/wasm asset-miss inconsistency documented, not unified).
+│         Commits `5f10312`/`966c362`/`59b6fef`/`1ffc68e`/`2b8fc6c`, 0 Critical/0 Important
+│         throughout. Ear-check advisory (not gated)
+├─ ✅ 4d  live shake/flash/banners — the ProcessViewports port Step 3 deferred      SHIPPED
+│         🎯 MILESTONE: flash/shake/camera/banners evolve from real explosions + a real
+│         spawn/death, bit-exact vs a new C++ render_live golden over 321 ticks. T0 headline
+│         correction: `screen_flash` is NOT in C++ HashGameState (stateHash.hpp omits it,
+│         rollback-only) — added to SimState hash-neutrally (decrement game.cpp:271-273,
+│         sobject-create max-write sobject.cpp:41), gated by re-diff not re-fuzz. T1: sole
+│         shake writer (sobject.cpp:31) emits raw blast-coord+amount events; game layer does
+│         itof/rect/max, keeping sim viewport-blind. T2: game-layer live stepping
+│         (viewport_step.rs) — decrement-without-floor + banner-walk on pre-frame state, THEN
+│         process_frame, THEN apply shake-max, THEN as_scene(sim.screen_flash) — matches
+│         ProcessViewports's real call site (game.cpp:463, after the worm loop). T3: C++
+│         dumper's opt-in render_live directive (full ProcessFrame + wired viewports), green
+│         re-diff (every prior golden byte-identical) + Rust parser arm. T4 MILESTONE: golden
+│         matched first run — flash+shake from real explosions, camera moves live on respawn
+│         (killed_timer vacuity trap from the design doc solved via fire-triggered spawn),
+│         triple-isolation + 4 non-vacuity witnesses; harness is a documented, double-anchored
+│         hand-copy of viewport_step.rs (Bevy !Send/ECS forces the duplication). T5: death-
+│         banner text via the 3e font (cross-viewport: dying worm's banner in the OTHER
+│         viewport, viewport.cpp:256-270). Finding+fix: frame::draw interleaved process+draw
+│         PER viewport (wrong) — refactored to process-ALL-first (matches ProcessViewports),
+│         hash-neutral (each viewport RNG fully local; 3a/3b/3e goldens unchanged); golden
+│         regen touched ONLY the frame-hash column, ONLY the death window (ticks 93-236) —
+│         state-hash column stayed byte-identical. 6 commits, 0 Critical/0 Important
+│         throughout. Deferred: steerable_sum centering (real DEFER — ProcessSteerables
+│         mutates hashed wobject.cur_frame, unported, no reaching scenario; non-steerable
+│         SetCenter + debug_assert guard stand); YoureIt/GameOfTag banner arm (comment, not a
+│         hard tripwire); minor — the harness hand-copy is a theoretical frame-level blind
+│         spot, mitigated (not eliminated) by double-anchoring
+├─ ✅ 4e  .lrp byte-faithful reader — phase 1 SHIPPED (container + XOR-delta stream +
+│         WideRollbackChecksum); phase 2 (cereal Game graph) is a bounded follow-on
+│         🎯 MILESTONE: a real C++-produced .lrp drives the Rust sim bit-exact over 1120 ticks,
+│         incl. the WideRollbackChecksum word at cycle 1050 (0xf6211087). Phase-boundary finding:
+│         cereal blobs are length-prefixed, so phase 1 skips the whole cereal Game graph outright
+│         — initial state comes from scenario::load instead — and WideRollbackChecksum is a
+│         HARDER gate than HashGameState (folds the whole rollback inventory incl.
+│         prev_control_states + terrain, not just the tick's visible state). T0: lrp_gen (C++
+│         headless replay-writer, setup verbatim from the dumper) + 320t/1120t corpus,
+│         tick-0-alignment proven. T1: the WideRollbackChecksum port (Mix32 exact, 21 worm fields
+│         + pools + material buffer, prev_istates caller-supplied), cycle-0 facit matched first
+│         run. T2: Bevy-free rust/replay crate (flate2) — BE container, cereal-skip, tags
+│         0x80-0x83, XOR-delta decode, checksum extraction, verified against all 1120x2 input
+│         words via the scenario grammar (XOR-baseline caveat routed to phase 2). T3 MILESTONE:
+│         phase-1 gate GREEN first run — 1120 ticks bit-exact incl. the cycle-1050 word, per-tick
+│         tripwire + negative test. T4: hostile-input hardening (10 tests, no panic on garbage,
+│         O(1) Err on a huge length-prefix) + debug_asserts + phase-2 bookkeeping (spec §8: cereal
+│         graph / version<7 lift [adjudicated: rejected for phase 1 — palette-only inside the
+│         cereal blob] / decode_with_baseline / framehash diff). 6 commits (fb9b9b7 plan/
+│         d0cca91 T0/0a08d54 T1/b5fb884 T2/cd711fc T3/b8bd8cb T4), 0 Critical/0 Important
+│         throughout. Deferred: phase 2 in full (cereal Game graph — possibly its own post-step
+│         item, spec Open Q1)
+├─ ✅ 4f  minimal start flow — new match with defaults + respawn + quit/restart (no menu tree)   SHIPPED
+│         🎯 MILESTONE: bare `cargo run -p game` (no flags) now starts a SPELBAR default match —
+│         Live mode, the `render_stage`-level default_match fixture (blood-bevised worm
+│         positions, DART, seed 42; the fixture sits outside the golden dir so it can't perturb
+│         any golden enumeration). F5 restarts (adjudicated to also zero an in-flight recording —
+│         restart means restart); a positional `default_match` arg is rejected cleanly (T0 review
+│         NEEDS-FIX → fixed); the window title is tidied. wasm arm stays byte-unchanged (the
+│         parity witness holds). Deferred: `GenerateFromSettings`/random-level generation
+└─ ✅ 4g  run/verify-skill extension + CI replay-checksum regression (woven in per gate)   SHIPPED
+          🎯 `shot --scenario-path <file>` renders any recording or arbitrary scenario file (the
+          golden path itself stays byte-identical, 19 shot tests green); SKILL.md gains §7 —
+          live play + the full key-binding table, the record→replay loop (incl. the flush caveat:
+          Esc/window-close flushes, a killed process writes nothing, F5 zeroes an in-flight
+          recording), headless verification, and a CI-coverage inventory (every gate already
+          wired into CI). The CI half was de facto delivered incrementally across 4a–4e, so 4g's
+          own diff is thin by design. 5 commits (80cb75c plan/7146490 T0/41a1af2 T0-fix/f566404
+          T1/e22c90a T2); T0 NEEDS-FIX → 2 Important fixes → clean; T1/T2 self-verified, covered
+          by the broad step-4 review (T4)
+```
+
+**STEP 4 = COMPLETE (4a–4g).** Remaining for John: the PR #5 merge decision + the `.lrp`
+phase-2 (cereal `Game` graph) follow-on decision — both bookkept, neither blocking.
+
+Adjudicated (controller, 2026-07-12): 4e split as above; corpus generated from C++ over the
+existing scenario inputs; audio backend chosen at 4c start (kira or rodio, NOT bevy_audio);
+minimal menu only; steerable_sum decided at 4d start — **resolved DEFER** (not the leaning-add
+premise: `ProcessSteerables` mutates the hashed `wobject.cur_frame`, is unported, and no
+scenario reaches it, so the accumulators would be vacuous without also authoring a
+steerable-weapon scenario + golden + re-fuzz; the non-steerable `SetCenter` + guard stand);
+TWO input formats by design (Rust-native round-trip artifact ≠ foreign `.lrp`).
 
 ---
 

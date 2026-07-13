@@ -14,3 +14,4 @@ sim-core = { path = "../sim-core" }
 assets = { path = "../assets" }
 sim = { path = "../sim" }
 render = { path = "../render" }
+replay = { path = "../replay" }

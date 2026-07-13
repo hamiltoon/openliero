@@ -304,6 +304,10 @@ pub fn worm_process_physics(worm: &mut WormState, reacts: &[i32; 4], c: &Physics
         if abs_x > mbh {
             if c.h_fall_damage {
                 worm.health = worm.health.wrapping_sub(c.fall_damage_right);
+            } else {
+                // worm.cpp:175 `Play(sound_hook[SoundBump])` — the else arm of the
+                // HFallDamage gate. Slice-4c one-shot (no rand; not hashed).
+                crate::sound::play_bump();
             }
             worm.vel.x = worm.vel.x.wrapping_neg().wrapping_div(3);
         } else {
@@ -316,6 +320,10 @@ pub fn worm_process_physics(worm: &mut WormState, reacts: &[i32; 4], c: &Physics
         if abs_y > mbv {
             if c.h_fall_damage {
                 worm.health = worm.health.wrapping_sub(c.fall_damage_down);
+            } else {
+                // worm.cpp:188 `Play(sound_hook[SoundBump])` — the else arm of the
+                // HFallDamage gate. Slice-4c one-shot (no rand; not hashed).
+                crate::sound::play_bump();
             }
             worm.vel.y = worm.vel.y.wrapping_neg().wrapping_div(3);
         } else {
@@ -615,6 +623,67 @@ mod tests {
         assert_eq!(w.vel.y, -66666, "sign flip + /3 truncation toward zero");
         // gravity skipped (reacts[up]=3 != 0); integration suppressed (down=2).
         assert_eq!(w.pos.y, pos0, "integration suppressed by reacts[down] >= 2");
+    }
+
+    // ---- Slice-4c sound: SoundBump one-shot on a hard bounce ----------------
+
+    #[test]
+    fn hard_bounce_emits_bump_one_shot() {
+        use crate::sound::{self, HookIndices, SoundEvent};
+        // Same vertical hard-bounce setup as
+        // `vertical_bounce_flips_sign_truncates_and_suppresses_integration`:
+        // abs(vel.y) > MinBounceDown with HFallDamage OFF -> the C++ else arm at
+        // worm.cpp:188 plays `sound_hook[SoundBump]`. The bounce arm's sound is a
+        // one-shot (key = None) at the resolved Bump index.
+        let c = PhysicsConsts::default();
+        let reacts = [2, 0, 3, 0];
+        let pos0 = itof(50);
+        let mut w = worm_at(Vec2::new(pos0, pos0), Vec2::new(0, 200000));
+
+        sound::begin_frame(HookIndices {
+            bump: 42,
+            ..HookIndices::UNSET
+        });
+        worm_process_physics(&mut w, &reacts, &c);
+        let events = sound::take_frame();
+
+        assert_eq!(
+            events,
+            vec![SoundEvent::one_shot(42)],
+            "a hard bounce (no fall damage) emits exactly one SoundBump one-shot"
+        );
+    }
+
+    #[test]
+    fn slow_stop_and_fall_damage_bounce_emit_no_bump() {
+        use crate::sound::{self, HookIndices};
+        // (a) A slow velocity STOPS (no reflect) -> no bump. (b) A hard bounce with
+        // HFallDamage ON takes the damage arm, NOT the sound arm (worm.cpp:185-188)
+        // -> no bump. Mirrors the two C++ branches that skip `Play(SoundBump)`.
+        let reacts = [2, 0, 3, 0];
+        let pos0 = itof(50);
+
+        let c = PhysicsConsts::default();
+        let mut slow = worm_at(Vec2::new(pos0, pos0), Vec2::new(0, 40000));
+        sound::begin_frame(HookIndices {
+            bump: 42,
+            ..HookIndices::UNSET
+        });
+        worm_process_physics(&mut slow, &reacts, &c);
+        assert!(sound::take_frame().is_empty(), "a slow stop plays no bump");
+
+        let mut cfd = PhysicsConsts::default();
+        cfd.h_fall_damage = true;
+        let mut hard = worm_at(Vec2::new(pos0, pos0), Vec2::new(0, 200000));
+        sound::begin_frame(HookIndices {
+            bump: 42,
+            ..HookIndices::UNSET
+        });
+        worm_process_physics(&mut hard, &reacts, &cfd);
+        assert!(
+            sound::take_frame().is_empty(),
+            "a fall-damage bounce takes the damage arm, not the sound arm"
+        );
     }
 
     // ---- Stop: slow downward velocity zeroed --------------------------------

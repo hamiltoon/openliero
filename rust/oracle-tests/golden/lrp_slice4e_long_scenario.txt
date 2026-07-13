@@ -1,0 +1,83 @@
+# Slice-4e `.lrp` corpus — the LONG fixture (> 1050 ticks): forces the
+# WideRollbackChecksum path with a NON-TRIVIAL dug material buffer at the 1050 boundary.
+# Two visible worms placed FAR apart on physics_fall_test.lev (Ftoi x ~150 vs ~350, so
+# their fire never crosses), both armed with EXPLOSIVES. They hold Down for ~24 ticks to
+# aim straight down, then Down+Fire for ~36 ticks — digging the ground beneath each worm
+# (the level's material_id buffer the checksum folds via MixBytes changes measurably by
+# cycle 1050) — then idle/settle for the remaining ~1060 ticks. Firing DOWN into distant
+# ground avoids mutual worm damage, so this replays cleanly through the C++ framehash tool
+# end-to-end (including the cycle-1050 checksum comparison).
+#
+# At ticks = 1120 the recorder embeds a WideRollbackChecksum word at cycles 0 AND 1050
+# (cycles % 1050 == 0), so the > 1050 boundary is crossed and >= 1 embedded word is
+# consumed non-vacuously. Uses only the shared sim grammar (seed/level/ticks/worm/weapon/
+# input) so both the C++ lrp_gen tool and Rust `scenario::loader::load` reconstruct the
+# identical tick-0 state. Control bits: Up=1 Down=2 Left=4 Right=8 Fire=16 Change=32 Jump=64;
+# so Down=2 aims down, Down+Fire=18 fires while aimed down.
+seed 42
+level Levels/physics_fall_test.lev
+ticks 1120
+worm 0  9830400 12779520 100 10 0   1
+worm 1 22937600 12779520 100 10 218 1
+weapon 0 EXPLOSIVES
+input 0 2 2
+input 1 2 2
+input 2 2 2
+input 3 2 2
+input 4 2 2
+input 5 2 2
+input 6 2 2
+input 7 2 2
+input 8 2 2
+input 9 2 2
+input 10 2 2
+input 11 2 2
+input 12 2 2
+input 13 2 2
+input 14 2 2
+input 15 2 2
+input 16 2 2
+input 17 2 2
+input 18 2 2
+input 19 2 2
+input 20 2 2
+input 21 2 2
+input 22 2 2
+input 23 2 2
+input 24 2 2
+input 25 18 18
+input 26 18 18
+input 27 18 18
+input 28 18 18
+input 29 18 18
+input 30 18 18
+input 31 18 18
+input 32 18 18
+input 33 18 18
+input 34 18 18
+input 35 18 18
+input 36 18 18
+input 37 18 18
+input 38 18 18
+input 39 18 18
+input 40 18 18
+input 41 18 18
+input 42 18 18
+input 43 18 18
+input 44 18 18
+input 45 18 18
+input 46 18 18
+input 47 18 18
+input 48 18 18
+input 49 18 18
+input 50 18 18
+input 51 18 18
+input 52 18 18
+input 53 18 18
+input 54 18 18
+input 55 18 18
+input 56 18 18
+input 57 18 18
+input 58 18 18
+input 59 18 18
+input 60 18 18

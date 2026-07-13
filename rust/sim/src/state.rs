@@ -11,7 +11,7 @@
 use assets::level::LevelData;
 use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
-use assets::tc::Texture;
+use assets::tc::{SoundHooks, Texture};
 use sim_core::fixed::{ftoi, itof, Fixed};
 use sim_core::math::vector_length;
 use sim_core::rng::Rand;
@@ -29,6 +29,8 @@ use crate::nobject::{
 use crate::physics::{worm_process_physics, worm_reactions, PhysicsConsts};
 use crate::pool::{BloodPool, Pool};
 use crate::sobject::{sobject_process, SObjectOutcome};
+use crate::shake::ShakeEvent;
+use crate::sound::{HookIndices, SoundEvent};
 use crate::weapon::{blow_up, wobject_process, worm_fire, WObjectOutcome};
 
 /// Number of weapon slots per worm. Mirrors C++ `NUM_WEAPONS` (`worm.hpp:13`).
@@ -907,6 +909,14 @@ fn build_worm_sprites(large: &SpriteSet) -> SpriteSet {
 pub struct SimState {
     pub rand: Rand,
     pub cycles: i32,
+    /// C++ `Game::screen_flash` (`game.hpp:129`): the palette-flash countdown.
+    /// Decremented at the top of every tick (`game.cpp:271-273`) and raised to
+    /// `max(type.flash, screen_flash)` when an explosion sobject spawns
+    /// (`sobject.cpp:41`, routed through the [`crate::flash`] per-tick
+    /// accumulator). Drives the render `LightUp` (`game.cpp:179-181`). **Never
+    /// hashed** — C++ `HashGameState` omits it (`stateHash.hpp:15-113`), so every
+    /// committed `sim_slice*` golden stays byte-identical (design §0). Init 0.
+    pub screen_flash: i32,
     pub level: LevelSim,
     pub worms: Vec<WormState>,
     pub bonuses: Pool<Bonus>,
@@ -1204,6 +1214,35 @@ pub struct SimState {
     /// C++ `LC(WormMinSpawnDistEnemy)` (`game.cpp:621-622`): the reject radius around
     /// the live enemy position in `CheckRespawnPosition`. Real TC value 160.
     pub worm_min_spawn_dist_enemy: i32,
+
+    /// The four resolved worm-hook sound indices (`common.sound_hook[SoundBump]`,
+    /// `[SoundReloaded]`, `[SoundAlive]`, `[SoundNinjaropeThrow]`) the hook-based
+    /// one-shot callsites (Slice-4c T1) play. Published to the per-tick
+    /// [`crate::sound`] context at the top of [`process_frame`](Self::process_frame)
+    /// so a deep callsite can play a hook without threading its index. **Not
+    /// hashed** (a sound-table input, like the object `start_sound`s); defaulted to
+    /// [`SoundHooks::default`] post-`new` (the difftest/game assign the real TC
+    /// values), so every prior golden stays byte-identical (sound never hashes).
+    pub sound_hooks: SoundHooks,
+    /// The per-tick **sound-event stream** (Slice-4c, `sound.rs`): the one-shot /
+    /// loop `Play`/`Stop` records the sim emits at its existing callsites, cleared
+    /// at the TOP of every [`process_frame`](Self::process_frame) and drained by
+    /// the `game` audio backend. **NEVER hashed** ([`crate::hash`] does not walk
+    /// this field — the isolation firewall, design §6.1); carries no `rand` and
+    /// feeds no sim math, so `hash_game_state` stays byte-identical whether it is
+    /// populated or empty. Headless/library callers simply ignore it.
+    pub sound_events: Vec<SoundEvent>,
+    /// The per-tick **explosion-shake event stream** (Slice-4d T1, `shake.rs`): the
+    /// `(x, y, amount)` records the sim emits at sobject creation when
+    /// `type.shake > 0` (`sobject.cpp:27-33`), cleared at the TOP of every
+    /// [`process_frame`](Self::process_frame) and drained by the `game` layer
+    /// ([`drain_shake_events`](Self::drain_shake_events)), which does the
+    /// per-viewport rect test + `itof(amount)` + `max` (T2). **NEVER hashed**
+    /// ([`crate::hash`] does not walk this field — the isolation firewall); carries
+    /// no `rand` and feeds no sim math, so `hash_game_state` stays byte-identical
+    /// whether it is populated or empty (design §0, §3b). Headless/library callers
+    /// simply ignore it.
+    pub shake_events: Vec<ShakeEvent>,
 }
 
 impl SimState {
@@ -1253,6 +1292,7 @@ impl SimState {
         SimState {
             rand,
             cycles: 0,
+            screen_flash: 0,
             level: LevelSim {
                 width: level.width,
                 height: level.height,
@@ -1364,7 +1404,27 @@ impl SimState {
             worm_spawn_rect_h: 0,
             worm_min_spawn_dist_last: 0,
             worm_min_spawn_dist_enemy: 0,
+            // Sound (Slice-4c): the worm-hook indices default to `SoundHooks::default`
+            // (all-zero) and the event stream starts empty. Both are unhashed
+            // side-channel state; the difftest/game assign the real `sound_hooks`
+            // after `new` (post-`new` pattern, like the blood consts). Every prior
+            // golden stays byte-identical (sound never enters the hash).
+            sound_hooks: SoundHooks::default(),
+            sound_events: Vec::new(),
+            // Shake (Slice-4d T1): the explosion-shake event stream starts empty.
+            // Unhashed side-channel output; the `game` layer drains it per tick and
+            // applies it to the live viewports (T2). Every prior golden stays
+            // byte-identical (shake never enters the hash, draws no rand).
+            shake_events: Vec::new(),
         }
+    }
+
+    /// Take this tick's collected explosion-shake events, leaving
+    /// [`shake_events`](Self::shake_events) empty — the `game` layer calls this each
+    /// tick (after `process_frame`) to apply them against the live viewports (Slice
+    /// 4d T2). A side-channel drain: touches no hashed state and draws no `rand`.
+    pub fn drain_shake_events(&mut self) -> Vec<ShakeEvent> {
+        std::mem::take(&mut self.shake_events)
     }
 
     /// The 256-byte 16x16 worm sprite for `(frame, direction, colour)`, mirroring
@@ -1429,12 +1489,32 @@ impl SimState {
     ///     `key_change_pressed` + [`process_movement`] (walk writes `vel.x`
     ///     **after** physics, so it affects *next* tick's integration).
     pub fn process_frame(&mut self, inputs: &[ControlState]) {
+        // Slice-4c sound: open the tick BEFORE any sim work — clear this thread's
+        // per-frame event buffer and publish the resolved worm-hook indices so a
+        // deep `Play`/`Stop` callsite can emit without threading them. Mirrors the
+        // C++ inline `Play` model: there is no queue; events fire during the tick.
+        // The buffer is drained into `self.sound_events` at the BOTTOM of the tick.
+        crate::sound::begin_frame(HookIndices {
+            bump: self.sound_hooks.Bump,
+            reloaded: self.sound_hooks.Reloaded,
+            alive: self.sound_hooks.Alive,
+            ninjarope_throw: self.sound_hooks.NinjaropeThrow,
+        });
+
+        // Slice-4d shake: open the tick — clear this thread's per-tick shake-event
+        // buffer so it holds exactly this tick's explosion-shake events (a prior
+        // panic or a direct unit-test call can never leak stale ones in). Drained
+        // into `self.shake_events` at the BOTTOM of the tick. Determinism-inert.
+        crate::shake::begin_frame();
+
         // Disjoint field borrows: destructuring `&mut self` binds each field as a
         // separate `&mut` (default binding mode), so the object loops can hold
         // `&mut wobjects`/`&mut rand` + `&weapons` while the worm loop separately
         // holds a `&mut` into `worms` and the Fire gate borrows the *other* fields
         // — all provably disjoint, which is what makes this borrow-check.
         let SimState {
+            sound_events,
+            shake_events,
             level,
             physics,
             control,
@@ -1493,6 +1573,7 @@ impl SimState {
             worm_spawn_rect_h,
             worm_min_spawn_dist_last,
             worm_min_spawn_dist_enemy,
+            screen_flash,
             ..
         } = self;
         let h_signed_recoil = *h_signed_recoil;
@@ -1535,6 +1616,22 @@ impl SimState {
         // object loops run BEFORE `++cycles` (game.cpp:357). So snapshot the value
         // here, run the loops with it, then `++cycles` after the loops (see below).
         let cycles_now = *cycles;
+
+        // ----- Top-of-frame screen_flash decrement (game.cpp:271-273), the FIRST
+        // thing ProcessFrame does after PreTick — BEFORE the bonus/object loops and
+        // BEFORE `++cycles`. Uses the previous tick's value, floored at 0 by the
+        // `> 0` guard. screen_flash is unhashed and has no in-tick reader (only the
+        // render palette LightUp reads it), so its exact ordering vs the loops is
+        // immaterial to the hash — placed here to mirror the C++ phase order.
+        if *screen_flash > 0 {
+            *screen_flash -= 1;
+        }
+        // Seed the per-tick flash accumulator with the decremented value so a deep
+        // sobject-create `crate::flash::raise(type.flash)` computes
+        // max(type.flash, screen_flash) — the C++ `sobject.cpp:41` write — without
+        // threading a &mut i32 through the object call tree (the sound-side-channel
+        // idiom). Folded back into `*screen_flash` at the bottom of the tick.
+        crate::flash::begin_frame(*screen_flash);
 
         // ----- Bonuses Process loop (game.cpp:287-290), at the TOP of the tick,
         // BEFORE the object loops AND before `++cycles`. `bonuses` is an
@@ -1902,6 +1999,19 @@ impl SimState {
                     && w.weapons[cw].delay_left <= 0
                 {
                     worm_fire(w, weapons, cossin, h_signed_recoil, rand, wobjects);
+                } else if !w.control_states.get(ControlState::FIRE)
+                    || w.control_states.get(ControlState::CHANGE)
+                    || !w.weapons[cw].available()
+                {
+                    // worm.cpp:339-343 cease-fire Stop (Slice-4c T2): the
+                    // else-arm mirrors C++ verbatim — NOT plain `else` (a held
+                    // trigger waiting out delay_left neither fires nor stops).
+                    // Guarded on loop_sound like C++ :340; unconditional beyond
+                    // that (Stop is never speculative-gated, input-map §6).
+                    // Determinism-inert: no rand, no hashed write.
+                    if current_weapon_loops(w, weapons) {
+                        crate::sound::stop_loop(current_weapon_loop_key(w, i as i32));
+                    }
                 }
 
                 // 9. physics — reads the SAME reacts computed in step 2.
@@ -1930,6 +2040,14 @@ impl SimState {
 
                 // 11. change/movement gate (worm.cpp:348-353).
                 if w.control_states.get(ControlState::CHANGE) {
+                    // worm.cpp:1075-1077: the top of ProcessWeaponChange stops
+                    // the CURRENT (pre-cycle) slot's loop (Slice-4c T2).
+                    // Emitted at the call-site — `process_weapon_change` has no
+                    // view of the weapon def table and nothing runs between
+                    // here and the C++ Stop, so the order is identical.
+                    if current_weapon_loops(w, weapons) {
+                        crate::sound::stop_loop(current_weapon_loop_key(w, i as i32));
+                    }
                     process_weapon_change(w, load_change);
                 } else {
                     w.key_change_pressed = false;
@@ -1959,6 +2077,17 @@ impl SimState {
                 //     worm-gibs. Returns the killer index (if any) to defer its
                 //     `kills++`. Inert for slices 1-5c (worms never reach
                 //     health <= 0), so those goldens stay byte-identical.
+                //
+                //     worm.cpp:373-376: on the death tick the block FIRST stops
+                //     the current weapon's loop (Slice-4c T2). Emitted at the
+                //     call-site under the same `health <= 0` gate (:369) —
+                //     `worm_death` has no view of the weapon def table — and
+                //     BEFORE the call, so the Stop precedes the 15+rand(3)
+                //     death one-shot `worm_death` emits (:378-379), exactly the
+                //     C++ statement order. Determinism-inert (no rand/hash).
+                if w.health <= 0 && current_weapon_loops(w, weapons) {
+                    crate::sound::stop_loop(current_weapon_loop_key(w, i as i32));
+                }
                 if let Some(killer) = worm_death(
                     w,
                     i as i32,
@@ -2125,6 +2254,26 @@ impl SimState {
             // (Scales' redistribution lives in `do_damage`, not here). No-op.
             _ => {}
         }
+
+        // Slice-4c sound: close the tick — move this thread's collected one-shot /
+        // loop events into `self.sound_events`, leaving the buffer empty for the
+        // next tick. `sound_events` now holds exactly this tick's events (design
+        // §2.2); the `game` backend drains it, headless callers ignore it. This is
+        // the ONLY write to the field and touches no hashed state.
+        *sound_events = crate::sound::take_frame();
+
+        // Slice-4d shake: close the tick — move this thread's collected
+        // explosion-shake events into `self.shake_events`, leaving the buffer empty
+        // for the next tick. Holds exactly this tick's events; the `game` layer
+        // drains + applies them to the live viewports (T2), headless callers ignore
+        // them. Unhashed side channel; touches no hashed state.
+        *shake_events = crate::shake::take_frame();
+
+        // Close the tick: fold this tick's accumulated explosion flash back into the
+        // persisted `screen_flash` (seeded decremented at the top; `raise`d to
+        // max(type.flash, screen_flash) at each sobject-create). Unhashed side
+        // channel — the render reads it, the hash never does (design §0).
+        *screen_flash = crate::flash::take_frame();
     }
 }
 
@@ -2580,7 +2729,9 @@ fn do_respawning(
 
         // :784-786 CorrectShadow — gated on settings->shadow (false) => OMITTED.
 
-        // :788 ready = false; :789 Play(SoundAlive) => sound-only, omitted.
+        // :788 ready = false; :789 `Play(sound_hook[SoundAlive])` — Slice-4c
+        // respawn one-shot (no rand; not hashed).
+        crate::sound::play_alive();
         worm.ready = false;
         // :791-793 revive.
         worm.visible = true;
@@ -2641,15 +2792,37 @@ fn worm_pre_death_drip(
             if rand.bound(3) == 0 {
                 // :358-359 sound index `18 + rand(3)`. The draw is kept (it
                 // advances the shared engine and is pinned outside the
-                // unpredictable IsPlaying branch); the Play side effect is
-                // sound-only and omitted from the sim.
-                let _snd = 18 + rand.bound(3);
+                // unpredictable IsPlaying branch). Slice-4c emits the one-shot at
+                // the ALREADY-computed index (no new rand; not hashed).
+                let snd = 18 + rand.bound(3) as i32;
+                crate::sound::one_shot(snd);
             }
             // :365 Create1 is UNCONDITIONAL within the outer gate (outside the
             // sound gate). Blood is nobject_types[6]; color 0, owner = index.
             nobject_create1(&nobject_types[6], w.vel, w.pos, 0, index, rand, nobjects);
         }
     }
+}
+
+/// Whether `w`'s CURRENT weapon slot resolves to a **looping** weapon — the C++
+/// `weapons[current_weapon].type->loop_sound` guard shared by every loop-`Stop`
+/// site (`worm.cpp:340`, `:373-375`, `:1075`). A slot with no resolved type or
+/// an out-of-table id (empty test weapon tables) is simply "no loop" — C++
+/// never hits that case (`InitWeapons` fills every slot).
+///
+/// Determinism-inert: reads only to gate a sound event (no rand, no hashed
+/// write).
+fn current_weapon_loops(w: &WormState, weapons: &[Weapon]) -> bool {
+    w.weapons[w.current_weapon as usize]
+        .ty
+        .and_then(|ty| weapons.get(ty as usize))
+        .is_some_and(|def| def.loop_sound)
+}
+
+/// The loop-channel key for `w`'s current weapon slot — the value analog of the
+/// C++ `&weapons[current_weapon]` pointer id every loop `Play`/`Stop` uses.
+fn current_weapon_loop_key(w: &WormState, index: i32) -> crate::sound::LoopKey {
+    crate::sound::LoopKey::WormWeapon(index as u8, w.current_weapon as u8)
 }
 
 /// Port of the **death block** (`worm.cpp:369-426`) — the tail of the visible arm
@@ -2700,12 +2873,17 @@ fn worm_death(
     w.leave_shell_timer = 0;
     w.make_sight_green = false;
 
-    // :373-376 stop the current weapon's loop_sound — a sound-only side effect
-    // with no rand; omitted (loop_sound is not modelled).
+    // :373-376 stop the current weapon's loop_sound — emitted by the CALLER
+    // (process_frame step 13) under the same `health <= 0` gate, immediately
+    // before this call: this fn has no view of the weapon def table, and no
+    // statement separates the C++ Stop from the gate, so the order and the
+    // event stream are identical.
 
     // :378 death-sound index `15 + rand(3)`. This is the ONLY draw before the
-    // sprays; the `Play` at :379 is a sound-only side effect the sim omits.
-    let _death_snd = 15 + rand.bound(3);
+    // sprays. Slice-4c emits the one-shot at the ALREADY-computed index (no new
+    // rand; not hashed).
+    let death_snd = 15 + rand.bound(3) as i32;
+    crate::sound::one_shot(death_snd);
 
     // :381-382 firecone off, rope stowed.
     w.fire_cone = 0;
@@ -3760,6 +3938,181 @@ mod tests {
             "max_bonuses == 0 short-circuits: the bonus-drop roll draws NO rand"
         );
         assert_eq!(state.cycles, 1, "cycles still advances once per tick");
+    }
+
+    #[test]
+    fn sound_events_and_hooks_are_hash_inert() {
+        // Isolation firewall (design §6.1): the sound-event stream and the worm-hook
+        // indices are NEVER walked by the hash. Populating/clearing `sound_events`
+        // and mutating `sound_hooks` must leave BOTH the master hash and every
+        // component hash byte-identical — this is exactly what keeps every committed
+        // golden unchanged after 4c (sound is a pure side channel).
+        use crate::hash::{hash_components, hash_game_state};
+        use crate::sound::SoundEvent;
+
+        let mut state = idle_state(0x00C0FFEE);
+        state.process_frame(&[]);
+        let master = hash_game_state(&state);
+        let components = hash_components(&state);
+
+        state.sound_events.push(SoundEvent::one_shot(7));
+        state.sound_events.push(SoundEvent::one_shot(15));
+        // T2: keyed loop Play/Stop events are equally hash-inert.
+        let key = crate::sound::LoopKey::WormWeapon(0, 3);
+        state.sound_events.push(SoundEvent::loop_play(5, key));
+        state
+            .sound_events
+            .push(SoundEvent::loop_stop(crate::sound::LoopKey::Worm(1)));
+        state.sound_hooks.Bump = 123;
+        state.sound_hooks.Reloaded = 4;
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "sound_events / sound_hooks absent from the master hash"
+        );
+        assert_eq!(
+            hash_components(&state),
+            components,
+            "sound_events / sound_hooks absent from every component hash"
+        );
+
+        state.sound_events.clear();
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "clearing sound_events does not move the hash"
+        );
+    }
+
+    #[test]
+    fn process_frame_decrements_screen_flash_and_floors_at_zero() {
+        // C++ game.cpp:271-273: `if (screen_flash > 0) --screen_flash;` at the TOP
+        // of every ProcessFrame. With no explosion this tick, screen_flash walks
+        // down by one per tick and floors at 0 (never negative). Pins the
+        // top-of-frame decrement independently of the sobject-create raise.
+        let mut state = idle_state(0x0000_F1A5);
+        state.screen_flash = 2;
+
+        state.process_frame(&[]);
+        assert_eq!(state.screen_flash, 1, "decrement by one per tick");
+
+        state.process_frame(&[]);
+        assert_eq!(state.screen_flash, 0, "reaches zero");
+
+        state.process_frame(&[]);
+        assert_eq!(state.screen_flash, 0, "floored at zero (the > 0 guard)");
+    }
+
+    #[test]
+    fn screen_flash_is_hash_inert() {
+        // Design §0 / §9 risk 4: screen_flash is NEVER folded into the hash (C++
+        // HashGameState omits it, stateHash.hpp:15-113). Mutating it must leave BOTH
+        // the master hash and every component hash byte-identical — this is exactly
+        // what keeps every committed sim_slice* golden unchanged after 4d (re-diff,
+        // no re-fuzz).
+        use crate::hash::{hash_components, hash_game_state};
+
+        let mut state = idle_state(0x5CEE_EF1A);
+        state.process_frame(&[]);
+        let master = hash_game_state(&state);
+        let components = hash_components(&state);
+
+        state.screen_flash = 33;
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "screen_flash absent from the master hash"
+        );
+        assert_eq!(
+            hash_components(&state),
+            components,
+            "screen_flash absent from every component hash"
+        );
+
+        state.screen_flash = 0;
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "clearing screen_flash does not move the hash"
+        );
+    }
+
+    #[test]
+    fn shake_events_are_hash_inert() {
+        // Design §0 / §3b: the explosion-shake event stream is NEVER walked by the
+        // hash (it is a render/game side channel — C++ writes viewport `shake`,
+        // which HashGameState omits). Populating/clearing `shake_events` must leave
+        // BOTH the master hash and every component hash byte-identical — this is
+        // exactly what keeps every committed sim_slice* golden unchanged after 4d
+        // (re-diff, no re-fuzz).
+        use crate::hash::{hash_components, hash_game_state};
+        use crate::shake::ShakeEvent;
+
+        let mut state = idle_state(0x5417_A6E5);
+        state.process_frame(&[]);
+        let master = hash_game_state(&state);
+        let components = hash_components(&state);
+
+        state.shake_events.push(ShakeEvent { x: 10, y: 20, amount: 4 });
+        state.shake_events.push(ShakeEvent { x: 1, y: 2, amount: 9 });
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "shake_events absent from the master hash"
+        );
+        assert_eq!(
+            hash_components(&state),
+            components,
+            "shake_events absent from every component hash"
+        );
+
+        state.shake_events.clear();
+        assert_eq!(
+            hash_game_state(&state),
+            master,
+            "clearing shake_events does not move the hash"
+        );
+    }
+
+    #[test]
+    fn drain_shake_events_empties_and_returns() {
+        // The game-layer accessor (T2) takes this tick's events, leaving the vec
+        // empty for the next tick.
+        use crate::shake::ShakeEvent;
+        let mut state = idle_state(0xD8A1_7000);
+        state.shake_events.push(ShakeEvent { x: 3, y: 4, amount: 5 });
+        state.shake_events.push(ShakeEvent { x: 6, y: 7, amount: 8 });
+
+        let drained = state.drain_shake_events();
+        assert_eq!(
+            drained,
+            vec![
+                ShakeEvent { x: 3, y: 4, amount: 5 },
+                ShakeEvent { x: 6, y: 7, amount: 8 },
+            ],
+            "drain returns this tick's events in emit order"
+        );
+        assert!(state.shake_events.is_empty(), "drain empties the vec");
+        assert!(
+            state.drain_shake_events().is_empty(),
+            "a second drain is empty"
+        );
+    }
+
+    #[test]
+    fn process_frame_clears_shake_events_when_no_explosion() {
+        // begin_frame clears the per-tick buffer at the TOP of every process_frame,
+        // so a stale direct emit (or a prior tick's events) never leaks in. With no
+        // explosion this tick, `shake_events` ends empty. Draws no rand either
+        // (idle_state: bonus roll gated off), so the tick is fully shake-neutral.
+        let mut state = idle_state(0x0000_5EA1);
+        // Stale direct emit outside process_frame must NOT survive into the tick.
+        crate::shake::emit(9, 9, 9);
+        state.process_frame(&[]);
+        assert!(
+            state.shake_events.is_empty(),
+            "no explosion -> no shake events; stale emit cleared at top of tick"
+        );
     }
 
     #[test]

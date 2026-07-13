@@ -26,15 +26,19 @@ pub fn read_asset(tc_root: &Path, rel: &str) -> Vec<u8> {
     std::fs::read(tc_root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
-/// wasm impl (Slice 3f T2): the browser has no filesystem, so the curated TC set
-/// is embedded in the binary at compile time and `rel` is keyed into it. The set
-/// is exactly what [`crate::loader::load`] reads for the shipped demo scenario:
-/// the three `sprites/` TGAs, the three object-config dirs (`weapons/`,
-/// `nobjects/`, `sobjects/` — ids are dynamic, driven by `tc.types`, so the whole
-/// dir must be present), `tc.cfg`, and the one demo level. `sounds/` and the
-/// unused big levels are deliberately excluded (audio is Step 4; embed only what
-/// the demo needs). `tc_root` is ignored. A miss `panic!`s — the key set is
-/// build-time-known, so a miss is a bug, mirroring the native `read {rel}: {e}`.
+/// wasm impl (Slice 3f T2; `sounds/` added Slice 4c T5): the browser has no
+/// filesystem, so the curated TC set is embedded in the binary at compile time
+/// and `rel` is keyed into it. The set is exactly what [`crate::loader::load`]
+/// reads for the shipped demo scenario plus the full sample set 4c's audio
+/// backend loads: the three `sprites/` TGAs, the three object-config dirs
+/// (`weapons/`, `nobjects/`, `sobjects/` — ids are dynamic, driven by
+/// `tc.types`, so the whole dir must be present), `tc.cfg`, the one demo level,
+/// and `sounds/` (31 WAVs, ~505 KB raw — the whole dir, not curated to the demo
+/// scenario's reachable set, so a future live-wasm build stays correct without
+/// re-touching this file, design §8 "wasm embed decision"). The unused big
+/// levels are still deliberately excluded. `tc_root` is ignored. A miss
+/// `panic!`s — the key set is build-time-known, so a miss is a bug, mirroring
+/// the native `read {rel}: {e}`.
 ///
 /// Keying: `include_dir!` indexes each subtree relative to *its own* root, so the
 /// stored key for `sprites/small.tga` is `small.tga`. We strip the leading
@@ -50,6 +54,10 @@ pub fn read_asset(_tc_root: &Path, rel: &str) -> Vec<u8> {
     static WEAPONS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../data/TC/openliero/weapons");
     static NOBJECTS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../data/TC/openliero/nobjects");
     static SOBJECTS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../data/TC/openliero/sobjects");
+    // 4c T5: the full sample set (`game::audio::load_sound_table_wasm`'s
+    // source). Includes the shipped `sounds/LICENSE` alongside the 30 WAVs —
+    // harmless (never keyed by `read_asset`, just extra embedded bytes).
+    static SOUNDS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../data/TC/openliero/sounds");
 
     // Individual top-level files. `include_bytes!` (unlike `include_dir!`) takes a
     // literal path with no `$CARGO_MANIFEST_DIR` expansion, so `concat!(env!(…))`.
@@ -83,6 +91,9 @@ pub fn read_asset(_tc_root: &Path, rel: &str) -> Vec<u8> {
     }
     if let Some(key) = rel.strip_prefix("sobjects/") {
         return from_dir(&SOBJECTS, key);
+    }
+    if let Some(key) = rel.strip_prefix("sounds/") {
+        return from_dir(&SOUNDS, key);
     }
     match rel {
         "tc.cfg" => TC_CFG.to_vec(),

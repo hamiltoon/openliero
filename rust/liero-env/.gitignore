@@ -9,3 +9,9 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+# T6 training artifacts (examples/train_ppo_sb3.py writes here): models, the CSV
+# progress log, tensorboard, and generated eval recordings. Never committed —
+# a run is reproducible from the script; only ONE representative eval recording
+# (docs/superpowers/eval_samples/) and the training note are checked in.
+runs/

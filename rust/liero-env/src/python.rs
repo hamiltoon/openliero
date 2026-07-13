@@ -19,6 +19,10 @@
 //!   the per-tick [`wide_rollback_checksum`](crate::env) determinism fingerprint.
 //! - `observe(agent) -> obs` — re-extract one agent's current observation.
 //! - `ticks` / `checksum` — read-only accessors mirroring the core.
+//! - `start_recording()` / `is_recording` / `save_recording(path)` — the eval-
+//!   recording surface (design §1.5, plan T5): tap this episode's control
+//!   words and write them as a scenario file `cargo run -p game -- --replay
+//!   <path>` opens in the real window.
 //!
 //! ## GIL discipline
 //! [`RawEnv::step`] releases the GIL (`Python::detach`, pyo3 0.29's
@@ -35,6 +39,8 @@
 //! `#[cfg(test)]`, so it cannot even be named here). The determinism contract
 //! (fixed→float one-directional, sim RNG untouched from Python) holds by
 //! construction.
+
+use std::path::Path;
 
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::prelude::*;
@@ -205,6 +211,47 @@ impl RawEnv {
     fn checksum(&self) -> u32 {
         self.env.checksum()
     }
+
+    /// Start recording this episode's per-tick control words (design §1.5,
+    /// plan T5). Call after `reset` (or mid-episode, to record from that point
+    /// on); `save_recording` builds the replayable scenario from whatever has
+    /// been tapped since. Replaces any recording already in progress; a `reset`
+    /// clears it.
+    fn start_recording(&mut self) {
+        self.env.start_recording();
+    }
+
+    /// `true` while a recording is active (since the last `start_recording`,
+    /// not yet cleared by a `reset`).
+    #[getter]
+    fn is_recording(&self) -> bool {
+        self.env.is_recording()
+    }
+
+    /// Write the current recording as a replayable scenario file at `path`:
+    /// `cargo run -p game -- --replay <path>` opens it in the real window
+    /// (design §1.5, §7). Raises `RuntimeError` with no active recording (call
+    /// `start_recording` first) or `OSError` if `path` cannot be written.
+    fn save_recording(&self, path: &str) -> PyResult<()> {
+        if !self.env.is_recording() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "save_recording: no active recording — call start_recording() first",
+            ));
+        }
+        self.env
+            .save_recording(Path::new(path))
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+    }
+}
+
+/// `True` iff `text` parses as a valid scenario file (the same grammar
+/// `Scenario::parse` accepts). No Python binding exposes `Scenario` itself
+/// (design §6 — Rust owns the hot path, `RawEnv` is the only pyclass), so this
+/// free function is the one seam the Python T5 smoke has to verify a saved
+/// recording is genuinely parseable, not merely "a file exists".
+#[pyfunction]
+fn scenario_parses(text: &str) -> bool {
+    scenario::Scenario::parse(text).is_ok()
 }
 
 /// The importable extension module `liero_env._liero_env` (maturin builds it
@@ -221,5 +268,6 @@ fn _liero_env(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("OBS_DIM", OBS_DIM)?;
     m.add("N_ACTION_BITS", N_ACTION_BITS)?;
     m.add("N_WORMS", N_WORMS)?;
+    m.add_function(pyo3::wrap_pyfunction!(scenario_parses, m)?)?;
     Ok(())
 }

@@ -39,6 +39,7 @@ from ._liero_env import (  # noqa: F401  (re-export)
     N_WORMS,
     OBS_DIM,
     RawEnv,
+    scenario_parses,
 )
 
 __all__ = [
@@ -50,6 +51,7 @@ __all__ = [
     "LieroParallelEnv",
     "LieroGymEnv",
     "AGENT_NAMES",
+    "scenario_parses",
 ]
 
 #: The two symmetric worm-agents' PettingZoo IDs (index 0 → worm 0, 1 → worm 1).
@@ -217,6 +219,17 @@ class LieroParallelEnv(ParallelEnv):
     def close(self):
         return None
 
+    def start_recording(self):
+        """Start tapping this episode's per-tick control words (design §1.5,
+        plan T5). Call after `reset()`; `save_recording` writes the tapped
+        stream as a scenario file replayable via `cargo run -p game --
+        --replay <path>`."""
+        self._raw.start_recording()
+
+    def save_recording(self, path):
+        """Write the current recording to `path` (see `start_recording`)."""
+        self._raw.save_recording(str(path))
+
 
 class LieroGymEnv(Env):
     """Single-agent Gymnasium `Env` — the Stable-Baselines3 on-ramp (design §0/§6).
@@ -312,3 +325,13 @@ class LieroGymEnv(Env):
 
     def close(self):
         return None
+
+    def start_recording(self):
+        """Start tapping this episode's per-tick control words (both agents —
+        the learning agent's `step` action and the frozen opponent's, design
+        §1.5, plan T5). Call after `reset()`."""
+        self._raw.start_recording()
+
+    def save_recording(self, path):
+        """Write the current recording to `path` (see `start_recording`)."""
+        self._raw.save_recording(str(path))

@@ -18,6 +18,7 @@ pub mod action;
 pub mod env;
 pub mod obs;
 pub mod python;
+pub mod record;
 pub mod reward;
 #[cfg(test)]
 mod test_fixtures;
@@ -26,4 +27,5 @@ pub use action::{decode as decode_action, encode as encode_action};
 pub use env::{LieroEnv, StepOutcome, N_WORMS};
 pub use obs::{observe, OBS_DIM};
 pub use python::RawEnv;
+pub use record::Recording;
 pub use reward::{reward, RewardConfig, WormSnapshot};

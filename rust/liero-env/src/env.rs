@@ -8,11 +8,14 @@
 //! `(seed, action stream)` yields an identical [`wide_rollback_checksum`] trace
 //! (design §1.4), which the tests assert directly.
 
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use scenario::{load, Loaded, Scenario};
 use sim::state::{ControlState, SimState, WormState};
 use sim::wide_checksum::wide_rollback_checksum;
+
+use crate::record::Recording;
 
 /// Worms per match — the symmetric 1v1 the harness trains (design §5). Fixed at
 /// two: one action and one obs/reward per agent per tick.
@@ -61,6 +64,11 @@ pub struct LieroEnv {
     /// The parsed fixture with its placeholder seed; `reset` clones it and
     /// overrides `seed` per episode (so the base parse happens once).
     base: Scenario,
+    /// The CURRENT episode's tick-0 metadata: `base` cloned with `reset`'s
+    /// `seed` injected (design §1.5). This — not `base` — is what a recording
+    /// is built over, so a saved file's tick-0 state matches the episode that
+    /// was actually played, not the placeholder-seed fixture.
+    episode_base: Scenario,
     /// The live tick-0-onward state (plus viewports/scene `scenario::load`
     /// returns; the env only reads `.state`).
     loaded: Loaded,
@@ -79,6 +87,11 @@ pub struct LieroEnv {
     /// fix, see [`checksum`](Self::checksum)) — cached rather than recomputed so
     /// the accessor always agrees with the last-returned `StepOutcome.checksum`.
     last_checksum: u32,
+    /// The active eval recording (design §1.5, plan T5), or `None` if
+    /// `start_recording` hasn't been called since the last `reset`. `reset`
+    /// always clears this — a recording's base fixture is tied to the episode
+    /// it was started under.
+    recording: Option<Recording>,
 }
 
 impl LieroEnv {
@@ -102,15 +115,18 @@ impl LieroEnv {
         let loaded = load(&tc_root, &base);
         let prev_istates = [0; N_WORMS];
         let last_checksum = wide_rollback_checksum(&loaded.state, &prev_istates);
+        let episode_base = base.clone();
         LieroEnv {
             tc_root,
             base,
+            episode_base,
             loaded,
             tick: 0,
             max_ticks,
             frame_skip: frame_skip.max(1),
             prev_istates,
             last_checksum,
+            recording: None,
         }
     }
 
@@ -131,8 +147,15 @@ impl LieroEnv {
         // diverge while a fixed seed stays reproducible (design §5).
         scenario.seed = seed;
         self.loaded = load(&self.tc_root, &scenario);
+        // `scenario` is no longer needed after `load` (it only borrowed it) —
+        // keep it as this episode's recording base (design §1.5): the seed the
+        // episode actually ran with, not the placeholder in `self.base`.
+        self.episode_base = scenario;
         self.tick = 0;
         self.prev_istates = [0; N_WORMS];
+        // A fresh episode invalidates any in-progress recording — its base
+        // fixture is tied to the episode `start_recording` was called under.
+        self.recording = None;
         self.last_checksum = wide_rollback_checksum(&self.loaded.state, &self.prev_istates);
         self.last_checksum
     }
@@ -144,6 +167,13 @@ impl LieroEnv {
     pub fn step(&mut self, actions: &[ControlState; N_WORMS]) -> StepOutcome {
         let words = [actions[0].pack(), actions[1].pack()];
         for _ in 0..self.frame_skip {
+            // Tap once per underlying sim tick (design §1.5) — a `frame_skip >
+            // 1` step taps the same action word `frame_skip` times, so the
+            // recorded stream indexes 1:1 by sim tick, exactly what `--replay`
+            // (`InputSource::Scripted::sample(tick, _)`) expects, not by env step.
+            if let Some(rec) = self.recording.as_mut() {
+                rec.push(words[0], words[1]);
+            }
             self.loaded.state.process_frame(actions);
             self.tick += 1;
         }
@@ -178,6 +208,36 @@ impl LieroEnv {
     /// construction.
     pub fn checksum(&self) -> u32 {
         self.last_checksum
+    }
+
+    /// Start tapping this episode's per-tick control words into a fresh
+    /// [`Recording`] (design §1.5, plan T5). Replaces any recording already in
+    /// progress. Ticks recorded before this call (earlier in the same episode)
+    /// are NOT retroactively captured — only ticks from this point on.
+    pub fn start_recording(&mut self) {
+        self.recording = Some(Recording::new());
+    }
+
+    /// `true` while a recording is active (since the last `start_recording`,
+    /// not yet cleared by a `reset`).
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// Build the active recording into a replayable [`Scenario`] (this
+    /// episode's `episode_base` — seed already injected — plus the tapped
+    /// input stream) and write its `to_text` form to `path`; the file
+    /// `cargo run -p game -- --replay <path>` opens in the real window (design
+    /// §1.5, §7). Errors with no active recording (call
+    /// [`start_recording`](Self::start_recording) first) — never writes a
+    /// silent empty/garbage file — or if `path` cannot be written.
+    pub fn save_recording(&self, path: &Path) -> io::Result<()> {
+        match &self.recording {
+            Some(rec) => rec.save(&self.episode_base, path),
+            None => Err(io::Error::other(
+                "save_recording: no active recording (call start_recording() first)",
+            )),
+        }
     }
 
     /// Borrow the live simulation state (obs extraction, T2, reads this).
@@ -351,5 +411,100 @@ mod tests {
         let mut env = LieroEnv::new(1000, 1);
         let reset_checksum = env.reset(99);
         assert_eq!(env.checksum(), reset_checksum);
+    }
+
+    /// T5 RED/GATE (plan T5, design §1.5): record a scripted episode, save it,
+    /// `Scenario::parse` it back, and drive a FRESH sim from the parsed file
+    /// exactly as `--replay` does (per-tick `ControlState::unpack(input(tick,
+    /// i))` fed into `process_frame`, mirroring `game::input::replay_state_series`
+    /// — reimplemented here since `liero-env` must not depend on `game`). The
+    /// replayed checksum trace must match the original episode's bit-for-bit —
+    /// this is the round-trip contract the whole eval-recording path rests on.
+    #[test]
+    fn recorded_episode_round_trips_through_replay() {
+        let mut env = LieroEnv::new(500, 1);
+        let mut original_trace = vec![env.reset(2024)];
+        assert!(
+            !env.is_recording(),
+            "a fresh env must not be recording before start_recording"
+        );
+        env.start_recording();
+        assert!(env.is_recording(), "start_recording must flip is_recording");
+
+        let actions = action_stream(50);
+        for a in &actions {
+            original_trace.push(env.step(a).checksum);
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "liero_env_round_trip_{}_{}.txt",
+            std::process::id(),
+            "recorded_episode_round_trips_through_replay"
+        ));
+        env.save_recording(&path)
+            .expect("save_recording writes the file while recording is active");
+
+        let text = std::fs::read_to_string(&path).expect("recorded file exists");
+        std::fs::remove_file(&path).ok();
+        let parsed = Scenario::parse(&text).expect("recorded scenario parses");
+        assert_eq!(
+            parsed.ticks as usize,
+            actions.len(),
+            "ticks must equal the recorded action-stream length"
+        );
+
+        let tc_root = PathBuf::from(TC_ROOT);
+        let mut replay_state = load(&tc_root, &parsed).state;
+        let mut prev = [0u32; N_WORMS];
+        let mut replay_trace = vec![wide_rollback_checksum(&replay_state, &prev)];
+        for t in 0..parsed.ticks {
+            let w0 = parsed.input(t, 0);
+            let w1 = parsed.input(t, 1);
+            replay_state.process_frame(&[ControlState::unpack(w0), ControlState::unpack(w1)]);
+            replay_trace.push(wide_rollback_checksum(&replay_state, &prev));
+            prev = [w0, w1];
+        }
+
+        assert_eq!(
+            original_trace, replay_trace,
+            "round-tripped recording must trace an identical checksum series"
+        );
+    }
+
+    /// `save_recording` before `start_recording` (or after a `reset` cleared a
+    /// prior recording) must error loudly and write nothing — never a silent
+    /// empty/garbage file.
+    #[test]
+    fn save_recording_without_active_recording_errors() {
+        let mut env = LieroEnv::new(10, 1);
+        env.reset(1);
+        let path = std::env::temp_dir().join(format!(
+            "liero_env_no_recording_{}_{}.txt",
+            std::process::id(),
+            "save_recording_without_active_recording_errors"
+        ));
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            env.save_recording(&path).is_err(),
+            "save_recording must error with no active recording"
+        );
+        assert!(!path.exists(), "no file must be written when not recording");
+    }
+
+    /// `reset` starts a fresh episode, so it must clear any in-progress
+    /// recording (design §1.5 — a recording's base fixture is the episode it was
+    /// started under; carrying it across a reset would silently record a
+    /// mismatched episode).
+    #[test]
+    fn reset_clears_active_recording() {
+        let mut env = LieroEnv::new(10, 1);
+        env.reset(1);
+        env.start_recording();
+        assert!(env.is_recording());
+        env.reset(2);
+        assert!(
+            !env.is_recording(),
+            "reset must clear any in-progress recording"
+        );
     }
 }

@@ -205,16 +205,50 @@ the largest surface and depends on nothing the earlier slices produce.
   speculative-gated) closed by the explicit C++ Stops **and** the liveness reaper; wasm
   audio-context init needs a user gesture as expected, handled without panic.
 
-- **4d — Live shake / flash / banners (the `ProcessViewports` port).** Wire the render-only viewport
-  side effects Step 3 deferred: top-of-frame `screen_flash`/`shake`/`banner_y` stepping and
-  `ProcessViewports` centering + viewport-local-RNG shake (input-map §7). Reuses the viewport-local
-  RNG already built for laser sparks in 3b. **Proves:** explosions flash and shake, death banners
-  appear, in a live match. **Oracle/gate:** a render golden on a scenario that drives flash/shake
-  **live** (worm/explosion-driven, vs 3b's injected `render_flash`/`render_shake` directives) — the
-  frame-hash still gates; `HashGameState` unchanged except the already-hashed `screen_flash`.
-  **Risks:** ⚠ `WormState` lacks `steerable_sum_x/y` for steerable centering (input-map §7b) — add
-  those two sim-state accumulators (a small, hashed sim change, re-fuzzed) or keep the non-steerable
-  centering assert; banner stepping is every-other-cycle.
+- **4d — Live shake / flash / banners (the `ProcessViewports` port). LANDED (2026-07-13, commits
+  `370be59`..`bf36497`, all reviews READY/MILESTONE-READY 0 Critical/0 Important).** Delivered as
+  specified, with one correction that reshaped the slice: the overview and input-map §7a/§8 called
+  `screen_flash` **"already-hashed sim state"** — **wrong**. C++ `HashGameState` does not fold
+  `screen_flash` (`stateHash.hpp` omits it; it lives only in the rollback `GameSnapshot`), so adding
+  it to `SimState` (top-of-frame decrement `game.cpp:271-273`, sobject-create max-write
+  `sobject.cpp:41`) is **hash-neutral** — gated by a re-diff of every prior golden, not a re-fuzz.
+  `shake` follows the same shape as 4c's audio event stream: the sole writer (`sobject.cpp:31`)
+  emits a **raw** blast-coordinate + amount event, and the game layer (not the sim) does the
+  `itof`/rect-test/max — keeping the sim itself viewport-blind, as no viewport concept exists inside
+  the firewall. The game-layer live-stepping core (`viewport_step.rs`) reproduces C++'s
+  interleaving around one atomic `process_frame` call: decrement-without-floor on **raw** pre-tick
+  values + banner-walk on **pre-frame** `killed_timer`/`cycles`, **then** `process_frame` (which
+  applies the sim-side `screen_flash` decrement and emits the shake events), **then** apply the
+  shake max, **then** `frame::draw`'s `Viewport::process` (centering + shake-RNG + clamp on
+  **post**-frame state) — matching the real `ProcessViewports` call site (`game.cpp:463`, after the
+  worm loop) with no reader running between the decrement and the max. A new C++ dumper directive,
+  `render_live`, runs the **full** `ProcessFrame` with wired viewports (the reduced dumper never
+  did either) to produce a golden whose flash/shake/banner/centering evolved from real explosions
+  and a real spawn/death; a mandatory re-diff proved every prior golden stayed byte-identical.
+  **MILESTONE (T4):** `render_slice4d_live` matched **first run** — 321 ticks bit-exact across a
+  death→respawn window; the camera moves live as the respawn worm falls (the `SetCenter` arm is
+  reached via a fire-triggered spawn, solving the design doc's `killed_timer`-vacuity trap); triple
+  isolation held throughout, backed by four non-vacuity witnesses (flash decaying to zero, shake RNG
+  jitter, the banner range walk, live centering itself) ruling out an accidental all-static pass.
+  The harness is a documented hand-copy of `viewport_step.rs` (Bevy's `!Send`/ECS shape forces the
+  duplication), double-anchored against drift. **T5** added death-banner **text** via the 3e font — a
+  genuinely cross-viewport effect (the dying worm's banner draws in the *other* player's viewport,
+  `viewport.cpp:256-270`). **Finding + fix:** `frame::draw` was interleaving process-then-draw **per
+  viewport**, which diverges from C++'s process-**all**-viewports-first (`ProcessViewports`); the
+  refactor to match is hash-neutral (each viewport's RNG stream is fully local — the 3a/3b/3e
+  goldens are unchanged), and the 4d golden regen touched only the frame-hash column, only inside
+  the death window (ticks 93–236) — the state-hash column stayed byte-identical. **Proved:**
+  explosions flash and shake, death banners appear, the camera follows a live worm, in a real
+  (dumper-driven) match. **Oracle/gate — MET:** the `render_slice4d_live` golden, triple-isolated
+  per tick. **Risk resolutions:** `steerable_sum_x/y` — **resolved DEFER**, not the leaning-add
+  premise this bullet originally recorded: `ProcessSteerables` mutates the **hashed**
+  `wobject.cur_frame` and is unported, and no committed scenario reaches a steerable weapon, so the
+  accumulators would be vacuous without also authoring a steerable-weapon scenario + golden +
+  re-fuzz; the non-steerable `SetCenter(Ftoi(pos))` plus its `debug_assert_eq!(steerable_count, 0)`
+  live guard stand instead. Banner stepping is confirmed every-other-cycle (`cycles & 1`), matching
+  C++. **Deferred:** the `YoureIt`/GameOfTag banner arm (a comment, not a hard tripwire — routed to
+  whichever later slice needs GameOfTag presentation); a spec-flagged minor — the harness hand-copy
+  is a theoretical frame-level blind spot, mitigated (not eliminated) by double-anchoring.
 
 - **4e — `.lrp` byte-faithful reader (the C++-interop gate).** Read a real `.lrp`: `LRPF` magic +
   version byte, deflate inflate-to-memory, the cereal `Game` initial state, the per-worm XOR-delta

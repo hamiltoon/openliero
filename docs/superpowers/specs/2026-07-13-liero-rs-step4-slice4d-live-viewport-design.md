@@ -334,6 +334,15 @@ The `as_scene(0,…)` → `as_scene(sim.screen_flash,…)` change (§3c) is the 
    intended.
 6. **Banner string/rendering surface creep.** The `KilledMsg`/`CommittedSuicideMsg` draw is bounded;
    the `YoureIt`/GameOfTag arm is the creep vector — keep it deferred (§7).
+7. **Harness hand-copy drift (minor, carried post-landing).** The Rust 4d oracle-test drives the
+   live game-layer path through a small (~15-line) hand-copy of `viewport_step.rs`'s tick order
+   (`game/src/main.rs`'s Bevy `!Send`/ECS resource shape cannot be driven headless without one) —
+   a theoretical frame-level blind spot if the two drift apart silently. Mitigated, not eliminated,
+   by double-anchoring: the golden's byte-for-byte comparison assertion plus a doc comment in the
+   harness cross-referencing the source function it copies. A future consumer touching the ordering
+   should re-verify both sides move together; factoring the copy away needs a third,
+   headless-drivable consumer of the same stepping order to be worth it (same posture as 3d's
+   CLI-local driver-copy deferral).
 
 ---
 

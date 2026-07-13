@@ -8,7 +8,29 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-13 · **STEP 4 — slice 4e phase 1 SHIPPED: `.lrp` REPLAY READER.**
+> **Last updated:** 2026-07-13 · **🎉 STEP 4 COMPLETE — slices 4f+4g SHIPPED: bare run =
+> playable match; the harness covers the whole loop.** 🎯 **`cargo run -p game` now starts a
+> genuinely PLAYABLE default match** — no flags — closing the loop the whole step built toward:
+> live input (4a) → record/replay (4b) → audio (4c) → live viewport (4d) → `.lrp` reading (4e)
+> all converge on a bare invocation that just works. **4f** ships the default-match fixture
+> (Live mode, `render_stage`-level, two visible worms on blood-bevised positions, DART, seed 42;
+> the fixture sits outside the golden dir so it cannot perturb any golden enumeration), F5-restart
+> (adjudicated to also zero an in-flight recording — restart means restart), a clean positional-arg
+> rejection for `default_match` (fixed after an initial review pass), and a tidied window title; the
+> wasm arm stays byte-unchanged (the parity witness holds). `GenerateFromSettings`/random-level
+> generation stays deferred. **4g** ships `shot --scenario-path <file>` (renders any recording or
+> arbitrary scenario file, not just the golden corpus — the golden path itself stays byte-identical,
+> 19 shot tests green), a new SKILL.md §7 (live play + the full key-binding table, the
+> record→replay loop incl. the flush caveat — Esc/window-close flush, a killed process writes
+> nothing, F5 zeroes an in-flight recording — headless verification, and a CI-coverage inventory
+> showing every gate is already wired into CI); the CI half of 4g was in fact delivered
+> incrementally across 4a–4e, so 4g's own diff is thin by design. **All 5 commits** (`80cb75c` plan /
+> `7146490` T0 / `41a1af2` T0-fix / `f566404` T1 / `e22c90a` T2) landed; T0 was reviewed
+> NEEDS-FIX → fixed by 2 Important-severity implementer fixes → clean, T1/T2 were self-verified
+> under the broad step-4 review (T4) that follows. **STEP 4 (4a–4g) IS NOW COMPLETE.** What remains
+> for John: the PR #5 merge decision and the `.lrp` phase-2 (cereal `Game` graph) follow-on decision
+> — both bookkept, neither blocking. Branch `liero-rs-step-4`.
+> Prior: **STEP 4 — slice 4e phase 1 SHIPPED: `.lrp` REPLAY READER.**
 > 🎯 **Liero-rs LÄSER RIKTIGA `.lrp`-REPLAYS byte-troget** — en genuin C++-producerad replay
 > driver Rust-simmen och reproducerar C++-facit **bit-exakt över 1120 ticks**, inklusive
 > `WideRollbackChecksum`-ordet vid cycle 1050 (`0xf6211087`), och `Prior:`-kedjan nedan förblir
@@ -301,7 +323,7 @@ the LAST slice of step 2.
 
 ---
 
-## 🔁 Rewrite track — faithful port (~79%)
+## 🔁 Rewrite track — faithful port (~80%)
 
 Strangler-style: the C++ engine is the oracle, every piece differential-tested
 bit-for-bit before moving on. Steps 0–2 merged (the deterministic sim core — the
@@ -311,21 +333,23 @@ sprite pass), **3c** put it LIVE on screen (`cargo run -p game` — the first Be
 code), **3d** the headless screenshot CLI + run-skill, **3e** the HUD/font/bars/
 minimap overlay (the full player view pixel-exact), and **3f** the wasm bring-up —
 the same CPU frame now renders in the **browser** (WebGL2), automated-proven in
-headless Chrome. Step 4 (input/replay/audio) is in progress — slices 4a (live input),
+headless Chrome. **Step 4 (input/replay/audio) is COMPLETE** (4a–4g): 4a (live input),
 4b (record→replay round-trip, the Step 5 precondition), 4c (audio, native + wasm),
-4d (live viewport — flash/shake/camera/banners), and 4e phase 1 (`.lrp` replay reader —
-container + delta stream + `WideRollbackChecksum`, bit-exact over 1120 ticks) are shipped;
-4e phase 2 (cereal `Game` graph) is a bounded follow-on; step 5 (netplay) is not started.
+4d (live viewport — flash/shake/camera/banners), 4e phase 1 (`.lrp` replay reader —
+container + delta stream + `WideRollbackChecksum`, bit-exact over 1120 ticks), 4f
+(minimal start flow — bare `cargo run -p game` is a playable default match), and 4g
+(run/verify-skill extension + CI replay-checksum regression) are all shipped; 4e phase 2
+(cereal `Game` graph) is a bounded follow-on; step 5 (netplay) is not started.
 
 ```
-REWRITE (steg 0–5)                                          ~79%
+REWRITE (steg 0–5)                                          ~80%
 ├─ ✅ Step 0  sim-core primitives (RNG/fixed/vec/math/tables)   DONE — merged (PR #1)
 ├─ ✅ Step 1  asset IO, slices 1a–1e (level/palette/sprites/    DONE — merged (PR #2)
 │             tc.cfg/objects/WAV)
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
 ├─ ✅ Step 3  Bevy rendering / window (reproduce the SDL3 view) DONE — 3a–3f shipped (PR #4)
-├─ 🟡 Step 4  input + replay (.lrp) + audio                     IN PROGRESS — 4a+4b+4c+4d+4e-phase1 shipped, 4e-phase2+4f+4g remain  ◀── YOU ARE HERE
-└─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
+├─ ✅ Step 4  input + replay (.lrp) + audio                     COMPLETE — 4a–4g shipped (4e-phase2 bounded follow-on)
+└─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started  ◀── YOU ARE HERE
 ```
 
 > Everything above EXISTS in the original openliero — this track reproduces it in
@@ -369,7 +393,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~79%** (steps 0–3 done; step 4 input/replay slices 4a+4b+4c+4d+4e-phase1 shipped, 4e-phase2+4f+4g + step 5 netplay remain) |
+| Rewrite track (steps 0–5) | **~80%** (steps 0–4 done; step 4 (input/replay/audio, 4a–4g) COMPLETE — 4e-phase2 bounded follow-on + step 5 netplay remain) |
 | Step 3 (rendering) | **✅ COMPLETE** (slices 3a + 3b + 3c + 3d + 3e + 3f all shipped; PR #4 ready to merge) |
 | Slice 3f (wasm bring-up) | **✅ MILESTONE GREEN** (🎉 the **browser milestone**: the same CPU frame renders in the browser via **WebGL2**, **automated-proven** — a headless-Chrome controller ran the debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) and the screenshot shows the **blood** demo's split-screen world (sky/terrain/worms/blood), the console **PANIC-FREE**, and the determinism guard (per-tick `state_hash` **+** a wasm-only `frame_hash`) stayed **GREEN in the browser** = the wasm-parity witness. Built: a **`scenario::assets::read_asset` seam** (native = verbatim `std::fs::read` — all goldens green = no-op proof; wasm = embed) + `include_dir` (wasm-only dep) embedding sprites/weapons/nobjects/sobjects + `include_bytes!` tc.cfg + the demo level `render_stage.lev` — a **curated 276 KB total** (sounds/ and big levels excluded); a **target-scoped feature split** (base 6 draw-features; `x11`/`wayland` native-only; `webgl2` wasm-only — union verified per target via `cargo tree`) making `cargo build -p game --target wasm32-unknown-unknown` **GREEN first try**; an entry-fork (`const DEFAULT="blood"`, `include_str!` scenario+sidecar, **no** `env::args`/`read_dir`/`fs` on wasm; `canvas=None` auto-append verified against the `bevy_window` source; determinism guard hardened with a per-tick wasm-only `frame_hash`); a `.cargo/config.toml` (target-scoped `wasm-server-runner`) + `web/index.html` dev-loop (127.0.0.1:1334, 200 html+wasm) + a static `wasm-bindgen` **0.2.126** (lock-matched) bundle (game.js 97 KB + game_bg.wasm 52.9 MB release); a new **`game-wasm` CI job** (build-only, no browser/apt, own job independent of the determinism gate, mirrors `sim-core`'s no-cache posture). Fynd: cargo reads `.cargo/config.toml` from **CWD**, not `--manifest-path` — the wasm dev-loop runs from `rust/`) |
 | Slice 3e (HUD / font / bars / minimap) | **✅ MILESTONE GREEN** (🎯 the **full player view is PIXEL-EXACT** vs C++ — the in-game overlay ported verbatim + difftest green first run: new **`render::font::Font`** (font.tga loader `common.cpp:414-433`, width-detect + 0/50→0/8 remap) draws HUD labels (`font.cpp:8-80` verbatim — double `c>=2 && c<252` guard, CLIP_IMAGE inlined, newline on cp 0; ASCII-decode **identity for `cp<0x80`**, bevis-tested as the exact reach of the label corpus); **`blit::draw_bar`** (`blit.cpp:105-113`, unclipped + `width>0` anti-clamp witness); **`render::hud::draw_hud`** (`viewport.cpp:84-153` verbatim — two-arm life bar (`health*100/settings_health`, `100-(killed_timer*25)/37` clamped), two-arm ammo/loading bar, blinking **Reloading** (`(cycles%20)>10 && visible`, y=`164*multiplier` **absolute** — a plan-deviation caught vs C++), kills-always / lives-on-KillEmAll+Scales, `w/10+234` / `w/10+245` / 50 / 10 / 6 colour columns); **`draw_minimap`+`draw_miniature`** (`viewport.cpp:593-613` + `level.cpp:489-507` — the two *different* `step` ceil vs `bounds` round idioms preserved, worm-dots `ftoi(pos)/step` colour `129+worm.index*4`, clip-gated, `AppearanceAt` inlined). `Scene`/`frame::draw` composites per viewport (**HUD full-clip → world world-clip → minimap**, verbatim double-draw); C++ dumper gained opt-in **`render_hud`** mirroring `frame::draw`, **RE-DIFF gate empty** (3a/blood/shake/sim_slice2 byte-identical). 3 scenarios + goldens — **hud** 41t / **reload** 71t / **death** 141t — difftests **GREEN**: hud + death first run (per-tick + total + triple-isolation + suppression + non-vacuity); reload first **blocked** (T7 RIFLE = `ST_LASER` tripped the deferred laser do-loop), re-cut to **GRENADE** (`ST_NORMAL`, inert hit-arm, no in-window explosion) → GREEN (71 rows + total, settled 50/51 witness). Find: tick 0 is fade-to-black ⇒ the HUD witness reads tick 1. Holdazone/GameOfTag/replay HUD-arms tripwired. Milestone review: **0 Critical / 0 Important**; minors on the deferral track: DRY the inlined `clip_image`, a `size>1`-advance font test, minimap dot-index discrimination, reload's own suppression control (deliberately omitted)) |
@@ -519,7 +543,7 @@ local). A future consumer reaching any of these lifts the deferral with a matchi
 
 ---
 
-### Step 4 — Input / `.lrp` replay / audio (🟡 IN PROGRESS · branch `liero-rs-step-4`)
+### Step 4 — Input / `.lrp` replay / audio (✅ COMPLETE · branch `liero-rs-step-4`)
 
 Close the play loop: real keyboard input at the fixed cadence, record/replay determinism,
 audio as a pure sim-event consumer, the live viewport (shake/flash/banners), and byte-faithful
@@ -617,9 +641,28 @@ map: `specs/2026-07-12-liero-rs-step4-cpp-input-replay-map.md`.
 │         d0cca91 T0/0a08d54 T1/b5fb884 T2/cd711fc T3/b8bd8cb T4), 0 Critical/0 Important
 │         throughout. Deferred: phase 2 in full (cereal Game graph — possibly its own post-step
 │         item, spec Open Q1)
-├─ ⬜ 4f  minimal start flow — new match with defaults + respawn + quit/restart (no menu tree)
-└─ ⬜ 4g  run/verify-skill extension + CI replay-checksum regression (woven in per gate)
+├─ ✅ 4f  minimal start flow — new match with defaults + respawn + quit/restart (no menu tree)   SHIPPED
+│         🎯 MILESTONE: bare `cargo run -p game` (no flags) now starts a SPELBAR default match —
+│         Live mode, the `render_stage`-level default_match fixture (blood-bevised worm
+│         positions, DART, seed 42; the fixture sits outside the golden dir so it can't perturb
+│         any golden enumeration). F5 restarts (adjudicated to also zero an in-flight recording —
+│         restart means restart); a positional `default_match` arg is rejected cleanly (T0 review
+│         NEEDS-FIX → fixed); the window title is tidied. wasm arm stays byte-unchanged (the
+│         parity witness holds). Deferred: `GenerateFromSettings`/random-level generation
+└─ ✅ 4g  run/verify-skill extension + CI replay-checksum regression (woven in per gate)   SHIPPED
+          🎯 `shot --scenario-path <file>` renders any recording or arbitrary scenario file (the
+          golden path itself stays byte-identical, 19 shot tests green); SKILL.md gains §7 —
+          live play + the full key-binding table, the record→replay loop (incl. the flush caveat:
+          Esc/window-close flushes, a killed process writes nothing, F5 zeroes an in-flight
+          recording), headless verification, and a CI-coverage inventory (every gate already
+          wired into CI). The CI half was de facto delivered incrementally across 4a–4e, so 4g's
+          own diff is thin by design. 5 commits (80cb75c plan/7146490 T0/41a1af2 T0-fix/f566404
+          T1/e22c90a T2); T0 NEEDS-FIX → 2 Important fixes → clean; T1/T2 self-verified, covered
+          by the broad step-4 review (T4)
 ```
+
+**STEP 4 = COMPLETE (4a–4g).** Remaining for John: the PR #5 merge decision + the `.lrp`
+phase-2 (cereal `Game` graph) follow-on decision — both bookkept, neither blocking.
 
 Adjudicated (controller, 2026-07-12): 4e split as above; corpus generated from C++ over the
 existing scenario inputs; audio backend chosen at 4c start (kira or rodio, NOT bevy_audio);

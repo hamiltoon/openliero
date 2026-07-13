@@ -1,6 +1,6 @@
 # Step 4 — Input / `.lrp` replay / audio: overview / altitude decisions
 
-Status: **OVERVIEW — Step 4 architecture/strategy** · 2026-07-12 · slices **4a–4g proposed, none started**
+Status: **OVERVIEW — Step 4 architecture/strategy** · 2026-07-13 · slices **4a–4g ALL LANDED — STEP 4 COMPLETE**
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 4 — Loop + input" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-07-12-liero-rs-step4-cpp-input-replay-map.md` (C++ map, cited as **input-map §N**)
@@ -31,16 +31,19 @@ cadence, **record and replay** that input deterministically, **trigger audio** f
 pure side effect, wire the **live viewport** (shake/flash/banners), and read existing **`.lrp`**
 replays byte-faithfully — all without perturbing the determinism firewall.
 
-**Done when:**
-1. A native `cargo run -p game` match is **playable from the keyboard** (1-player + 2-player
-   hotseat), sim ticking at `1000/14 Hz` with exactly one input snapshot per tick.
-2. A **record → replay round-trip is bit-exact**: a recorded live session, replayed headless,
-   reproduces the identical `HashGameState` (and frame-hash) time series — *the* Step 4 gate and
-   the Step 5 precondition (breakdown §Step4 oracle; iter §3).
-3. **Audio** plays from sim events (fire/explosion/bump/reload/…) with the Step 2/3 `HashGameState`
-   **provably unchanged** (isolation), native and wasm.
-4. **Live shake/flash/banners** render in a real match (the `ProcessViewports` port Step 3 deferred).
-5. A **real `.lrp` reads byte-faithfully** — **phase-1 semantics (LANDED 2026-07-13):** proven by
+**Done when (ALL 6 MET — STEP 4 COMPLETE, 2026-07-13):**
+1. ✅ **MET (4a, 4f).** A native `cargo run -p game` match is **playable from the keyboard**
+   (1-player + 2-player hotseat), sim ticking at `1000/14 Hz` with exactly one input snapshot per
+   tick — 4a delivered `--live`; 4f closed the loop by making the *bare* invocation (no flags) a
+   playable default match.
+2. ✅ **MET (4b).** A **record → replay round-trip is bit-exact**: a recorded live session, replayed
+   headless, reproduces the identical `HashGameState` (and frame-hash) time series — *the* Step 4
+   gate and the Step 5 precondition (breakdown §Step4 oracle; iter §3).
+3. ✅ **MET (4c).** **Audio** plays from sim events (fire/explosion/bump/reload/…) with the Step 2/3
+   `HashGameState` **provably unchanged** (isolation), native and wasm.
+4. ✅ **MET (4d).** **Live shake/flash/banners** render in a real match (the `ProcessViewports` port
+   Step 3 deferred).
+5. ✅ **MET (4e phase 1) — phase-1 semantics.** A **real `.lrp` reads byte-faithfully** — proven by
    matching the C++ **`WideRollbackChecksum`** time series bit-exact over a committed `.lrp`
    corpus (the phase-1 C++-interop gate; a *harder* gate than `HashGameState` — it folds the whole
    rollback inventory, not just the tick's visible state). The `WideRollbackChecksum` diff
@@ -48,9 +51,11 @@ replays byte-faithfully — all without perturbing the determinism firewall.
    graph entirely (length-prefixed blobs let the reader skip them) and instead seeds the initial
    state from `scenario::load`. The original literal reading of this line — a C++ **`framehash`**
    diff driven by the full cereal-deserialized initial state — is **phase 2**, a bounded follow-on
-   (possibly its own post-step item) — *scope-gated, see §Open Q1*.
-6. The in-repo **run-skill** drives the replay loop and CI runs the **replay-checksum regression**
-   (iter §6).
+   (possibly its own post-step item) — *scope-gated, see §Open Q1* — and does not block Step 4
+   completion.
+6. ✅ **MET (4g).** The in-repo **run-skill** drives the replay loop (`shot --scenario-path`) and CI
+   runs the **replay-checksum regression** (iter §6) — delivered incrementally across 4a–4e and
+   consolidated in 4g's SKILL.md §7 + CI-coverage inventory.
 
 Presentation, live keyboard, and audio *output* are **not** bit-gated (they cannot be — see
 Oracle strategy); the input→tick→state path **is**, via record→replay determinism and the `.lrp`
@@ -288,17 +293,38 @@ the largest surface and depends on nothing the earlier slices produce.
   generated corpus. **Deferred:** phase 2 in full — the cereal `Game` graph deserialization and the
   `framehash` diff it would enable, per §Open Q1's scope-gate (possibly its own post-step item).
 
-- **4f — Minimal start flow.** A "new match with defaults" entry (level + default weapons, no full
-  weapon-select), respawn, quit/restart — the smallest thing that makes single-player a loop rather
-  than a fixed demo. **Proves:** a match can be started and restarted without editing code.
-  **Oracle/gate:** smoke (headless launch) + the round-trip gate still green. **Risks:** scope
-  creep into the deferred `*State.cpp` menu surface — resist (§Open Q5).
+- **4f — Minimal start flow. LANDED (2026-07-13, commits `80cb75c` plan/`7146490` T0/`41a1af2`
+  T0-fix, T0-review NEEDS-FIX → fixed by 2 Important-severity implementer fixes → clean).**
+  Delivered as specified, sharper than the "new match with defaults" framing: bare
+  `cargo run -p game` (no flags) now starts a **playable** default match — Live mode, a new
+  `default_match` fixture on the `render_stage` level (two visible worms on blood-bevised
+  positions, DART, seed 42; the fixture lives outside the golden dir so it cannot perturb any
+  golden enumeration). F5 restarts the match — adjudicated to also zero an in-flight recording
+  (restart means restart, not "restart but keep recording state"). **Proved:** a match can be
+  started and restarted without editing code or passing flags. **Finding + fix:** a positional
+  `default_match` argument was initially accepted ambiguously alongside the named fixture path —
+  the T0 review caught it NEEDS-FIX; the fix rejects the positional form cleanly. The window title
+  was also tidied. The wasm arm stays byte-unchanged (the parity witness holds). **Oracle/gate —
+  MET:** smoke (headless launch) + the 4b round-trip gate stays green. **Deferred:**
+  `GenerateFromSettings` / random-level generation (§Open Q5's minimal-menu posture holds — no
+  menu was needed to reach a playable default).
 
-- **4g — run/verify skill + CI regression wiring.** Extend the in-repo `liero-shot` skill (iter §5)
-  with the replay-player drive; wire the 4b round-trip and (if 4e lands) the `.lrp` framehash diff
-  into CI (iter §6 — do for Rust what C++ never did: `framehash`-style regression actually in CI).
-  **Proves:** the agent/CI loop covers input+replay. **Oracle/gate:** the CI jobs themselves.
-  **Risks:** keep it Bevy-free/GPU-free like the existing determinism job (3c `--exclude game`).
+- **4g — run/verify skill + CI regression wiring. LANDED (2026-07-13, commits `f566404` T1/
+  `e22c90a` T2, both self-verified and covered by the broad step-4 review).** Delivered as
+  specified: `shot` gained `--scenario-path <file>`, rendering any recording or arbitrary
+  scenario file (not just the golden corpus) — the golden path itself stays byte-identical, 19
+  `shot` tests green. `SKILL.md` gained a new §7 covering live play + the full key-binding table,
+  the record→replay loop (including the flush caveat: Esc/window-close flushes the recording, a
+  killed process writes nothing, F5 zeroes an in-flight recording), headless verification, and a
+  CI-coverage inventory showing every Step 4 gate is already wired into CI. **Finding:** the CI
+  half of 4g was in fact delivered incrementally across 4a–4e (each slice wired its own gate into
+  CI as it landed) — 4g's own diff is thin by design, consolidating documentation rather than
+  adding new CI surface. **Proved:** the agent/CI loop covers input+replay end-to-end.
+  **Oracle/gate — MET:** the CI jobs themselves (all pre-existing, now inventoried).
+
+**STEP 4 = COMPLETE.** All slices 4a–4g landed; remaining for John: the PR #5 merge decision and
+the `.lrp` phase-2 (cereal `Game` graph) follow-on decision (§Open Q1) — both bookkept, neither
+blocking.
 
 *4c and 4d are mutually independent and may be built in either order or in parallel; both depend on
 4a (a live loop to attach to) but not on each other. 4g is woven in incrementally as each gate

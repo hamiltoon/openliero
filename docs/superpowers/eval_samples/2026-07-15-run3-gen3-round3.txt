@@ -1,0 +1,84 @@
+seed 7777
+level Levels/render_stage.lev
+ticks 76
+max_bonuses 0
+game_mode 0
+worm 0 6553600 7602176 100 1 0 1
+worm 1 3276800 7602176 100 1 218 1
+weapon 0 DART
+input 0 9 9
+input 1 9 9
+input 2 9 9
+input 3 9 9
+input 4 73 73
+input 5 73 73
+input 6 73 73
+input 7 73 73
+input 8 9 9
+input 9 9 9
+input 10 9 9
+input 11 9 9
+input 12 73 73
+input 13 73 73
+input 14 73 73
+input 15 73 73
+input 16 73 73
+input 17 73 73
+input 18 73 73
+input 19 73 73
+input 20 73 73
+input 21 73 73
+input 22 73 73
+input 23 73 73
+input 24 73 73
+input 25 73 73
+input 26 73 73
+input 27 73 73
+input 28 71 71
+input 29 71 71
+input 30 71 71
+input 31 71 71
+input 32 116 116
+input 33 116 116
+input 34 116 116
+input 35 116 116
+input 36 86 82
+input 37 86 82
+input 38 86 82
+input 39 86 82
+input 40 116 117
+input 41 116 117
+input 42 116 117
+input 43 116 117
+input 44 81 81
+input 45 81 81
+input 46 81 81
+input 47 81 81
+input 48 117 117
+input 49 117 117
+input 50 117 117
+input 51 117 117
+input 52 80 80
+input 53 80 80
+input 54 80 80
+input 55 80 80
+input 56 116 117
+input 57 116 117
+input 58 116 117
+input 59 116 117
+input 60 80 81
+input 61 80 81
+input 62 80 81
+input 63 80 81
+input 64 116 16
+input 65 116 16
+input 66 116 16
+input 67 116 16
+input 68 80 116
+input 69 80 116
+input 70 80 116
+input 71 80 116
+input 72 116 82
+input 73 116 82
+input 74 116 82
+input 75 116 82

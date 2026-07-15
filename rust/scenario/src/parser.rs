@@ -24,6 +24,7 @@
 //! render_flash <tick> <amount>                  # Slice 3b; draw-only screen-flash injection
 //! render_hud                                     # Slice 3e; draw-time HUD/minimap draw (0 args)
 //! render_live                                    # Slice 4d; opt-in live-viewport path (0 args)
+//! spawn_ready                                     # live-play: zero killed_timer so the camera follows (0 args)
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
@@ -95,6 +96,16 @@ pub struct Scenario {
     /// oracle-test drives the matching live game-layer path. Both parser sides move
     /// together (the shared scenario file must parse on both).
     render_live: bool,
+    /// Live-play `spawn_ready` (0-arg) — the opt-in camera-follow directive.
+    /// Absent => `false` (prior scenarios untouched; the loader keeps the worms'
+    /// `killed_timer` at the `WormInit` default of 150, pinning the camera at the
+    /// origin so every committed render golden stays byte-identical). Present =>
+    /// the loader zeroes `killed_timer` on every worm AFTER `SimState::new`, so the
+    /// `viewport.rs:84` `killed_timer <= 0` centering arm opens for a live visible
+    /// worm and the camera follows it. Carried on the live paths only
+    /// (`default_match`, and any live recording replayed via `--replay`), so a
+    /// record→replay round-trip re-applies it identically (`to_text` emits it).
+    spawn_ready: bool,
 }
 
 impl Scenario {
@@ -115,6 +126,7 @@ impl Scenario {
         let mut render_flash: Vec<(u32, i32)> = Vec::new();
         let mut render_hud = false;
         let mut render_live = false;
+        let mut spawn_ready = false;
 
         for (lineno, raw) in text.lines().enumerate() {
             let n = lineno + 1;
@@ -202,6 +214,14 @@ impl Scenario {
                     expect_args(n, key, &nums, 0)?;
                     render_live = true;
                 }
+                "spawn_ready" => {
+                    // Live-play camera-follow directive (0 args — presence enables
+                    // it). The loader zeroes every worm's `killed_timer` post-`new`
+                    // so the `killed_timer <= 0` viewport-centering arm opens; every
+                    // render golden omits it, so their fixed camera is unchanged.
+                    expect_args(n, key, &nums, 0)?;
+                    spawn_ready = true;
+                }
                 "worm" => {
                     expect_args(n, key, &nums, 7)?;
                     let visible = match parse_at(6)? {
@@ -271,6 +291,7 @@ impl Scenario {
             render_flash,
             render_hud,
             render_live,
+            spawn_ready,
         })
     }
 
@@ -333,6 +354,13 @@ impl Scenario {
     /// shake-event drain + `frame::draw`) off this.
     pub fn live(&self) -> bool {
         self.render_live
+    }
+
+    /// Whether the `spawn_ready` directive is present — the live-play camera-follow
+    /// opt-in. The loader zeroes every worm's `killed_timer` when set, so the
+    /// `viewport.rs:84` `killed_timer <= 0` centering arm follows a live worm.
+    pub fn spawn_ready(&self) -> bool {
+        self.spawn_ready
     }
 
     /// Serialize this scenario back to its text form. `Scenario::parse` reads the
@@ -398,6 +426,9 @@ impl Scenario {
         }
         if self.render_live {
             out.push_str("render_live\n");
+        }
+        if self.spawn_ready {
+            out.push_str("spawn_ready\n");
         }
         // Sparse `input` lines in ascending tick order; skip all-zero ticks (they
         // decode to (0,0) from absence — the parser convention, `parser.rs:262`).
@@ -733,15 +764,37 @@ input 5 16 0
         assert!(err.contains("expects 0 args"), "got: {err}");
     }
 
+    // ---- Live-play `spawn_ready` directive (loader zeroes killed_timer) ----
+
+    #[test]
+    fn spawn_ready_defaults_off_and_parses() {
+        // Absent => off (prior scenarios untouched; the loader keeps the fixed camera).
+        let s = Scenario::parse(SAMPLE).expect("parses");
+        assert!(!s.spawn_ready(), "absent spawn_ready defaults off");
+        // Present (0 args) => on.
+        let s = Scenario::parse("seed 1\nlevel a.lev\nticks 1\nspawn_ready\n")
+            .expect("parses");
+        assert!(s.spawn_ready(), "spawn_ready enables the camera-follow load arm");
+    }
+
+    #[test]
+    fn spawn_ready_wrong_arity_errors() {
+        // spawn_ready takes NO args; a trailing token is rejected.
+        let err =
+            Scenario::parse("seed 1\nlevel a.lev\nticks 1\nspawn_ready 1\n").unwrap_err();
+        assert!(err.contains("expects 0 args"), "got: {err}");
+    }
+
     // ---- Slice 4b: `to_text` serializer + `with_recorded_inputs` builder ----
 
     // A scenario exercising EVERY directive the parser stores: seed/level/ticks,
     // both defaulted globals (max_bonuses, game_mode), two worms (one visible, one
     // not; distinct fields), a bare weapon + a weapon with an ammo token,
     // render_shadow, two render_shake (same tick, order-sensitive), render_flash,
-    // render_hud, render_live, and sparse input incl. the max 7-bit word (127). No explicit
-    // all-zero `input` line (those don't round-trip — see the risk note in the
-    // done-report; they are semantically absence and the recorder never emits them).
+    // render_hud, render_live, spawn_ready, and sparse input incl. the max 7-bit word
+    // (127). No explicit all-zero `input` line (those don't round-trip — see the risk
+    // note in the done-report; they are semantically absence and the recorder never
+    // emits them).
     const RICH: &str = "\
 seed 42
 level Levels/foo.lev
@@ -758,6 +811,7 @@ render_shake 3 0 4
 render_flash 2 20
 render_hud
 render_live
+spawn_ready
 input 5 16 0
 input 10 127 64
 ";

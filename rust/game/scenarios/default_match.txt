@@ -21,3 +21,6 @@ ticks 0
 worm 0 6553600 7602176 100 10 0   1
 worm 1 3276800 7602176 100 10 218 1
 weapon 0 DART
+# Live-play camera-follow: zero killed_timer post-load so viewport.process centres
+# on each worm from tick 0 (the render goldens omit this and keep the pinned camera).
+spawn_ready

@@ -181,8 +181,21 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     state.worm_min_spawn_dist_enemy = tc.constants.WormMinSpawnDistEnemy;
     state.game_mode = scenario.game_mode as u32;
 
-    // NOTE: killed_timer is left at its `WormInit` default (150) — the camera
-    // stays pinned at (0,0). Resetting it would centre the viewport and diverge.
+    // Camera-follow opt-in: by default `killed_timer` is left at its `WormInit`
+    // default (150), so the camera stays pinned at (0,0) — every committed render
+    // golden was generated this way, so resetting it unconditionally would centre
+    // the viewport and diverge them. The `spawn_ready` directive (live paths only —
+    // `default_match` / a replayed live recording; NO golden carries it) opts INTO
+    // zeroing `killed_timer` on every worm, so the `viewport.rs:84` `killed_timer
+    // <= 0` centering arm opens and the camera follows a live visible worm. This is
+    // sim-inert: `process_frame`'s visible arm never reads `killed_timer` (only the
+    // dead arm does), and `killed_timer` is not in `hash_game_state`, so every
+    // headless determinism gate stays byte-identical.
+    if scenario.spawn_ready() {
+        for w in &mut state.worms {
+            w.killed_timer = 0;
+        }
+    }
 
     let fire_cone = build_fire_cone_sprites(&state.large_sprites);
 
@@ -234,6 +247,81 @@ worm 0 6553600 7602176 100 10 0   1
 worm 1 3276800 7602176 100 10 218 1
 weapon 0 DART
 ";
+
+    // A `spawn_ready` variant of SAMPLE: the opt-in directive the live paths
+    // (default_match / --replay of a live recording) carry so the camera follows
+    // the worm from tick 0 (viewport.rs:84 `killed_timer <= 0` gate).
+    const SAMPLE_SPAWN_READY: &str = "\
+seed 42
+level Levels/render_stage.lev
+ticks 1
+worm 0 6553600 7602176 100 10 0   1
+worm 1 3276800 7602176 100 10 218 1
+weapon 0 DART
+spawn_ready
+";
+
+    #[test]
+    fn spawn_ready_zeroes_killed_timer_else_leaves_it_initial() {
+        // Absent `spawn_ready` => the fixed-camera invariant holds: killed_timer
+        // stays at the WormInit default (150), so viewport.process pins the camera.
+        let pinned = load(
+            Path::new(TC_ROOT),
+            &Scenario::parse(SAMPLE).expect("scenario parses"),
+        );
+        assert!(
+            pinned.state.worms.iter().all(|w| w.killed_timer == 150),
+            "absent spawn_ready leaves killed_timer at the 150 default"
+        );
+
+        // Present `spawn_ready` => killed_timer is zeroed on every worm, so the
+        // `killed_timer <= 0` viewport-centering arm opens for a live visible worm.
+        let ready = load(
+            Path::new(TC_ROOT),
+            &Scenario::parse(SAMPLE_SPAWN_READY).expect("scenario parses"),
+        );
+        assert!(
+            ready.state.worms.iter().all(|w| w.killed_timer == 0),
+            "spawn_ready zeroes killed_timer on every worm"
+        );
+    }
+
+    #[test]
+    fn spawn_ready_makes_the_camera_follow_the_worm() {
+        use render::bitmap::Rect;
+        use render::viewport::Viewport;
+
+        // The camera-follow proof: run the real `Viewport::process` (the phase-5
+        // centering the render calls) on both loads. Both worms spawn OFF origin
+        // (worm0 px=100), so a following camera leaves (0,0); a pinned one does not.
+        let ready = load(
+            Path::new(TC_ROOT),
+            &Scenario::parse(SAMPLE_SPAWN_READY).expect("scenario parses"),
+        );
+        let (lw, lh) = (ready.state.level.width, ready.state.level.height);
+        let mut vp = Viewport::new(Rect::new(0, 0, 158, 158), 0);
+        vp.process(&ready.state.worms[0], lw, lh);
+        assert!(
+            vp.x != 0 || vp.y != 0,
+            "spawn_ready: the camera centres on the worm (leaves origin), got ({}, {})",
+            vp.x,
+            vp.y
+        );
+
+        // Same worm, no directive: killed_timer 150 keeps BOTH viewport arms shut,
+        // so the camera stays pinned at the origin.
+        let pinned = load(
+            Path::new(TC_ROOT),
+            &Scenario::parse(SAMPLE).expect("scenario parses"),
+        );
+        let mut vp = Viewport::new(Rect::new(0, 0, 158, 158), 0);
+        vp.process(&pinned.state.worms[0], lw, lh);
+        assert_eq!(
+            (vp.x, vp.y),
+            (0, 0),
+            "no spawn_ready: the camera stays pinned at the origin"
+        );
+    }
 
     #[test]
     fn load_yields_font_and_labels() {

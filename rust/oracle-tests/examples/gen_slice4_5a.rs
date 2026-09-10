@@ -84,7 +84,15 @@ const VARIANTS: [Variant; 3] = [
         name: "scales",
         game_mode: 3,
         lives: 2,
-        health: 120,
+        // Design §7.3's table says 120; lowered to 40 (still non-default, and still a
+        // third distinct value across the three variants) because Scales RECYCLES
+        // lives — self/environmental damage heals the opponent and every whole
+        // `settings_health` of overflow is `+1 life`, so with 120 the two worms trade
+        // lives forever and `IsGameOver` never fires: 1000 game seeds x 3000 ticks
+        // produced no C++ game over at all. A small `settings_health` makes both the
+        // overkill-to-lives wrap and the overflow-to-lives wrap coarse, so the swings
+        // cross zero. Every other sim-reaching field is unchanged.
+        health: 40,
         loading_time: 150,
         blood: 60,
         load_change: true,
@@ -329,6 +337,14 @@ fn snap(s: &SimState) -> Snap {
 
 /// The strict 11x11 pickup AABB (`worm.cpp:289-290`): a bonus that vanished under a
 /// living worm was COLLECTED, not expired.
+///
+/// Two deliberate approximations, both safe for a witness that only has to be
+/// *plausible* (the C++ golden is the truth, and it corroborates the pickup tick):
+/// it compares the worm's PREVIOUS-tick `ipos` (the pickup block reads `ipos` at the
+/// top of the worm's `Process`, i.e. before this tick's move is committed to the
+/// snapshot), and bonuses are identified by their integer position only — two bonuses
+/// that alias to the same pixel would be indistinguishable, which would at worst
+/// mislabel a timer expiry as a pickup.
 fn on_bonus(w: (i32, i32), b: (i32, i32)) -> bool {
     (w.0 - b.0).abs() < 5 && (w.1 - b.1).abs() < 5
 }
@@ -476,9 +492,9 @@ fn ends(l: &Ledger) -> bool {
 ///
 /// The settings-driven BONUS path (`max_bonuses` + `weap_table`) is required in two
 /// strengths, because a pickup needs the random input stream to walk a worm onto an
-/// 11x11 box and only ~1 seed in 200 manages it inside a variant's window: every
-/// variant with a short window asks for the DROP (`bonus_dropped`), and `gametag` —
-/// the long one — asks for a real PICKUP as well, so at least one golden covers the
+/// 11x11 box and only ~1 seed in 200 manages it inside a variant's window: EVERY
+/// variant asks for the DROP (`bonus_dropped`), and `gametag` — the one with the
+/// longest window — asks for a real PICKUP as well, so at least one golden covers the
 /// whole path (T7 review's mandatory coverage).
 fn ok(v: &Variant, l: &Ledger, shadow_fired: bool) -> bool {
     let base = ends(l) && l.game_over_held && l.deaths >= 1 && l.respawns >= 2;
@@ -489,8 +505,8 @@ fn ok(v: &Variant, l: &Ledger, shadow_fired: bool) -> bool {
                 && l.reload_started
                 && l.bonus_dropped
         }
-        "scales" => shadow_fired && l.scales_death_kept_health && l.life_gained,
-        "gametag" => l.timer_bumped && !l.pickup_ticks.is_empty(),
+        "scales" => shadow_fired && l.bonus_dropped && l.scales_death_kept_health && l.life_gained,
+        "gametag" => l.timer_bumped && l.bonus_dropped && !l.pickup_ticks.is_empty(),
         _ => unreachable!(),
     }
 }
@@ -572,6 +588,12 @@ fn main() {
         "dump" => {
             // The Rust side of a golden, in the dumper's exact 12-column layout, so a
             // divergence localises with a plain `diff` (T9 owns the actual test).
+            //
+            // NOTE: this REGENERATES the setup text in memory (`setup_cfg`) instead of
+            // reading the committed sidecar, and it takes the tick count on the command
+            // line instead of reading the scenario file — so it exercises neither the
+            // committed `.cfg` bytes nor `scenario::load`'s `settings` directive. Those
+            // two seams are T9's to cover; this is a localisation aid, not a test.
             let v = variant(arg(1));
             let (game_seed, input_seed, ticks) = (num(2), num(3), num(4));
             let objects = load_objects();
@@ -681,6 +703,6 @@ fn main() {
             println!("wrote {} (game over at tick {g}, ticks {ticks})", arg(4));
             println!("{} shadow={}", l.summary(), r.shadow_fired);
         }
-        other => panic!("unknown command {other:?} (cfg | scan | gen)"),
+        other => panic!("unknown command {other:?} (cfg | scan | gen | dump)"),
     }
 }

@@ -524,6 +524,37 @@ pub fn do_damage(
     }
 }
 
+/// Port of `Game::DoHealing` (`game.cpp:591-609`) — the pickup heal. `DoHealingDirect`
+/// on the healed worm, then in Scales (`game_mode == 3`) the SAME amount is dealt to
+/// the other worms, split by truncating division in source order (`parts`/`left`,
+/// `:595-604`) through `DoDamageDirect(other, k, w.index)` — the healer is the
+/// attributed killer if one dies. Every other mode clamps (`:607`; already applied by
+/// `do_healing_direct`, so KillEmAll is byte-identical to the prior pickup port).
+pub fn do_healing(
+    worms: &mut [WormState],
+    w_idx: usize,
+    amount: i32,
+    game_mode: u32,
+    settings_health: i32,
+) {
+    crate::bonus::do_healing_direct(&mut worms[w_idx], amount, game_mode, settings_health);
+    if game_mode == 3 {
+        let healer = worms[w_idx].index;
+        let mut parts = worms.len() as i32 - 1;
+        let mut left = amount;
+        for j in 0..worms.len() {
+            if j != w_idx {
+                let k = left / parts;
+                worms[j].do_damage_direct(k, healer);
+                parts -= 1;
+                left -= k;
+            }
+        }
+    } else {
+        worms[w_idx].health = worms[w_idx].health.min(settings_health);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Object-pool element types (empty this slice; fields are what the hash reads)
 // ---------------------------------------------------------------------------
@@ -2110,6 +2141,8 @@ impl SimState {
                     nobjects,
                     last_killed_idx,
                     got_changed,
+                    game_mode,
+                    settings_health,
                 ) {
                     deferred_kills.push(killer);
                 }
@@ -2187,6 +2220,7 @@ impl SimState {
                         large_sprites,
                         textures,
                         settings_health,
+                        game_mode,
                         rand,
                     );
                 }
@@ -2684,8 +2718,8 @@ fn limit_xy(x: &mut i32, y: &mut i32, max_x: i32, max_y: i32) {
 /// `CorrectShadow` (`:784-786`) is live since 4½a-1 (behind `SimState.shadow`).
 /// Omissions (faithful to the dumper's settings): the `SoundAlive` play (`:789`) and
 /// `AfterSpawn` stats (`:807`) — all render/sound/stats side effects the sim
-/// drops. The Scales-of-Justice guard on the health restore (`:794`) folds away
-/// (the TC is KillEmAll), so `health` is always restored here.
+/// drops. The Scales-of-Justice guard on the health restore (`:794`) is live since
+/// 4½a-1.
 #[allow(clippy::too_many_arguments)]
 fn do_respawning(
     worm: &mut WormState,
@@ -2693,6 +2727,7 @@ fn do_respawning(
     large_sprites: &SpriteSet,
     textures: &[Texture],
     settings_health: i32,
+    game_mode: u32,
     rand: &mut Rand,
 ) {
     // :758-770 step the cursor toward Ftoi(pos)-80 by ±1, FOUR times per tick,
@@ -2758,8 +2793,10 @@ fn do_respawning(
         worm.visible = true;
         worm.fire_cone = 0;
         worm.vel = Vec2::zero();
-        // :794-796 health = settings->health (Scales guard folds away; KillEmAll).
-        worm.health = settings_health;
+        // :794-796 health = settings->health, except in Scales (game_mode 3).
+        if game_mode != 3 {
+            worm.health = settings_health;
+        }
 
         // :799-805 the lone no-arg `rand() & 1` (raw next draw's LOW bit). Odd =>
         // face left-ish (Itof(32), dir 0); even => face right-ish (Itof(96), dir 1).
@@ -2884,6 +2921,8 @@ fn worm_death(
     nobjects: &mut Pool<NObject>,
     last_killed_idx: &mut i32,
     got_changed: &mut bool,
+    game_mode: u32,
+    settings_health: i32,
 ) -> Option<usize> {
     // :369 gate. Inert (zero draws, no mutation) while the worm is alive.
     if w.health > 0 {
@@ -2910,21 +2949,31 @@ fn worm_death(
     w.fire_cone = 0;
     w.ninjarope.out = false;
 
-    // :384-391 lives. KillEmAll: `--lives` (:390). The Scales death branch
-    // (`while health <= 0 { health += settings->health; --lives }`, :385-388) is
-    // UNPORTED — deferred past step 2: game_mode IS modelled since slice-6 T5,
-    // but no committed Scales scenario kills a worm, so the branch is unreached
-    // (the sim_slice6_scales golden wounds without killing).
-    w.lives -= 1;
+    // :384-391 lives. Scales (game_mode 3): wrap every whole settings->health of
+    // overkill into a lost life, leaving health in (0, settings_health]; every other
+    // mode: one life. `settings_health >= 1` is guaranteed by the 4½a builder
+    // (BuildError::InvalidHealth), so the loop terminates.
+    if game_mode == 3 {
+        while w.health <= 0 {
+            w.health += settings_health;
+            w.lives -= 1;
+        }
+    } else {
+        w.lives -= 1;
+    }
 
-    // :393-401 last_killed_idx / got_changed bookkeeping (no rand; unhashed).
-    // The GameOfTag multi-kill guard at :396-398 is UNPORTED — deferred past
-    // step 2: the assignment below matches C++ whenever the guard evaluates
-    // true, which holds for the first kill (last_killed_idx starts at -1) and
-    // always outside GameOfTag; the committed gametag golden has exactly one
-    // kill, so the divergent second-kill path is unreached.
+    // :393-401 last_killed_idx / got_changed (no rand; unhashed). GameOfTag keeps "it"
+    // when the killer is neither the victim nor "it" (:396-398) — unobservable with two
+    // worms (design §1.3 finding 3), ported for fidelity.
     let old_last_killed = *last_killed_idx;
-    *last_killed_idx = index;
+    if game_mode != 1
+        || *last_killed_idx < 0
+        || w.last_killed_by_idx < 0
+        || w.last_killed_by_idx == index
+        || w.last_killed_by_idx == *last_killed_idx
+    {
+        *last_killed_idx = index;
+    }
     *got_changed = old_last_killed != *last_killed_idx;
 
     // :403-405 the killer's `kills++` (hashed on master). Deferred to the caller
@@ -4525,7 +4574,7 @@ mod tests {
         let before = rand.last();
         let (mut lki, mut gc) = (-1i32, false);
 
-        let killer = worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        let killer = worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(rand.last(), before, "live worm: death block draws NO rand");
         assert_eq!(pool.len(), 0, "live worm: no spray");
@@ -4557,7 +4606,7 @@ mod tests {
             let _speed = refr.bound(20); // gib[0] speed_v (distribution 0 => no dist draws)
         }
 
-        let killer = worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        let killer = worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(rand.last(), refr.last(), "draws: sound(1) + 8 gibs x (angle+speed)");
         assert_eq!(pool.len(), 8, "blood 0 => kMax 0 => NO blood spray; exactly 8 gibs");
@@ -4588,7 +4637,7 @@ mod tests {
         let mut rand = seeded_rand(3);
         let (mut lki, mut gc) = (-1i32, false);
 
-        let killer = worm_death(&mut w, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        let killer = worm_death(&mut w, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(killer, Some(0), "killer worm 0 gets kills++ (:403-405)");
     }
@@ -4605,7 +4654,7 @@ mod tests {
         let mut rand = seeded_rand(3);
         let (mut lki, mut gc) = (-1i32, false);
         let self_killer =
-            worm_death(&mut w_self, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+            worm_death(&mut w_self, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
         assert_eq!(self_killer, None, "self-kill (killed_by == index) => no kills++");
 
         let mut w_none = dying_worm(0, 0, -1);
@@ -4613,7 +4662,7 @@ mod tests {
         let mut rand2 = seeded_rand(3);
         let (mut lki2, mut gc2) = (-1i32, false);
         let none_killer =
-            worm_death(&mut w_none, 0, 0, &types, &cossin, &mut rand2, &mut pool2, &mut lki2, &mut gc2);
+            worm_death(&mut w_none, 0, 0, &types, &cossin, &mut rand2, &mut pool2, &mut lki2, &mut gc2, 0, 100);
         assert_eq!(none_killer, None, "unknown killer (< 0) => no kills++");
     }
 
@@ -4649,7 +4698,7 @@ mod tests {
             refr.bound(10000);
         }
 
-        worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(
             rand.last(),
@@ -4681,7 +4730,7 @@ mod tests {
             refr.bound(20);
         }
 
-        worm_death(&mut w, 0, 1, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        worm_death(&mut w, 0, 1, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(rand.last(), refr.last(), "blood 1 => no blood draws; only sound + 8 gibs");
         assert_eq!(pool.len(), 8, "kMax == 1 is NOT > 1 => no blood spray; exactly 8 gibs");
@@ -4700,7 +4749,7 @@ mod tests {
         let mut rand = seeded_rand(1);
         let (mut lki, mut gc) = (-1i32, false);
 
-        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(pool.len(), 8, "gib loop runs EXACTLY 8 times ({{7,21,..,105}})");
     }
@@ -4720,7 +4769,7 @@ mod tests {
         let mut pool0: Pool<NObject> = Pool::new(600);
         let mut r0 = seeded_rand(2);
         let (mut lki0, mut gc0) = (-1i32, false);
-        worm_death(&mut w0, 0, 0, &types, &cossin, &mut r0, &mut pool0, &mut lki0, &mut gc0);
+        worm_death(&mut w0, 0, 0, &types, &cossin, &mut r0, &mut pool0, &mut lki0, &mut gc0, 0, 100);
         let mut ref0 = seeded_rand(2);
         ref0.bound(3); // sound
         for _ in 0..8 {
@@ -4733,7 +4782,7 @@ mod tests {
         let mut pool1: Pool<NObject> = Pool::new(600);
         let mut r1 = seeded_rand(2);
         let (mut lki1, mut gc1) = (-1i32, false);
-        worm_death(&mut w1, 1, 0, &types, &cossin, &mut r1, &mut pool1, &mut lki1, &mut gc1);
+        worm_death(&mut w1, 1, 0, &types, &cossin, &mut r1, &mut pool1, &mut lki1, &mut gc1, 0, 100);
         let mut ref1 = seeded_rand(2);
         ref1.bound(3); // sound
         for _ in 0..8 {
@@ -5057,7 +5106,7 @@ mod tests {
         let mut w = respawn_worm(150, 150, (0, 200), true);
         let mut rand = seeded_rand(999);
 
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, 0, &mut rand);
 
         // 4 steps: x 0->4 (++), y 200->196 (--). No rand consumed.
         assert_eq!(
@@ -5081,7 +5130,7 @@ mod tests {
         let mut level = flat_level(200, 200);
         let mut w = respawn_worm(150, 150, (1000, 1000), false);
         let mut rand = seeded_rand(1);
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, 0, &mut rand);
         assert_eq!(w.logic_respawn, Vec2::new(42, 42), "clamped to [.,width-158]=42");
         assert_eq!(rand.last(), 0, "ready=false => no draw even when (clamped) converged");
         assert!(!w.visible, "ready=false => no respawn");
@@ -5090,7 +5139,7 @@ mod tests {
         let mut level2 = flat_level(200, 200);
         let mut w2 = respawn_worm(150, 150, (-1000, -1000), false);
         let mut rand2 = seeded_rand(1);
-        do_respawning(&mut w2, &mut level2, &sprites, &tex, 100, &mut rand2);
+        do_respawning(&mut w2, &mut level2, &sprites, &tex, 100, 0, &mut rand2);
         assert_eq!(w2.logic_respawn, Vec2::new(0, 0), "clamped to [0,.]");
     }
 
@@ -5105,7 +5154,7 @@ mod tests {
         let mut w = respawn_worm(150, 150, (70, 70), false);
         let mut rand = seeded_rand(7);
 
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, 0, &mut rand);
 
         assert_eq!(rand.last(), 0, "converged but !ready => zero rand draws");
         assert!(!w.visible, "converged but !ready => no respawn");
@@ -5139,7 +5188,7 @@ mod tests {
             w.direction = 9;
             let mut rand = seeded_rand(seed);
 
-            do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+            do_respawning(&mut w, &mut level, &sprites, &tex, 100, 0, &mut rand);
 
             // Exactly 2 draws, in order: dirt puff THEN the lone aiming rand.
             assert_eq!(
@@ -5196,7 +5245,7 @@ mod tests {
         let mut level = flat_level(400, 400);
         let mut w = respawn_worm(150, 150, (70, 70), true);
         let mut rand = seeded_rand(seed);
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, 0, &mut rand);
 
         // The facing must follow the LOW bit (odd => Itof(32)/dir0).
         if low != 0 {
@@ -6095,5 +6144,102 @@ mod tests {
         state.shadow = true;
         state.process_frame(&[ControlState::new(), ControlState::new()]);
         assert!(!crate::shadow::enabled(), "end_frame clears the flag after the tick");
+    }
+
+    #[test]
+    fn a45_scales_death_wraps_the_overkill_into_lives() {
+        let mut w = dying_worm(0, -130, -1); // lives 5 (two_worms)
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (-1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 3, 100);
+        assert_eq!(w.lives, 3, "two whole settings_health of overkill => two lives (worm.cpp:385-388)");
+        assert_eq!(w.health, 70, "-130 + 100 + 100");
+    }
+
+    #[test]
+    fn a45_killemall_death_keeps_the_negative_health() {
+        let mut w = dying_worm(0, -130, -1);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (-1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
+        assert_eq!(w.lives, 4);
+        assert_eq!(w.health, -130);
+    }
+
+    #[test]
+    fn a45_gameoftag_guard_keeps_it_for_a_third_party_killer() {
+        // "it" = worm 1; worm 0 is killed by worm 2 (neither victim nor "it") => "it" stays.
+        let mut w = dying_worm(0, 0, 2);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 1, 100);
+        assert_eq!(lki, 1, "worm.cpp:396-398: the guard is false => no reassignment");
+        assert!(!gc);
+    }
+
+    #[test]
+    fn a45_gameoftag_guard_reassigns_when_it_is_the_killer() {
+        let mut w = dying_worm(0, 0, 1);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 1, 100);
+        assert_eq!(lki, 0, "killer == it => the victim becomes it");
+        assert!(gc);
+    }
+
+    #[test]
+    fn a45_scales_respawn_does_not_restore_health() {
+        let sprites = dirt_sprites();
+        let tex = [dirt_texture()];
+        let mut level = flat_level(400, 400);
+        let mut w = respawn_worm(150, 150, (70, 70), true);
+        w.health = 37;
+        let mut rand = seeded_rand(7);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, 3, &mut rand);
+        assert!(w.visible, "converged + ready => respawned");
+        assert_eq!(w.health, 37, "Scales: no restore (worm.cpp:794-796)");
+
+        let mut level2 = flat_level(400, 400);
+        let mut w2 = respawn_worm(150, 150, (70, 70), true);
+        w2.health = 37;
+        let mut rand2 = seeded_rand(7);
+        do_respawning(&mut w2, &mut level2, &sprites, &tex, 100, 0, &mut rand2);
+        assert_eq!(w2.health, 100, "KillEmAll: health = settings->health");
+    }
+
+    #[test]
+    fn a45_do_healing_scales_damages_the_other_worm() {
+        let mut worms: Vec<WormState> = two_worms().iter().map(WormState::from_init).collect();
+        worms[0].health = 50;
+        do_healing(&mut worms, 0, 30, 3, 100);
+        assert_eq!(worms[0].health, 80);
+        assert_eq!(worms[1].health, 70, "game.cpp:594-605: the healed amount is dealt to the others");
+        assert_eq!(worms[1].last_killed_by_idx, -1, "not killed => no attribution");
+
+        worms[1].health = 10;
+        do_healing(&mut worms, 0, 30, 3, 100);
+        assert_eq!(worms[1].health, -20);
+        assert_eq!(worms[1].last_killed_by_idx, 0, "the healer is the killer (DoDamageDirect by_idx)");
+    }
+
+    #[test]
+    fn a45_do_healing_killemall_clamps_and_leaves_the_others() {
+        let mut worms: Vec<WormState> = two_worms().iter().map(WormState::from_init).collect();
+        worms[0].health = 90;
+        do_healing(&mut worms, 0, 30, 0, 100);
+        assert_eq!(worms[0].health, 100);
+        assert_eq!(worms[1].health, 100);
     }
 }

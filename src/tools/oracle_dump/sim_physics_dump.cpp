@@ -325,8 +325,12 @@ Scenario ParseScenario(char const* path) {
         std::exit(1);
       }
       ls >> s.settings_file;
+      // Exactly 1 argument, like the Rust parser. A token starting with `#` is the start of
+      // a trailing comment, NOT a second argument: the Rust side strips from the first `#`
+      // (`raw.split('#').next()`), so without this the two parsers would disagree on
+      // `settings foo.cfg  # note`.
       std::string extra;
-      if (s.settings_file.empty() || (ls >> extra)) {
+      if (s.settings_file.empty() || (ls >> extra && extra[0] != '#')) {
         std::fprintf(stderr, "settings expects exactly 1 argument\n");
         std::exit(1);
       }

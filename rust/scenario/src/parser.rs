@@ -24,7 +24,9 @@
 //! render_flash <tick> <amount>                  # Slice 3b; draw-only screen-flash injection
 //! render_hud                                     # Slice 3e; draw-time HUD/minimap draw (0 args)
 //! render_live                                    # Slice 4d; opt-in live-viewport path (0 args)
-//! settings    <file>                             # Step 4½a-1; oracle-only setup sidecar (see below)
+//! settings    <file>                             # Step 4½a-1; oracle-only setup sidecar — see
+//!                                                 # [`Scenario::settings`]. Excludes `worm`,
+//!                                                 # `weapon`, `game_mode`, `max_bonuses`, `render*`
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
@@ -395,8 +397,9 @@ impl Scenario {
     /// value and its absence does not affect the round-trip identity.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
-        // Required globals, then the always-defaulted ones (0 re-parses to 0, so
-        // emitting them unconditionally still round-trips and is explicit/diffable).
+        // The three required globals, then EITHER the `settings` sidecar OR the two
+        // always-defaulted directives it replaces (0 re-parses to 0, so emitting those
+        // unconditionally on the classic path still round-trips and is explicit/diffable).
         out.push_str(&format!("seed {}\n", self.seed));
         out.push_str(&format!("level {}\n", self.level));
         out.push_str(&format!("ticks {}\n", self.ticks));

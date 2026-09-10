@@ -255,7 +255,15 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   WINCHESTER, LASER, GAUSS GUN and MISSILE enter Step-2 branches that were never ported (the
   `ST_LASER` do-loop and its siblings — the sim panics). Weapon selection makes them choosable, so
   they are ported bit-exact, with sim goldens, **before** 4½c. Until then they are banned in 4½a's
-  goldens. Needs its own design + plan.
+  goldens. **Widened 2026-09-10 by its design (§9 Q1, controller ruling: all in one slice): 13
+  weapons, not 5** — also LARPA, BOUNCY LARPA, CRACKLER (particle trails via `Create1`/`Create2`),
+  MINI NUKE, BIG NUKE, NAPALM, HELLRAIDER (splinter trails, `nobject.cpp:133-138`) and BOOBY TRAP
+  (chain explosions, `sobject.cpp:148-150`); MISSILE's `ProcessSteerables` is a *silent* no-op, not
+  a panic, and porting it closes Step 4d's `steerable_sum` camera deferral. Also moves input
+  application to the top of the tick (C++ order; the MISSILE Up boost is the first object-loop
+  control read). Design: `specs/2026-09-10-liero-rs-step4.5-slice4.5c0-weapon-branches-design.md`;
+  plan: `plans/2026-09-10-liero-rs-step4.5-slice4.5c0-plan.md` (T0–T13). 4½a-2 plan:
+  `plans/2026-09-10-liero-rs-step4.5-slice4.5a2-plan.md` (T0–T7).
 - **4½c — Weapon selection phase.** The `weapsel.cpp` port into `sim` as a Bevy-free struct with
   `process_frame(inputs) -> bool`; the constructor's RNG rejection loops, `Randomize`, bot auto-ready
   (`is_ready[i] = controller != 0 && select_bot_weapons != 1`, `weapsel.cpp:95`), left/right cycling

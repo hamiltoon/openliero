@@ -350,9 +350,10 @@ pub(crate) fn check_for_spec_worm_hit(
 /// * **explode arms** (`:205-233`, `if do_explode`) — `create_on_exp` fully ported
 ///   via [`sobject_create`] (BEFORE `dirt_effect`, the C++ order; this is the
 ///   splinter's secondary `small_explosion`); `dirt_effect` fully ported via
-///   [`draw_dirt_effect`] (`CorrectShadow` omitted, O4); splinter scatter fully
-///   ported via [`nobject_create2`] (`rand(128)` + `rand(2)` per splinter, then
-///   Create2's draws). All three are skipped for the dirt particle.
+///   [`draw_dirt_effect`] (+ `CorrectShadow` behind `SimState.shadow`, 4½a-1);
+///   splinter scatter fully ported via [`nobject_create2`] (`rand(128)` +
+///   `rand(2)` per splinter, then Create2's draws). All three are skipped for the
+///   dirt particle.
 ///
 /// `inew` is computed once before the clamp and reused by the ground test (the
 /// clamp mutates `pos`, `inew` stays frozen) — the same ordering quirk as
@@ -475,9 +476,8 @@ pub fn nobject_process(
         if ty.expl_ground {
             // :119-128 BlitImageOnMap-on-ground arm (Slice-4d): a `draw_on_map`
             // object with `start_frame > 0` (the spent SHELL) paints its 7x7 image
-            // into `material_id` at `(ipos - 3)` before exploding. `CorrectShadow`
-            // (:123-127, behind settings->shadow) is OMITTED (shadow off, render-
-            // only). Inert for the dirt particle (draw_on_map=false).
+            // into `material_id` at `(ipos - 3)` before exploding, then (:123-127)
+            // CorrectShadow behind settings->shadow (Step 4½a-1).
             if ty.start_frame > 0 && ty.draw_on_map {
                 blit_image_on_map(
                     level,
@@ -485,6 +485,13 @@ pub fn nobject_process(
                     (ty.start_frame + obj.cur_frame) as usize,
                     ipos_x - 3,
                     ipos_y - 3,
+                );
+                crate::shadow::correct_shadow_if_enabled(
+                    level,
+                    ipos_x - 8,
+                    ipos_y - 8,
+                    ipos_x + 9,
+                    ipos_y + 9,
                 );
             }
             // :130
@@ -649,7 +656,7 @@ pub fn nobject_process(
             );
         }
 
-        // :211-219 dirt_effect crater. Fully ported; CorrectShadow omitted (O4).
+        // :211-219 dirt_effect crater + CorrectShadow behind settings->shadow (4½a-1).
         // Inert for the dirt particle (dirt_effect=-1).
         if ty.dirt_effect >= 0 {
             draw_dirt_effect(
@@ -661,6 +668,8 @@ pub fn nobject_process(
                 ftoi(obj.pos.y) - 7,
                 rand,
             );
+            let (px, py) = (ftoi(obj.pos.x), ftoi(obj.pos.y));
+            crate::shadow::correct_shadow_if_enabled(level, px - 10, py - 10, px + 11, py + 11);
         }
 
         // :221-228 splinter scatter. Per splinter: rand(128) [kAngle] + rand(2)

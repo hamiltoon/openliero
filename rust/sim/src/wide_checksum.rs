@@ -186,6 +186,7 @@ mod tests {
             settings_health: 100,
             game_mode: 0,
             time_to_lose: 600,
+            shadow: false,
             last_killed_idx: -1,
             got_changed: false,
             settings_max_bonuses: 0,

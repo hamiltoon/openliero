@@ -685,8 +685,8 @@ pub fn wobject_process(
 /// centred on the wobject, with the C++ `Ftoi(x) - 7, Ftoi(y) - 7` top-left
 /// offset ([`ftoi`] is the arithmetic `>> 16`). This is where greenball-style
 /// explosions (dirt_effect=6) destroy terrain and draw their `rand(rframe)`.
-/// **`CorrectShadow` is omitted (O4)** — the dumper sets `settings->shadow =
-/// false`, so it never runs.
+/// **`CorrectShadow` is live since 4½a-1 (behind `SimState.shadow`)** — the dumper's
+/// classic path sets `settings->shadow = false`, so it is inert for prior goldens.
 ///
 /// Branch behaviour by weapon:
 /// * **fan** (`create_on_exp = -1`, `dirt_effect = -1`) — both branches skipped:
@@ -811,6 +811,9 @@ pub fn blow_up(
             ftoi(pos.y) - 7,
             rand,
         );
+        // weapon.cpp:121-123 CorrectShadow behind settings->shadow (Step 4½a-1).
+        let (ix, iy) = (ftoi(pos.x), ftoi(pos.y));
+        crate::shadow::correct_shadow_if_enabled(level, ix - 10, iy - 10, ix + 11, iy + 11);
     }
 }
 

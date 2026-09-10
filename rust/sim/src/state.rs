@@ -661,6 +661,9 @@ pub const MAT_DIRT_ROCK: u8 = MAT_DIRT | MAT_DIRT2 | MAT_ROCK;
 /// worm-body palette index carries. `CheckForSpecWormHit` (T2) tests it on the
 /// worm-sprite pixel via [`LevelSim::worm_pixel`].
 pub const MAT_WORM: u8 = 1 << 5;
+/// `Material::kSeeShadow` (`material.hpp:11`, `1 << 4`): a pixel that shows a shadow
+/// when a `DirtRock` pixel sits at `(x + 3, y - 3)` — `CorrectShadow`'s predicate.
+pub const MAT_SEE_SHADOW: u8 = 1 << 4;
 
 impl LevelSim {
     /// Port of `Level::CheckedMatWrap(x, y).Background()` (`level.hpp:124-130` +
@@ -1175,6 +1178,12 @@ pub struct SimState {
     /// (it uses the `Settings` default), so this defaults to **600** post-`new` — no
     /// scenario directive, mirroring the dumper. **Not hashed** (settings scalar).
     pub time_to_lose: i32,
+    /// C++ `Settings::shadow` (`settings.hpp:74`, in-game default `true`): gates
+    /// `CorrectShadow` after every in-frame crater (`sim::shadow`, Step 4½a-1). The
+    /// oracle dumper's classic path forces it `false`, so it defaults to **false**
+    /// post-`new` and every prior golden stays byte-identical; the 4½a builder assigns
+    /// the setting. **Not hashed** (its effect on `material_id` is).
+    pub shadow: bool,
 
     /// C++ `Game::last_killed_idx` (`game.hpp`, default `-1`): the index of the
     /// most recently killed worm. Written by the death block (`worm.cpp:393-401`)
@@ -1221,7 +1230,7 @@ pub struct SimState {
     /// [`crate::sound`] context at the top of [`process_frame`](Self::process_frame)
     /// so a deep callsite can play a hook without threading its index. **Not
     /// hashed** (a sound-table input, like the object `start_sound`s); defaulted to
-    /// [`SoundHooks::default`] post-`new` (the difftest/game assign the real TC
+    /// [`SoundHooks::default`] post-`new` (`scenario::load` assigns the real TC
     /// values), so every prior golden stays byte-identical (sound never hashes).
     pub sound_hooks: SoundHooks,
     /// The per-tick **sound-event stream** (Slice-4c, `sound.rs`): the one-shot /
@@ -1388,6 +1397,7 @@ impl SimState {
             // defaults to the C++ `Settings` value 600 (the dumper never overrides it).
             game_mode: 0,
             time_to_lose: 600,
+            shadow: false,
             // Game-level kill bookkeeping (worm.cpp:393-401). C++ defaults:
             // last_killed_idx = -1, got_changed = false. Not hashed; written only
             // when a worm dies (unreached for slices 1-5c) => priors identical.
@@ -1506,6 +1516,8 @@ impl SimState {
         // panic or a direct unit-test call can never leak stale ones in). Drained
         // into `self.shake_events` at the BOTTOM of the tick. Determinism-inert.
         crate::shake::begin_frame();
+        // Step 4½a-1: publish this tick's settings->shadow for the CorrectShadow sites.
+        crate::shadow::begin_frame(self.shadow);
 
         // Disjoint field borrows: destructuring `&mut self` binds each field as a
         // separate `&mut` (default binding mode), so the object loops can hold
@@ -2274,6 +2286,8 @@ impl SimState {
         // max(type.flash, screen_flash) at each sobject-create). Unhashed side
         // channel — the render reads it, the hash never does (design §0).
         *screen_flash = crate::flash::take_frame();
+        // Step 4½a-1: the CorrectShadow flag is off again outside the tick.
+        crate::shadow::end_frame();
     }
 }
 
@@ -2667,8 +2681,8 @@ fn limit_xy(x: &mut i32, y: &mut i32, max_x: i32, max_y: i32) {
 ///    HIGH bit of the same draw): they advance the RNG identically but select
 ///    different bits, so the call form is load-bearing.
 ///
-/// Omissions (faithful to the dumper's settings): `CorrectShadow` (`:784-786`,
-/// gated on `settings->shadow`, **false**), the `SoundAlive` play (`:789`) and
+/// `CorrectShadow` (`:784-786`) is live since 4½a-1 (behind `SimState.shadow`).
+/// Omissions (faithful to the dumper's settings): the `SoundAlive` play (`:789`) and
 /// `AfterSpawn` stats (`:807`) — all render/sound/stats side effects the sim
 /// drops. The Scales-of-Justice guard on the health restore (`:794`) folds away
 /// (the TC is KillEmAll), so `health` is always restored here.
@@ -2727,7 +2741,14 @@ fn do_respawning(
         let ipos_y = ftoi(worm.pos.y);
         draw_dirt_effect(level, large_sprites, textures, 0, ipos_x - 7, ipos_y - 7, rand);
 
-        // :784-786 CorrectShadow — gated on settings->shadow (false) => OMITTED.
+        // :784-786 CorrectShadow behind settings->shadow (Step 4½a-1).
+        crate::shadow::correct_shadow_if_enabled(
+            level,
+            ipos_x - 10,
+            ipos_y - 10,
+            ipos_x + 11,
+            ipos_y + 11,
+        );
 
         // :788 ready = false; :789 `Play(sound_hook[SoundAlive])` — Slice-4c
         // respawn one-shot (no rand; not hashed).
@@ -6065,5 +6086,14 @@ mod tests {
         do_damage(&mut ws, 1, 0, 0, 3, 100);
         assert_eq!(ws[1].health, 100);
         assert_eq!(ws[0].health, 50, "no heal when amount == 0");
+    }
+
+    #[test]
+    fn a45_shadow_defaults_off_and_process_frame_clears_the_frame_flag() {
+        let mut state = idle_state(3);
+        assert!(!state.shadow, "post-new default false => every golden byte-identical");
+        state.shadow = true;
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert!(!crate::shadow::enabled(), "end_frame clears the flag after the tick");
     }
 }

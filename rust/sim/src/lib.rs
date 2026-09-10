@@ -20,6 +20,7 @@ pub mod levelgen;
 pub mod nobject;
 pub mod physics;
 pub mod pool;
+pub mod shadow;
 pub mod shake;
 pub mod sobject;
 pub mod sound;

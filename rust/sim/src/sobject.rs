@@ -35,7 +35,7 @@
 //!    `rand(20000)`, `rand(20000)`).
 //! 5. **Crater** (`:209-210`): iff `dirt_effect >= 0`, [`draw_dirt_effect`] carves
 //!    the level and draws `rand(r_frame)` — the LAST cluster draw. `CorrectShadow`
-//!    is omitted (`settings->shadow = false`, O4).
+//!    follows behind `SimState.shadow` (4½a-1; draws no rand).
 //! 6. **Bonus chain-loop** (`:217-227`): LIVE (Slice 6 T3). Each bonus inside the
 //!    `±detect_range` box is freed and replaced by a recursive
 //!    `sobject_types[0].Create` (the booby) at its `Ftoi(pos)`; the booby's own
@@ -391,7 +391,7 @@ pub fn sobject_create(
 
     // :209-215 crater. Carve AFTER the dirt-throw (the trap): draw_dirt_effect
     // writes material_id, and its rand(r_frame) is the LAST cluster draw.
-    // CorrectShadow omitted (settings->shadow = false, O4).
+    // :212-214 CorrectShadow behind settings->shadow (Step 4½a-1).
     if ty.dirt_effect >= 0 {
         draw_dirt_effect(
             level,
@@ -402,6 +402,7 @@ pub fn sobject_create(
             y - 7,
             rand,
         );
+        crate::shadow::correct_shadow_if_enabled(level, x - 10, y - 10, x + 11, y + 11);
     }
 
     // :217-227 bonus chain-loop (Slice 6 T3 — deferral #1, closed). After the

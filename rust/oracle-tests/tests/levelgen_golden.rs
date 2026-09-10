@@ -12,7 +12,7 @@
 //! stage token = `<fnv1a64(material_id) %016x>:<rand.last %08x>`; `<shadowed>` = bare hash
 //! after MakeShadow or `-`; `<dig>` = 12 DrawDirtEffect(7) stamps (+ CorrectShadow when
 //! shadow) continuing the generation RNG (worm.cpp:931-934 shape). The `shadow=1` dig tokens
-//! need 4½a's `sim::shadow::correct_shadow` and are checked by the second test (T9).
+//! go through 4½a's `sim::shadow::correct_shadow` and are checked by the second test.
 //! `<level_file>` is relative to the repo root; two `file` lines load the dumper-written
 //! fixture `golden/levelgen_shadow_fixture.lev` (the pre-MakeShadow `gen 42 128 96` map) with
 //! shadow 1 and 0, so the file branch's MakeShadow wiring is a check that can fail.
@@ -23,6 +23,7 @@ use assets::sprite::{SpriteSet, Tga};
 use assets::tc::{TcConfig, Texture};
 use sim::blit::draw_dirt_effect;
 use sim::levelgen::{self, make_shadow, LevelGenAssets, LevelGenParams, RockStats};
+use sim::shadow::correct_shadow;
 use sim::state::LevelSim;
 use sim_core::rng::Rand;
 
@@ -76,7 +77,7 @@ fn load_tc() -> Tc {
 
 /// Mirror of the dumper's `Dig`: 12 dig-texture stamps at `((i*41+5) % w - 7,
 /// (i*29+7) % h - 7)`, each followed by `after_stamp(level, x, y)` — nothing for
-/// `shadow=0`, CorrectShadow over `Rect(x-3, y-3, x+18, y+18)` for `shadow=1` (T9).
+/// `shadow=0`, CorrectShadow over `Rect(x-3, y-3, x+18, y+18)` for `shadow=1`.
 fn dig_stamps(
     level: &mut LevelSim,
     tc: &Tc,
@@ -232,7 +233,8 @@ fn check_gen(n: usize, t: &[&str], tc: &Tc, cov: &mut Coverage) {
     );
 
     // Dig stage, continuing the generation RNG. shadow=0: DrawDirtEffect 7 only. shadow=1 adds
-    // CorrectShadow (4½a's port) and is checked by `levelgen_dig_stage_with_correct_shadow` (T9).
+    // CorrectShadow (4½a's port) and is checked by
+    // `levelgen_dig_stage_with_correct_shadow_matches_cpp` below.
     if !shadow {
         dig_stamps(&mut level, tc, &mut rand, |_, _, _| {});
         assert_eq!(
@@ -391,5 +393,65 @@ fn levelgen_matches_cpp_oracle() {
     assert_eq!(
         on, shadowed,
         "shadow fixture shadow=1 != the gen 42 128 96 MakeShadow map"
+    );
+}
+
+/// 4½b T9 — the `shadow=1` dig tokens through 4½a's `CorrectShadow` port: after generation
+/// + MakeShadow, 12 dig stamps each followed by CorrectShadow over `Rect(x-3, y-3, x+18,
+/// y+18)` (worm.cpp:931-934), continuing the generation RNG. Non-vacuity: on at least one
+/// line the same stamps without CorrectShadow give a different map.
+#[test]
+fn levelgen_dig_stage_with_correct_shadow_matches_cpp() {
+    let golden = std::fs::read_to_string(format!("{ROOT}/rust/oracle-tests/golden/levelgen.txt"))
+        .expect("read golden/levelgen.txt");
+    let tc = load_tc();
+    let assets = LevelGenAssets {
+        large_sprites: &tc.large,
+        textures: &tc.textures,
+        material_flags: &tc.flags,
+    };
+    let mut checked = 0usize;
+    let mut changed = 0usize;
+    for (i, line) in golden.lines().enumerate() {
+        let t: Vec<&str> = line.split_whitespace().collect();
+        if t.first().copied() != Some("gen") || t[4] != "1" {
+            continue;
+        }
+        let seed: u32 = t[1].parse().expect("seed");
+        let w: i32 = t[2].parse().expect("w");
+        let h: i32 = t[3].parse().expect("h");
+        let ctx = format!("line {} (gen seed {seed} {w}x{h} shadow 1)", i + 1);
+        let prepare = |rand: &mut Rand| {
+            let mut l = levelgen::generate_random(&assets, w, h, rand);
+            make_shadow(&mut l);
+            l
+        };
+
+        let mut rand = seeded(seed);
+        let mut level = prepare(&mut rand);
+        dig_stamps(&mut level, &tc, &mut rand, |l, x, y| {
+            correct_shadow(l, x - 3, y - 3, x + 18, y + 18);
+        });
+        assert_eq!(
+            stage(&level.material_id, &rand),
+            t[12],
+            "{ctx}: dig stage with CorrectShadow (blit.cpp:624-639)"
+        );
+
+        let mut r2 = seeded(seed);
+        let mut plain = prepare(&mut r2);
+        dig_stamps(&mut plain, &tc, &mut r2, |_, _, _| {});
+        if plain.material_id != level.material_id {
+            changed += 1;
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 21,
+        "expected >= 21 shadow=1 gen lines, got {checked}"
+    );
+    assert!(
+        changed > 0,
+        "CorrectShadow never changed a dig result (vacuous)"
     );
 }

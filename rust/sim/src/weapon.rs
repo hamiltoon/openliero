@@ -296,9 +296,17 @@ pub enum WObjectOutcome {
 /// trips loudly, or omitted because they need state the driver owns):
 /// steering (`shot_type` 2/3) and the laser do-loop, `mult_speed`, and
 /// object/particle trails are all `debug_assert`ed to their fan-shaped no-op
-/// values. The `collide_with_objects` impulse loop needs the wobject/nobject
-/// pools and draws no RNG under the single-shot scenarios (self-skip), so it is
-/// omitted here and lands with the driver.
+/// values.
+///
+/// **The `collide_with_objects` impulse loop (`weapon.cpp:212-232`) is now LIVE**
+/// (Slice-4½a-1 T8b): a constant `impulse = vel * blow_away / 100` is added to
+/// every wobject in the inclusive ±2 px box that does **not** match this
+/// wobject's type *and* owner, then to **every** nobject in that box (no
+/// type/owner skip). It draws no RNG. It was previously omitted as "inert +
+/// driver-owned", which was true only while no golden fired FAN (the one TC
+/// weapon with the flag) near a live object; the settings-matrix goldens do, and
+/// the omission was the `nobjects`-column divergence at scales t219 /
+/// killemall t338 / gametag t388.
 ///
 /// **The in-flight worm-hit arm (`weapon.cpp:287-326`) is now LIVE** (Slice-5′a
 /// T3, re-applying `fd33bbc`): after the timeout countdown a per-worm loop, gated
@@ -487,9 +495,63 @@ pub fn wobject_process(
 
     // The particle-trail spawn (weapon.cpp:201-210) goes here in C++; deferred (no
     // fired weapon in this TC has part_trail_obj >= 0 — bazooka = -1; guarded above).
-    // The collide_with_objects impulse loop (weapon.cpp:212-232) goes here in C++;
-    // omitted (driver-owned + inert for one shot; no RNG drawn under the scenario).
     // The worm-hit loop (weapon.cpp:287-326) is AFTER the timeout, below.
+
+    // collide_with_objects impulse (weapon.cpp:212-232) — LIVE (T8b). FAN is the
+    // only TC weapon with the flag (`fan.cfg`, blowAway = 30). Draws NO rand.
+    // Runs AFTER mult_speed / the trails and BEFORE the boundary clamp, so the
+    // impulse reads the fully-updated `vel` and the box test reads the
+    // already-moved `pos`. Ordering that is load-bearing:
+    //   * `impulse = vel * blow_away / 100` (`:213`) is computed ONCE, from this
+    //     wobject's post-mult_speed vel, and is a CONSTANT for both loops —
+    //     truncating `/100` (`Vec2::div`), not a shift.
+    //   * wobjects first (`:215-223`), then nobjects (`:225-231`); each walks the
+    //     pool in slot order (`ExactObjectList::All()` == `Pool::iter_mut`).
+    //   * the wobject loop skips an object only when it matches BOTH the firing
+    //     weapon type and the owner (`:217` `i->type != type || i->owner_idx !=
+    //     owner_idx`). That is what excludes `this`: the driver
+    //     (`state.rs:1738-1799`) copied this wobject out by value, so its slot
+    //     still holds a STALE copy with the same type+owner. Do NOT "simplify"
+    //     this to a slot-index test — a mutation of that slot would be lost.
+    //     Earlier slots in the driver's walk are already written back (C++ sees
+    //     their post-Process values too); later slots are untouched. Both match.
+    //   * the nobject loop has NO type/owner skip (`:226`) — every nobject in the
+    //     box is kicked, including the firer's own debris.
+    //   * the box test (`:218-219`, `:227-228`) is INCLUSIVE on both ends:
+    //     `pos.x >= i->pos.x - Itof(2) && pos.x <= i->pos.x + Itof(2)` and the
+    //     same for y. `wrapping_*` mirrors C++'s two's-complement fixed math.
+    // Omitting this was the slice-4½a-1 divergence (scales t219 / killemall t338 /
+    // gametag t388, `nobjects` column only): no prior golden fired FAN with
+    // another object inside the 2 px box.
+    if weapon.collide_with_objects {
+        let impulse = obj.vel.mul(weapon.blow_away).div(100);
+        let two = itof(2);
+
+        // :215-223 — wobjects, skipping same type AND same owner (i.e. `this`).
+        for i in wobjects.iter_mut() {
+            if i.ty == obj.ty && i.owner_idx == obj.owner_idx {
+                continue;
+            }
+            if obj.pos.x >= i.pos.x.wrapping_sub(two)
+                && obj.pos.x <= i.pos.x.wrapping_add(two)
+                && obj.pos.y >= i.pos.y.wrapping_sub(two)
+                && obj.pos.y <= i.pos.y.wrapping_add(two)
+            {
+                i.vel = i.vel.add(impulse);
+            }
+        }
+
+        // :225-231 — nobjects, NO type/owner skip.
+        for i in nobjects.iter_mut() {
+            if obj.pos.x >= i.pos.x.wrapping_sub(two)
+                && obj.pos.x <= i.pos.x.wrapping_add(two)
+                && obj.pos.y >= i.pos.y.wrapping_sub(two)
+                && obj.pos.y <= i.pos.y.wrapping_add(two)
+            {
+                i.vel = i.vel.add(impulse);
+            }
+        }
+    }
 
     // Boundary clamp (weapon.cpp:234-247). inew = Ftoi(pos + vel), computed ONCE
     // and reused by the collision test; the clamp below mutates pos, not inew.
@@ -3326,5 +3388,272 @@ mod tests {
         assert_eq!(sobjects.len(), 0, "no trail spawn when cycles % delay != 0");
         // Steering still applied (independent of the trail gate).
         assert_ne!(obj.vel, Vec2::new(itof(2), itof(1)), "steering runs every flight tick");
+    }
+
+    // ---- T8b: collide_with_objects impulse loop (weapon.cpp:212-232) ---------
+
+    // The real FAN numbers from the slice-4½a-1 divergence diagnosis (scales
+    // t219): the flying FAN wobject and the constant impulse it hands out.
+    // `blowAway = 30` (data/TC/openliero/weapons/fan.cfg:10), so
+    // impulse = vel * 30 / 100 = (-35241, 1872) with C++ truncating division.
+    const FAN_POS: Vec2 = Vec2 {
+        x: 9_332_730,
+        y: 12_380_096,
+    };
+    const FAN_VEL: Vec2 = Vec2 {
+        x: -117_471,
+        y: 6_242,
+    };
+    const FAN_IMPULSE: Vec2 = Vec2 {
+        x: -35_241,
+        y: 1_872,
+    };
+
+    // A FAN-shaped weapon for the impulse block: shot_type normal, no bounce,
+    // mult_speed 100, no trails, no animation, no ground explode — so a flight
+    // tick reaches `collide_with_objects` with `vel` exactly as it was set.
+    fn impulse_weapon(collide_with_objects: bool, blow_away: i32) -> Weapon {
+        Weapon {
+            id: 24,
+            shot_type: ST_NORMAL,
+            bounce: 0,
+            mult_speed: 100,
+            gravity: 0,
+            expl_ground: false,
+            time_to_explo: 0,
+            num_frames: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            collide_with_objects,
+            blow_away,
+            ..Default::default()
+        }
+    }
+
+    // The flying wobject, positioned so that after the tick's `pos += vel` it sits
+    // exactly on FAN_POS (the impulse block runs AFTER the move).
+    fn impulse_shooter() -> WObject {
+        WObject {
+            pos: FAN_POS.sub(FAN_VEL),
+            vel: FAN_VEL,
+            cur_frame: 0,
+            time_left: 100, // far above 0 -> no timeout explode
+            ty: Some(24),
+            owner_idx: 0,
+        }
+    }
+
+    // Drive `wobject_process` with REAL wobject/nobject pools on an all-air level
+    // and no worms (the in-flight worm-hit arm is inert).
+    fn proc_impulse(
+        obj: &mut WObject,
+        weapon: &Weapon,
+        wobjects: &mut Pool<WObject>,
+        nobjects: &mut Pool<NObject>,
+        rand: &mut Rand,
+    ) -> WObjectOutcome {
+        let mut level = air_level();
+        let mut worms: [WormState; 0] = [];
+        let nobject_types: [NObjectType; 0] = [];
+        let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bonuses: Pool<Bonus> = Pool::new(1);
+        let worm_sprites = SpriteSet::default();
+        let large_sprites = SpriteSet::default();
+        let cossin = precompute_cossin();
+        wobject_process(
+            obj,
+            &mut level,
+            weapon,
+            &[],
+            0,
+            &mut worms,
+            wobjects,
+            nobjects,
+            &nobject_types,
+            &mut sobjects,
+            &[],
+            &mut bonuses,
+            &worm_sprites,
+            &large_sprites,
+            &[],
+            &cossin,
+            100,
+            0,
+            100,
+            rand,
+        )
+    }
+
+    fn dirt_particle(pos: Vec2, vel: Vec2) -> NObject {
+        NObject {
+            pos,
+            vel,
+            cur_frame: 0,
+            ty: Some(2),
+            owner_idx: 0,
+            time_left: 100,
+        }
+    }
+
+    #[test]
+    fn collide_with_objects_adds_vel_blow_away_over_100_to_a_nearby_nobject() {
+        // weapon.cpp:213 `impulse = vel * blowAway / 100` (truncating), :225-231
+        // adds it to EVERY nobject inside the inclusive ±Itof(2) box. The three
+        // slots below are the real scales-t219 s2/s4/s5 particles and their C++
+        // post-loop velocities (divergence-diagnosis.md §7).
+        let weapon = impulse_weapon(true, 30);
+        let mut obj = impulse_shooter();
+        let mut wobjects: Pool<WObject> = Pool::new(4);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        nobjects.spawn(dirt_particle(FAN_POS, Vec2::new(46_459, -1_124)));
+        nobjects.spawn(dirt_particle(FAN_POS, Vec2::new(22_945, 25_978)));
+        nobjects.spawn(dirt_particle(FAN_POS, Vec2::new(37_932, -10_221)));
+        let mut rand = seeded();
+
+        proc_impulse(&mut obj, &weapon, &mut wobjects, &mut nobjects, &mut rand);
+
+        let vels: Vec<Vec2> = nobjects.iter().map(|n| n.vel).collect();
+        assert_eq!(
+            vels,
+            vec![
+                Vec2::new(11_218, 748),
+                Vec2::new(-12_296, 27_850),
+                Vec2::new(2_691, -8_349),
+            ],
+            "each nobject got exactly vel*30/100 = {FAN_IMPULSE:?} added"
+        );
+    }
+
+    #[test]
+    fn collide_with_objects_box_is_inclusive_at_two_pixels_and_excludes_three() {
+        // weapon.cpp:227-228: `pos >= i->pos - Itof(2) && pos <= i->pos + Itof(2)`
+        // on BOTH axes — inclusive at exactly 2 px, excluded at 3 px.
+        let weapon = impulse_weapon(true, 30);
+        let mut obj = impulse_shooter();
+        let mut wobjects: Pool<WObject> = Pool::new(4);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        // s0: +2 px in x (inclusive edge). s1: -2 px in y (inclusive edge).
+        // s2: +3 px in x (outside). s3: -3 px in y (outside).
+        let base = Vec2::new(1_000, 2_000);
+        nobjects.spawn(dirt_particle(
+            Vec2::new(FAN_POS.x + itof(2), FAN_POS.y),
+            base,
+        ));
+        nobjects.spawn(dirt_particle(
+            Vec2::new(FAN_POS.x, FAN_POS.y - itof(2)),
+            base,
+        ));
+        nobjects.spawn(dirt_particle(
+            Vec2::new(FAN_POS.x + itof(3), FAN_POS.y),
+            base,
+        ));
+        nobjects.spawn(dirt_particle(
+            Vec2::new(FAN_POS.x, FAN_POS.y - itof(3)),
+            base,
+        ));
+        let mut rand = seeded();
+
+        proc_impulse(&mut obj, &weapon, &mut wobjects, &mut nobjects, &mut rand);
+
+        let kicked = base.add(FAN_IMPULSE);
+        let vels: Vec<Vec2> = nobjects.iter().map(|n| n.vel).collect();
+        assert_eq!(
+            vels,
+            vec![kicked, kicked, base, base],
+            "±2 px is inside the box, ±3 px is outside"
+        );
+    }
+
+    #[test]
+    fn collide_with_objects_off_leaves_every_pool_object_untouched() {
+        // The whole block is gated on `w.collide_with_objects` (weapon.cpp:212).
+        let weapon = impulse_weapon(false, 30);
+        let mut obj = impulse_shooter();
+        let mut wobjects: Pool<WObject> = Pool::new(4);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let base = Vec2::new(1_000, 2_000);
+        nobjects.spawn(dirt_particle(FAN_POS, base));
+        let mut other = impulse_shooter();
+        other.pos = FAN_POS;
+        other.owner_idx = 1;
+        other.vel = base;
+        wobjects.spawn(other);
+        let mut rand = seeded();
+
+        proc_impulse(&mut obj, &weapon, &mut wobjects, &mut nobjects, &mut rand);
+
+        assert_eq!(nobjects.iter().next().unwrap().vel, base, "flag off: nobject untouched");
+        assert_eq!(wobjects.iter().next().unwrap().vel, base, "flag off: wobject untouched");
+    }
+
+    #[test]
+    fn collide_with_objects_skips_same_type_and_owner_wobjects_only() {
+        // weapon.cpp:217 `if (i->type != type || i->owner_idx != owner_idx)` — a
+        // wobject is kicked unless it matches BOTH the firing weapon type and the
+        // owner. That is what skips `this` (the driver's pool still holds this
+        // wobject's stale slot), so it must stay a type+owner test, not a slot test.
+        let weapon = impulse_weapon(true, 30);
+        let mut obj = impulse_shooter();
+        let base = Vec2::new(1_000, 2_000);
+        let mut wobjects: Pool<WObject> = Pool::new(4);
+        // s0: same type AND same owner (the stale `this` slot) -> skipped.
+        let mut same = impulse_shooter();
+        same.pos = FAN_POS;
+        same.vel = base;
+        wobjects.spawn(same);
+        // s1: same type, OTHER owner -> kicked.
+        let mut other_owner = impulse_shooter();
+        other_owner.pos = FAN_POS;
+        other_owner.vel = base;
+        other_owner.owner_idx = 1;
+        wobjects.spawn(other_owner);
+        // s2: OTHER type, same owner -> kicked.
+        let mut other_ty = impulse_shooter();
+        other_ty.pos = FAN_POS;
+        other_ty.vel = base;
+        other_ty.ty = Some(10);
+        wobjects.spawn(other_ty);
+        // s3: other type + other owner but 3 px away -> outside the box.
+        let mut far = impulse_shooter();
+        far.pos = Vec2::new(FAN_POS.x + itof(3), FAN_POS.y);
+        far.vel = base;
+        far.ty = Some(10);
+        far.owner_idx = 1;
+        wobjects.spawn(far);
+        let mut nobjects: Pool<NObject> = Pool::new(1);
+        let mut rand = seeded();
+
+        proc_impulse(&mut obj, &weapon, &mut wobjects, &mut nobjects, &mut rand);
+
+        let kicked = base.add(FAN_IMPULSE);
+        let vels: Vec<Vec2> = wobjects.iter().map(|w| w.vel).collect();
+        assert_eq!(
+            vels,
+            vec![base, kicked, kicked, base],
+            "same type+owner skipped; differing type OR owner kicked when in the box"
+        );
+    }
+
+    #[test]
+    fn collide_with_objects_draws_no_rng() {
+        // weapon.cpp:212-232 contains no `game.rand` call — the impulse must not
+        // move the shared stream (the diagnosis proved `rand.last` unchanged across
+        // the whole C++ wobject sub-loop at scales t219).
+        let weapon = impulse_weapon(true, 30);
+        let mut obj = impulse_shooter();
+        let mut wobjects: Pool<WObject> = Pool::new(4);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        nobjects.spawn(dirt_particle(FAN_POS, Vec2::new(46_459, -1_124)));
+        let mut other = impulse_shooter();
+        other.pos = FAN_POS;
+        other.owner_idx = 1;
+        wobjects.spawn(other);
+        let mut rand = Rand::new();
+        rand.seed(SEED);
+        let before = rand.last();
+
+        proc_impulse(&mut obj, &weapon, &mut wobjects, &mut nobjects, &mut rand);
+
+        assert_eq!(rand.last(), before, "the impulse loop draws no rand");
     }
 }

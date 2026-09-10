@@ -16,6 +16,7 @@ pub mod control;
 pub mod debug;
 pub mod flash;
 pub mod hash;
+pub mod levelgen;
 pub mod nobject;
 pub mod physics;
 pub mod pool;

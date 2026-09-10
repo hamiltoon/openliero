@@ -40,7 +40,7 @@ T0 touches only C++/script/golden files and runs in its **own worktree** in para
 | `src/tools/oracle_dump/levelgen_dump.cpp` | Create (T0) | C++ oracle: stage replica of `GenerateRandom` + 3 self-checks vs the real functions, `MakeShadow`, dig stage with `CorrectShadow`, file cases, coverage guard |
 | `CMakeLists.txt` | Modify `:390-391` (T0) | two lines: `oracle_dump_levelgen` target in the oracle block |
 | `rust/oracle-tests/gen_levelgen_golden.sh` | Create (T0) | LOCAL/MANUAL golden regeneration |
-| `rust/oracle-tests/golden/levelgen.txt` | Create (T0, generated) | the committed golden (42 `gen` + 5 `file` lines) |
+| `rust/oracle-tests/golden/levelgen.txt` | Create (T0, generated) | the committed golden (42 `gen` + 7 `file` lines — amended 2026-09-10: the MakeShadow fixture adds a shadow 1/0 pair) |
 | `rust/sim/src/levelgen.rs` | Create (T1–T6) | the generator: `new_level`, field, splats, stones, `blit_stone`, tunnels, formations, rocks, `generate_random`, `make_shadow`, `LevelGenParams`, `generate_from_settings`, `level_file_name` |
 | `rust/sim/src/lib.rs` | Modify (T1) | `pub mod levelgen;` |
 | `rust/oracle-tests/tests/levelgen_golden.rs` | Create (T7), extend (T9) | the differential test (MILESTONE); T9 adds the `shadow=1` dig-stage test via 4½a's `correct_shadow` |
@@ -545,7 +545,7 @@ Run: `grep -c "^gen " /Users/john/code/openliero/.claude/worktrees/liero-rs-step
 Expected: `42` (or `14 × number of seeds` if Step 5 added seeds).
 
 Run: `grep "^file " /Users/john/code/openliero/.claude/worktrees/liero-rs-step-4-5-levelgen-oracle/rust/oracle-tests/golden/levelgen.txt`
-Expected: 5 lines; the two `see_shadow_test.lev` lines and the `render_stage.lev` line end in `:00000000` (file branch, no RNG) and report `504 350`; the two `does_not_exist` lines end in a non-zero `rand.last` (fallback ran) and report `504 350`.
+Expected: 7 lines (amended 2026-09-10 — the two `levelgen_shadow_fixture.lev` rows, shadow 1 and 0, hash DIFFERENTLY and both end in `:00000000`); the two `see_shadow_test.lev` lines and the `render_stage.lev` line end in `:00000000` (file branch, no RNG) and report `504 350`; the two `does_not_exist` lines end in a non-zero `rand.last` (fallback ran) and report `504 350`.
 
 Run: `grep -c " - " /Users/john/code/openliero/.claude/worktrees/liero-rs-step-4-5-levelgen-oracle/rust/oracle-tests/golden/levelgen.txt`
 Expected: `21` (one `-` `<shadowed>` column per `shadow=0` gen line; `7 × seeds` in general).
@@ -1585,7 +1585,7 @@ Expected: `1 file changed`.
 - Consumes: T1 `new_level` (the test helper `shadow_level` builds on it); T3's test imports `MAT_DIRT`, `MAT_BACKGROUND`; `sim::state::{LevelSim, MAT_BACKGROUND, MAT_DIRT, MAT_DIRT_ROCK, MAT_ROCK}` (`state.rs:640-663`), `LevelSim::set_material`.
 - Produces:
   - `pub fn make_shadow(level: &mut LevelSim)`
-  - private `const MAT_SEE_SHADOW: u8 = 1 << 4` (`material.hpp:11`) and `fn flags_at(level: &LevelSim, x: i32, y: i32) -> u8`
+  - private `const MAT_SEE_SHADOW: u8 = 1 << 4` (`material.hpp:11`) and `fn flags_at(level: &LevelSim, x: i32, y: i32) -> u8` — amended 2026-09-10 (final-review F4): the const is now `use crate::state::MAT_SEE_SHADOW;`, same value
 
 - [ ] **Step 1: Write the failing tests**
 

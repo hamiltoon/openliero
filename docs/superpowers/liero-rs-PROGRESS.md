@@ -8,7 +8,16 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-09-10 · **📐 STEP 4½ (game shell) PLANNED — inserted between Step 4
+> **Last updated:** 2026-09-10 · **🗺️ 4½b (random level generation) golden DONE — bit-exact.**
+> The Rust generator (`sim::levelgen`) reproduces C++ `GenerateRandom` stage by stage (noise
+> field, splats, stones, worm tunnels, rock formations, rocks — level hash AND `rand.last` after
+> each) over 3 seeds × 7 sizes (incl. maps small enough to hit the `kMaxTries` cap) × shadow
+> on/off, plus `MakeShadow` and `GenerateFromSettings`' file and missing-file paths — 49/49 lines
+> bit-exact. The golden's dig stage is a function-level oracle for 4½a's `CorrectShadow` port
+> (checked by 4½b T9 once it lands). SelectSpawn deferred with Holdazone. Spec
+> `specs/2026-09-10-liero-rs-step4.5-slice4.5b-level-generation-design.md`.
+>
+> Prior (2026-09-10): **📐 STEP 4½ (game shell) PLANNED — inserted between Step 4
 > and Step 5.** Step 4 left a bare run that plays a hard-coded default match; "playable
 > single-player that feels like Liero" also needs the shell around it. Step 4½ ports it:
 > main menu over a generated level, weapon selection, level select + random generation,
@@ -710,8 +719,13 @@ fact maps: `specs/2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++) and
 │          TOML persistence + UpdateHash + fixes: sound_hooks never assigned, HUD off in the live
 │          binary. Gate: non-default-settings sim goldens (new dumper directives) + TOML byte
 │          round-trip vs data/Setups/liero.cfg + data/Profiles/*.toml        not started
-├─ ⬜ 4½b  random level generation + MakeShadow + SelectSpawn, dedicated Rand seeded from the
-│          match seed. Gate: new oracle_dump_levelgen, bit-exact   (parallel with 4½a)   not started
+├─ 🟡 4½b  random level generation (sim::levelgen: GenerateRandom stages, MakeShadow,
+│          generate_from_settings), dedicated Rand seeded from the match seed; SelectSpawn
+│          deferred with Holdazone. 🎯 MILESTONE GREEN 2026-09-10: new oracle_dump_levelgen
+│          golden — 49/49 lines (42 gen × 3 seeds × 7 sizes × shadow on/off + 7 file/fallback,
+│          incl. a MakeShadow fixture) bit-exact across every stage + rand.last + rock stats,
+│          FIRST RUN. T8 (eyeball example, README) done. Remaining: T9 CorrectShadow dig-stage
+│          check (after 4½a lands correct_shadow)                                    in progress
 ├─ ⬜ 4½c  weapon selection phase in sim (draws the sim RNG) + 12/3 key repeat + per-viewport
 │          menu + frozen-screen look. Gate: new oracle_dump_weapsel, bit-exact RNG     not started
 ├─ ⬜ 4½d  menu framework (Menu/MenuItem/behaviors, DrawRoundedBox, scrollbar, type-to-search,

@@ -1,0 +1,14 @@
+# Step 4½ slice 4½a-1 T7 — the SETTINGS-DRIVEN smoke (design §7.3 `defaults`): the
+# shipped C++ default setup `data/Setups/liero.cfg` (a legacy v5 file: no rgbDepth,
+# 6-bit rgb) read by BOTH the C++ dumper's `settings` path (the real
+# Settings::FromToml) and the Rust `settings_toml::settings_from_toml`, then built into
+# the C++ LocalController start state (worms invisible at (0,0), killed_timer 150,
+# health = WormSettings::health 100, lives = Settings::lives 15) by the dumper /
+# `scenario::build::build_match`. No input: both worms count down and respawn
+# (`ready` is true from the Worm ctor) with the DoRespawning dirt puff + CorrectShadow
+# (shadow = true, the C++ default), under the default bonus roll (max_bonuses 4).
+# The golden has 12 columns: the 11 classic hashes + Game::IsGameOver() (0/1).
+seed 7
+level Levels/modern_test.lev
+ticks 400
+settings ../../../data/Setups/liero.cfg

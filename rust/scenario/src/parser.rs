@@ -24,6 +24,7 @@
 //! render_flash <tick> <amount>                  # Slice 3b; draw-only screen-flash injection
 //! render_hud                                     # Slice 3e; draw-time HUD/minimap draw (0 args)
 //! render_live                                    # Slice 4d; opt-in live-viewport path (0 args)
+//! settings    <file>                             # Step 4½a-1; oracle-only setup sidecar (see below)
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
@@ -65,6 +66,15 @@ pub struct Scenario {
     /// scenario keeps the shared scenario file parsing on both sides (Slice 6, T0).
     pub game_mode: i32,
     pub worms: Vec<ScenarioWorm>,
+    /// Step-4½a-1 `settings <file>` — the oracle-harness-only setup sidecar (a
+    /// C++-schema TOML file; the path is relative to the scenario file's directory).
+    /// Absent => `None` (every pre-4½ scenario, byte-identical meaning). Present => the
+    /// C++ dumper reads it with the real `Settings::FromToml` and starts the worms in
+    /// the C++ LocalController state; the Rust golden test uses
+    /// `settings_toml::settings_from_toml` + `build::build_match`. A settings scenario
+    /// rejects `worm`/`weapon`/`game_mode`/`max_bonuses`/`render*`, and
+    /// [`crate::load`] refuses it (design §7.1).
+    pub settings: Option<String>,
     /// Sparse per-tick input overrides: `tick -> (worm0_7bit, worm1_7bit)`.
     inputs: HashMap<u32, (u32, u32)>,
     /// Per-slot weapon overrides: `slot -> weapon_name`.
@@ -115,6 +125,10 @@ impl Scenario {
         let mut render_flash: Vec<(u32, i32)> = Vec::new();
         let mut render_hud = false;
         let mut render_live = false;
+        let mut settings: Option<String> = None;
+        let mut game_mode_given = false;
+        let mut max_bonuses_given = false;
+        let mut render_given = false;
 
         for (lineno, raw) in text.lines().enumerate() {
             let n = lineno + 1;
@@ -150,10 +164,12 @@ impl Scenario {
                 "max_bonuses" => {
                     expect_args(n, key, &nums, 1)?;
                     max_bonuses = parse_at(0)? as i32;
+                    max_bonuses_given = true;
                 }
                 "game_mode" => {
                     expect_args(n, key, &nums, 1)?;
                     game_mode = parse_at(0)? as i32;
+                    game_mode_given = true;
                 }
                 "render" => {
                     // Opt-in render-layout directive for the shared scenario (Slice 3a).
@@ -163,6 +179,7 @@ impl Scenario {
                     // Accepted (not rejected) so the shared scenario file parses on BOTH
                     // sides — same discipline as `game_mode`/`max_bonuses` above.
                     expect_args(n, key, &nums, 1)?;
+                    render_given = true;
                 }
                 "render_shadow" => {
                     // Slice 3b: draw-time-only shadow flip (0 args — presence flips it).
@@ -201,6 +218,13 @@ impl Scenario {
                     // off it.
                     expect_args(n, key, &nums, 0)?;
                     render_live = true;
+                }
+                "settings" => {
+                    // Step 4½a-1: the oracle-only setup sidecar (design §7.1).
+                    expect_args(n, key, &nums, 1)?;
+                    if settings.replace(nums[0].to_string()).is_some() {
+                        return Err(format!("line {n}: duplicate `settings`"));
+                    }
                 }
                 "worm" => {
                     expect_args(n, key, &nums, 7)?;
@@ -256,6 +280,24 @@ impl Scenario {
             }
         }
 
+        if settings.is_some()
+            && (!worms.is_empty()
+                || !weapons.is_empty()
+                || game_mode_given
+                || max_bonuses_given
+                || render_given
+                || render_shadow
+                || !render_shake.is_empty()
+                || !render_flash.is_empty()
+                || render_hud
+                || render_live)
+        {
+            return Err(
+                "`settings` excludes the worm, weapon, game_mode, max_bonuses and render* directives"
+                    .to_string(),
+            );
+        }
+
         Ok(Scenario {
             seed: seed.ok_or("missing `seed`")?,
             level: level.ok_or("missing `level`")?,
@@ -263,6 +305,7 @@ impl Scenario {
             max_bonuses,
             game_mode,
             worms,
+            settings,
             inputs,
             weapons,
             weapon_ammo,
@@ -357,8 +400,15 @@ impl Scenario {
         out.push_str(&format!("seed {}\n", self.seed));
         out.push_str(&format!("level {}\n", self.level));
         out.push_str(&format!("ticks {}\n", self.ticks));
-        out.push_str(&format!("max_bonuses {}\n", self.max_bonuses));
-        out.push_str(&format!("game_mode {}\n", self.game_mode));
+        match &self.settings {
+            // A settings scenario carries mode/bonuses in its setup; the parser rejects
+            // the two directives alongside `settings`.
+            Some(path) => out.push_str(&format!("settings {path}\n")),
+            None => {
+                out.push_str(&format!("max_bonuses {}\n", self.max_bonuses));
+                out.push_str(&format!("game_mode {}\n", self.game_mode));
+            }
+        }
         // Worms in stored order; `visible` back to 0/1.
         for w in &self.worms {
             out.push_str(&format!(
@@ -848,5 +898,58 @@ input 10 127 64
             "no input lines for all-zero stream"
         );
         assert_eq!(Scenario::parse(&zeros.to_text()).unwrap(), zeros);
+    }
+
+    const SETTINGS_SCN: &str =
+        "seed 7\nlevel Levels/modern_test.lev\nticks 3\nsettings a_setup.cfg\ninput 1 16 0\n";
+
+    #[test]
+    fn settings_directive_parses_and_defaults_absent() {
+        let s = Scenario::parse(SETTINGS_SCN).expect("parses");
+        assert_eq!(s.settings.as_deref(), Some("a_setup.cfg"));
+        assert!(s.worms.is_empty());
+        let plain = Scenario::parse("seed 1\nlevel L\nticks 1\n").unwrap();
+        assert_eq!(
+            plain.settings, None,
+            "absent => None: every existing scenario is unchanged"
+        );
+    }
+
+    #[test]
+    fn settings_excludes_the_directives_it_replaces() {
+        for extra in [
+            "worm 0 0 0 100 10 0 0",
+            "weapon 0 DART",
+            "game_mode 1",
+            "max_bonuses 0",
+            "render player",
+            "render_shadow",
+            "render_shake 1 0 2",
+            "render_flash 1 3",
+            "render_hud",
+            "render_live",
+        ] {
+            let text = format!("{SETTINGS_SCN}{extra}\n");
+            assert!(
+                Scenario::parse(&text).is_err(),
+                "`settings` + `{extra}` must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_arity_and_duplicates_error() {
+        assert!(Scenario::parse("seed 1\nlevel L\nticks 1\nsettings\n").is_err());
+        assert!(Scenario::parse("seed 1\nlevel L\nticks 1\nsettings a b\n").is_err());
+        assert!(Scenario::parse("seed 1\nlevel L\nticks 1\nsettings a\nsettings b\n").is_err());
+    }
+
+    #[test]
+    fn to_text_round_trips_a_settings_scenario() {
+        let s = Scenario::parse(SETTINGS_SCN).unwrap();
+        let text = s.to_text();
+        assert!(text.contains("settings a_setup.cfg\n"));
+        assert!(!text.contains("game_mode") && !text.contains("max_bonuses"));
+        assert_eq!(Scenario::parse(&text).unwrap(), s);
     }
 }

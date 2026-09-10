@@ -58,6 +58,12 @@
 //   render_live                        (Slice 4d; opt-in — wire viewports + real
 //                                       Game::ProcessFrame so shake/flash/banner/centering
 //                                       evolve LIVE. Requires `render player`.)
+//   settings <file>                    (Step 4½a-1; a C++-schema setup file, relative to the
+//                                       scenario's directory, read by the REAL
+//                                       Settings::FromToml. Worms then start in the C++
+//                                       LocalController state (no `worm` lines allowed) and
+//                                       every dump line gains a 12th column, IsGameOver 0/1.
+//                                       Excludes worm/weapon/game_mode/max_bonuses/render*.)
 //
 // Diagnostic: set env OL_PHYS_TRACE=1 to also print per-tick pos/vel for both worms
 // to stderr (does not affect the golden output). Built via the
@@ -125,9 +131,9 @@
 #include <vector>
 
 #include "common.hpp"
+#include "constants.hpp"
 #include "filesystem.hpp"
 #include "game.hpp"
-#include "constants.hpp"
 #include "gfx/blit.hpp"
 #include "gfx/renderer.hpp"
 #include "gfx/shadow_query.hpp"
@@ -229,16 +235,29 @@ struct Scenario {
   // scenario, so priors stay byte-identical (the re-diff gate, spec §5). Absent (every
   // existing scenario) => the reduced-tail path runs exactly as before.
   bool render_live = false;
+  // Step 4½a-1 `settings <file>` (design §7.1): the setup file read by the REAL
+  // Settings::FromToml; the worms start in the C++ LocalController state and the dump gains a
+  // 12th IsGameOver column. Empty (every pre-4½ scenario) => the classic path, byte-identical.
+  std::string settings_file;
+  // Presence flags for the directives a `settings` scenario must not carry.
+  bool game_mode_given = false;
+  bool max_bonuses_given = false;
 };
 
 std::vector<uint8_t> SlurpFile(std::string const& path) {
   std::ifstream f(path, std::ios::binary);
   if (!f) {
-    std::fprintf(stderr, "cannot open level %s\n", path.c_str());
+    std::fprintf(stderr, "cannot open %s\n", path.c_str());
     std::exit(1);
   }
-  return std::vector<uint8_t>(std::istreambuf_iterator<char>(f),
-                              std::istreambuf_iterator<char>());
+  return std::vector<uint8_t>(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+
+// Step 4½a-1: the directory part of `path` ("." when there is none), so the `settings`
+// file resolves relative to the scenario file.
+std::string DirOf(std::string const& path) {
+  std::size_t const kSlash = path.find_last_of('/');
+  return kSlash == std::string::npos ? std::string(".") : path.substr(0, kSlash);
 }
 
 Scenario ParseScenario(char const* path) {
@@ -266,8 +285,10 @@ Scenario ParseScenario(char const* path) {
       ls >> s.ticks;
     } else if (key == "max_bonuses") {
       ls >> s.max_bonuses;
+      s.max_bonuses_given = true;
     } else if (key == "game_mode") {
       ls >> s.game_mode;
+      s.game_mode_given = true;
     } else if (key == "render") {
       ls >> s.render_layout;
       if (s.render_layout != "player") {
@@ -297,6 +318,18 @@ Scenario ParseScenario(char const* path) {
       // Live viewport path (Slice 4d). 0 args — presence drives the real
       // Game::ProcessFrame + wires the two viewports into ProcessViewports.
       s.render_live = true;
+    } else if (key == "settings") {
+      // Step 4½a-1: the oracle-only setup sidecar (see Scenario::settings_file).
+      if (!s.settings_file.empty()) {
+        std::fprintf(stderr, "duplicate settings directive\n");
+        std::exit(1);
+      }
+      ls >> s.settings_file;
+      std::string extra;
+      if (s.settings_file.empty() || (ls >> extra)) {
+        std::fprintf(stderr, "settings expects exactly 1 argument\n");
+        std::exit(1);
+      }
     } else if (key == "worm") {
       WormSpec w;
       ls >> w.index >> w.pos_x >> w.pos_y >> w.health >> w.lives >> w.stats_x >> w.visible;
@@ -325,7 +358,17 @@ Scenario ParseScenario(char const* path) {
       std::exit(1);
     }
   }
-  if (s.worms.size() != 2) {
+  if (!s.settings_file.empty()) {
+    bool const kForbidden = !s.worms.empty() || !s.weapon_overrides.empty() || s.game_mode_given ||
+                            s.max_bonuses_given || !s.render_layout.empty() || s.render_shadow ||
+                            !s.render_shake.empty() || !s.render_flash.empty() || s.render_hud ||
+                            s.render_live;
+    if (kForbidden) {
+      std::fprintf(stderr,
+                   "settings excludes worm/weapon/game_mode/max_bonuses/render* directives\n");
+      std::exit(1);
+    }
+  } else if (s.worms.size() != 2) {
     std::fprintf(stderr, "scenario must define exactly 2 worms (got %zu)\n", s.worms.size());
     std::exit(1);
   }
@@ -367,24 +410,43 @@ int main(int argc, char** argv) {
   common->load(kTcRoot);
 
   auto settings = std::make_shared<Settings>();
-  // Game-mode switch (game.cpp:372-461) is driven by the scenario's `game_mode`
-  // directive; default kGmKillEmAll (0) => `default: break` => inert (Slice 6).
-  settings->game_mode = scn.game_mode;
-  settings->lives = scn.worms[0].lives;
-  settings->loading_time = 0;
-  // O4: omit CorrectShadow for the dirt-effect slices. CorrectShadow (blit.cpp:624,
-  // gated on settings->shadow) writes material_id and IS reachable from this dumper's
-  // Process loop (worm dig, dirt-effect / expl_ground explosions). It is inert to
-  // slices 1-4a only because those scenarios trigger no such event in the dumped ticks;
-  // the empty re-diff confirms that. (MakeShadow, the other shadow material_id writer,
-  // runs only via GenerateFromSettings, which this load()-based dumper never calls.)
-  settings->shadow = false;
-  // Bonus-drop roll gate. The in-game default is 4 (settings.hpp:69); this dumper
-  // overrides it from the scenario (default 0) so that scenarios WITHOUT a
-  // `max_bonuses` directive leave it 0 — the per-tick roll then short-circuits
-  // (`max_bonuses > 0` is false => no rand drawn), keeping their goldens byte-identical.
-  // A scenario that sets `max_bonuses > 0` opens the roll (Slice 5c).
-  settings->max_bonuses = scn.max_bonuses;
+  if (!scn.settings_file.empty()) {
+    // Step 4½a-1: the REAL C++ setup reader. Every sim-reaching field (game_mode, lives,
+    // loading_time, blood, load_change, shadow, max_bonuses, weap_table, time_to_lose,
+    // blood_particle_max, per-worm health + weapons) comes from the file.
+    std::string const kCfgPath = DirOf(argv[1]) + "/" + scn.settings_file;
+    try {
+      std::vector<uint8_t> const kCfg = SlurpFile(kCfgPath);
+      settings->FromToml(std::string(kCfg.begin(), kCfg.end()));
+    } catch (std::exception const& e) {
+      std::fprintf(stderr, "settings %s: %s\n", kCfgPath.c_str(), e.what());
+      return 1;
+    }
+    if (settings->game_mode == Settings::kGmHoldazone) {
+      std::fprintf(stderr, "settings %s: Holdazone is refused (unported in Rust)\n",
+                   kCfgPath.c_str());
+      return 1;
+    }
+  } else {
+    // Game-mode switch (game.cpp:372-461) is driven by the scenario's `game_mode`
+    // directive; default kGmKillEmAll (0) => `default: break` => inert (Slice 6).
+    settings->game_mode = scn.game_mode;
+    settings->lives = scn.worms[0].lives;
+    settings->loading_time = 0;
+    // O4: omit CorrectShadow for the dirt-effect slices. CorrectShadow (blit.cpp:624,
+    // gated on settings->shadow) writes material_id and IS reachable from this dumper's
+    // Process loop (worm dig, dirt-effect / expl_ground explosions). It is inert to
+    // slices 1-4a only because those scenarios trigger no such event in the dumped ticks;
+    // the empty re-diff confirms that. (MakeShadow, the other shadow material_id writer,
+    // runs only via GenerateFromSettings, which this load()-based dumper never calls.)
+    settings->shadow = false;
+    // Bonus-drop roll gate. The in-game default is 4 (settings.hpp:69); this dumper
+    // overrides it from the scenario (default 0) so that scenarios WITHOUT a
+    // `max_bonuses` directive leave it 0 — the per-tick roll then short-circuits
+    // (`max_bonuses > 0` is false => no rand drawn), keeping their goldens byte-identical.
+    // A scenario that sets `max_bonuses > 0` opens the roll (Slice 5c).
+    settings->max_bonuses = scn.max_bonuses;
+  }
 
   auto sound_player = std::make_shared<NullSoundPlayer>();
   Game game(common, settings, sound_player);
@@ -418,49 +480,69 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Add 2 worms exactly as the determinism fixture (test_determinism.cpp), with
-  // health / stats_x from the scenario.
-  for (int idx = 0; idx < 2; ++idx) {
-    WormSpec const& spec = scn.worms[idx];
-    auto w = std::make_shared<Worm>();
-    w->settings = settings->worm_settings[idx];
-    w->health = spec.health;
-    w->index = idx;
-    w->stats_x = spec.stats_x;
-    game.AddWorm(w);
-  }
-  for (auto const& w : game.worms) {
-    w->InitWeapons(game);
-  }
-  game.ResetWorms();
-
-  // Apply scenario start conditions (ResetWorms reset health/visible/lives, so set
-  // them AFTER it). No viewports — we never call ProcessFrame.
-  for (int idx = 0; idx < 2; ++idx) {
-    WormSpec const& spec = scn.worms[idx];
-    auto const& w = game.worms[idx];
-    w->pos = {spec.pos_x, spec.pos_y};
-    w->vel = {0, 0};
-    w->health = spec.health;
-    w->lives = spec.lives;
-    w->visible = spec.visible != 0;
-
-    // Apply per-slot weapon overrides (ResetWorms re-ran InitWeapons, so do this
-    // after it). Set the slot ready to fire: full ammo, no delay, not loading. The
-    // Fire gate needs Available() (loading_left == 0) and delay_left <= 0.
-    for (auto const& [slot, name] : scn.weapon_overrides) {
-      WormWeapon& ww = w->weapons[slot];
-      ww.type = &common->weapons[ResolveWeapon(*common, name)];
-      ww.ammo = ww.type->ammo;
-      // Opt-in low-ammo override (only when the `weapon` directive had a 3rd token).
-      auto ammo_it = scn.weapon_ammo_overrides.find(slot);
-      if (ammo_it != scn.weapon_ammo_overrides.end()) {
-        ww.ammo = ammo_it->second;
-      }
-      ww.delay_left = 0;
-      ww.loading_left = 0;
+  if (!scn.settings_file.empty()) {
+    // Step 4½a-1: the C++ LocalController start state (localController.cpp:30-54: health =
+    // ws.health, stats_x 0/218) + weapsel Finalize's InitWeapons (weapsel.cpp:352-356) + the
+    // kStateGame lives (localController.cpp:232-235), reached via ResetWorms
+    // (game.cpp:155-166), which yields the identical state: visible = false, pos (0,0),
+    // killed_timer 150, current_weapon 0. No worm-line overrides.
+    for (int idx = 0; idx < 2; ++idx) {
+      auto w = std::make_shared<Worm>();
+      w->settings = settings->worm_settings[idx];
+      w->health = w->settings->health;
+      w->index = idx;
+      w->stats_x = idx == 0 ? 0 : 218;
+      game.AddWorm(w);
     }
-    w->current_weapon = 0;
+    for (auto const& w : game.worms) {
+      w->InitWeapons(game);
+    }
+    game.ResetWorms();
+  } else {
+    // Add 2 worms exactly as the determinism fixture (test_determinism.cpp), with
+    // health / stats_x from the scenario.
+    for (int idx = 0; idx < 2; ++idx) {
+      WormSpec const& spec = scn.worms[idx];
+      auto w = std::make_shared<Worm>();
+      w->settings = settings->worm_settings[idx];
+      w->health = spec.health;
+      w->index = idx;
+      w->stats_x = spec.stats_x;
+      game.AddWorm(w);
+    }
+    for (auto const& w : game.worms) {
+      w->InitWeapons(game);
+    }
+    game.ResetWorms();
+
+    // Apply scenario start conditions (ResetWorms reset health/visible/lives, so set
+    // them AFTER it). No viewports — we never call ProcessFrame.
+    for (int idx = 0; idx < 2; ++idx) {
+      WormSpec const& spec = scn.worms[idx];
+      auto const& w = game.worms[idx];
+      w->pos = {spec.pos_x, spec.pos_y};
+      w->vel = {0, 0};
+      w->health = spec.health;
+      w->lives = spec.lives;
+      w->visible = spec.visible != 0;
+
+      // Apply per-slot weapon overrides (ResetWorms re-ran InitWeapons, so do this
+      // after it). Set the slot ready to fire: full ammo, no delay, not loading. The
+      // Fire gate needs Available() (loading_left == 0) and delay_left <= 0.
+      for (auto const& [slot, name] : scn.weapon_overrides) {
+        WormWeapon& ww = w->weapons[slot];
+        ww.type = &common->weapons[ResolveWeapon(*common, name)];
+        ww.ammo = ww.type->ammo;
+        // Opt-in low-ammo override (only when the `weapon` directive had a 3rd token).
+        auto ammo_it = scn.weapon_ammo_overrides.find(slot);
+        if (ammo_it != scn.weapon_ammo_overrides.end()) {
+          ww.ammo = ammo_it->second;
+        }
+        ww.delay_left = 0;
+        ww.loading_left = 0;
+      }
+      w->current_weapon = 0;
+    }
   }
 
   std::FILE* out = std::fopen(argv[2], "w");
@@ -849,8 +931,8 @@ int main(int argc, char** argv) {
         for (SObject const* i = nullptr; (i = sr.Next());) {
           SObjectType const& t = common.sobject_types[i->id];
           int const kFrame = i->cur_frame + t.start_frame;
-          BlitImageR(kShadow, renderer->bmp, common.large_sprites.SpritePtr(kFrame),
-                     i->x + kOffs.x, i->y + kOffs.y, 16, 16);
+          BlitImageR(kShadow, renderer->bmp, common.large_sprites.SpritePtr(kFrame), i->x + kOffs.x,
+                     i->y + kOffs.y, 16, 16);
         }
       }
 
@@ -928,8 +1010,7 @@ int main(int argc, char** argv) {
             Weapon const& weapon = *ww.type;
 
             if (weapon.laser_sight) {
-              DrawLaserSight(renderer->bmp, vp->rand, kHotspotX, kHotspotY, kTempX + 7,
-                             kTempY + 4);
+              DrawLaserSight(renderer->bmp, vp->rand, kHotspotX, kHotspotY, kTempX + 7, kTempY + 4);
             }
 
             if (ww.type - common.weapons.data() == LC(LaserWeapon) - 1 && w.Pressed(Worm::kFire)) {
@@ -1030,9 +1111,14 @@ int main(int argc, char** argv) {
   auto dump = [&](int tick) {
     uint32_t const state_hash = HashGameState(game);
     ComponentHashes const c = HashGameComponents(game);
-    std::fprintf(out, "%d %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n", tick, state_hash,
+    std::fprintf(out, "%d %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x", tick, state_hash,
                  c.rng, c.level, c.worms[0], c.worms[1], c.bobjects, c.bonuses, c.sobjects,
                  c.nobjects, c.wobjects);
+    // Step 4½a-1: the settings path adds Game::IsGameOver() (game.cpp:521-544) as column 12.
+    if (!scn.settings_file.empty()) {
+      std::fprintf(out, " %d", game.IsGameOver() ? 1 : 0);
+    }
+    std::fprintf(out, "\n");
     if (trace) {
       auto const& w0 = game.worms[0];
       auto const& w1 = game.worms[1];

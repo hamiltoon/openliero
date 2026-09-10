@@ -98,6 +98,11 @@ pub(crate) fn load_sprites(tc_root: &Path, file: &str, w: i32, h: i32, count: i3
 /// Verbatim factor-out of `render_slice3b_common::build()`. `tc_root` is the TC
 /// directory (`data/TC/openliero`); `scenario` is the already-parsed scenario.
 pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
+    assert!(
+        scenario.settings.is_none(),
+        "scenario::load refuses a `settings` scenario: build it with \
+         scenario::build::build_match (design §7.1)"
+    );
     // Origpal = small.tga's embedded palette (C++ common.exepal), as in 3a.
     let small_bytes = crate::assets::read_asset(tc_root, "sprites/small.tga");
     let small_tga = assets::sprite::Tga::load(&small_bytes).expect("small.tga parses");
@@ -281,5 +286,13 @@ weapon 0 DART
         // Non-vacuity: the all-zero default was the bug (every hook played sample 0,
         // "shotgun"); the real TC's `bump` is sound index 14.
         assert_ne!(loaded.state.sound_hooks.Bump, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "settings")]
+    fn load_refuses_a_settings_scenario() {
+        let s = Scenario::parse("seed 1\nlevel Levels/render_stage.lev\nticks 1\nsettings x.cfg\n")
+            .expect("parses");
+        let _ = load(Path::new(TC_ROOT), &s);
     }
 }

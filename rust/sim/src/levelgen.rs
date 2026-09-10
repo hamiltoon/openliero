@@ -27,6 +27,31 @@ use crate::state::LevelSim;
 /// Largest level side C++ accepts (`level.cpp:232`, `assets/src/level.rs:51`).
 const MAX_DIM: i32 = 4096;
 
+/// `stone_tab` (`common.cpp:23`): the four large-sprite frames of each 32x32 rock
+/// formation, in quadrant order top-left, top-right, bottom-left, bottom-right.
+pub const STONE_TAB: [[usize; 4]; 3] = [[98, 60, 61, 62], [63, 75, 85, 86], [89, 90, 97, 96]];
+
+/// Diagnostic statistics of one rock-placement loop (no C++ counterpart — C++ returns
+/// nothing). `count` = the drawn number of items, `placed` = how many found a rock-free
+/// window before the `kMaxTries` cap, `tries` = candidate positions drawn (loop
+/// iterations) summed over all items. The golden compares all three, which proves the cap
+/// path and the retry path ran and localises a divergence to the predicate vs the draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RockStats {
+    pub count: i32,
+    pub placed: i32,
+    pub tries: u64,
+}
+
+/// The TC assets generation reads (C++ `Common`): the 16x16 large-sprite bank (110
+/// frames, `common.cpp:368`), the texture table (tc.cfg `[[constants.textures]]`) and the
+/// 256-entry material flag table (tc.cfg `materials`).
+pub struct LevelGenAssets<'a> {
+    pub large_sprites: &'a SpriteSet,
+    pub textures: &'a [Texture],
+    pub material_flags: &'a [u8; 256],
+}
+
 /// `Level::Resize` (`level.cpp:218-227`) on a fresh level: a zero-filled `width × height`
 /// material map carrying the TC flag table. Precondition `1 <= width, height <= 4096`
 /// (the menu range is 64..=4096 step 8, `gfx.cpp:1295-1297`, but a hand-edited setup file
@@ -245,6 +270,138 @@ pub fn dig_tunnels(
     tunnel_walk(w, h, rand, |rand, x, y| {
         draw_dirt_effect(level, large_sprites, textures, 1, x, y, rand)
     });
+}
+
+/// Port of the file-static `IsNoRock` (`level.cpp:85-99`): the `(size+1) x (size+1)`
+/// window at `(x, y)`, intersected with the level, contains no `Rock()` cell. A window
+/// clipped to nothing is rock-free.
+fn is_no_rock(level: &LevelSim, size: i32, x: i32, y: i32) -> bool {
+    let x1 = x.max(0);
+    let y1 = y.max(0);
+    let x2 = (x + size + 1).min(level.width);
+    let y2 = (y + size + 1).min(level.height);
+    for yy in y1..y2 {
+        for xx in x1..x2 {
+            if level.rock(xx, yy) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The 2x2 [`blit_stone`] of one 32x32 formation (`level.cpp:162-169`).
+pub fn blit_formation(
+    level: &mut LevelSim,
+    large_sprites: &SpriteSet,
+    kind: usize,
+    cx: i32,
+    cy: i32,
+) {
+    let t = STONE_TAB[kind];
+    blit_stone(level, large_sprites, t[0], cx, cy);
+    blit_stone(level, large_sprites, t[1], cx + 16, cy);
+    blit_stone(level, large_sprites, t[2], cx, cy + 16);
+    blit_stone(level, large_sprites, t[3], cx + 16, cy + 16);
+}
+
+/// The shared `do { … } while (!IsNoRock(size, cx, cy) && ++tries < kMaxTries)` retry loop
+/// of both rock stages (`level.cpp:147-155` formations, `:178-186` rocks), with
+/// `kMaxTries = width * height` (`:140`). Per candidate, in C++ statement order:
+/// `cx = rand(w) - off`; then `rand(bottom_die) == 0 ? h - 1 - rand(bottom_range)
+/// : rand(h) - off`. The rejection counter increments ONLY on rejection (the `&&`
+/// short-circuits on acceptance), so `None` ⇔ C++ `tries >= kMaxTries` after the loop.
+/// `stats.tries` counts every candidate drawn.
+fn find_rock_free(
+    level: &LevelSim,
+    rand: &mut Rand,
+    stats: &mut RockStats,
+    off: i32,
+    bottom_die: u32,
+    bottom_range: u32,
+    size: i32,
+) -> Option<(i32, i32)> {
+    let max_tries = level.width * level.height;
+    let mut tries = 0i32;
+    loop {
+        stats.tries += 1;
+        let cx = rand.bound(level.width as u32) as i32 - off;
+        let cy = if rand.bound(bottom_die) == 0 {
+            level.height - 1 - rand.bound(bottom_range) as i32
+        } else {
+            rand.bound(level.height as u32) as i32 - off
+        };
+        if is_no_rock(level, size, cx, cy) {
+            return Some((cx, cy));
+        }
+        tries += 1;
+        if tries >= max_tries {
+            return None;
+        }
+    }
+}
+
+/// `GenerateRandom`'s rock formations (`level.cpp:137-170`). `kMaxTries = w*h`;
+/// `count = rand(15)+5`; per formation draw candidates `cx = rand(w)-16`,
+/// `cy = rand(4)==0 ? h-1-rand(20) : rand(h)-16` until `is_no_rock(32)` accepts or the
+/// rejection counter (incremented ONLY on rejection) reaches the cap; on the cap skip the
+/// formation WITHOUT drawing its kind; else `kind = rand(3)` and [`blit_formation`].
+pub fn place_rock_formations(
+    level: &mut LevelSim,
+    large_sprites: &SpriteSet,
+    rand: &mut Rand,
+) -> RockStats {
+    let mut s = RockStats {
+        count: rand.bound(15) as i32 + 5,
+        placed: 0,
+        tries: 0,
+    };
+    for _ in 0..s.count {
+        let Some((cx, cy)) = find_rock_free(level, rand, &mut s, 16, 4, 20, 32) else {
+            continue;
+        };
+        s.placed += 1;
+        let kind = rand.bound(3) as usize;
+        blit_formation(level, large_sprites, kind, cx, cy);
+    }
+    s
+}
+
+/// `GenerateRandom`'s 16x16 rocks (`level.cpp:172-192`): `count = rand(25)+5`; candidates
+/// `cx = rand(w)-8`, `cy = rand(5)==0 ? h-1-rand(13) : rand(h)-8`; `is_no_rock(15)`;
+/// same cap rule; placed ⇒ frame `rand(6)+3` via [`blit_stone`].
+pub fn place_rocks(level: &mut LevelSim, large_sprites: &SpriteSet, rand: &mut Rand) -> RockStats {
+    let mut s = RockStats {
+        count: rand.bound(25) as i32 + 5,
+        placed: 0,
+        tries: 0,
+    };
+    for _ in 0..s.count {
+        let Some((cx, cy)) = find_rock_free(level, rand, &mut s, 8, 5, 13, 15) else {
+            continue;
+        };
+        s.placed += 1;
+        let frame = rand.bound(6) as usize + 3;
+        blit_stone(level, large_sprites, frame, cx, cy);
+    }
+    s
+}
+
+/// `Level::GenerateRandom` (`level.cpp:101-193`) minus the palette reset (a generated level
+/// has no custom palette — [`generate_from_settings`] returns `palette: None`, design F8).
+/// Stages in C++ order: resize, dirt pattern, tunnels, formations, rocks.
+pub fn generate_random(
+    assets: &LevelGenAssets,
+    width: i32,
+    height: i32,
+    rand: &mut Rand,
+) -> LevelSim {
+    let mut level = new_level(width, height, assets.material_flags);
+    generate_dirt_pattern(&mut level, assets.large_sprites, rand);
+    dig_tunnels(&mut level, assets.large_sprites, assets.textures, rand);
+    place_rock_formations(&mut level, assets.large_sprites, rand);
+    place_rocks(&mut level, assets.large_sprites, rand);
+    level
 }
 
 #[cfg(test)]
@@ -555,5 +712,176 @@ mod tests {
             }
         });
         assert_eq!(level.material_id, want);
+    }
+
+    /// The shipped TC's large-sprite bank, texture table and material flags.
+    fn real_tc() -> (SpriteSet, Vec<Texture>, [u8; 256]) {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
+        let tc_bytes = std::fs::read(format!("{root}/tc.cfg")).expect("read tc.cfg");
+        let tc = assets::tc::TcConfig::load(&tc_bytes).expect("tc.cfg parses");
+        let tga_bytes = std::fs::read(format!("{root}/sprites/large.tga")).expect("read large.tga");
+        let tga = assets::sprite::Tga::load(&tga_bytes).expect("large.tga parses");
+        let large = SpriteSet::from_tga(&tga, 16, 16, 110).expect("large sprite bank");
+        (large, tc.textures.clone(), tc.materials)
+    }
+
+    #[test]
+    fn is_no_rock_checks_a_size_plus_one_window_clipped_to_the_level() {
+        let mut flags = [0u8; 256];
+        flags[5] = MAT_ROCK;
+        let mut level = new_level(40, 40, &flags);
+        level.material_id[(10 + 10 * 40) as usize] = 5; // rock at (10,10)
+        assert!(
+            !is_no_rock(&level, 4, 6, 6),
+            "(10,10) is the far corner of the 5x5 window"
+        );
+        assert!(is_no_rock(&level, 4, 5, 5), "window 5..=9 excludes (10,10)");
+        assert!(
+            !is_no_rock(&level, 15, -5, -5),
+            "negative origin clips to 0..11"
+        );
+        assert!(
+            is_no_rock(&level, 32, 39, 39),
+            "window clipped to the single cell (39,39)"
+        );
+    }
+
+    #[test]
+    fn blit_formation_lays_stone_tab_out_as_2x2() {
+        let overrides: Vec<(usize, Vec<u8>)> = STONE_TAB[1]
+            .iter()
+            .map(|&f| (f, vec![f as u8; 256]))
+            .collect();
+        let sprites = bank(99, &overrides);
+        let mut level = new_level(40, 40, &[0u8; 256]);
+        blit_formation(&mut level, &sprites, 1, 4, 2);
+        let at = |x: i32, y: i32| level.material_id[(x + y * 40) as usize];
+        assert_eq!(at(4, 2), 63, "top-left = stone_tab[1][0]");
+        assert_eq!(at(20, 2), 75, "top-right = stone_tab[1][1] at cx+16");
+        assert_eq!(at(4, 18), 85, "bottom-left = stone_tab[1][2] at cy+16");
+        assert_eq!(at(20, 18), 86, "bottom-right = stone_tab[1][3]");
+    }
+
+    /// 8x8 all-rock: every candidate is rejected, kMaxTries = 64 per formation, and on the
+    /// cap the loop `continue`s BEFORE rand(3) (level.cpp:155-160).
+    #[test]
+    fn formations_on_solid_rock_hit_the_cap_and_skip_the_kind_draw() {
+        let mut flags = [0u8; 256];
+        flags[5] = MAT_ROCK;
+        let mut level = new_level(8, 8, &flags);
+        level.material_id.iter_mut().for_each(|p| *p = 5);
+        let sprites = bank(99, &[]);
+        let mut rand = seeded(13);
+        let stats = place_rock_formations(&mut level, &sprites, &mut rand);
+
+        let mut r = seeded(13);
+        let count = r.bound(15) as i32 + 5;
+        for _ in 0..count {
+            for _ in 0..64 {
+                r.bound(8);
+                if r.bound(4) == 0 {
+                    r.bound(20);
+                } else {
+                    r.bound(8);
+                }
+            }
+        }
+        assert_eq!(
+            stats,
+            RockStats {
+                count,
+                placed: 0,
+                tries: 64 * count as u64
+            }
+        );
+        assert_eq!(
+            rand.draws(),
+            r.draws(),
+            "no rand(3) after a capped formation"
+        );
+        assert!(level.material_id.iter().all(|&p| p == 5), "nothing blitted");
+    }
+
+    /// Same for the 16x16 rocks (level.cpp:172-192): candidates rand(w)-8 and
+    /// rand(5)==0 ? h-1-rand(13) : rand(h)-8; on the cap no rand(6).
+    #[test]
+    fn rocks_on_solid_rock_hit_the_cap_and_skip_the_sprite_draw() {
+        let mut flags = [0u8; 256];
+        flags[5] = MAT_ROCK;
+        let mut level = new_level(8, 8, &flags);
+        level.material_id.iter_mut().for_each(|p| *p = 5);
+        let sprites = bank(99, &[]);
+        let mut rand = seeded(14);
+        let stats = place_rocks(&mut level, &sprites, &mut rand);
+
+        let mut r = seeded(14);
+        let count = r.bound(25) as i32 + 5;
+        for _ in 0..count {
+            for _ in 0..64 {
+                r.bound(8);
+                if r.bound(5) == 0 {
+                    r.bound(13);
+                } else {
+                    r.bound(8);
+                }
+            }
+        }
+        assert_eq!(
+            stats,
+            RockStats {
+                count,
+                placed: 0,
+                tries: 64 * count as u64
+            }
+        );
+        assert_eq!(rand.draws(), r.draws(), "no rand(6) after a capped rock");
+    }
+
+    /// No rock anywhere and all-zero sprites (so blits write nothing): every formation and
+    /// every rock is accepted on its first candidate.
+    #[test]
+    fn open_terrain_accepts_every_first_candidate() {
+        let mut level = new_level(200, 150, &[0u8; 256]);
+        let sprites = bank(99, &[]);
+        let mut rand = seeded(17);
+        let f = place_rock_formations(&mut level, &sprites, &mut rand);
+        assert!((5..=19).contains(&f.count));
+        assert_eq!((f.placed, f.tries), (f.count, f.count as u64));
+        let k = place_rocks(&mut level, &sprites, &mut rand);
+        assert!((5..=29).contains(&k.count));
+        assert_eq!((k.placed, k.tries), (k.count, k.count as u64));
+    }
+
+    #[test]
+    fn generate_random_composes_the_stages_in_level_cpp_order() {
+        let (large, textures, flags) = real_tc();
+        let assets = LevelGenAssets {
+            large_sprites: &large,
+            textures: &textures,
+            material_flags: &flags,
+        };
+        let mut ra = seeded(42);
+        let a = generate_random(&assets, 504, 350, &mut ra);
+
+        let mut rb = seeded(42);
+        let mut b = new_level(504, 350, &flags);
+        generate_dirt_pattern(&mut b, &large, &mut rb);
+        dig_tunnels(&mut b, &large, &textures, &mut rb);
+        place_rock_formations(&mut b, &large, &mut rb);
+        place_rocks(&mut b, &large, &mut rb);
+        assert_eq!(a, b);
+        assert_eq!(ra.last(), rb.last());
+        assert!(
+            a.material_id
+                .iter()
+                .any(|&m| flags[m as usize] & MAT_ROCK != 0),
+            "rocks placed"
+        );
+        assert!(
+            a.material_id
+                .iter()
+                .any(|&m| flags[m as usize] & MAT_BACKGROUND != 0),
+            "tunnels carved background (tc.cfg materials 1/2 carry the background bit)"
+        );
     }
 }

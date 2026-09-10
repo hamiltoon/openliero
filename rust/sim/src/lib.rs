@@ -15,6 +15,7 @@ pub mod bonus;
 pub mod control;
 pub mod debug;
 pub mod flash;
+pub mod game_over;
 pub mod hash;
 pub mod levelgen;
 pub mod nobject;

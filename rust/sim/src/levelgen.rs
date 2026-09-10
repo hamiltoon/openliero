@@ -18,8 +18,10 @@
 //!   unspecified evaluation order to reproduce.
 
 use assets::sprite::SpriteSet;
+use assets::tc::Texture;
 use sim_core::rng::Rand;
 
+use crate::blit::draw_dirt_effect;
 use crate::state::LevelSim;
 
 /// Largest level side C++ accepts (`level.cpp:232`, `assets/src/level.rs:51`).
@@ -194,10 +196,62 @@ pub fn generate_dirt_pattern(level: &mut LevelSim, large_sprites: &SpriteSet, ra
     scatter_stones(level, large_sprites, rand);
 }
 
+/// The tunnel walk of `GenerateRandom` (`level.cpp:108-135`), with the per-stamp action
+/// injected so tests can record positions. `count = rand(50)+5` tunnels; each starts at
+/// `(rand(w)-8, rand(h)-8)` with step `(rand(11)-5, rand(5)-2)` and `rand(12)` segments; a
+/// segment draws `count3 = rand(5)`, takes `count3` steps (stamping after each), backtracks
+/// by `(count3 + 1) * step`, then jitters by `(rand(7)-3, rand(15)-7)`.
+fn tunnel_walk(
+    width: i32,
+    height: i32,
+    rand: &mut Rand,
+    mut stamp: impl FnMut(&mut Rand, i32, i32),
+) {
+    let count = rand.bound(50) as i32 + 5;
+    for _ in 0..count {
+        let mut cx = rand.bound(width as u32) as i32 - 8;
+        let mut cy = rand.bound(height as u32) as i32 - 8;
+        let dx = rand.bound(11) as i32 - 5;
+        let dy = rand.bound(5) as i32 - 2;
+        let count2 = rand.bound(12) as i32;
+        for _ in 0..count2 {
+            let count3 = rand.bound(5) as i32;
+            for _ in 0..count3 {
+                cx += dx;
+                cy += dy;
+                stamp(&mut *rand, cx, cy);
+            }
+            cx -= (count3 + 1) * dx;
+            cy -= (count3 + 1) * dy;
+            cx += rand.bound(7) as i32 - 3;
+            cy += rand.bound(15) as i32 - 7;
+        }
+    }
+}
+
+/// `GenerateRandom`'s dirt-effect worm tunnels (`level.cpp:108-135`): every stamp is
+/// `DrawDirtEffect(texture 1, cx, cy)` with `(cx, cy)` the window's TOP-LEFT (no `-7`,
+/// unlike `BlowUpObject`). Texture 1 is the carving texture (tc.cfg `mframe=1, rframe=2,
+/// sframe=73, ndrawback=true`). Each stamp draws its own `rand(r_frame)` first, even when
+/// it is clipped away entirely (`blit.cpp:537`) — reused unchanged from Step 2
+/// ([`draw_dirt_effect`]).
+pub fn dig_tunnels(
+    level: &mut LevelSim,
+    large_sprites: &SpriteSet,
+    textures: &[Texture],
+    rand: &mut Rand,
+) {
+    let (w, h) = (level.width, level.height);
+    tunnel_walk(w, h, rand, |rand, x, y| {
+        draw_dirt_effect(level, large_sprites, textures, 1, x, y, rand)
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::MAT_ROCK;
+    use crate::state::{MAT_BACKGROUND, MAT_DIRT};
 
     fn seeded(seed: u32) -> Rand {
         let mut r = Rand::new();
@@ -388,5 +442,118 @@ mod tests {
         scatter_stones(&mut b, &sprites, &mut rb);
         assert_eq!(a, b);
         assert_eq!(ra.last(), rb.last());
+    }
+
+    /// level.cpp:108-135 restated statement by statement (the stamp recorder draws one
+    /// value per stamp, as DrawDirtEffect's rand(r_frame) does). Pins the draw order, the
+    /// `(count3 + 1) * d` backtrack and the jitter ranges in readable form; the golden's
+    /// `tunnels` stage token is the correctness gate.
+    #[test]
+    fn tunnel_walk_follows_level_cpp_108_135() {
+        let (w, h) = (300, 200);
+        let mut got = Vec::new();
+        let mut rand = seeded(99);
+        tunnel_walk(w, h, &mut rand, |r, x, y| {
+            r.bound(2);
+            got.push((x, y));
+        });
+
+        let mut r = seeded(99);
+        let mut want = Vec::new();
+        let count = r.bound(50) as i32 + 5;
+        for _ in 0..count {
+            let mut cx = r.bound(w as u32) as i32 - 8;
+            let mut cy = r.bound(h as u32) as i32 - 8;
+            let dx = r.bound(11) as i32 - 5;
+            let dy = r.bound(5) as i32 - 2;
+            let count2 = r.bound(12) as i32;
+            for _ in 0..count2 {
+                let count3 = r.bound(5) as i32;
+                for _ in 0..count3 {
+                    cx += dx;
+                    cy += dy;
+                    r.bound(2);
+                    want.push((cx, cy));
+                }
+                cx -= (count3 + 1) * dx;
+                cy -= (count3 + 1) * dy;
+                cx += r.bound(7) as i32 - 3;
+                cy += r.bound(15) as i32 - 7;
+            }
+        }
+        assert_eq!(got, want);
+        assert_eq!(rand.draws(), r.draws());
+        assert!(!got.is_empty());
+    }
+
+    /// Every stamp draws rand(r_frame) even when it is fully clipped (blit.cpp:537 runs
+    /// before the clip at :545-547). On a 4x4 level almost every 16x16 stamp is clipped, so
+    /// a port that skipped the draw for off-level stamps would diverge here.
+    #[test]
+    fn dig_tunnels_draws_once_per_stamp_even_when_clipped() {
+        let tex = Texture {
+            mframe: 0,
+            rframe: 2,
+            sframe: 1,
+            ndrawback: true,
+        };
+        let textures = vec![tex.clone(), tex];
+        let sprites = bank(3, &[]);
+        let mut level = new_level(4, 4, &[0u8; 256]);
+        let mut rand = seeded(21);
+        dig_tunnels(&mut level, &sprites, &textures, &mut rand);
+
+        let mut r = seeded(21);
+        let mut stamps = 0u64;
+        tunnel_walk(4, 4, &mut r, |r, _, _| {
+            r.bound(2);
+            stamps += 1;
+        });
+        assert!(stamps > 0);
+        assert_eq!(rand.draws(), r.draws());
+        assert_eq!(rand.last(), r.last());
+    }
+
+    /// dirt effect 1 = tc.cfg texture 1 (mframe 1, carving: ndrawback = true). With an
+    /// all-1 mask over all-Dirt terrain every in-clip window cell becomes material 1
+    /// (blit.cpp:566-579), the window's top-left is the walked (cx, cy) — no -7 offset —
+    /// and the clip is Rect(0, 0, w, h - 1).
+    #[test]
+    fn dig_tunnels_carves_texture_1_at_the_walked_top_left_positions() {
+        let mut flags = [0u8; 256];
+        flags[12] = MAT_DIRT;
+        flags[1] = MAT_DIRT | MAT_BACKGROUND; // tc.cfg materials[1] = 9
+        let textures = vec![
+            Texture {
+                mframe: 0,
+                rframe: 2,
+                sframe: 2,
+                ndrawback: true,
+            },
+            Texture {
+                mframe: 1,
+                rframe: 2,
+                sframe: 2,
+                ndrawback: true,
+            },
+        ];
+        let sprites = bank(4, &[(1, vec![1u8; 256])]);
+        let (w, h) = (64, 48);
+        let mut level = new_level(w, h, &flags);
+        level.material_id.iter_mut().for_each(|p| *p = 12);
+        let mut rand = seeded(8);
+        dig_tunnels(&mut level, &sprites, &textures, &mut rand);
+
+        let mut r = seeded(8);
+        let mut want = vec![12u8; (w * h) as usize];
+        tunnel_walk(w, h, &mut r, |r, x, y| {
+            r.bound(2);
+            for my in y.max(0)..(y + 16).min(h - 1) {
+                for mx in x.max(0)..(x + 16).min(w) {
+                    want[(mx + my * w) as usize] = 1;
+                }
+            }
+        });
+        assert_eq!(level.material_id, want);
     }
 }

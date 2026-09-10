@@ -8,6 +8,7 @@ sim-core = { path = "../sim-core" }
 assets = { path = "../assets" }
 sim = { path = "../sim" }
 render = { path = "../render" }
+toml = "0.8"
 
 # Wasm-only: the curated TC asset set is embedded in the binary (there is no
 # filesystem in the browser). Native never pulls this in, so the host dep tree

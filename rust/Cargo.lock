@@ -4177,6 +4177,7 @@ dependencies = [
  "render",
  "sim",
  "sim-core",
+ "toml",
 ]
 
 [[package]]

@@ -17,6 +17,7 @@
 //!   design F7). No C++ expression here holds two `rand()` calls, so there is no
 //!   unspecified evaluation order to reproduce.
 
+use assets::level::LevelData;
 use assets::sprite::SpriteSet;
 use assets::tc::Texture;
 use sim_core::rng::Rand;
@@ -56,6 +57,29 @@ pub struct LevelGenAssets<'a> {
     pub large_sprites: &'a SpriteSet,
     pub textures: &'a [Texture],
     pub material_flags: &'a [u8; 256],
+}
+
+/// The C++ `Settings` fields that drive `Level::GenerateFromSettings`, same names
+/// (`settings.hpp:74`, `:80`, `:89-90`). 4½a maps its `MatchConfig` onto this; the level
+/// FILE is resolved ([`level_file_name`]) and loaded by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelGenParams {
+    pub random_level: bool,
+    pub random_map_width: i32,
+    pub random_map_height: i32,
+    pub shadow: bool,
+}
+
+impl Default for LevelGenParams {
+    /// The C++ `Settings` defaults: random level, 504x350, shadows on.
+    fn default() -> Self {
+        LevelGenParams {
+            random_level: true,
+            random_map_width: 504,
+            random_map_height: 350,
+            shadow: true,
+        }
+    }
 }
 
 /// `Level::Resize` (`level.cpp:218-227`) on a fresh level: a zero-filled `width × height`
@@ -408,6 +432,71 @@ pub fn generate_random(
     place_rock_formations(&mut level, assets.large_sprites, rand);
     place_rocks(&mut level, assets.large_sprites, rand);
     level
+}
+
+/// `GenerateFromSettings`' file-name rule (`level.cpp:401-404`): append `.LEV` when the
+/// name contains no `.` anywhere (the whole string, directories included).
+pub fn level_file_name(level_file: &str) -> String {
+    if level_file.contains('.') {
+        level_file.to_string()
+    } else {
+        format!("{level_file}.LEV")
+    }
+}
+
+/// Port of `Level::GenerateFromSettings` (`level.cpp:397-429`) with the I/O lifted out.
+///
+/// * `params.random_level` ⇒ [`generate_random`] at `random_map_width x random_map_height`
+///   (`file` is ignored, as C++ never opens it).
+/// * otherwise `file` is the caller's attempt to read + parse [`level_file_name`]`(level_file)`:
+///   `Some(level)` is used as loaded — palette/display kept, **no RNG drawn**; `None` (read
+///   or parse failure) falls back to [`generate_random`], the `try/catch` + `!loaded` of
+///   `level.cpp:405-418`.
+/// * then `params.shadow` ⇒ [`make_shadow`] on either result (`level.cpp:426-428`) — so a
+///   loaded level is shadowed too.
+///
+/// A generated level has `palette: None` (= the TC exe palette, `level.cpp:102-103`) and
+/// `display: None`. Not ported: the `old_*` provenance fields (`:421-424`), which only feed
+/// the NEW-GAME reuse rule (4½d keeps the params beside the level), and C++ `SetPixel`'s
+/// `display_valid` clear on MODERNLV levels (render-only; Rust renders no display layer).
+pub fn generate_from_settings(
+    assets: &LevelGenAssets,
+    params: &LevelGenParams,
+    file: Option<LevelData>,
+    rand: &mut Rand,
+) -> LevelData {
+    let (mut level, palette, display) = match file {
+        Some(data) if !params.random_level => (
+            LevelSim {
+                width: data.width,
+                height: data.height,
+                material_id: data.material_id,
+                material_flags: *assets.material_flags,
+            },
+            data.palette,
+            data.display,
+        ),
+        _ => (
+            generate_random(
+                assets,
+                params.random_map_width,
+                params.random_map_height,
+                rand,
+            ),
+            None,
+            None,
+        ),
+    };
+    if params.shadow {
+        make_shadow(&mut level);
+    }
+    LevelData {
+        width: level.width,
+        height: level.height,
+        material_id: level.material_id,
+        palette,
+        display,
+    }
 }
 
 /// Flag byte of the in-bounds pixel `(x, y)` — the C++ `Mat(x, y)` read, derived live
@@ -1023,5 +1112,130 @@ mod tests {
         assert_eq!(get(&l, 9, 9), 13);
         assert_eq!(get(&l, 5, 9), 12);
         assert_eq!(get(&l, 4, 9), 40);
+    }
+
+    #[test]
+    fn level_file_name_appends_lev_only_when_there_is_no_dot() {
+        assert_eq!(level_file_name("Levels/foo"), "Levels/foo.LEV");
+        assert_eq!(level_file_name("Levels/foo.lev"), "Levels/foo.lev");
+        assert_eq!(
+            level_file_name("a.b/c"),
+            "a.b/c",
+            "C++ searches the whole string for '.'"
+        );
+    }
+
+    #[test]
+    fn level_gen_params_default_mirrors_cpp_settings() {
+        let want = LevelGenParams {
+            random_level: true,
+            random_map_width: 504,
+            random_map_height: 350,
+            shadow: true,
+        };
+        assert_eq!(LevelGenParams::default(), want);
+    }
+
+    #[test]
+    fn random_path_generates_then_shadows_and_ignores_any_file() {
+        let (large, textures, flags) = real_tc();
+        let assets = LevelGenAssets {
+            large_sprites: &large,
+            textures: &textures,
+            material_flags: &flags,
+        };
+        let params = LevelGenParams {
+            random_level: true,
+            random_map_width: 128,
+            random_map_height: 96,
+            shadow: true,
+        };
+        let decoy = LevelData {
+            width: 2,
+            height: 2,
+            material_id: vec![1; 4],
+            palette: None,
+            display: None,
+        };
+        let mut ra = seeded(9);
+        let got = generate_from_settings(&assets, &params, Some(decoy), &mut ra);
+
+        let mut rb = seeded(9);
+        let mut want = generate_random(&assets, 128, 96, &mut rb);
+        make_shadow(&mut want);
+        assert_eq!((got.width, got.height), (128, 96));
+        assert_eq!(got.material_id, want.material_id);
+        assert_eq!(
+            got.palette, None,
+            "a generated level has no custom palette (level.cpp:102-103)"
+        );
+        assert_eq!(got.display, None);
+        assert_eq!(ra.last(), rb.last());
+    }
+
+    #[test]
+    fn file_path_keeps_level_and_palette_draws_nothing_and_still_shadows() {
+        let (large, textures, flags) = real_tc();
+        let assets = LevelGenAssets {
+            large_sprites: &large,
+            textures: &textures,
+            material_flags: &flags,
+        };
+        // tc.cfg: 160 = see-shadow background, 12 = dirt (DirtRock), 40 = no flags.
+        let mut ids = vec![40u8; 64];
+        ids[6 * 8] = 160; // (0,6)
+        ids[3 + 3 * 8] = 12; // (3,3), its (x+3, y-3) neighbour
+        let pal = assets::palette::Palette {
+            entries: [assets::palette::Color { r: 4, g: 8, b: 12 }; 256],
+        };
+        let file = LevelData {
+            width: 8,
+            height: 8,
+            material_id: ids,
+            palette: Some(pal.clone()),
+            display: None,
+        };
+        let params = LevelGenParams {
+            random_level: false,
+            random_map_width: 504,
+            random_map_height: 350,
+            shadow: true,
+        };
+        let mut rand = seeded(5);
+        let got = generate_from_settings(&assets, &params, Some(file), &mut rand);
+        assert_eq!(rand.draws(), 0, "a loaded level consumes no RNG");
+        assert_eq!((got.width, got.height), (8, 8));
+        assert_eq!(
+            got.material_id[6 * 8],
+            164,
+            "MakeShadow applies to loaded levels (level.cpp:426-428)"
+        );
+        assert_eq!(got.palette, Some(pal), "the file's palette is kept");
+    }
+
+    #[test]
+    fn missing_file_falls_back_to_random_at_the_params_size() {
+        let (large, textures, flags) = real_tc();
+        let assets = LevelGenAssets {
+            large_sprites: &large,
+            textures: &textures,
+            material_flags: &flags,
+        };
+        let params = LevelGenParams {
+            random_level: false,
+            random_map_width: 64,
+            random_map_height: 64,
+            shadow: false,
+        };
+        let mut ra = seeded(3);
+        let got = generate_from_settings(&assets, &params, None, &mut ra);
+        let mut rb = seeded(3);
+        let want = generate_random(&assets, 64, 64, &mut rb);
+        assert_eq!(
+            got.material_id, want.material_id,
+            "level.cpp:416-418 fallback, no shadow"
+        );
+        assert_eq!(ra.last(), rb.last());
+        assert_eq!(got.palette, None);
     }
 }

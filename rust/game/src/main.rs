@@ -28,6 +28,7 @@ use sim::state::SimState;
 
 use game::audio::{AudioSink, Drainer, NullSink, RodioSink};
 use game::input::{InputSource, Mode, ParsedArgs, Recorder};
+use game::match_flow::{FlowStep, MatchFlow};
 
 mod blit;
 
@@ -78,6 +79,10 @@ struct Demo {
     scene: SceneData,
     surface: Bitmap,
     tick: u32,
+    /// Step 4½a-1: the match lifecycle (`LocalController`'s game → game-ended tail) —
+    /// `Some` in `Mode::Live` only. Scripted loops its golden and Replay plays a fixed
+    /// `ticks`, so neither ends a match.
+    flow: Option<MatchFlow>,
     /// Per-tick `state_hash` column of the committed golden (index = tick) — the
     /// sim determinism witness, asserted on BOTH targets in debug builds.
     #[cfg(debug_assertions)]
@@ -439,6 +444,7 @@ fn setup(
         scene,
         surface,
         tick: 0,
+        flow: (*mode == Mode::Live).then(MatchFlow::new),
         #[cfg(debug_assertions)]
         golden_state: golden.0,
         #[cfg(all(target_arch = "wasm32", debug_assertions))]
@@ -603,14 +609,7 @@ fn tick_and_render(
     // live session at the restart tick (see `Recorder::clear`'s doc for the
     // full semantics).
     if (*mode == Mode::Live || *mode == Mode::Replay) && keys.just_pressed(KeyCode::F5) {
-        if let Some(recorder) = recorder.as_deref_mut() {
-            recorder.clear();
-        }
-        let loaded = scenario::load(Path::new(TC_ROOT), &demo.scenario);
-        sim.0 = loaded.state;
-        demo.viewports = loaded.viewports;
-        demo.scene = loaded.scene;
-        demo.tick = 0;
+        restart_match(&mut sim.0, &mut demo, recorder.as_deref_mut());
         render_and_upload(&mut demo, &sim.0, &mut images, &frame.0);
         return;
     }
@@ -659,6 +658,19 @@ fn tick_and_render(
         audio.0.drain(&sim.0.sound_events);
         let live = live_loop_keys(&sim.0);
         audio.0.reap(&live);
+
+        // 4½a-1: match end (LocalController::Process tail, localController.cpp:177-199) —
+        // Live only. IsGameOver => 180 more simulated frames => restart through the F5
+        // path (the stand-in for 4½g's stats -> menu route, design §6).
+        let finished = demo
+            .flow
+            .as_mut()
+            .is_some_and(|flow| flow.after_frame(&sim.0) == FlowStep::Finished);
+        if finished {
+            restart_match(&mut sim.0, &mut demo, recorder.as_deref_mut());
+            render_and_upload(&mut demo, &sim.0, &mut images, &frame.0);
+            return;
+        }
     }
 
     // 2. Loop step. Scripted-only reload (spec §4.3 step 4 / §9): when `tick`
@@ -746,6 +758,23 @@ fn render_and_upload(
     // `get_mut` marks the Image dirty => Bevy re-uploads it to the GPU.
     let mut image = images.get_mut(handle).expect("frame image exists");
     blit::blit_surface_into_bytes(&demo.surface, image.data.as_mut().expect("image has data"));
+}
+
+/// Rebuild tick 0 through `scenario::load` — the 4f F5 restart, shared since 4½a-1 with
+/// the live match-end restart. Restarts an in-flight recording too (the 4f T0 fix: the
+/// flushed file then covers only ticks since the restart) and, in Live, the `MatchFlow`.
+fn restart_match(sim: &mut SimState, demo: &mut Demo, recorder: Option<&mut Recorder>) {
+    if let Some(recorder) = recorder {
+        recorder.clear();
+    }
+    let loaded = scenario::load(Path::new(TC_ROOT), &demo.scenario);
+    *sim = loaded.state;
+    demo.viewports = loaded.viewports;
+    demo.scene = loaded.scene;
+    demo.tick = 0;
+    if demo.flow.is_some() {
+        demo.flow = Some(MatchFlow::new());
+    }
 }
 
 /// The scenario text for `name`. **Native:** read the committed

@@ -81,9 +81,11 @@ and every existing golden untouched.
    control-state stream, `IsGameOver` (cpp-map §8, "must be ported bit-exact").
 4. **All prior goldens stay byte-identical** — the standing re-diff gate from Steps 2–4; the
    scenario text format stays frozen, so nothing in the corpus can move.
-5. **The shipped `data/Setups/liero.cfg` and `data/Profiles/*.toml` — and any setup/profile a C++
-   install has saved — load in Rust and round-trip byte-identical** (C++-saved → Rust load → Rust
-   save → same bytes).
+5. **Rust saves the same bytes C++ saves.** For every shipped `data/Setups/*.cfg` and
+   `data/Profiles/*.toml`, Rust load → Rust save equals C++ load → C++ save, and any file C++ has
+   saved round-trips byte-identical through Rust. **Corrected 2026-09-10 (4½a design §3.4):** the
+   shipped files are v5 / 6-bit RGB / hand-written and C++ itself rewrites all ten on load + save,
+   so "shipped file round-trips unchanged" is unsatisfiable even in C++.
 6. **The same shell runs on wasm**, with localStorage persistence and live keyboard.
 7. **Playing alone works**: a human vs. a `DumbAI`-controlled worm, selected from the player menu.
 
@@ -241,6 +243,19 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   `:494`, `:516-518`). **Parallel with 4½a** — file-disjoint; `CorrectShadow` (Rust has none today —
   Step 2's O4 omitted it at all 7 call sites) is owned by 4½a. Plan:
   `plans/2026-09-10-liero-rs-step4.5-slice4.5b-plan.md`.
+- **4½a is split (4½a design §9):** **4½a-1** = model + TOML reader + builder + sim ports
+  (`CorrectShadow`, the missing Scales/`DoHealing` mode rules) + `is_game_over` + `MatchFlow` +
+  sim goldens via one new optional scenario directive `settings <file>` (the dumper reads it with
+  the real `Settings::FromToml`; `scenario::load` refuses it) + the `sound_hooks` fix. Plan:
+  `plans/2026-09-10-liero-rs-step4.5-slice4.5a1-plan.md`. **4½a-2** = TOML writer + the byte gate
+  + `UpdateHash` + storage + `TC_ROOT` centralisation + the HUD fix. Interim rulings: differing
+  per-player health is refused until 4½f (Rust carries one health value); the live game restarts
+  (the F5 path) 180 frames after game over until 4½g adds the stats screen.
+- **4½c-0 — the unported weapon branches (added 2026-09-10, 4½a design finding).** RIFLE,
+  WINCHESTER, LASER, GAUSS GUN and MISSILE enter Step-2 branches that were never ported (the
+  `ST_LASER` do-loop and its siblings — the sim panics). Weapon selection makes them choosable, so
+  they are ported bit-exact, with sim goldens, **before** 4½c. Until then they are banned in 4½a's
+  goldens. Needs its own design + plan.
 - **4½c — Weapon selection phase.** The `weapsel.cpp` port into `sim` as a Bevy-free struct with
   `process_frame(inputs) -> bool`; the constructor's RNG rejection loops, `Randomize`, bot auto-ready
   (`is_ready[i] = controller != 0 && select_bot_weapons != 1`, `weapsel.cpp:95`), left/right cycling
@@ -317,7 +332,8 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   menu → match flow, the 3f precedent.
 
 *Parallelism: **4½a ∥ 4½b** (disjoint surfaces); **4½e ∥ 4½f** (both build on 4½d's framework and
-touch different menus). 4½c depends on 4½a's `MatchConfig` for `weap_table` and saved picks. 4½d
+touch different menus). 4½c-0 can start as soon as 4½b's sim work lands (it touches weapon code,
+not settings). 4½c depends on 4½a's `MatchConfig` for `weap_table` and saved picks, and on 4½c-0. 4½d
 depends on a+b+c. 4½g depends on 4½a's `IsGameOver`. 4½h is last by nature.*
 
 ---

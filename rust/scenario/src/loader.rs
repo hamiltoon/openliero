@@ -180,6 +180,10 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     state.worm_min_spawn_dist_last = tc.constants.WormMinSpawnDistLast;
     state.worm_min_spawn_dist_enemy = tc.constants.WormMinSpawnDistEnemy;
     state.game_mode = scenario.game_mode as u32;
+    // Step 4½a-1 (live bug, design §8): the worm-hook sound indices. Left at
+    // `SoundHooks::default()` every hook played sample 0. Unhashed (sound never
+    // enters the hash), so every golden stays byte-identical.
+    state.sound_hooks = tc.sound_hooks.clone();
 
     // NOTE: killed_timer is left at its `WormInit` default (150) — the camera
     // stays pinned at (0,0). Resetting it would centre the viewport and diverge.
@@ -252,5 +256,20 @@ weapon 0 DART
         // Death-banner strings (Slice 4d T5): the KilledMsg prefix / suicide suffix.
         assert_eq!(loaded.scene.labels.killed_msg, "Killed ");
         assert_eq!(loaded.scene.labels.committed_suicide_msg, " committed suicide");
+    }
+
+    #[test]
+    fn load_assigns_the_tc_sound_hooks() {
+        let scenario = Scenario::parse(SAMPLE).expect("scenario parses");
+        let loaded = load(Path::new(TC_ROOT), &scenario);
+        let tc_bytes = std::fs::read(format!("{TC_ROOT}/tc.cfg")).expect("read tc.cfg");
+        let tc = TcConfig::load(&tc_bytes).expect("tc.cfg parses");
+        assert_eq!(
+            loaded.state.sound_hooks, tc.sound_hooks,
+            "state.sound_hooks must be the TC's resolved hook indices"
+        );
+        // Non-vacuity: the all-zero default was the bug (every hook played sample 0,
+        // "shotgun"); the real TC's `bump` is sound index 14.
+        assert_ne!(loaded.state.sound_hooks.Bump, 0);
     }
 }

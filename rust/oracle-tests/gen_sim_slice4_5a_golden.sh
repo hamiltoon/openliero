@@ -11,7 +11,7 @@ PRESET="${PRESET:-macos-arm64}"
 cd "$ROOT"
 cmake --preset "$PRESET" -DOPENLIERO_BUILD_ORACLE_DUMP=ON >/dev/null
 cmake --build "$ROOT/build/$PRESET" --config Release --target oracle_dump_sim_physics
-for v in defaults; do
+for v in defaults killemall scales gametag; do
   "build/$PRESET/Release/oracle_dump_sim_physics" \
     "rust/oracle-tests/golden/sim_slice4_5a_${v}_scenario.txt" \
     "rust/oracle-tests/golden/sim_slice4_5a_${v}.txt"

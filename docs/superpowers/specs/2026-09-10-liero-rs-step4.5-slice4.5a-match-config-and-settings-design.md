@@ -282,7 +282,8 @@ behaviour the reader reproduces:
 | array element | positional, `f.index` advances even past a wrong-typed element (`:299-316`) | element `i` if present and integer, else keep |
 | short / long array | missing tail kept / extra ignored (`SerializeArray` loops `N`, `cereal_types.hpp:51-60`) | same |
 | non-array where an array is expected | `Lookup` on a non-table/non-array ⇒ null | keep all |
-| missing / non-table `[player1]` | child frame null ⇒ every load untouched | treat as an empty table |
+| missing / scalar `[player1]` | child frame null ⇒ every load untouched | treat as an empty table |
+| array-valued `settings` / `playerN` | `startNode` keeps the array node; `Lookup` on an array frame ignores the name and returns slot `index` (`toml_archive.hpp:177-202`, `:299-306`) ⇒ fields read **by position** in serialization order | read positionally (corrected 2026-09-10 by the 4½a-1 T2 review; 4½a-2's G5 golden should include one such input to confirm against the real C++) |
 | `rgbDepth` | default **6** on load, `< 8` ⇒ `v = (v & 63) << 2`, then clamp 0..255 (`:288-303`) | same — **including** on a missing table, where it mangles the *defaults* (`104 ⇒ 160`): a C++ quirk, reproduced and tested |
 | `version` | read into a local, discarded | ignored |
 | parse error | `TomlParseError` (`:162-167`) ⇒ `Settings::load` false (`settings.cpp:76-78`) | `Err(TomlError)`, value untouched |
@@ -569,7 +570,7 @@ the 12-column golden asserted every tick:
 | setup source | shipped `data/Setups/liero.cfg` (legacy v5) | generated sidecar | generated sidecar | generated sidecar |
 | `gameMode` | 0 | 0 | 3 | 1 |
 | `lives` | 15 | 1 | 2 | 3 |
-| worm `health` (both) | 100 | 150 | 120 | 80 |
+| worm `health` (both) | 100 | 150 | 40 (amended 2026-09-10 from 120: at 120 Scales trades lives forever and the match never ends) | 80 |
 | `loadingTime` | 100 | 37 | 150 | 0 |
 | `blood` | 100 | 250 | 60 | 0 |
 | `loadChange` | true | false | true | true |

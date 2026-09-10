@@ -10,6 +10,7 @@
 pub mod assets;
 pub mod loader;
 pub mod parser;
+pub mod settings;
 
 pub use loader::{load, HudLabels, Loaded, SceneData};
 pub use parser::{Scenario, ScenarioWorm};

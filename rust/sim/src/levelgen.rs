@@ -22,10 +22,16 @@ use assets::tc::Texture;
 use sim_core::rng::Rand;
 
 use crate::blit::draw_dirt_effect;
-use crate::state::LevelSim;
+use crate::state::{LevelSim, MAT_BACKGROUND, MAT_DIRT_ROCK, MAT_ROCK};
 
 /// Largest level side C++ accepts (`level.cpp:232`, `assets/src/level.rs:51`).
 const MAX_DIM: i32 = 4096;
+
+/// `Material::kSeeShadow` (`material.hpp:11`, `1 << 4`): a background shade that shows a
+/// cast shadow. Same value as `render::shadow_query::MAT_SEE_SHADOW` and as the
+/// `pub const MAT_SEE_SHADOW` the parallel slice 4½a adds to `sim::state`; private here so
+/// the two slices stay merge-free (design §1). Deduplicate onto `sim::state` in slice 4½d.
+const MAT_SEE_SHADOW: u8 = 1 << 4;
 
 /// `stone_tab` (`common.cpp:23`): the four large-sprite frames of each 32x32 rock
 /// formation, in quadrant order top-left, top-right, bottom-left, bottom-right.
@@ -402,6 +408,44 @@ pub fn generate_random(
     place_rock_formations(&mut level, assets.large_sprites, rand);
     place_rocks(&mut level, assets.large_sprites, rand);
     level
+}
+
+/// Flag byte of the in-bounds pixel `(x, y)` — the C++ `Mat(x, y)` read, derived live
+/// from `material_flags[material_id]`.
+fn flags_at(level: &LevelSim, x: i32, y: i32) -> u8 {
+    level.material_flags[level.material_id[(x + y * level.width) as usize] as usize]
+}
+
+/// Port of `Level::MakeShadow` (`level.cpp:195-216`). For `x in 0..w-3` (outer), `y in 3..h`
+/// (inner): (1) `SeeShadow(x,y) && DirtRock(x+3,y-3)` ⇒ pixel `+4` (wrapping `PalIdx`);
+/// (2) then, re-reading the possibly updated pixel, `12..=18 && Rock(x+3,y-3)` ⇒ `-2`,
+/// floored at 12. Finally every `Background` pixel of the bottom row (all x) becomes 13.
+/// In place, like C++ `SetPixel`: the neighbour `(x+3, y-3)` lies in a column not yet
+/// visited, so it is always read pre-pass (design §5). Precondition `height >= 1`.
+pub fn make_shadow(level: &mut LevelSim) {
+    let w = level.width;
+    let h = level.height;
+    for x in 0..w - 3 {
+        for y in 3..h {
+            let idx = (x + y * w) as usize;
+            if flags_at(level, x, y) & MAT_SEE_SHADOW != 0
+                && flags_at(level, x + 3, y - 3) & MAT_DIRT_ROCK != 0
+            {
+                let p = level.material_id[idx];
+                level.set_material(idx, p.wrapping_add(4));
+            }
+            let p = level.material_id[idx];
+            if (12..=18).contains(&p) && flags_at(level, x + 3, y - 3) & MAT_ROCK != 0 {
+                let dimmed = p - 2;
+                level.set_material(idx, if dimmed < 12 { 12 } else { dimmed });
+            }
+        }
+    }
+    for x in 0..w {
+        if flags_at(level, x, h - 1) & MAT_BACKGROUND != 0 {
+            level.set_material((x + (h - 1) * w) as usize, 13);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -883,5 +927,100 @@ mod tests {
                 .any(|&m| flags[m as usize] & MAT_BACKGROUND != 0),
             "tunnels carved background (tc.cfg materials 1/2 carry the background bit)"
         );
+    }
+
+    /// Flags shaped like the shipped tc.cfg `materials`: dirt 12..=18 (1), rock 19 (4),
+    /// see-shadow background 160..=163 (24), their shadowed twins 164..=167 (8), and
+    /// dirt+background 1 (9). Material 40 has no flags (the default fill).
+    fn shadow_flags() -> [u8; 256] {
+        let mut f = [0u8; 256];
+        f[12..=18].fill(MAT_DIRT);
+        f[19] = MAT_ROCK;
+        f[160..=163].fill(MAT_SEE_SHADOW | MAT_BACKGROUND);
+        f[164..=167].fill(MAT_BACKGROUND);
+        f[1] = MAT_DIRT | MAT_BACKGROUND;
+        f
+    }
+
+    fn shadow_level(w: i32, h: i32) -> LevelSim {
+        let mut l = new_level(w, h, &shadow_flags());
+        l.material_id.iter_mut().for_each(|p| *p = 40);
+        l
+    }
+
+    fn set(l: &mut LevelSim, x: i32, y: i32, v: u8) {
+        let w = l.width;
+        l.material_id[(x + y * w) as usize] = v;
+    }
+
+    fn get(l: &LevelSim, x: i32, y: i32) -> u8 {
+        l.material_id[(x + y * l.width) as usize]
+    }
+
+    #[test]
+    fn make_shadow_adds_4_to_see_shadow_pixels_under_dirt_rock() {
+        let mut l = shadow_level(10, 10);
+        set(&mut l, 2, 5, 160);
+        set(&mut l, 5, 2, 12); // DirtRock neighbour of (2,5)
+        set(&mut l, 2, 7, 161); // neighbour (5,4) = 40: no flags
+        make_shadow(&mut l);
+        assert_eq!(get(&l, 2, 5), 164);
+        assert_eq!(get(&l, 2, 7), 161);
+    }
+
+    #[test]
+    fn make_shadow_dims_dirt_beside_rock_floored_at_12_and_skips_the_last_3_columns() {
+        let mut l = shadow_level(10, 10);
+        set(&mut l, 1, 6, 16);
+        set(&mut l, 4, 3, 19); // rock neighbour of (1,6): 16 - 2 = 14
+        set(&mut l, 1, 8, 13);
+        set(&mut l, 4, 5, 19); // rock neighbour of (1,8): 13 - 2 = 11 -> floor 12
+        set(&mut l, 6, 6, 14);
+        set(&mut l, 9, 3, 19); // x = 6 < w - 3: processed -> 12
+        set(&mut l, 7, 6, 14); // x = 7 = w - 3: never processed
+        make_shadow(&mut l);
+        assert_eq!(get(&l, 1, 6), 14);
+        assert_eq!(get(&l, 1, 8), 12);
+        assert_eq!(get(&l, 6, 6), 12);
+        assert_eq!(get(&l, 7, 6), 14);
+    }
+
+    /// Rule 2 re-reads the pixel AFTER rule 1 wrote it (level.cpp:198-206): a see-shadow
+    /// 10 becomes 14, which is in 12..=18 with a rock neighbour, so it drops to 12.
+    #[test]
+    fn make_shadow_rule_two_rereads_the_rule_one_result() {
+        let mut l = shadow_level(10, 10);
+        l.material_flags[10] = MAT_SEE_SHADOW;
+        set(&mut l, 3, 6, 10);
+        set(&mut l, 6, 3, 19); // rock: DirtRock for rule 1 AND Rock for rule 2
+        make_shadow(&mut l);
+        assert_eq!(get(&l, 3, 6), 12);
+    }
+
+    /// A = (0,6) looks at B = (3,3); B looks at C = (6,0). B turns 161 -> 165 and 165 is
+    /// made DirtRock here, so if B were processed before A (a y-outer loop), A would darken.
+    #[test]
+    fn make_shadow_reads_neighbours_before_their_column_is_visited() {
+        let mut l = shadow_level(10, 10);
+        l.material_flags[165] = MAT_DIRT | MAT_BACKGROUND;
+        set(&mut l, 0, 6, 160);
+        set(&mut l, 3, 3, 161);
+        set(&mut l, 6, 0, 12);
+        make_shadow(&mut l);
+        assert_eq!(get(&l, 3, 3), 165, "B shadowed by C");
+        assert_eq!(get(&l, 0, 6), 160, "A read B before B changed");
+    }
+
+    #[test]
+    fn make_shadow_sets_background_bottom_row_pixels_to_13() {
+        let mut l = shadow_level(10, 10);
+        set(&mut l, 0, 9, 1); // dirt+background -> 13
+        set(&mut l, 9, 9, 164); // background, in the last 3 columns -> 13
+        set(&mut l, 5, 9, 12); // dirt, not background -> unchanged
+        make_shadow(&mut l);
+        assert_eq!(get(&l, 0, 9), 13);
+        assert_eq!(get(&l, 9, 9), 13);
+        assert_eq!(get(&l, 5, 9), 12);
+        assert_eq!(get(&l, 4, 9), 40);
     }
 }

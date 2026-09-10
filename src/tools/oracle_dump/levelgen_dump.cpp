@@ -380,9 +380,9 @@ std::string DumpFile(std::string& out, Common& common, char const* level_file, u
   rand.Seed(seed);
   level.GenerateFromSettings(common, settings, rand);
   char line[256];
-  int const kLen = std::snprintf(line, sizeof line, "file %s %u %d %d %d %s\n", level_file, seed,
-                                 shadow ? 1 : 0, level.width, level.height,
-                                 Stage(level, rand).c_str());
+  int const kLen =
+      std::snprintf(line, sizeof line, "file %s %u %d %d %d %s\n", level_file, seed, shadow ? 1 : 0,
+                    level.width, level.height, Stage(level, rand).c_str());
   if (kLen < 0 || static_cast<std::size_t>(kLen) >= sizeof line) {
     Fail("file line truncated", seed, level.width, level.height);
   }

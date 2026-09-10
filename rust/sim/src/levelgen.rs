@@ -23,16 +23,10 @@ use assets::tc::Texture;
 use sim_core::rng::Rand;
 
 use crate::blit::draw_dirt_effect;
-use crate::state::{LevelSim, MAT_BACKGROUND, MAT_DIRT_ROCK, MAT_ROCK};
+use crate::state::{LevelSim, MAT_BACKGROUND, MAT_DIRT_ROCK, MAT_ROCK, MAT_SEE_SHADOW};
 
 /// Largest level side C++ accepts (`level.cpp:232`, `assets/src/level.rs:51`).
 const MAX_DIM: i32 = 4096;
-
-/// `Material::kSeeShadow` (`material.hpp:11`, `1 << 4`): a background shade that shows a
-/// cast shadow. Same value as `render::shadow_query::MAT_SEE_SHADOW` and as the
-/// `pub const MAT_SEE_SHADOW` the parallel slice 4½a adds to `sim::state`; private here so
-/// the two slices stay merge-free (design §1). Deduplicate onto `sim::state` in slice 4½d.
-const MAT_SEE_SHADOW: u8 = 1 << 4;
 
 /// `stone_tab` (`common.cpp:23`): the four large-sprite frames of each 32x32 rock
 /// formation, in quadrant order top-left, top-right, bottom-left, bottom-right.
@@ -459,6 +453,11 @@ pub fn level_file_name(level_file: &str) -> String {
 /// `display: None`. Not ported: the `old_*` provenance fields (`:421-424`), which only feed
 /// the NEW-GAME reuse rule (4½d keeps the params beside the level), and C++ `SetPixel`'s
 /// `display_valid` clear on MODERNLV levels (render-only; Rust renders no display layer).
+///
+/// `settings.load_powerlevel_palette` gating (C++ `level.cpp:281-287`, `:388-392`: drop the
+/// loaded level's custom palette when the setting is off) is the CALLER's responsibility
+/// (slice 4½a's builder) — this function passes the file branch's `LevelData.palette` through
+/// unchanged.
 pub fn generate_from_settings(
     assets: &LevelGenAssets,
     params: &LevelGenParams,
@@ -466,16 +465,23 @@ pub fn generate_from_settings(
     rand: &mut Rand,
 ) -> LevelData {
     let (mut level, palette, display) = match file {
-        Some(data) if !params.random_level => (
-            LevelSim {
-                width: data.width,
-                height: data.height,
-                material_id: data.material_id,
-                material_flags: *assets.material_flags,
-            },
-            data.palette,
-            data.display,
-        ),
+        Some(data) if !params.random_level => {
+            debug_assert_eq!(
+                data.material_id.len(),
+                (data.width * data.height) as usize,
+                "file-branch LevelData.material_id length must match width * height"
+            );
+            (
+                LevelSim {
+                    width: data.width,
+                    height: data.height,
+                    material_id: data.material_id,
+                    material_flags: *assets.material_flags,
+                },
+                data.palette,
+                data.display,
+            )
+        }
         _ => (
             generate_random(
                 assets,

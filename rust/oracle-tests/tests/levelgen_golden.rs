@@ -112,7 +112,8 @@ struct Coverage {
     /// `FIXTURE_CASE`'s golden (pre-shadow `<rocks>` hash, `<shadowed>` hash), from its
     /// shadow=1 `gen` line.
     fixture_source: Option<(String, String)>,
-    /// shadow -> final hash of the `SHADOW_FIXTURE` file lines, as the Rust port computed it.
+    /// shadow -> the golden's final-hash token for each `SHADOW_FIXTURE` file line (asserted
+    /// equal to the Rust-computed value just above, in `check_file`).
     fixture_final: BTreeMap<bool, String>,
 }
 
@@ -399,7 +400,7 @@ fn levelgen_matches_cpp_oracle() {
 /// 4½b T9 — the `shadow=1` dig tokens through 4½a's `CorrectShadow` port: after generation
 /// + MakeShadow, 12 dig stamps each followed by CorrectShadow over `Rect(x-3, y-3, x+18,
 /// y+18)` (worm.cpp:931-934), continuing the generation RNG. Non-vacuity: on at least one
-/// line the same stamps without CorrectShadow give a different map.
+///   line the same stamps without CorrectShadow give a different map.
 #[test]
 fn levelgen_dig_stage_with_correct_shadow_matches_cpp() {
     let golden = std::fs::read_to_string(format!("{ROOT}/rust/oracle-tests/golden/levelgen.txt"))
@@ -414,7 +415,16 @@ fn levelgen_dig_stage_with_correct_shadow_matches_cpp() {
     let mut changed = 0usize;
     for (i, line) in golden.lines().enumerate() {
         let t: Vec<&str> = line.split_whitespace().collect();
-        if t.first().copied() != Some("gen") || t[4] != "1" {
+        if t.first().copied() != Some("gen") {
+            continue;
+        }
+        assert!(
+            t.len() >= 13,
+            "line {}: a gen record has 19 fields (need >= 13 for the dig-stage token), got {}",
+            i + 1,
+            t.len()
+        );
+        if t[4] != "1" {
             continue;
         }
         let seed: u32 = t[1].parse().expect("seed");
@@ -450,6 +460,11 @@ fn levelgen_dig_stage_with_correct_shadow_matches_cpp() {
         checked >= 21,
         "expected >= 21 shadow=1 gen lines, got {checked}"
     );
+    // Measured on this golden: changed=20, checked=21 — one shadow=1 line's dig stamps happen
+    // to land where CorrectShadow is a no-op (no SeeShadow pixel touched by that line's 12
+    // stamps), so `assert_eq!(changed, checked, ...)` is too strict here and would flake
+    // against future golden regenerations. `changed > 0` is the real non-vacuity bar (final
+    // review F6).
     assert!(
         changed > 0,
         "CorrectShadow never changed a dig result (vacuous)"

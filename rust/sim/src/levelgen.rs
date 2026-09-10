@@ -978,6 +978,7 @@ mod tests {
         set(&mut l, 6, 6, 14);
         set(&mut l, 9, 3, 19); // x = 6 < w - 3: processed -> 12
         set(&mut l, 7, 6, 14); // x = 7 = w - 3: never processed
+        set(&mut l, 0, 4, 19); // (7,6)'s would-be neighbour (10,3) aliases (0,4)
         make_shadow(&mut l);
         assert_eq!(get(&l, 1, 6), 14);
         assert_eq!(get(&l, 1, 8), 12);

@@ -8,6 +8,7 @@
 //! the existing `oracle_tests::scenario::Scenario` references compile unchanged.
 
 pub mod assets;
+pub mod build;
 pub mod loader;
 pub mod parser;
 pub mod settings;

@@ -89,7 +89,7 @@ pub struct Loaded {
     pub scene: SceneData,
 }
 
-fn load_sprites(tc_root: &Path, file: &str, w: i32, h: i32, count: i32) -> SpriteSet {
+pub(crate) fn load_sprites(tc_root: &Path, file: &str, w: i32, h: i32, count: i32) -> SpriteSet {
     let bytes = crate::assets::read_asset(tc_root, &format!("sprites/{file}"));
     let tga = assets::sprite::Tga::load(&bytes).unwrap_or_else(|_| panic!("{file} parses"));
     SpriteSet::from_tga(&tga, w, h, count).unwrap_or_else(|_| panic!("{file} sprite bank"))
@@ -107,7 +107,6 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     let level = assets::level::load(&lev_bytes).expect("level loads");
     let tc_bytes = crate::assets::read_asset(tc_root, "tc.cfg");
     let tc = TcConfig::load(&tc_bytes).expect("tc.cfg parses");
-    let color_anim = tc.color_anim.clone();
     let objects = Objects::load(&tc.types, |sub, id| {
         Ok(crate::assets::read_asset(
             tc_root,
@@ -188,15 +187,31 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     // NOTE: killed_timer is left at its `WormInit` default (150) — the camera
     // stays pinned at (0,0). Resetting it would centre the viewport and diverge.
 
-    let fire_cone = build_fire_cone_sprites(&state.large_sprites);
+    let scene = scene_data(tc_root, &tc, origpal, &state.large_sprites);
+    Loaded {
+        state,
+        viewports: Viewport::player_layout(),
+        scene,
+    }
+}
 
+/// The owned Scene ingredients for a loaded TC — shared by [`load`] and
+/// `crate::build::build_match` (Step 4½a-1; a pure factor-out of the former `load` tail,
+/// gated by the render goldens). `origpal` is the palette the caller chose.
+pub(crate) fn scene_data(
+    tc_root: &Path,
+    tc: &TcConfig,
+    origpal: Palette,
+    large_sprites: &SpriteSet,
+) -> SceneData {
+    let fire_cone = build_fire_cone_sprites(large_sprites);
     // HUD font: `sprites/font.tga` is a plain uncompressed indexed TGA, so the
     // generic `Tga::load` parses it (7 × 250*8, de-flipped); `Font::load` runs the
-    // `common.cpp:414-433` per-glyph post-process. No new TGA parser (T0).
+    // `common.cpp:414-433` per-glyph post-process.
     let font_bytes = crate::assets::read_asset(tc_root, "sprites/font.tga");
     let font_tga = assets::sprite::Tga::load(&font_bytes).expect("font.tga parses");
     let font = Font::load(&font_tga);
-    // HUD labels carried verbatim from the TC's `[texts]` (already parsed by `assets::tc`).
+    // HUD labels carried verbatim from the TC's `[texts]`.
     let labels = HudLabels {
         kills: tc.texts.Kills.clone(),
         lives: tc.texts.Lives.clone(),
@@ -204,20 +219,15 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
         killed_msg: tc.texts.KilledMsg.clone(),
         committed_suicide_msg: tc.texts.CommittedSuicideMsg.clone(),
     };
-
-    Loaded {
-        state,
-        viewports: Viewport::player_layout(),
-        scene: SceneData {
-            origpal,
-            color_anim,
-            fire_cone,
-            nr_begin: tc.constants.NRColourBegin,
-            nr_end: tc.constants.NRColourEnd,
-            laser_weapon: tc.constants.LaserWeapon,
-            font,
-            labels,
-        },
+    SceneData {
+        origpal,
+        color_anim: tc.color_anim.clone(),
+        fire_cone,
+        nr_begin: tc.constants.NRColourBegin,
+        nr_end: tc.constants.NRColourEnd,
+        laser_weapon: tc.constants.LaserWeapon,
+        font,
+        labels,
     }
 }
 

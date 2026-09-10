@@ -77,7 +77,7 @@ and every existing golden untouched.
    (settings), weapon availability, level (file *or* random), player profiles/colours/controls,
    weapon selection, the match itself, match end, stats screen, back to the menu, QUIT.
 3. **Every sim-affecting piece is bit-exact vs a C++ golden** — settings→sim plumbing, random level
-   generation + `MakeShadow` + `SelectSpawn`, the weapon-selection RNG stream, DumbLieroAI's
+   generation + `MakeShadow` + `CorrectShadow`, the weapon-selection RNG stream, DumbLieroAI's
    control-state stream, `IsGameOver` (cpp-map §8, "must be ported bit-exact").
 4. **All prior goldens stay byte-identical** — the standing re-diff gate from Steps 2–4; the
    scenario text format stays frozen, so nothing in the corpus can move.
@@ -129,9 +129,12 @@ Presentation (menu pixels, stats screen layout) is **not** C++-gated — it cann
    `gfx.cpp:1446` and `:1520`), while the netplay/test paths generate from `game.rand`, the sim RNG
    (`rollbackController.cpp:381`, `net/session.cpp:696`, `game_harness.hpp:58`) — cpp-map §4.2. We
    take the **netplay shape**: a dedicated `Rand` seeded from the match seed. The generation is
-   therefore deterministic, recordable, replayable and identical to the C++ netplay path; the only
-   divergence from C++ single-player is the *seed source*, which is unobservable (a wall-clock seed
-   produces an arbitrary level; ours produces an arbitrary-but-reproducible one).
+   therefore deterministic, recordable and replayable, and the *level* for seed S equals C++
+   `GenerateRandom` driven by a `Rand` seeded with S. The divergence from C++ single-player is the
+   *seed source*, which is unobservable. **Correction (4½b design):** it is *not* identical to the
+   C++ netplay path in one respect — there, generation advances the sim RNG before frame 0 and the
+   host ships map + RNG state (`session.cpp:534-537`, `:693-704`); ours leaves the sim stream
+   untouched. Unobservable until Step 5, which runs Rust on both peers; Step 5 must choose.
 7. **The weapon-selection phase is part of the match, in `sim`, Bevy-free.** `weapsel.cpp` becomes a
    struct in the `sim` crate with `process_frame(inputs) -> bool`, because **it consumes
    `game.rand`** — the sim RNG (`weapsel.cpp:57-61`, the rejection loop `:66-75`, `Randomize`
@@ -220,7 +223,9 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   for GameOfTag/Holdazone) plus the Scales-of-Justice extra-life rule (`game.cpp:511-566`,
   `:155-166`) and the 180-frame post-mortem fade before the match ends
   (`localController.cpp:213`, `:275-280`, `:186-198`); TOML persistence (schema, paths, `UpdateHash`);
-  and the two live bugs (`sound_hooks`, HUD off). **Gate:** sim goldens with non-default settings via
+  and the live bugs (`sound_hooks`, HUD off, and — found in 4½b's design — `scenario::load` ignoring
+  `LevelData.palette`, so POWERLEVEL palettes never show); plus the `CorrectShadow` port
+  (`sim::shadow`, gated on `settings.shadow`; Rust has none today). **Gate:** sim goldens with non-default settings via
   new dumper directives + the TOML byte-gate. **Proves:** the shell can *configure* a match without
   the scenario format moving.
 - **4½b — Random level generation.** `GenerateDirtPattern` (`level.cpp:11` — the diffusion noise
@@ -228,10 +233,14 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   `rand(50)+5` dirt-effect tunnels (`:108-135`, each `DrawDirtEffect` call drawing one more
   `rand(tex.r_frame)`, `blit.cpp:534-537`), the rock formations with their `kMaxTries = width*height`
   rejection cap (`:140`, `:155-158`, `:142-170`, `:172-192`), `MakeShadow` (`level.cpp:195`) and
-  `SelectSpawn` (`level.cpp:435`, called from `Game::SpawnZone`, `game.cpp:494`). All three
-  primitives already exist on the Rust side (`sim_core::rng::Rand`, `sim::blit::draw_dirt_effect`,
-  `SpriteSet` — rust-map cross-cutting §4). **Gate:** `oracle_dump_levelgen`, bit-exact.
-  **Parallel with 4½a** — no shared surface.
+  `generate_from_settings` (random / file / fallback + shadow). All three primitives already exist
+  on the Rust side (`sim_core::rng::Rand`, `sim::blit::draw_dirt_effect`, `SpriteSet` — rust-map
+  cross-cutting §4). **Gate:** `oracle_dump_levelgen`, bit-exact, incl. a `CorrectShadow` dig
+  stage that checks 4½a's port (4½b T9, runs after 4½a lands it). **`SelectSpawn` is deferred with
+  Holdazone** — its only caller is `SpawnZone`, reachable only from Holdazone (`game.cpp:455`,
+  `:494`, `:516-518`). **Parallel with 4½a** — file-disjoint; `CorrectShadow` (Rust has none today —
+  Step 2's O4 omitted it at all 7 call sites) is owned by 4½a. Plan:
+  `plans/2026-09-10-liero-rs-step4.5-slice4.5b-plan.md`.
 - **4½c — Weapon selection phase.** The `weapsel.cpp` port into `sim` as a Bevy-free struct with
   `process_frame(inputs) -> bool`; the constructor's RNG rejection loops, `Randomize`, bot auto-ready
   (`is_ready[i] = controller != 0 && select_bot_weapons != 1`, `weapsel.cpp:95`), left/right cycling
@@ -271,7 +280,9 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   minimap preview (`:105-156`, `level.cpp:489`, `level.hpp:31-34`); SAVE SETUP AS… /
   LOAD SETUP (`mainMenuState.cpp:285-311`, `paths::ShadowsSystem` refusing reserved names,
   `filesystem.hpp:142`); the `InputStringState` and `InfoBoxState` overlays (`inputState.cpp:13`,
-  `:166`). **Gate:** menu self-goldens + a settings→`MatchConfig`→sim golden reusing 4½a's directives.
+  `:166`). **Gate:** menu self-goldens + a settings→`MatchConfig`→sim golden reusing 4½a's directives
+  + the **first sim golden on a non-504×350 level** (MAP WIDTH/HEIGHT land here; the sim has only
+  ever been gated at 504×350).
   **Parallel with 4½f.**
 - **4½f — Player menu, profiles, DumbLieroAI.** The `PlayerMenu` (`gfx.cpp:459-483`, `:1362-1428`):
   NAME (with `GenerateName` for an empty name, `mainMenuState.cpp:323-347`), HEALTH, R/G/B with the
@@ -336,7 +347,8 @@ depends on a+b+c. 4½g depends on 4½a's `IsGameOver`. 4½h is last by nature.*
 - **Gamepad input** (`InputDeviceBehavior` `gfx.cpp:85`, `gamepad_controls` `worm.hpp:74-77`) —
   keyboard first, as in Step 4; additive and un-gated.
 - **Holdazone** stays `unimplemented!()` (`sim/src/state.rs:2250-2252`); the settings menu shows its
-  items, and choosing it is refused rather than silently broken.
+  items, and choosing it is refused rather than silently broken. `Level::SelectSpawn`
+  (`level.cpp:435`) is deferred with it — `SpawnZone` is its only caller.
 
 ---
 

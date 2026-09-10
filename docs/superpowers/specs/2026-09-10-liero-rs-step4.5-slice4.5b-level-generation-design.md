@@ -338,10 +338,14 @@ slices the oracle's work, and the golden cannot be written from a replica bug.
 #### 10.3 Matrix and coverage guard
 
 Seeds `{1, 42, 2654435769}` × sizes `{504×350, 600×350, 64×64, 128×96, 101×77, 2000×72, 72×1000}`
-× shadow `{0, 1}` = 42 `gen` lines; plus 5 `file` lines: `Levels/see_shadow_test.lev` seed 1
-shadow 1 and 0, `Levels/render_stage.lev` seed 1 shadow 1, and the missing
+× shadow `{0, 1}` = 42 `gen` lines; plus 7 `file` lines: `Levels/see_shadow_test.lev` seed 1
+shadow 1 and 0, `Levels/render_stage.lev` seed 1 shadow 1, the missing
 `Levels/does_not_exist` (no `.` ⇒ `.LEV` appended ⇒ load fails ⇒ random fallback at the
-504×350 defaults) seed 42 shadow 1 and 0. The dumper **exits 1** unless at least one `gen` case hit
+504×350 defaults) seed 42 shadow 1 and 0, and (amended 2026-09-10, controller ruling, T0 review)
+`rust/oracle-tests/golden/levelgen_shadow_fixture.lev` (128×96 OLLEVEL2 = the pre-`MakeShadow`
+`GenerateRandom` output for seed 42) loaded with shadow 1 and 0 — a `MakeShadow` fixture: the
+shipped `Levels/*.lev` files are all `MakeShadow` no-ops, so without it a skipped `make_shadow` on
+the file branch was undetectable. The dumper **exits 1** unless at least one `gen` case hit
 the cap (`placed < count`) **and** at least one uncapped case retried (`tries > count`), so the
 committed golden is guaranteed to exercise both loop exits. If a guard fails, the remedy is more
 small-map seeds (e.g. add seeds for 64×64), recorded in the golden's commit message.
@@ -395,8 +399,9 @@ names the **first diverging stage**), assert both `RockStats`, assert the compos
 (when shadow), assert `<shadowed>`, and on `shadow=0` lines run the dig stage (pure
 `draw_dirt_effect`) and assert `<dig>`. For each `file` line: `level_file_name` → `std::fs::read`
 (+ `assets::level::load`) → `Option` → `generate_from_settings` → assert. Coverage guards: all 14
-(size, shadow) combinations present, 5 `file` lines, ≥1 cap case, ≥1 retry case, `MakeShadow`
-changed every shadow line, ≥1 file line with `last == 0` and ≥1 with `last != 0`.
+(size, shadow) combinations present, 7 `file` lines (amended 2026-09-10, controller ruling, T0
+review — includes the `levelgen_shadow_fixture.lev` `MakeShadow` pair), ≥1 cap case, ≥1 retry case,
+`MakeShadow` changed every shadow line, ≥1 file line with `last == 0` and ≥1 with `last != 0`.
 
 **T9 (after 4½a's `sim::shadow::correct_shadow` lands)** adds a second test in the same file: on
 every `shadow=1` line, regenerate + `make_shadow`, run the dig stage with `correct_shadow` and assert

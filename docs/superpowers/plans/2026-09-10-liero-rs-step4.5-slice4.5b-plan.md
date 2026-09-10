@@ -537,7 +537,7 @@ Expected: no output.
 Run (Bash `run_in_background: true` — a fresh worktree's first configure bootstraps vcpkg and builds `game`, which can exceed 10 min): `bash /Users/john/code/openliero/.claude/worktrees/liero-rs-step-4-5-levelgen-oracle/rust/oracle-tests/gen_levelgen_golden.sh`
 Expected tail: `oracle_dump_levelgen: <N> capped cases, <M> retried cases` with N ≥ 1 and M ≥ 1, then `wrote rust/oracle-tests/golden/levelgen.txt`; exit 0.
 
-If it exits with `replica != Level::GenerateDirtPattern` / `GenerateRandom` / `GenerateFromSettings`: the **replica** is wrong (never edit `level.cpp`) — diff the named function against the replica statement by statement (`level.cpp:11-193`, `:397-429`) and rerun. If it exits with `matrix misses the cap or the retry path`: add seeds to `kSeeds` (e.g. `7U`, `99U`) and rerun until both counts are ≥ 1; the Rust test (T7) is keyed on the golden, not on the seed list, and asserts only the 14 (size, shadow) combinations and the 5 file lines.
+If it exits with `replica != Level::GenerateDirtPattern` / `GenerateRandom` / `GenerateFromSettings`: the **replica** is wrong (never edit `level.cpp`) — diff the named function against the replica statement by statement (`level.cpp:11-193`, `:397-429`) and rerun. If it exits with `matrix misses the cap or the retry path`: add seeds to `kSeeds` (e.g. `7U`, `99U`) and rerun until both counts are ≥ 1; the Rust test (T7) is keyed on the golden, not on the seed list, and asserts only the 14 (size, shadow) combinations and the 7 file lines (amended 2026-09-10, controller ruling, T0 review: includes the `levelgen_shadow_fixture.lev` MakeShadow pair).
 
 - [ ] **Step 6: Sanity-check the golden**
 
@@ -559,7 +559,8 @@ Expected: no output, exit 0. (Use `clang-format-22` if the default binary is ano
 - [ ] **Step 8: Commit (one commit — the controller cherry-picks it)**
 
 Run: `git -C /Users/john/code/openliero/.claude/worktrees/liero-rs-step-4-5-levelgen-oracle add src/tools/oracle_dump/levelgen_dump.cpp CMakeLists.txt rust/oracle-tests/gen_levelgen_golden.sh rust/oracle-tests/golden/levelgen.txt`
-Run: `git -C /Users/john/code/openliero/.claude/worktrees/liero-rs-step-4-5-levelgen-oracle commit -m "oracle(4½b): oracle_dump_levelgen + gen script + levelgen golden" -m "Self-checked stage replica of Level::GenerateRandom (field/splats/stones/tunnels/formations/rocks), MakeShadow, CorrectShadow dig stage, GenerateFromSettings file + fallback cases. <N> capped / <M> retried cases; <G> gen + 5 file lines." -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"`
+Run: `git -C /Users/john/code/openliero/.claude/worktrees/liero-rs-step-4-5-levelgen-oracle commit -m "oracle(4½b): oracle_dump_levelgen + gen script + levelgen golden" -m "Self-checked stage replica of Level::GenerateRandom (field/splats/stones/tunnels/formations/rocks), MakeShadow, CorrectShadow dig stage, GenerateFromSettings file + fallback cases. <N> capped / <M> retried cases; <G> gen + 7 file lines." -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"`
+(amended 2026-09-10, controller ruling, T0 review: file-line count raised from 5 to 7 — a `levelgen_shadow_fixture.lev` MakeShadow pair was added.)
 (Fill `<N>`, `<M>`, `<G>` with the numbers Step 5/6 printed.)
 Expected: `4 files changed`.
 
@@ -2206,7 +2207,9 @@ fn levelgen_matches_cpp_oracle() {
         }
     }
     assert!(cov.gen_lines >= 42, "expected >= 42 gen lines, got {}", cov.gen_lines);
-    assert_eq!(cov.file_lines, 5, "file lines");
+    // amended 2026-09-10 (controller ruling, T0 review): 5 -> 7 file lines — added the
+    // levelgen_shadow_fixture.lev MakeShadow pair (shipped Levels/*.lev are MakeShadow no-ops).
+    assert_eq!(cov.file_lines, 7, "file lines");
     assert!(cov.capped > 0, "no case hit the kMaxTries cap (level.cpp:137-158)");
     assert!(cov.retried > 0, "no uncapped case rejected-then-placed a rock");
     assert!(cov.file_loaded >= 3, "file branch (no RNG) not exercised");
@@ -2402,7 +2405,8 @@ with
 ```
 ├─ ✅ 4½b  random level generation — sim::levelgen (GenerateRandom stage by stage + MakeShadow
 │          + GenerateFromSettings random/file/fallback; takes &mut Rand, the shell seeds it
-│          from the match seed). Gate: oracle_dump_levelgen, 42 gen + 5 file lines BIT-EXACT
+│          from the match seed). Gate: oracle_dump_levelgen, 42 gen + 7 file lines BIT-EXACT
+│          (amended 2026-09-10, controller ruling, T0 review: +levelgen_shadow_fixture.lev)
 │          (per-stage hash + rand.last, kMaxTries cap + retry paths); its dig stage checks
 │          4½a's CorrectShadow once that lands (T9). SelectSpawn deferred with Holdazone. done
 ```

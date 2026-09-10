@@ -19,12 +19,19 @@
 // bare hash after MakeShadow (no RNG) or "-" when shadow == 0. <dig> = 12 dig-texture
 // stamps (DrawDirtEffect texture 7) each followed, when shadow == 1, by CorrectShadow over
 // the worm.cpp:931-934 rect, continuing from the post-generation RNG. tries = candidate
-// positions drawn by the rock loops (loop iterations), summed.
+// positions drawn by the rock loops (loop iterations), summed. <level_file> is the
+// repo-root-relative string passed as settings.level_file.
+//
+// No shipped level has a pixel MakeShadow changes, so the dumper also WRITES a fixture,
+// rust/oracle-tests/golden/levelgen_shadow_fixture.lev: GenerateRandom's pre-shadow map for
+// seed 42 at 128x96 in the OLLEVEL2 format (level.cpp:231-251). Its two file lines (shadow 1
+// and 0) make the file branch's MakeShadow wiring a check that can fail.
 //
 // Run from the repo root (Common::load("data/TC/openliero") and the file cases' relative
 // paths). Output is buffered and argv[1] is written only after every case passed; it
 // exits 1 without writing unless some case hit the kMaxTries cap AND some uncapped case
-// retried a rock placement (the matrix must exercise both loop exits). Built via
+// retried a rock placement (the matrix must exercise both loop exits), and unless
+// MakeShadow changes the fixture on the file branch. Built via
 // OPENLIERO_BUILD_ORACLE_DUMP (see rust/oracle-tests/gen_levelgen_golden.sh). Not part of
 // the default build.
 #include <cinttypes>
@@ -38,12 +45,15 @@
 #include "common.hpp"
 #include "filesystem.hpp"
 #include "gfx/blit.hpp"
+#include "io/stream.hpp"
 #include "level.hpp"
 #include "math/rect.hpp"
 #include "rand.hpp"
 #include "settings.hpp"
 
 namespace {
+
+constexpr char kShadowFixture[] = "rust/oracle-tests/golden/levelgen_shadow_fixture.lev";
 
 uint64_t Fnv1a(std::vector<unsigned char> const& data) {
   uint64_t h = 0xcbf29ce484222325ULL;
@@ -57,6 +67,16 @@ uint64_t Fnv1a(std::vector<unsigned char> const& data) {
 [[noreturn]] void Fail(char const* what, uint32_t seed, int w, int h) {
   std::fprintf(stderr, "oracle_dump_levelgen: %s (seed %u, %dx%d)\n", what, seed, w, h);
   std::exit(1);
+}
+
+// Writes size bytes to path (binary); false on any open/write/close error.
+bool WriteFile(char const* path, void const* data, std::size_t size) {
+  std::FILE* file = std::fopen(path, "wb");
+  if (!file) {
+    return false;
+  }
+  bool const kWrote = std::fwrite(data, 1, size, file) == size;
+  return std::fclose(file) == 0 && kWrote;
 }
 
 std::string HashOnly(Level const& level) {
@@ -330,12 +350,15 @@ Coverage DumpGen(std::string& out, Common& common, uint32_t seed, int w, int h, 
   std::string const kDig = Stage(level, rand);
 
   char line[512];
-  std::snprintf(line, sizeof line,
-                "gen %u %d %d %d %s %s %s %s %s %s %s %s %d %d %" PRIu64 " %d %d %" PRIu64 "\n",
-                seed, w, h, shadow ? 1 : 0, kField.c_str(), kSplats.c_str(), kStones.c_str(),
-                kTunnels.c_str(), kFormations.c_str(), kRocks.c_str(), shadowed.c_str(),
-                kDig.c_str(), kForm.count, kForm.placed, kForm.tries, kRock.count, kRock.placed,
-                kRock.tries);
+  int const kLen = std::snprintf(
+      line, sizeof line,
+      "gen %u %d %d %d %s %s %s %s %s %s %s %s %d %d %" PRIu64 " %d %d %" PRIu64 "\n", seed, w, h,
+      shadow ? 1 : 0, kField.c_str(), kSplats.c_str(), kStones.c_str(), kTunnels.c_str(),
+      kFormations.c_str(), kRocks.c_str(), shadowed.c_str(), kDig.c_str(), kForm.count,
+      kForm.placed, kForm.tries, kRock.count, kRock.placed, kRock.tries);
+  if (kLen < 0 || static_cast<std::size_t>(kLen) >= sizeof line) {
+    Fail("gen line truncated", seed, w, h);
+  }
   out += line;
 
   Coverage c;
@@ -345,8 +368,9 @@ Coverage DumpGen(std::string& out, Common& common, uint32_t seed, int w, int h, 
   return c;
 }
 
-void DumpFile(std::string& out, Common& common, char const* level_file, uint32_t seed,
-              bool shadow) {
+// Appends one file line; returns the final level hash (for the fixture guard).
+std::string DumpFile(std::string& out, Common& common, char const* level_file, uint32_t seed,
+                     bool shadow) {
   Settings settings;
   settings.random_level = false;
   settings.level_file = level_file;
@@ -356,9 +380,68 @@ void DumpFile(std::string& out, Common& common, char const* level_file, uint32_t
   rand.Seed(seed);
   level.GenerateFromSettings(common, settings, rand);
   char line[256];
-  std::snprintf(line, sizeof line, "file %s %u %d %d %d %s\n", level_file, seed, shadow ? 1 : 0,
-                level.width, level.height, Stage(level, rand).c_str());
+  int const kLen = std::snprintf(line, sizeof line, "file %s %u %d %d %d %s\n", level_file, seed,
+                                 shadow ? 1 : 0, level.width, level.height,
+                                 Stage(level, rand).c_str());
+  if (kLen < 0 || static_cast<std::size_t>(kLen) >= sizeof line) {
+    Fail("file line truncated", seed, level.width, level.height);
+  }
   out += line;
+  return HashOnly(level);
+}
+
+// The file-branch MakeShadow fixture: GenerateRandom's pre-shadow map for the `gen 42 128 96`
+// case, serialised as OLLEVEL2 ("OLLEVEL2", version 0, width and height as u16 LE, then
+// width*height material ids; level.cpp:231-251) to kShadowFixture and loaded back through
+// the real GenerateFromSettings file branch with shadow 1 and 0. Everything that can be
+// checked in memory is checked before the fixture is written.
+void DumpShadowFixture(std::string& out, Common& common) {
+  constexpr uint32_t kSeed = 42U;
+  constexpr int kW = 128;
+  constexpr int kH = 96;
+  Settings settings;
+  settings.random_map_width = kW;
+  settings.random_map_height = kH;
+  Level level(common);
+  Rand rand;
+  rand.Seed(kSeed);
+  level.GenerateRandom(common, settings, rand);
+  std::string const kPre = HashOnly(level);
+
+  std::vector<uint8_t> bytes = {'O', 'L', 'L', 'E', 'V', 'E', 'L', '2'};
+  bytes.push_back(0);  // version
+  bytes.push_back(static_cast<uint8_t>(kW & 0xff));
+  bytes.push_back(static_cast<uint8_t>((kW >> 8) & 0xff));
+  bytes.push_back(static_cast<uint8_t>(kH & 0xff));
+  bytes.push_back(static_cast<uint8_t>((kH >> 8) & 0xff));
+  bytes.insert(bytes.end(), level.material_id.begin(), level.material_id.end());
+
+  {  // Preflight: the bytes load back to the same map, and MakeShadow changes it.
+    Level loaded(common);
+    io::MemReader r(bytes);
+    if (!loaded.load(common, settings, r) || HashOnly(loaded) != kPre) {
+      Fail("shadow fixture does not round-trip through Level::load", kSeed, kW, kH);
+    }
+    loaded.MakeShadow(common);
+    if (HashOnly(loaded) == kPre) {
+      Fail("MakeShadow does not change the shadow fixture", kSeed, kW, kH);
+    }
+  }
+  if (!WriteFile(kShadowFixture, bytes.data(), bytes.size())) {
+    Fail("cannot write rust/oracle-tests/golden/levelgen_shadow_fixture.lev", kSeed, kW, kH);
+  }
+
+  std::string const kOn = DumpFile(out, common, kShadowFixture, kSeed, /*shadow=*/true);
+  std::string const kOff = DumpFile(out, common, kShadowFixture, kSeed, /*shadow=*/false);
+  if (kOff != kPre) {
+    Fail("shadow fixture: shadow 0 file line != generated map (load failed?)", kSeed, kW, kH);
+  }
+  if (kOn == kOff) {
+    Fail("shadow fixture: shadow 1 file line == shadow 0 file line", kSeed, kW, kH);
+  }
+  if (kOn == kPre) {
+    Fail("shadow fixture: shadow 1 file line == its pre-shadow hash", kSeed, kW, kH);
+  }
 }
 
 struct Size {
@@ -381,8 +464,15 @@ int main(int argc, char** argv) {
   // The matrix (design §10.3). The Rust test iterates the golden, so this list is the
   // single source of truth; if a coverage guard below fails, add seeds here.
   static constexpr uint32_t kSeeds[] = {1U, 42U, 2654435769U};
-  static constexpr Size kSizes[] = {{504, 350}, {600, 350}, {64, 64},  {128, 96},
-                                    {101, 77},  {2000, 72}, {72, 1000}};
+  static constexpr Size kSizes[] = {
+      {.w = 504, .h = 350},  // default
+      {.w = 600, .h = 350},  // test_random_map_size.cpp:97
+      {.w = 64, .h = 64},    // menu minimum
+      {.w = 128, .h = 96},   // "overflows with rocks" (test_random_map_size.cpp:95-96)
+      {.w = 101, .h = 77},   // odd
+      {.w = 2000, .h = 72},  // wide
+      {.w = 72, .h = 1000},  // tall
+  };
   int capped = 0;
   int retried = 0;
   for (uint32_t const kSeed : kSeeds) {
@@ -394,11 +484,11 @@ int main(int argc, char** argv) {
       }
     }
   }
-  DumpFile(out, *common, "data/TC/openliero/Levels/see_shadow_test.lev", 1U, true);
-  DumpFile(out, *common, "data/TC/openliero/Levels/see_shadow_test.lev", 1U, false);
-  DumpFile(out, *common, "data/TC/openliero/Levels/render_stage.lev", 1U, true);
-  DumpFile(out, *common, "data/TC/openliero/Levels/does_not_exist", 42U, true);
-  DumpFile(out, *common, "data/TC/openliero/Levels/does_not_exist", 42U, false);
+  DumpFile(out, *common, "data/TC/openliero/Levels/see_shadow_test.lev", 1U, /*shadow=*/true);
+  DumpFile(out, *common, "data/TC/openliero/Levels/see_shadow_test.lev", 1U, /*shadow=*/false);
+  DumpFile(out, *common, "data/TC/openliero/Levels/render_stage.lev", 1U, /*shadow=*/true);
+  DumpFile(out, *common, "data/TC/openliero/Levels/does_not_exist", 42U, /*shadow=*/true);
+  DumpFile(out, *common, "data/TC/openliero/Levels/does_not_exist", 42U, /*shadow=*/false);
 
   std::fprintf(stderr, "oracle_dump_levelgen: %d capped cases, %d retried cases\n", capped,
                retried);
@@ -407,14 +497,10 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  std::FILE* file = std::fopen(argv[1], "w");
-  if (!file) {
-    std::fprintf(stderr, "cannot open %s\n", argv[1]);
-    return 1;
-  }
-  bool const kWrote = std::fputs(out.c_str(), file) >= 0;
-  if (std::fclose(file) != 0 || !kWrote) {
-    std::fprintf(stderr, "cannot write %s\n", argv[1]);
+  DumpShadowFixture(out, *common);
+
+  if (!WriteFile(argv[1], out.data(), out.size())) {
+    std::fprintf(stderr, "oracle_dump_levelgen: cannot write %s\n", argv[1]);
     return 1;
   }
   return 0;

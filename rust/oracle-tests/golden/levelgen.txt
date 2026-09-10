@@ -45,3 +45,5 @@ file data/TC/openliero/Levels/see_shadow_test.lev 1 0 504 350 85a1556069ce1fa5:0
 file data/TC/openliero/Levels/render_stage.lev 1 1 504 350 60ba8cc901999025:00000000
 file data/TC/openliero/Levels/does_not_exist 42 1 504 350 ad9f3069349aef42:035ea72b
 file data/TC/openliero/Levels/does_not_exist 42 0 504 350 e2db7d220634f323:035ea72b
+file rust/oracle-tests/golden/levelgen_shadow_fixture.lev 42 1 128 96 9785531f5d77a1b6:00000000
+file rust/oracle-tests/golden/levelgen_shadow_fixture.lev 42 0 128 96 0887c694a2b634d5:00000000

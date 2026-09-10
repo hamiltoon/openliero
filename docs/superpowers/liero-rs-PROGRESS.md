@@ -8,7 +8,17 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-07-13 · **🎉 STEP 4 COMPLETE — slices 4f+4g SHIPPED: bare run =
+> **Last updated:** 2026-09-10 · **📐 STEP 4½ (game shell) PLANNED — inserted between Step 4
+> and Step 5.** Step 4 left a bare run that plays a hard-coded default match; "playable
+> single-player that feels like Liero" also needs the shell around it. Step 4½ ports it:
+> main menu over a generated level, weapon selection, level select + random generation,
+> settings/profiles (C++ TOML schema, so C++-saved `liero.cfg`/profiles load), DumbLieroAI for
+> solo play, match end + a compact stats screen — pixel-exact menus first, a modern UI later.
+> Eight slices **4½a–4½h**, none started; every sim-affecting part (settings plumbing, levelgen,
+> weapon-select RNG, DumbLieroAI, `IsGameOver`) gets a C++ golden. Overview:
+> `specs/2026-09-10-liero-rs-step4.5-game-shell-overview.md`. Rewrite % re-based to include
+> 4½ (~80% → ~70%). Branch `liero-rs-step-4-5`.
+> Prior (2026-07-13): **🎉 STEP 4 COMPLETE — slices 4f+4g SHIPPED: bare run =
 > playable match; the harness covers the whole loop.** 🎯 **`cargo run -p game` now starts a
 > genuinely PLAYABLE default match** — no flags — closing the loop the whole step built toward:
 > live input (4a) → record/replay (4b) → audio (4c) → live viewport (4d) → `.lrp` reading (4e)
@@ -323,7 +333,7 @@ the LAST slice of step 2.
 
 ---
 
-## 🔁 Rewrite track — faithful port (~80%)
+## 🔁 Rewrite track — faithful port (~70%)
 
 Strangler-style: the C++ engine is the oracle, every piece differential-tested
 bit-for-bit before moving on. Steps 0–2 merged (the deterministic sim core — the
@@ -339,17 +349,26 @@ headless Chrome. **Step 4 (input/replay/audio) is COMPLETE** (4a–4g): 4a (live
 container + delta stream + `WideRollbackChecksum`, bit-exact over 1120 ticks), 4f
 (minimal start flow — bare `cargo run -p game` is a playable default match), and 4g
 (run/verify-skill extension + CI replay-checksum regression) are all shipped; 4e phase 2
-(cereal `Game` graph) is a bounded follow-on; step 5 (netplay) is not started.
+(cereal `Game` graph) is a bounded follow-on. **Step 4½ (game shell) is planned** (4½a–4½h,
+none started) — inserted 2026-09-10 because a playable default match is not yet a game: the
+menus, weapon selection, level select/generation, settings/profiles, DumbLieroAI and the stats
+screen are the remaining single-player surface. Step 5 (netplay) is not started.
+
+The % was re-based on 2026-09-10: the denominator is now **steps 0–5 plus Step 4½** (~10 k C++
+LOC of shell, ~1.5 k of it sim-affecting), so the same finished work (steps 0–4) reads ~70%
+instead of ~80%.
 
 ```
-REWRITE (steg 0–5)                                          ~80%
+REWRITE (steg 0–5, incl. 4½)                                ~70%
 ├─ ✅ Step 0  sim-core primitives (RNG/fixed/vec/math/tables)   DONE — merged (PR #1)
 ├─ ✅ Step 1  asset IO, slices 1a–1e (level/palette/sprites/    DONE — merged (PR #2)
 │             tc.cfg/objects/WAV)
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
 ├─ ✅ Step 3  Bevy rendering / window (reproduce the SDL3 view) DONE — 3a–3f shipped (PR #4)
 ├─ ✅ Step 4  input + replay (.lrp) + audio                     COMPLETE — 4a–4g shipped (4e-phase2 bounded follow-on)
-└─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started  ◀── YOU ARE HERE
+├─ ⬜ Step 4½ game shell (menus, weapsel, level select/gen,     planned — 4½a–4½h  ◀── YOU ARE HERE
+│             settings/profiles, DumbLieroAI, match end + stats)
+└─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
 
 > Everything above EXISTS in the original openliero — this track reproduces it in
@@ -393,7 +412,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5) | **~80%** (steps 0–4 done; step 4 (input/replay/audio, 4a–4g) COMPLETE — 4e-phase2 bounded follow-on + step 5 netplay remain) |
+| Rewrite track (steps 0–5, incl. 4½) | **~70%** (steps 0–4 done; step 4 (input/replay/audio, 4a–4g) COMPLETE — 4e-phase2 bounded follow-on + step 4½ game shell (planned 2026-09-10) + step 5 netplay remain; re-based from ~80% when 4½ was added to the denominator) |
 | Step 3 (rendering) | **✅ COMPLETE** (slices 3a + 3b + 3c + 3d + 3e + 3f all shipped; PR #4 ready to merge) |
 | Slice 3f (wasm bring-up) | **✅ MILESTONE GREEN** (🎉 the **browser milestone**: the same CPU frame renders in the browser via **WebGL2**, **automated-proven** — a headless-Chrome controller ran the debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) and the screenshot shows the **blood** demo's split-screen world (sky/terrain/worms/blood), the console **PANIC-FREE**, and the determinism guard (per-tick `state_hash` **+** a wasm-only `frame_hash`) stayed **GREEN in the browser** = the wasm-parity witness. Built: a **`scenario::assets::read_asset` seam** (native = verbatim `std::fs::read` — all goldens green = no-op proof; wasm = embed) + `include_dir` (wasm-only dep) embedding sprites/weapons/nobjects/sobjects + `include_bytes!` tc.cfg + the demo level `render_stage.lev` — a **curated 276 KB total** (sounds/ and big levels excluded); a **target-scoped feature split** (base 6 draw-features; `x11`/`wayland` native-only; `webgl2` wasm-only — union verified per target via `cargo tree`) making `cargo build -p game --target wasm32-unknown-unknown` **GREEN first try**; an entry-fork (`const DEFAULT="blood"`, `include_str!` scenario+sidecar, **no** `env::args`/`read_dir`/`fs` on wasm; `canvas=None` auto-append verified against the `bevy_window` source; determinism guard hardened with a per-tick wasm-only `frame_hash`); a `.cargo/config.toml` (target-scoped `wasm-server-runner`) + `web/index.html` dev-loop (127.0.0.1:1334, 200 html+wasm) + a static `wasm-bindgen` **0.2.126** (lock-matched) bundle (game.js 97 KB + game_bg.wasm 52.9 MB release); a new **`game-wasm` CI job** (build-only, no browser/apt, own job independent of the determinism gate, mirrors `sim-core`'s no-cache posture). Fynd: cargo reads `.cargo/config.toml` from **CWD**, not `--manifest-path` — the wasm dev-loop runs from `rust/`) |
 | Slice 3e (HUD / font / bars / minimap) | **✅ MILESTONE GREEN** (🎯 the **full player view is PIXEL-EXACT** vs C++ — the in-game overlay ported verbatim + difftest green first run: new **`render::font::Font`** (font.tga loader `common.cpp:414-433`, width-detect + 0/50→0/8 remap) draws HUD labels (`font.cpp:8-80` verbatim — double `c>=2 && c<252` guard, CLIP_IMAGE inlined, newline on cp 0; ASCII-decode **identity for `cp<0x80`**, bevis-tested as the exact reach of the label corpus); **`blit::draw_bar`** (`blit.cpp:105-113`, unclipped + `width>0` anti-clamp witness); **`render::hud::draw_hud`** (`viewport.cpp:84-153` verbatim — two-arm life bar (`health*100/settings_health`, `100-(killed_timer*25)/37` clamped), two-arm ammo/loading bar, blinking **Reloading** (`(cycles%20)>10 && visible`, y=`164*multiplier` **absolute** — a plan-deviation caught vs C++), kills-always / lives-on-KillEmAll+Scales, `w/10+234` / `w/10+245` / 50 / 10 / 6 colour columns); **`draw_minimap`+`draw_miniature`** (`viewport.cpp:593-613` + `level.cpp:489-507` — the two *different* `step` ceil vs `bounds` round idioms preserved, worm-dots `ftoi(pos)/step` colour `129+worm.index*4`, clip-gated, `AppearanceAt` inlined). `Scene`/`frame::draw` composites per viewport (**HUD full-clip → world world-clip → minimap**, verbatim double-draw); C++ dumper gained opt-in **`render_hud`** mirroring `frame::draw`, **RE-DIFF gate empty** (3a/blood/shake/sim_slice2 byte-identical). 3 scenarios + goldens — **hud** 41t / **reload** 71t / **death** 141t — difftests **GREEN**: hud + death first run (per-tick + total + triple-isolation + suppression + non-vacuity); reload first **blocked** (T7 RIFLE = `ST_LASER` tripped the deferred laser do-loop), re-cut to **GRENADE** (`ST_NORMAL`, inert hit-arm, no in-window explosion) → GREEN (71 rows + total, settled 50/51 witness). Find: tick 0 is fade-to-black ⇒ the HUD witness reads tick 1. Holdazone/GameOfTag/replay HUD-arms tripwired. Milestone review: **0 Critical / 0 Important**; minors on the deferral track: DRY the inlined `clip_image`, a `size>1`-advance font test, minimap dot-index discrimination, reload's own suppression control (deliberately omitted)) |
@@ -671,6 +690,52 @@ premise: `ProcessSteerables` mutates the hashed `wobject.cur_frame`, is unported
 scenario reaches it, so the accumulators would be vacuous without also authoring a
 steerable-weapon scenario + golden + re-fuzz; the non-steerable `SetCenter` + guard stand);
 TWO input formats by design (Rust-native round-trip artifact ≠ foreign `.lrp`).
+
+---
+
+### Step 4½ — Game shell (⬜ NOT STARTED · branch `liero-rs-step-4-5`)
+
+Turn "plays a hard-coded match" into a complete game, close to or exactly like openliero: bare
+`cargo run -p game` opens the main menu over a generated level; a match is configured, weapon-
+selected, played (vs a human or DumbLieroAI), ended and summarised on a stats screen using only
+the menus; C++-saved `liero.cfg`/profiles round-trip byte-identical; the same shell runs on wasm.
+Sim-affecting parts are C++-golden-gated; menus get Rust-only frame-hash self-goldens + PNG
+eyeballing vs the C++ build. Overview: `specs/2026-09-10-liero-rs-step4.5-game-shell-overview.md`;
+fact maps: `specs/2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++) and
+`specs/2026-09-10-liero-rs-step4.5-rust-baseline-map.md` (Rust).
+
+```
+├─ ⬜ 4½a  MatchConfig + Settings/WormSettings model + MatchConfig→SimState builder (scenario
+│          format frozen) + IsGameOver (+ Scales extra life, 180-frame post-mortem) + C++-schema
+│          TOML persistence + UpdateHash + fixes: sound_hooks never assigned, HUD off in the live
+│          binary. Gate: non-default-settings sim goldens (new dumper directives) + TOML byte
+│          round-trip vs data/Setups/liero.cfg + data/Profiles/*.toml        not started
+├─ ⬜ 4½b  random level generation + MakeShadow + SelectSpawn, dedicated Rand seeded from the
+│          match seed. Gate: new oracle_dump_levelgen, bit-exact   (parallel with 4½a)   not started
+├─ ⬜ 4½c  weapon selection phase in sim (draws the sim RNG) + 12/3 key repeat + per-viewport
+│          menu + frozen-screen look. Gate: new oracle_dump_weapsel, bit-exact RNG     not started
+├─ ⬜ 4½d  menu framework (Menu/MenuItem/behaviors, DrawRoundedBox, scrollbar, type-to-search,
+│          168..174 palette rotation, fades, menu sounds) + ScreenStack + main menu
+│          🎯 MILESTONE: bare run → main menu → NEW GAME → weapsel → play → Esc → menu
+│          (RESUME/NEW) → QUIT. Gate: menu self-goldens + full re-diff             not started
+├─ ⬜ 4½e  settings menu (per-game-mode visibility) + weapon availability + level selector (file
+│          picker, RANDOM node, minimap preview) + save/load setups + InputString/InfoBox
+│          overlays                                              (parallel with 4½f)   not started
+├─ ⬜ 4½f  player menu (name, health, RGB bar, key bindings, weapons via Levenshtein,
+│          controller Human/DumbAI) + profiles + DumbLieroAI port (own Rand). Gate: fixed-seed
+│          AI control-state stream, bit-exact                    (parallel with 4½e)   not started
+├─ ⬜ 4½g  match end + compact stats screen (hash-inert StatsRecorder subset; no heatmaps/graph)
+│          + hidden options subset (fullscreen, shadows, powerlevel palettes, auto-record, bot
+│          weapons)                                                                      not started
+└─ ⬜ 4½h  wasm: live keyboard, localStorage persistence, wider embedded level manifest — the
+           whole shell in the browser (wasm debug self-check retires on that path)   not started
+```
+
+Deferred out of 4½: modern (non-pixel-exact) UI (later post-step), FollowAI (needs Step 5a
+snapshots), netplay menus/states (Step 5), the F8 weapon-randomiser easter egg, spectator window,
+TC selector, stats heatmaps/graphs, `.lrp` replay browser (needs `.lrp` phase 2), gamepad.
+Open for John: the level corpus — ship stock levels, or rely on random generation (overview
+§Open Q6).
 
 ---
 

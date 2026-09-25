@@ -1,6 +1,6 @@
 # Step 4½, Slice 4½c — the weapon selection phase: design
 
-Status: **DESIGN** · 2026-09-25 · branch `liero-rs-step-4-5` (4½a ✅, 4½b ✅, 4½c-0 ✅ landed)
+Status: **LANDED** · 2026-09-25 · branch `liero-rs-step-4-5` (4½a ✅, 4½b ✅, 4½c-0 ✅ landed) · plan: `plans/2026-09-25-liero-rs-step4.5-slice4.5c-plan.md` (its Addendum A replaces the §5/§6.8 self-goldens + macOS eyeball with a bit-exact gate against the real C++ `WeaponSelection::Draw`)
 Part of: `2026-09-10-liero-rs-step4.5-game-shell-overview.md` (the 4½c bullet, LD 7, Hard gate 3; cited **overview**)
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` §3, §6, §8 (cited **cpp-map**) and
 `2026-09-10-liero-rs-step4.5-rust-baseline-map.md` §1–§5, §9 (cited **rust-map**)
@@ -234,7 +234,10 @@ nothing in the match until it is released and pressed again**.
 ### 3.7 Drawing (`weapsel.cpp:160-209`, normal viewports)
 
 - **Palette** (`:20-24`, `:163`): `pal = Origpal; pal.RotateFrom(Origpal, 168, 174, gfx.menu_cycles)`.
-  There is no `color_anim` and no worm-colour step. `menu_cycles` carries over from the main menu (reset
+  There is no `color_anim` and no worm-colour step in `UpdateWeapselPalette` — **but** `Origpal()` already
+  carries the worm colours: `LocalController::Focus` → `Game::Focus` → `Game::UpdateSettings`
+  (`game.cpp:475-488`) runs `Palette::SetWormColour` (*corrected at plan time, plan fact 1; ported in
+  4½c as `render::palette::set_worm_colour`*). `menu_cycles` carries over from the main menu (reset
   at `mainMenuState.cpp:145`) and increments once per frame after the draw, because `GamePlayState` does
   not want the menu flip (`gamePlayState.hpp:13`, `gfx.cpp:1646`).
 - **Frozen background, cached once** (`:165-180`): `game.Draw` (the level, the HUD, and the minimap when

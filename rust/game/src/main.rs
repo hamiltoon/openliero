@@ -23,6 +23,9 @@ use bevy::window::WindowResolution;
 use render::bitmap::Bitmap;
 use render::viewport::Viewport;
 use scenario::{Scenario, SceneData};
+// TC asset root, resolved at compile time so `cargo run -p game` works from any CWD —
+// centralised in `scenario::paths` since Step 4½a-2.
+use scenario::paths::TC_ROOT;
 use sim::sound::LoopKey;
 use sim::state::SimState;
 
@@ -33,9 +36,6 @@ use game::web_params::MatchParams;
 
 mod blit;
 
-/// TC asset root, resolved at compile time relative to this crate so `cargo run
-/// -p game` works from any CWD (constraint: CARGO_MANIFEST_DIR, not CWD).
-const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
 /// Committed golden dir — the scenario text and (debug) the self-check column.
 /// Native-only: on wasm the scenario text + sidecar are embedded via `include_str!`
 /// (there is no filesystem), so this path constant is not referenced there.

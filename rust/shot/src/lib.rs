@@ -389,12 +389,10 @@ fn available_names(prefix: &str) -> Vec<String> {
 /// `--hashes`) emit the sidecar grammar to STDOUT. All info/progress goes to
 /// STDERR so `--hashes` stdout stays machine-parseable.
 pub fn run(cfg: &Config) -> Result<(), String> {
-    let tc_root: PathBuf = cfg.tc_root.clone().unwrap_or_else(|| {
-        PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../data/TC/openliero"
-        ))
-    });
+    let tc_root: PathBuf = cfg
+        .tc_root
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(scenario::paths::TC_ROOT));
 
     // `label` names the scenario for logging + the multi-tick PNG filename
     // stem. On the `--scenario <name>` path it is the resolved name

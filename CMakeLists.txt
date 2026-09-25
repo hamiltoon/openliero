@@ -391,6 +391,8 @@ if(OPENLIERO_BUILD_ORACLE_DUMP)
   target_link_libraries(oracle_dump_lrp_gen PRIVATE game)
   add_executable(oracle_dump_levelgen src/tools/oracle_dump/levelgen_dump.cpp)
   target_link_libraries(oracle_dump_levelgen PRIVATE game)
+  add_executable(oracle_dump_settings src/tools/oracle_dump/settings_dump.cpp)
+  target_link_libraries(oracle_dump_settings PRIVATE game cereal::cereal)
 endif()
 
 # binaries

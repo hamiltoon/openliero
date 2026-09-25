@@ -1,0 +1,69 @@
+aiFrames = 140
+aiMutations = 2
+aiParallels = 3
+aiTraces = false
+allowViewingSpawnPoint = false
+blood = 100
+bonusTimeout = 0
+flagsToWin = 20
+gameMode = 0
+inputDelay = 1
+levelFile = ''
+lives = 3
+loadChange = true
+loadPowerlevelPalette = true
+loadingTime = 100
+map = true
+maxBonuses = 4
+namesOnBonuses = false
+randomLevel = true
+recordReplays = true
+regenerateLevel = false
+screenSync = true
+selectBotWeapons = 1
+shadow = true
+tc = 'openliero'
+timeToLose = 600
+weapTable = [
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0
+]
+zoneTimeout = 30

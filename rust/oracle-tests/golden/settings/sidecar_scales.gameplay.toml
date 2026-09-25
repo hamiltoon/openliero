@@ -1,0 +1,69 @@
+aiFrames = 99
+aiMutations = 5
+aiParallels = 7
+aiTraces = true
+allowViewingSpawnPoint = true
+blood = 60
+bonusTimeout = 45
+flagsToWin = 7
+gameMode = 3
+inputDelay = 3
+levelFile = 'Levels/modern_test.lev'
+lives = 2
+loadChange = true
+loadPowerlevelPalette = false
+loadingTime = 150
+map = false
+maxBonuses = 8
+namesOnBonuses = true
+randomLevel = false
+recordReplays = false
+regenerateLevel = true
+screenSync = false
+selectBotWeapons = 2
+shadow = true
+tc = 'openliero'
+timeToLose = 600
+weapTable = [
+    0,
+    0,
+    2,
+    0,
+    0,
+    0,
+    0,
+    2,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    2,
+    0,
+    0,
+    0,
+    2,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    2
+]
+zoneTimeout = 90

@@ -1,0 +1,12 @@
+# Step 4½a-2 synthetic byte-gate profile: LoadProfile edge cases - the colour is restored,
+# wrong types keep, arrays are short / long, no rgbDepth (6-bit), u32 narrowing, and a name
+# mixing an escaped non-ASCII vertical space (U+0085) with raw UTF-8.
+name = "nel\U00000085Zo\U000000E9"
+health = "x"
+controller = 4294967297
+color = 99
+randomName = 0
+weapons = [3]
+controls = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+gamepadControls = [-1]
+rgb = [63, 0, 32]

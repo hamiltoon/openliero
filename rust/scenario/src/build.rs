@@ -127,9 +127,9 @@ pub fn build_match(
     validate(cfg, objects.weapons.len())?;
     let s = &cfg.settings;
 
-    // weap_order: indices sorted by weapon name (Common::Precompute, common.cpp:491-499).
-    let mut weap_order: Vec<usize> = (0..objects.weapons.len()).collect();
-    weap_order.sort_by(|&a, &b| objects.weapons[a].name.cmp(&objects.weapons[b].name));
+    // weap_order: indices sorted by weapon name (Common::Precompute, common.cpp:491-499) — the
+    // one shared copy since Step 4½c (design finding 12).
+    let weap_order = sim::weapsel::weap_order(&objects.weapons);
     let worms_init: Vec<WormInit> = (0..2)
         .map(|i| {
             let ws = &s.worm_settings[i];

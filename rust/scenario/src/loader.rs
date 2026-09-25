@@ -120,9 +120,9 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     })
     .expect("object configs load");
 
-    // weap_order: indices sorted by weapon name; id == index (Common::Precompute).
-    let mut weap_order: Vec<usize> = (0..objects.weapons.len()).collect();
-    weap_order.sort_by(|&a, &b| objects.weapons[a].name.cmp(&objects.weapons[b].name));
+    // weap_order: indices sorted by weapon name; id == index (Common::Precompute). The one shared
+    // copy since Step 4½c (design finding 12).
+    let weap_order = sim::weapsel::weap_order(&objects.weapons);
     let settings_weapons = [1u32; NUM_WEAPONS];
     let mut resolved = WormInit::resolve_weapons(&objects, &weap_order, &settings_weapons);
 

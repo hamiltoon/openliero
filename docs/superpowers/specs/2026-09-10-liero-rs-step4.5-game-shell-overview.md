@@ -1,6 +1,6 @@
 # Step 4½ — Game shell: overview / altitude decisions
 
-Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a-1 LANDED** (4½a split into a-1/a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, 4½a-2 + 4½c–4½h planned
+Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, 4½c–4½h planned
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 4½ — Game shell" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++ map, cited as **cpp-map §N**)
@@ -248,7 +248,9 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   sim goldens via one new optional scenario directive `settings <file>` (the dumper reads it with
   the real `Settings::FromToml`; `scenario::load` refuses it) + the `sound_hooks` fix. **LANDED**
   (plan: `plans/2026-09-10-liero-rs-step4.5-slice4.5a1-plan.md`). **4½a-2** = TOML writer + the
-  byte gate + `UpdateHash` + storage + `TC_ROOT` centralisation + the HUD fix. Interim rulings: differing
+  byte gate + `UpdateHash` + storage + `TC_ROOT` centralisation + the HUD fix. **LANDED** (plan:
+  `plans/2026-09-10-liero-rs-step4.5-slice4.5a2-plan.md`; the binary does no config I/O until
+  4½d — slice design §9.3.6). Interim rulings: differing
   per-player health is refused until 4½f (Rust carries one health value); the live game restarts
   (the F5 path) 180 frames after game over until 4½g adds the stats screen.
 - **4½c-0 — the unported weapon branches (added 2026-09-10, 4½a design finding).** RIFLE,

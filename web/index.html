@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <title>Liero-rs</title>
     <style>
       /* Dark backdrop so the auto-appended canvas is easy to spot. Bevy's
@@ -12,11 +12,48 @@
       html, body { margin: 0; height: 100%; background: #101014; color: #b8b8c8;
         font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       body { display: flex; flex-direction: column; align-items: center; justify-content: center; }
-      canvas { image-rendering: pixelated; outline: none; }
+      /* Fit the 960x600 canvas to the screen (winit sets fixed pixel sizes inline,
+         hence !important): as wide as possible without overflowing either axis. */
+      canvas { image-rendering: pixelated; outline: none; touch-action: none;
+        width: min(100vw, 960px, 160vh) !important; height: auto !important;
+        aspect-ratio: 8 / 5; }
+      @supports (height: 100dvh) {
+        canvas { width: min(100vw, 960px, 160dvh) !important; }
+      }
       #help { order: 2; margin-top: 12px; max-width: 960px; padding: 0 16px; text-align: center; }
       #help kbd { color: #fff; }
       #help .dim { color: #707080; }
       #status { order: 1; margin-bottom: 8px; color: #707080; }
+
+      /* On-screen controls (touch devices, or ?touch=1). They set window.lieroTouch,
+         which the game reads once per tick for player 1 (rust/game/src/touch.rs). */
+      #touch { display: none; position: fixed; inset: 0; pointer-events: none; z-index: 10;
+        -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+      body.touch #touch { display: block; }
+      body.touch #help { display: none; }
+      /* Portrait phone: the game at the top, the thumbs' space below it. */
+      @media (orientation: portrait) {
+        body.touch { justify-content: flex-start; padding-top: 28px; box-sizing: border-box; }
+      }
+      #touch .ctl { position: absolute; pointer-events: auto; touch-action: none;
+        border: 2px solid rgba(255, 255, 255, 0.35); background: rgba(255, 255, 255, 0.10);
+        color: rgba(255, 255, 255, 0.85); font: bold 13px/1 ui-monospace, Menlo, monospace;
+        display: flex; align-items: center; justify-content: center; }
+      #touch .ctl.on { background: rgba(255, 255, 255, 0.35); }
+      #pad { left: max(16px, env(safe-area-inset-left)); bottom: max(20px, env(safe-area-inset-bottom));
+        width: 150px; height: 150px; border-radius: 50%; }
+      #knob { width: 56px; height: 56px; border-radius: 50%; background: rgba(255, 255, 255, 0.35);
+        transform: translate(0, 0); pointer-events: none; }
+      #btns { position: absolute; right: max(16px, env(safe-area-inset-right));
+        bottom: max(20px, env(safe-area-inset-bottom)); width: 180px; height: 170px; }
+      #btns .ctl { border-radius: 50%; }
+      #b-fire { right: 0; bottom: 40px; width: 84px; height: 84px; }
+      #b-jump { right: 96px; bottom: 0; width: 64px; height: 64px; }
+      #b-change { right: 96px; bottom: 84px; width: 64px; height: 64px; font-size: 11px; }
+      #b-dig { right: 10px; bottom: 136px; width: 52px; height: 34px; border-radius: 17px;
+        font-size: 11px; }
+      #touch-hint { position: absolute; top: max(6px, env(safe-area-inset-top)); left: 0; right: 0;
+        text-align: center; color: #707080; font-size: 11px; }
     </style>
   </head>
   <body>
@@ -62,6 +99,16 @@
       and init the glue.
     -->
     <div id="status">Loading…</div>
+    <div id="touch" aria-hidden="true">
+      <div id="touch-hint">Pad: move ←/→, aim ↑/↓ · you are the blue worm (player 1)</div>
+      <div id="pad" class="ctl"><div id="knob"></div></div>
+      <div id="btns">
+        <div id="b-fire" class="ctl" data-bit="fire">FIRE</div>
+        <div id="b-jump" class="ctl" data-bit="jump">JUMP</div>
+        <div id="b-change" class="ctl" data-bit="change">WEAPON</div>
+        <div id="b-dig" class="ctl" data-bit="dig">DIG</div>
+      </div>
+    </div>
     <div id="help">
       Click the game to give it the keyboard.
       <br />
@@ -76,12 +123,120 @@
       <span class="dim">
         URL: <code>?weapons=MISSILE,LASER,BIG%20NUKE</code> · <code>&amp;level=water_stage</code>
         (render_stage, water_stage, see_shadow_test, physics_fall_test) ·
-        <code>&amp;seed=7</code> · <code>?demo</code> for the scripted demo
+        <code>&amp;seed=7</code> · <code>?demo</code> for the scripted demo ·
+        <code>?touch=1</code> for on-screen controls
       </span>
     </div>
     <script type="module">
       import init from './game.js';
       const status = document.getElementById('status');
+
+      // --- Audio: browsers keep a new AudioContext suspended until a user
+      // gesture, and iOS only resumes one from inside a gesture handler. Track
+      // the contexts the game creates and resume them on the first tap/key.
+      const audioContexts = [];
+      const BaseAudioContext = window.AudioContext || window.webkitAudioContext;
+      if (BaseAudioContext) {
+        window.AudioContext = class extends BaseAudioContext {
+          constructor(...args) {
+            super(...args);
+            audioContexts.push(this);
+          }
+        };
+      }
+      const resumeAudio = () => {
+        for (const ctx of audioContexts) {
+          if (ctx.state !== 'running') ctx.resume().catch(() => {});
+        }
+      };
+      for (const ev of ['pointerdown', 'keydown', 'touchend']) {
+        window.addEventListener(ev, resumeAudio, { capture: true, passive: true });
+      }
+
+      // --- On-screen controls. Bit layout = rust/game/src/touch.rs TOUCH_*.
+      const TOUCH = { up: 1, down: 2, left: 4, right: 8, fire: 16, change: 32, jump: 64, dig: 128 };
+      window.lieroTouch = 0;
+      const params = new URLSearchParams(location.search);
+      const touchParam = params.get('touch');
+      const wantTouch = touchParam === '1' ||
+        (touchParam !== '0' && (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window));
+      if (wantTouch) setUpTouch();
+
+      function setUpTouch() {
+        document.body.classList.add('touch');
+        const held = new Map(); // pointerId -> bits held by that finger
+        const update = () => {
+          let mask = 0;
+          for (const bits of held.values()) mask |= bits;
+          window.lieroTouch = mask;
+          for (const el of document.querySelectorAll('#btns .ctl')) {
+            el.classList.toggle('on', (mask & TOUCH[el.dataset.bit]) !== 0);
+          }
+        };
+        const release = (e) => {
+          held.delete(e.pointerId);
+          update();
+        };
+
+        // Pad: the finger's offset from the centre picks the directions (with a
+        // dead zone), so sliding between directions and diagonals just works.
+        const pad = document.getElementById('pad');
+        const knob = document.getElementById('knob');
+        const padMove = (e) => {
+          const r = pad.getBoundingClientRect();
+          const radius = r.width / 2;
+          let dx = (e.clientX - (r.left + radius)) / radius;
+          let dy = (e.clientY - (r.top + radius)) / radius;
+          const dead = 0.3;
+          let bits = 0;
+          if (dx < -dead) bits |= TOUCH.left;
+          if (dx > dead) bits |= TOUCH.right;
+          if (dy < -dead) bits |= TOUCH.up;
+          if (dy > dead) bits |= TOUCH.down;
+          held.set(e.pointerId, bits);
+          const len = Math.hypot(dx, dy);
+          if (len > 1) { dx /= len; dy /= len; }
+          knob.style.transform = `translate(${dx * radius * 0.6}px, ${dy * radius * 0.6}px)`;
+          update();
+        };
+        pad.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          pad.setPointerCapture(e.pointerId);
+          padMove(e);
+        });
+        pad.addEventListener('pointermove', (e) => {
+          if (held.has(e.pointerId)) padMove(e);
+        });
+        for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+          pad.addEventListener(ev, (e) => {
+            knob.style.transform = 'translate(0, 0)';
+            release(e);
+          });
+        }
+
+        // Buttons: held while the finger that pressed them is down.
+        for (const el of document.querySelectorAll('#btns .ctl')) {
+          el.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            el.setPointerCapture(e.pointerId);
+            held.set(e.pointerId, TOUCH[el.dataset.bit]);
+            update();
+          });
+          for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+            el.addEventListener(ev, release);
+          }
+        }
+
+        // No page scrolling, zooming or long-press menus while playing.
+        for (const ev of ['touchmove', 'gesturestart', 'contextmenu']) {
+          document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+        }
+        // Release everything if the page loses focus mid-press.
+        window.addEventListener('blur', () => {
+          held.clear();
+          update();
+        });
+      }
       // The Bevy app never returns from `init()` (its event loop takes over), so
       // mark the page ready once the canvas appears and give it the keyboard.
       new MutationObserver((_, obs) => {

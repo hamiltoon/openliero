@@ -131,6 +131,7 @@ jobs:
               ``,
               `URL parameters: \`weapons\` (up to 5 names), \`level\` (render_stage, water_stage, see_shadow_test, physics_fall_test), \`seed\`, \`demo\`.`,
               `Keys: P1 R/F/D/G + Left Ctrl/Shift/Alt; P2 arrows + Right Ctrl/Alt/Shift; F5 restarts. Click the game first.`,
+              `On a phone or tablet: on-screen pad + FIRE/JUMP/WEAPON/DIG drive player 1 (\`?touch=1\` forces them on a desktop).`,
             ].join('\n');
             const { owner, repo } = context.repo;
             const issue_number = context.payload.pull_request.number;

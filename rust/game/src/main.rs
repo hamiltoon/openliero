@@ -29,6 +29,7 @@ use sim::state::SimState;
 use game::audio::{AudioSink, Drainer, NullSink, RodioSink};
 use game::input::{InputSource, Mode, ParsedArgs, Recorder};
 use game::match_flow::{FlowStep, MatchFlow};
+use game::web_params::MatchParams;
 
 mod blit;
 
@@ -65,6 +66,11 @@ struct RecordPath(Option<PathBuf>);
 #[derive(Resource)]
 struct ReplayPath(Option<PathBuf>);
 
+/// The PR-preview URL parameters (`web_params`). Parsed from the page URL on wasm;
+/// always the default (no overrides) natively, where the CLI picks the scenario.
+#[derive(Resource)]
+struct Preview(MatchParams);
+
 /// The pure-Rust simulation. NO Bevy types inside (the rollback-ready shape).
 #[derive(Resource)]
 struct Sim(SimState);
@@ -83,6 +89,9 @@ struct Demo {
     /// `Some` in `Mode::Live` only. Scripted loops its golden and Replay plays a fixed
     /// `ticks`, so neither ends a match.
     flow: Option<MatchFlow>,
+    /// PR-preview loadout (`?weapons=`, `web_params`): re-applied to the tick-0 state
+    /// on every (re)start of the live match. Empty natively and without the parameter.
+    loadout: Vec<String>,
     /// Per-tick `state_hash` column of the committed golden (index = tick) — the
     /// sim determinism witness, asserted on BOTH targets in debug builds.
     #[cfg(debug_assertions)]
@@ -168,12 +177,13 @@ fn main() {
     // `--record <path>` (4b, T1) names the recorder's on-exit flush target.
     // `--replay <path>` (4b, T2) selects Mode::Replay and names the arbitrary
     // scenario file `setup` reads instead of `GOLDEN_DIR`.
+    let preview = preview_params();
     let ParsedArgs {
         mode,
         name,
         record,
         replay,
-    } = resolve_scenario();
+    } = resolve_scenario(&preview);
     // Title: drop the stale "3c demo" string (flagged since 4a T2). The bare 4f
     // default match reads as "default match" (its sentinel name); every other
     // run shows its scenario name.
@@ -202,6 +212,7 @@ fn main() {
         .insert_resource(mode)
         .insert_resource(RecordPath(record))
         .insert_resource(ReplayPath(replay))
+        .insert_resource(Preview(preview))
         // C++ gfx.cpp kDelay = 14ms => one processFrame per ~71.43 Hz tick. The
         // number only sets perceived speed; determinism is by tick count, not
         // wall-clock. `Time<Fixed>` gives the fixed-timestep accumulator for free.
@@ -214,7 +225,11 @@ fn main() {
         // complete before the first FixedUpdate regardless.
         .add_systems(Startup, setup_audio)
         .add_systems(FixedUpdate, tick_and_render)
-        .add_systems(Update, close_on_esc)
+        // Esc quits natively; in a browser tab it would only leave a dead canvas.
+        .add_systems(
+            Update,
+            close_on_esc.run_if(|| !cfg!(target_arch = "wasm32")),
+        )
         // 4b: flush the recorder once, on graceful exit. Esc's `AppExit` is written
         // by `close_on_esc` in `Update`, so it is always observable here in `Last`.
         // Window-close (the X button) is different: winit's close request becomes
@@ -242,7 +257,7 @@ fn main() {
 /// also a golden, so the debug self-check golden path is guaranteed to resolve
 /// (Scripted mode only — Live does not load the golden column, see `setup`).
 #[cfg(not(target_arch = "wasm32"))]
-fn resolve_scenario() -> ParsedArgs {
+fn resolve_scenario(_preview: &MatchParams) -> ParsedArgs {
     let parsed = match game::input::parse_args(std::env::args().skip(1), DEFAULT_SCENARIO) {
         Ok(parsed) => parsed,
         // A bare trailing `--record`/`--replay` with no path token (T1 review
@@ -318,21 +333,50 @@ fn resolve_scenario() -> ParsedArgs {
     parsed
 }
 
-/// Wasm has no CLI args and no filesystem to enumerate, so the scenario is the
-/// **compile-time default** (`blood`) — its text + (debug) golden sidecar are
-/// embedded via `include_str!` (see `load_scenario_text` / `golden_sidecar_text`),
-/// and its level lives in the `scenario` crate's embedded TC manifest (Slice 3f
-/// T2). A `?scenario=` query-param switch is a documented follow-up (spec §Q4).
-/// `--live` is native-only (spec §8): wasm always resolves `Mode::Scripted`, so
-/// the scripted witness path (incl. the debug self-check) is untouched by 4a.
+/// Wasm has no CLI args and no filesystem to enumerate. Since the PR-preview build
+/// the page URL decides (`web_params`): by default the browser plays the LIVE
+/// default match on the keyboard (two players, the native `--live` bindings), with
+/// `?weapons=` / `?level=` / `?seed=` applied; `?demo` keeps the pre-preview
+/// behavior — the scripted **compile-time default** (`blood`), whose text + (debug)
+/// golden sidecar are embedded via `include_str!` (see `load_scenario_text` /
+/// `golden_sidecar_text`), so the scripted witness path (incl. the debug
+/// self-check) is unchanged.
 #[cfg(target_arch = "wasm32")]
-fn resolve_scenario() -> ParsedArgs {
+fn resolve_scenario(preview: &MatchParams) -> ParsedArgs {
+    if preview.demo {
+        return ParsedArgs {
+            mode: Mode::Scripted,
+            name: DEFAULT_SCENARIO.to_string(),
+            record: None,
+            replay: None,
+        };
+    }
     ParsedArgs {
-        mode: Mode::Scripted,
-        name: DEFAULT_SCENARIO.to_string(),
+        mode: Mode::Live,
+        name: game::input::DEFAULT_MATCH.to_string(),
         record: None,
         replay: None,
     }
+}
+
+/// The PR-preview parameters: the page URL's query string on wasm (a missing
+/// `window`/`location` degrades to the default match).
+#[cfg(target_arch = "wasm32")]
+fn preview_params() -> MatchParams {
+    let query = web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .unwrap_or_default();
+    let params = MatchParams::parse(&query);
+    for w in &params.warnings {
+        preview_warn(w);
+    }
+    params
+}
+
+/// Natively the CLI picks the scenario; the preview parameters are always empty.
+#[cfg(not(target_arch = "wasm32"))]
+fn preview_params() -> MatchParams {
+    MatchParams::default()
 }
 
 /// Enumerate the committed demo scenarios — the `<name>` of every
@@ -366,6 +410,7 @@ fn setup(
     mode: Res<Mode>,
     record_path: Res<RecordPath>,
     replay_path: Res<ReplayPath>,
+    preview: Res<Preview>,
 ) {
     let name = &name.0;
     // 1. Read + parse the scenario text. `Mode::Replay` (4b, T2) reads an
@@ -382,8 +427,13 @@ fn setup(
     } else if name == game::input::DEFAULT_MATCH {
         // 4f: the bare-invocation default match — the committed default-match
         // fixture (Mode::Live), sourced here instead of a `render_slice3b_*`
-        // golden. See `default_match_text`.
-        default_match_text()
+        // golden. See `default_match_text`. The PR-preview build derives it from
+        // the URL instead (`web_params`; with no parameters it is the same match).
+        if cfg!(target_arch = "wasm32") {
+            preview.0.scenario_text()
+        } else {
+            default_match_text()
+        }
     } else {
         load_scenario_text(name)
     };
@@ -392,13 +442,21 @@ fn setup(
     // 2. Tick-0 load (moves `state` into `Sim`; viewports + scene into `Demo`).
     let loaded = scenario::load(Path::new(TC_ROOT), &scenario);
     let scenario::Loaded {
-        state,
+        mut state,
         viewports,
         scene,
         // `font`/`labels` (Slice 3e T0) are wired into the render path in T5; the
         // interactive `game` binary does not draw the HUD yet.
         ..
     } = loaded;
+
+    // PR preview: the `?weapons=` loadout (Live only; empty natively).
+    let loadout = if *mode == Mode::Live {
+        preview.0.weapons.clone()
+    } else {
+        Vec::new()
+    };
+    apply_loadout(&mut state, &loadout);
 
     // 3. Owned CPU surface the `render` crate paints into.
     let surface = Bitmap::new(SURFACE_W as i32, SURFACE_H as i32);
@@ -445,6 +503,7 @@ fn setup(
         surface,
         tick: 0,
         flow: (*mode == Mode::Live).then(MatchFlow::new),
+        loadout,
         #[cfg(debug_assertions)]
         golden_state: golden.0,
         #[cfg(all(target_arch = "wasm32", debug_assertions))]
@@ -769,6 +828,7 @@ fn restart_match(sim: &mut SimState, demo: &mut Demo, recorder: Option<&mut Reco
     }
     let loaded = scenario::load(Path::new(TC_ROOT), &demo.scenario);
     *sim = loaded.state;
+    apply_loadout(sim, &demo.loadout);
     demo.viewports = loaded.viewports;
     demo.scene = loaded.scene;
     demo.tick = 0;
@@ -779,6 +839,26 @@ fn restart_match(sim: &mut SimState, demo: &mut Demo, recorder: Option<&mut Reco
 
 /// The scenario text for `name`. **Native:** read the committed
 /// `render_slice3b_<name>_scenario.txt` from `GOLDEN_DIR` (`std::fs`, unchanged).
+/// Apply a PR-preview loadout to a freshly loaded tick-0 state (no-op when empty);
+/// names that match no weapon are reported and leave their slot unchanged.
+fn apply_loadout(state: &mut SimState, loadout: &[String]) {
+    let unknown = game::web_params::apply_weapons(state, loadout);
+    if !unknown.is_empty() {
+        preview_warn(&format!(
+            "unknown weapon name(s) {unknown:?}; those slots keep the default"
+        ));
+    }
+}
+
+/// Report an ignored preview parameter: the browser console on wasm (where
+/// `eprintln!` goes nowhere), stderr natively.
+fn preview_warn(msg: &str) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&format!("openliero preview: {msg}").into());
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("openliero preview: {msg}");
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn load_scenario_text(name: &str) -> String {
     let scenario_path = format!("{GOLDEN_DIR}/render_slice3b_{name}_scenario.txt");

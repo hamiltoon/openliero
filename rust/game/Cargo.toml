@@ -64,6 +64,9 @@ bevy = { version = "0.19", default-features = false, features = ["webgl2"] }
 # `suspended` until a user gesture — no error, just silence until then (T5
 # task note; documented on `build_native_sink`'s wasm branch below).
 rodio = { version = "0.19", default-features = false, features = ["wasm-bindgen"] }
+# PR-preview build: read the page URL's query string (`web_params`) and log
+# ignored parameters to the browser console. Already in the tree via Bevy/winit.
+web-sys = { version = "0.3", features = ["Window", "Location", "console"] }
 
 # Dev-only fast-iteration linking. NEVER a default; never enabled in CI; NEVER with
 # the wasm target (`dynamic_linking` cannot build for wasm32).

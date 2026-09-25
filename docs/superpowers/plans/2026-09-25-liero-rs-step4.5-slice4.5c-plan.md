@@ -5776,6 +5776,42 @@ git -C /home/user/openliero add docs/superpowers/liero-rs-PROGRESS.md docs/super
 git -C /home/user/openliero commit -m "docs(4.5c): PROGRESS + overview + maps — slice 4.5c landed (weapon selection phase)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_019Mcsj34x9n7QgLzRg1QGxT"
 ```
 
+## Addendum A (2026-09-25, John's ruling): the menu is gated against C++ pixels HERE, not on macOS
+
+John ruled that the C++ comparison of the weapon-selection screen must happen in this cloud
+session, not be left for a macOS eyeball. Two mechanisms replace the "self-goldens + eyeball on
+macOS" parts of T8/T10. They override the plan text wherever the two disagree.
+
+**A1 — a C++ frame gate (folded into T5 and T8; the primary gate).** `WeaponSelection::Draw`
+(`weapsel.cpp:211-216`) renders into a `Renderer` bitmap, not a window; it depends on the global
+`gfx` for `play_renderer` / `single_screen_renderer`, `frozen_screen`, `menu_cycles` and
+`settings` (`weapsel.cpp:20-24`, `:99-209`). The existing `render_live` path of
+`sim_physics_dump.cpp` already builds a headless `Renderer` and hashes real C++ frames.
+- **T5** extends `oracle_dump_weapsel` with an opt-in render mode: set up exactly the `gfx` state
+  `Draw` reads (renderers allocated headlessly, `settings`, `menu_cycles` advanced as
+  `Gfx::Process` would, `frozen_screen` empty at the phase start), call the real
+  `WeaponSelection::Draw(gfx.play_renderer, state, /*use_spectator_viewports=*/false)` after each
+  `process_frame` step, and write per frame `<frame> <frame_hash16>` (the same `hash_frame` the
+  render goldens use, incl. the palette the frame is shown with) to a sidecar, plus an optional
+  `--png-dir` that writes each frame as a PNG (or PPM, whichever needs no new dependency) for
+  eyeballing. If `Draw` needs state that cannot be set up headlessly, T5 **stops and reports** the
+  exact blocker instead of weakening the gate.
+- **T8** gates the Rust weapon-selection screen **bit-exact against those C++ frame hashes**
+  (every frame of every render case), not against Rust self-goldens. The design's known
+  differences (the worm-colour palette step, the random player names) must be either ported or
+  pinned identically on both sides — decide in T5/T8, record the choice, never paper over a
+  mismatch by regenerating. T8 also writes a side-by-side PNG (C++ | Rust) of a few frames to the
+  session scratchpad for the controller to show John.
+
+**A2 — the real C++ game on a virtual display (a new task T10b, after T9; eyeball only).** Build
+the full `openliero` target (`cmake --build build/linux-x64 --config Release --target openliero`,
+with `env.sh` sourced), run it under `Xvfb :99 -screen 0 1280x800x24` with `SDL_VIDEODRIVER=x11
+SDL_AUDIODRIVER=dummy`, drive it with `xdotool` (apt-install it if missing) to NEW GAME → weapon
+selection, move the cursor / cycle a weapon / RANDOMIZE, and capture screenshots (`import -window
+root` or `xwd | convert`). Pair them with the Rust build of the same moment (the `game` binary under
+the same Xvfb, or `shot --weapsel`) into side-by-side PNGs in the scratchpad. Not a gate (window
+scaling and timing differ) — a human-eyeball artifact for John.
+
 ## Done-report (each task)
 
 Each task reports:

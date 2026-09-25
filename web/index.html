@@ -55,8 +55,18 @@
       #b-change { right: 96px; bottom: 84px; width: 64px; height: 64px; font-size: 11px; }
       #b-dig { right: 10px; bottom: 136px; width: 52px; height: 34px; border-radius: 17px;
         font-size: 11px; }
+      /* The hint stays out of the canvas's top centre, where the weapon-selection title is:
+         one short line above the game in portrait, a small block in the top-left gutter
+         (beside the game, above the pad) in landscape. */
       #touch-hint { position: absolute; top: max(6px, env(safe-area-inset-top)); left: 0; right: 0;
         text-align: center; color: #707080; font-size: 11px; }
+      #touch-hint span + span::before { content: ' · '; }
+      @media (orientation: landscape) {
+        #touch-hint { left: max(8px, env(safe-area-inset-left)); right: auto; width: 96px;
+          text-align: left; line-height: 1.5; }
+        #touch-hint span { display: block; }
+        #touch-hint span + span::before { content: none; }
+      }
     </style>
   </head>
   <body>
@@ -107,7 +117,7 @@
     -->
     <div id="status">Loading…</div>
     <div id="touch" aria-hidden="true">
-      <div id="touch-hint">Pick: pad ↑/↓ line, ←/→ weapon, FIRE on DONE! · Play: move ←/→, aim ↑/↓ · you are the blue worm, player 2 is a bot</div>
+      <div id="touch-hint"><span>Pick ↑↓ ←→</span><span>FIRE on DONE!</span><span>You: blue worm</span><span>P2: a bot</span></div>
       <div id="pad" class="ctl"><div id="knob"></div></div>
       <div id="btns">
         <div id="b-fire" class="ctl" data-bit="fire">FIRE</div>

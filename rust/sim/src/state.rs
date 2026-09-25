@@ -1787,6 +1787,7 @@ impl SimState {
                         large_sprites,
                         textures,
                         obj.pos,
+                        obj.vel,
                         obj.owner_idx,
                         sobject_types,
                         nobject_types,

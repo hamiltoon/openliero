@@ -397,6 +397,7 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
         &s.large_sprites,
         &s.textures,
         obj.pos,
+        obj.vel,
         0, // fired by worm 0
         &s.sobject_types,
         &s.nobject_types,

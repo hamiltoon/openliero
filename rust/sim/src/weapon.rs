@@ -905,10 +905,9 @@ fn wobject_pass(
 /// **fixed** `pos` (`fixedvec(kX, kY)` — NO `Ftoi`) with zero velocity and colour
 /// `splinter_colour - kColorSub`. It runs **after** `create_on_exp` and **before**
 /// the dart's own `dirt_effect` — the C++ order is load-bearing because each
-/// `Create2` draws its RNG between the two. The `scatter != 0` sub-branch (the
-/// C++ `Create1` path) is **guarded** (O18): no weapon in this TC takes it (only
-/// `mini_nuke` has `scatter=1`, out of scope) and `blow_up` has no access to the
-/// wobject velocity `Create1` needs, so a config that would hit it trips loudly.
+/// `Create2` draws its RNG between the two. The `scatter != 0` sub-branch (the C++
+/// `Create1` path, MINI NUKE) is LIVE since 4½c-0 T4: it spawns `Create1` splinters with
+/// the exploding wobject's `vel` (the new parameter; the driver passes `obj.vel`).
 #[allow(clippy::too_many_arguments)]
 pub fn blow_up(
     weapon: &Weapon,
@@ -916,6 +915,7 @@ pub fn blow_up(
     large_sprites: &SpriteSet,
     textures: &[Texture],
     pos: Vec2,
+    vel: Vec2,
     owner_idx: i32,
     sobject_types: &[SObjectType],
     nobject_types: &[NObjectType],
@@ -990,15 +990,23 @@ pub fn blow_up(
                 );
             }
         } else {
-            // :107-114 scatter != 0 -> the C++ Create1 splinter branch. GUARDED
-            // (O18): no weapon in this TC takes it (only mini_nuke has scatter=1,
-            // with the special small_nukes type, out of scope), AND blow_up has no
-            // access to the wobject velocity that C++ Create1 needs (`fixedvec(
-            // kVelX, kVelY)`). A config that would hit it trips loudly here.
-            debug_assert!(
-                false,
-                "splinter_scatter != 0 (Create1 branch) deferred (O18): needs wobject vel"
-            );
+            // :107-114 scatter != 0 (MINI NUKE) — LIVE (4½c-0 T4): per splinter
+            // rand(2) [kColorSub] THEN nobject_types[splinter_type].Create1 with the
+            // exploding wobject's OWN vel (`fixedvec(kVelX, kVelY)`, captured before the
+            // Free), the FIXED pos and colour `splinter_colour - kColorSub`. No angle
+            // draw; Create1's own scatter draws follow (`nobject.rs` nobject_create1).
+            for _ in 0..weapon.splinter_amount {
+                let color_sub = rand.bound(2) as i32;
+                nobject_create1(
+                    &nobject_types[weapon.splinter_type as usize],
+                    vel,
+                    pos,
+                    weapon.splinter_colour - color_sub,
+                    owner_idx,
+                    rand,
+                    nobjects,
+                );
+            }
         }
     }
 
@@ -2364,6 +2372,7 @@ mod tests {
             &sprites,
             &textures,
             pos,
+            Vec2::zero(),
             0,
             &[],
             &[],
@@ -2440,6 +2449,7 @@ mod tests {
             &sprites,
             &textures,
             Vec2::new(itof(50), itof(50)),
+            Vec2::zero(),
             0,
             &[],
             &[],
@@ -2629,6 +2639,7 @@ mod tests {
             &sprites,
             &textures,
             pos,
+            Vec2::zero(),
             3, // owner_idx (= cause_idx / fired_by)
             &sobject_types,
             &nobject_types,
@@ -2723,6 +2734,7 @@ mod tests {
             &SpriteSet::default(),
             &[],
             Vec2::new(itof(50), itof(50)),
+            Vec2::zero(),
             2,
             &sobject_types,
             &nobject_types,
@@ -2811,6 +2823,7 @@ mod tests {
             &SpriteSet::default(),
             &[],
             pos,
+            Vec2::zero(),
             4, // owner_idx (= C++ cause_idx == fired_by)
             &[],
             &nobject_types,
@@ -2876,6 +2889,7 @@ mod tests {
             &SpriteSet::default(),
             &[],
             Vec2::new(itof(50), itof(50)),
+            Vec2::zero(),
             1,
             &[],
             &nobject_types,
@@ -2897,15 +2911,22 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Create1 branch")]
-    fn splinter_scatter_nonzero_trips_the_guarded_create1_branch() {
-        // scatter != 0 -> the C++ Create1 splinter branch. It is GUARDED (O18): no
-        // weapon in this TC takes it (only mini_nuke has scatter=1, out of scope),
-        // and blow_up has no access to the wobject velocity Create1 needs. A config
-        // that would hit it must trip loudly.
+    fn splinter_scatter_nonzero_spawns_create1_splinters_carrying_the_wobject_vel() {
+        // weapon.cpp:107-114 (MINI NUKE, scatter 1): per splinter rand(2) [kColorSub] THEN
+        // nobject_types[splinter_type].Create1(fixedvec(kVelX, kVelY), fixedvec(kX, kY),
+        // splinter_colour - kColorSub, cause) — the exploding wobject's OWN vel, no angle.
         let cossin = precompute_cossin();
         let weapon = splinter_weapon(2, 1);
         let nobject_types = vec![dirt_nobject()];
+        let pos = Vec2::new(itof(50), itof(60));
+        let vel = Vec2::new(itof(2), itof(-1));
+
+        let mut refr = seeded();
+        let mut want: Pool<NObject> = Pool::new(8);
+        for _ in 0..2 {
+            let sub = refr.bound(2) as i32;
+            nobject_create1(&nobject_types[0], vel, pos, 80 - sub, 1, &mut refr, &mut want);
+        }
 
         let mut rand = seeded();
         let mut level = air_level();
@@ -2913,13 +2934,13 @@ mod tests {
         let mut wobjects: Pool<WObject> = Pool::new(8);
         let mut nobjects: Pool<NObject> = Pool::new(8);
         let mut sobjects: Pool<SObject> = Pool::new(8);
-
         blow_up(
             &weapon,
             &mut level,
             &SpriteSet::default(),
             &[],
-            Vec2::new(itof(50), itof(50)),
+            pos,
+            vel,
             1,
             &[],
             &nobject_types,
@@ -2935,6 +2956,13 @@ mod tests {
             100,
             &mut rand,
         );
+
+        assert_eq!(
+            nobjects.iter().copied().collect::<Vec<_>>(),
+            want.iter().copied().collect::<Vec<_>>(),
+            "two Create1 splinters at the fixed pos with the wobject vel"
+        );
+        assert_eq!(rand.last(), refr.last(), "rand(2) then Create1's draws, per splinter");
     }
 
     // ====================================================================

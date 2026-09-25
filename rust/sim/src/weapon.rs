@@ -294,9 +294,105 @@ pub enum WObjectOutcome {
     Remove,
 }
 
-/// Port of the single non-laser pass of `WObject::Process` (`weapon.cpp:127-338`)
-/// for the **fan** (ST_NORMAL) and **dart** (ST_TYPE1) projectile shapes — the two
-/// share an identical per-tick flight (see the `shot_type` guard below).
+/// `weapon.cpp:336-337` `iter < 8`: a non-LASER `ST_LASER` wobject re-runs the Process
+/// body at most 8 times per tick.
+const LASER_MAX_ITERATIONS: i32 = 8;
+/// `weapon.cpp:337` `|| w.id == 28`: the original Liero LASER slot re-runs the body until it
+/// explodes or is removed. In the openliero TC weapon 28 IS the LASER (`tc.cfg [types]
+/// weapons`, `common.cpp:495` id = index; pinned by `weapon_branch_inventory.rs`).
+const LASER_UNBOUNDED_WEAPON_ID: i32 = 28;
+
+/// Port of `WObject::Process` (`weapon.cpp:127-338`): the once-per-call RemExp block
+/// (`:137-142`), then `do { ++iter; <body> } while (w.shot_type == kStLaser && used &&
+/// (iter < 8 || w.id == 28));` (`:144`, `:336-337`) around [`wobject_pass`], the body.
+///
+/// Every non-`ST_LASER` weapon runs the body once. An `ST_LASER` wobject (RIFLE,
+/// WINCHESTER, GAUSS GUN, LASER) runs the WHOLE body — move, clamp, ground test, gravity,
+/// timer, the in-flight worm-hit arm — up to 8 times per tick, the LASER (id 28) without
+/// limit, and stops on the step that explodes or removes it: C++ `break`s right after
+/// `BlowUpObject`/`Free` (`:328-335`), exactly where the body returns Explode/Remove. C++'s
+/// `used` is therefore always true at the loop check: nothing else in an `ST_LASER` body
+/// can free `this` (no `ST_LASER` weapon spawns a trail — `weapon_branch_inventory.rs`).
+/// No iteration cap, because C++ has none; the LASER (`speed 100`) always progresses
+/// toward an edge, where `!Inside` explodes it.
+#[allow(clippy::too_many_arguments)]
+pub fn wobject_process(
+    obj: &mut WObject,
+    level: &mut LevelSim,
+    weapon: &Weapon,
+    weapons: &[Weapon],
+    cycles: i32,
+    worms: &mut [WormState],
+    wobjects: &mut Pool<WObject>,
+    nobjects: &mut Pool<NObject>,
+    nobject_types: &[NObjectType],
+    sobjects: &mut Pool<SObject>,
+    sobject_types: &[SObjectType],
+    bonuses: &mut Pool<Bonus>,
+    worm_sprites: &SpriteSet,
+    large_sprites: &SpriteSet,
+    textures: &[Texture],
+    cossin: &[Vec2; 128],
+    blood: i32,
+    game_mode: u32,
+    settings_health: i32,
+    consts: WObjectConsts,
+    rand: &mut Rand,
+) -> WObjectOutcome {
+    // weapon.cpp:137-142 — the RemExp hack (4½c-0 T1), once per Process call, BEFORE the
+    // do-loop: with `h[HRemExp]` set, the `LC(RemExpObject)` weapon (1-based; 35 = BOOBY
+    // TRAP) explodes the tick its owner holds Change AND Fire, by zeroing `time_left` so
+    // the body's timeout fires. Off in the openliero TC. Reads the owner's control state
+    // as the object loop sees it (the top-of-tick input, design §4.3).
+    if consts.h_rem_exp && weapon.id == consts.rem_exp_object - 1 {
+        let owner = worms[obj.owner_idx as usize].control_states;
+        if owner.get(ControlState::CHANGE) && owner.get(ControlState::FIRE) {
+            obj.time_left = 0;
+        }
+    }
+
+    let mut iter = 0;
+    loop {
+        iter += 1;
+        let out = wobject_pass(
+            obj,
+            level,
+            weapon,
+            weapons,
+            cycles,
+            worms,
+            wobjects,
+            nobjects,
+            nobject_types,
+            sobjects,
+            sobject_types,
+            bonuses,
+            worm_sprites,
+            large_sprites,
+            textures,
+            cossin,
+            blood,
+            game_mode,
+            settings_health,
+            consts,
+            rand,
+        );
+        // weapon.cpp:328-335: BlowUpObject / Free, then `break`.
+        if out != WObjectOutcome::Keep {
+            return out;
+        }
+        // weapon.cpp:336-337.
+        if !(weapon.shot_type == ST_LASER
+            && (iter < LASER_MAX_ITERATIONS || weapon.id == LASER_UNBOUNDED_WEAPON_ID))
+        {
+            return WObjectOutcome::Keep;
+        }
+    }
+}
+
+/// One step of `WObject::Process` — the do-loop body (`weapon.cpp:145-335`).
+/// [`wobject_process`] runs it once per tick for every shot type but `ST_LASER`, which it
+/// repeats (4½c-0 T3). Written first for the **fan** (ST_NORMAL) and **dart** (ST_TYPE1).
 ///
 /// Advances one wobject by one tick: integrate `pos += vel`, clamp `pos` at the
 /// level edges, test the next-step cell for a ground collision, apply gravity in
@@ -323,7 +419,7 @@ pub enum WObjectOutcome {
 /// `(cycles & 7) == 0` (the same threading the nobject animation uses).
 ///
 /// Steering (`shot_type` 2/3), `mult_speed` and both trails (the particle trail since
-/// 4½c-0 T2) are LIVE; the laser do-loop is still `debug_assert`ed off (4½c-0 T3).
+/// 4½c-0 T2) are LIVE; the laser do-loop is [`wobject_process`] (4½c-0 T3).
 ///
 /// **The `collide_with_objects` impulse loop (`weapon.cpp:212-232`) is now LIVE**
 /// (Slice-4½a-1 T8b): a constant `impulse = vel * blow_away / 100` is added to
@@ -341,10 +437,11 @@ pub enum WObjectOutcome {
 /// `DoDamage` + **the blood fan BEFORE the hit-sound gate** (the load-bearing
 /// order — the OPPOSITE of the nobject arm) + the `worm_collide` explode/remove
 /// verdict. See the inline block for the exact RNG order. The `RemExp` early-explode block
-/// (`weapon.cpp:137-142`) is LIVE since 4½c-0 T1, driven by [`WObjectConsts`]; the hack is
-/// off in the openliero TC, so it is unit-tested only (design §4.4).
+/// (`weapon.cpp:137-142`) is LIVE since 4½c-0 T1 — in [`wobject_process`], once, before the
+/// loop — driven by [`WObjectConsts`]; the hack is off in the openliero TC, so it is
+/// unit-tested only (design §4.4).
 #[allow(clippy::too_many_arguments)]
-pub fn wobject_process(
+fn wobject_pass(
     obj: &mut WObject,
     level: &mut LevelSim,
     weapon: &Weapon,
@@ -367,31 +464,10 @@ pub fn wobject_process(
     consts: WObjectConsts,
     rand: &mut Rand,
 ) -> WObjectOutcome {
-    // weapon.cpp:137-142 — the RemExp hack (LIVE since 4½c-0 T1), once per Process call,
-    // BEFORE the do-loop: with `h[HRemExp]` set, the `LC(RemExpObject)` weapon (1-based;
-    // 35 = BOOBY TRAP) explodes the tick its owner holds Change AND Fire, by zeroing
-    // `time_left` so the timeout below fires. Off in the openliero TC. Reads the owner's
-    // control state as the object loop sees it (the top-of-tick input, design §4.3).
-    if consts.h_rem_exp && weapon.id == consts.rem_exp_object - 1 {
-        let owner = worms[obj.owner_idx as usize].control_states;
-        if owner.get(ControlState::CHANGE) && owner.get(ControlState::FIRE) {
-            obj.time_left = 0;
-        }
-    }
-
-    // Deferred-branch guard. shot_type 0/1/2/3 are ported (ST_NORMAL/ST_TYPE1 share the
-    // plain flight; ST_STEERABLE and ST_TYPE2 run the steering block below), and so are
-    // `mult_speed` and both trails (the particle trail since 4½c-0 T2). Only the laser
-    // do-loop (shot_type 4) stays deferred, until 4½c-0 T3.
-    debug_assert!(
-        weapon.shot_type != ST_LASER,
-        "laser do-loop Process branch deferred"
-    );
-
     let mut do_explode = false;
 
-    // do { ... } while (shot_type == kStLaser && ...): fan is not a laser, so the
-    // body runs exactly once.
+    // ONE step of the C++ do-loop body (weapon.cpp:145-335); [`wobject_process`] owns the
+    // `while (shot_type == kStLaser && used && (iter < 8 || id == 28))` repeat.
 
     // pos += vel.
     obj.pos = obj.pos.add(obj.vel);
@@ -3994,5 +4070,119 @@ mod tests {
         proc_part_trail(&mut obj, &part_trail_weapon(0), 9, &mut nobjects, &mut rand);
         assert!(nobjects.is_empty(), "9 % 4 != 0 -> no particle");
         assert_eq!(rand.last(), before, "and no draw");
+    }
+
+    // ---- 4½c-0 T3: the ST_LASER do-loop (weapon.cpp:144, :336-337) ------------------
+
+    fn st_laser_weapon(id: i32, gravity: i32) -> Weapon {
+        Weapon {
+            id,
+            shot_type: ST_LASER,
+            bounce: 0,
+            mult_speed: 100,
+            gravity,
+            expl_ground: true,
+            time_to_explo: 0,
+            num_frames: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    fn beam(id: i32, px: i32, py: i32) -> WObject {
+        WObject {
+            pos: Vec2::new(itof(px), itof(py)),
+            vel: Vec2::new(itof(1), 0),
+            owner_idx: 1,
+            ty: Some(id),
+            ..WObject::default()
+        }
+    }
+
+    #[test]
+    fn st_laser_steps_eight_times_per_tick() {
+        // The whole body re-runs until iter == 8. Free air + gravity 20: each step moves by
+        // the running vel, then adds 20 to vel.y -> after 8 steps x += 8 px, vel.y == 160,
+        // y += 20 * (0+1+..+7) = 560 (fixed units).
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = beam(2, 100, 500);
+        let out = proc_no_worms(&mut obj, &level, &st_laser_weapon(2, 20), 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep, "free air: survives the tick");
+        assert_eq!(obj.pos.x, itof(108), "8 one-pixel steps");
+        assert_eq!(obj.vel, Vec2::new(itof(1), 8 * 20), "8 air steps of gravity");
+        assert_eq!(obj.pos.y, itof(500) + 20 * 28, "the sum of the running vel.y");
+
+        // Contrast: the same flight as ST_NORMAL is ONE step.
+        let mut one = beam(2, 100, 500);
+        let normal = Weapon {
+            shot_type: ST_NORMAL,
+            ..st_laser_weapon(2, 20)
+        };
+        proc_no_worms(&mut one, &level, &normal, 0, &mut rand);
+        assert_eq!((one.pos.x, one.vel.y), (itof(101), 20));
+    }
+
+    #[test]
+    fn the_laser_slot_28_steps_until_it_explodes() {
+        // `|| w.id == 28`: the LASER does not stop after 8 steps. On the 1000-px air level
+        // it walks from x = 100 to the edge in ONE tick: at x = 999 the next cell is outside,
+        // the clamp pins x = 999 and `!Inside` explodes it (explGround).
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = beam(28, 100, 500);
+        let out = proc_no_worms(&mut obj, &level, &st_laser_weapon(28, 0), 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Explode, "explodes at the level edge this tick");
+        assert_eq!(obj.pos.x, itof(999), "walked 899 steps, not 8");
+    }
+
+    #[test]
+    fn st_laser_explodes_on_the_step_that_meets_rock() {
+        // floor_level: rock at (10,10) only. Step 1: pos 7, next 8; step 2: pos 8, next 9;
+        // step 3: pos 9, next 10 = rock -> explode with pos 9 (the loop breaks there).
+        let level = floor_level();
+        let mut rand = seeded();
+        let mut obj = beam(2, 6, 10);
+        let out = proc_no_worms(&mut obj, &level, &st_laser_weapon(2, 0), 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Explode);
+        assert_eq!(obj.pos, Vec2::new(itof(9), itof(10)), "stopped on the third step");
+    }
+
+    #[test]
+    fn st_laser_hits_a_worm_on_a_later_step_and_is_removed() {
+        // The worm-hit arm (weapon.cpp:287-326) runs on EVERY step. The fixture's only solid
+        // worm pixel is sprite (8,8) -> world (51,53) for a worm at (50,50). From x = 47 the
+        // beam reaches x = 51 on step 4: hit -> DoDamage(1) -> worm_collide -> Remove; steps
+        // 5..8 never run.
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        let w = Weapon {
+            hit_damage: 1,
+            worm_collide: true,
+            detect_distance: 0,
+            ..st_laser_weapon(2, 0)
+        };
+        let nobject_types = blood_types();
+        let mut worms = [hit_worm(50, 50, Vec2::zero())];
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+        let mut obj = beam(2, 47, 53);
+        let out = proc_hit(
+            &mut obj,
+            &level,
+            &w,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            &mut rand,
+        );
+        assert_eq!(out, WObjectOutcome::Remove, "worm_collide without worm_explode");
+        assert_eq!(obj.pos.x, itof(51), "removed on step 4");
+        assert_eq!(worms[0].health, 99, "one hit, not one per remaining step");
     }
 }

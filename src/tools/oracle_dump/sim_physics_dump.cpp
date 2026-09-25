@@ -44,8 +44,9 @@
 //   game_mode <n>     (Settings::game_mode enum; default 0 = kGmKillEmAll => the
 //                      game-mode switch hits `default: break` and is inert, Slice 6)
 //   worm <idx> <pos_x_fixed> <pos_y_fixed> <health> <lives> <stats_x> <visible>
-//   input <tick> <worm0_7bit> <worm1_7bit>   (sparse; absent => 0; applied on the
-//                                              Process pass advancing <tick>-><tick>+1)
+//   input <tick> <worm0_7bit> <worm1_7bit>   (sparse; absent => 0; applied at the TOP
+//                                              of the pass advancing <tick>-><tick>+1,
+//                                              before the object loops — Step 4½c-0)
 //   weapon <slot> <name> [ammo]   (override BOTH worms' weapon slot <slot> with the
 //                                  named weapon from `common->weapons`, full ammo,
 //                                  ready to fire; optional 3rd token is an opt-in
@@ -1163,6 +1164,22 @@ int main(int argc, char** argv) {
       continue;
     }
 
+    // Step 4½c-0: apply every worm's input at the TOP of the tick, before the bonus and
+    // object loops — exactly as the real Game::ProcessFrame sees it (controllers set
+    // control_states before ProcessFrame; the render_live branch above does the same).
+    // The object loops read it (the steerable Up boost, weapon.cpp:152; RemExp, :139);
+    // no pre-4½c-0 scenario reaches such a read, so every prior golden is byte-identical.
+    {
+      std::array<uint32_t, 2> in{0, 0};
+      auto const it = scn.inputs.find(t);
+      if (it != scn.inputs.end()) {
+        in = it->second;
+      }
+      for (int idx = 0; idx < static_cast<int>(game.worms.size()); ++idx) {
+        game.worms[idx]->control_states.Unpack(idx < 2 ? in[idx] : 0);
+      }
+    }
+
     // Bonuses Process loop (game.cpp:287-290), at the TOP of ProcessFrame, BEFORE
     // the object loops AND before `++cycles`. `bonuses` is an ExactObjectList (slot
     // order; All() skips free slots); `Bonus::Process` (fall/bounce/expire) may
@@ -1223,14 +1240,7 @@ int main(int argc, char** argv) {
       game.CreateBonus();
     }
 
-    std::array<uint32_t, 2> in{0, 0};
-    auto it = scn.inputs.find(t);
-    if (it != scn.inputs.end()) {
-      in = it->second;
-    }
-    for (int idx = 0; idx < static_cast<int>(game.worms.size()); ++idx) {
-      auto const& w = game.worms[idx];
-      w->control_states.Unpack(idx < 2 ? in[idx] : 0);
+    for (auto const& w : game.worms) {
       w->Process(game);
     }
 

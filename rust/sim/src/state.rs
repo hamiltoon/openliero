@@ -1522,11 +1522,11 @@ impl SimState {
     /// [`Explode`]: WObjectOutcome::Explode
     /// [`Remove`]: WObjectOutcome::Remove
     ///
-    /// **Input interleave** (matches the C++ dumper `sim_physics_dump.cpp:233-238`):
-    /// for each worm in `worms` order, overwrite its `control_states` from the
-    /// tick's input (mirroring `ControlState::Unpack`), then run that worm's full
-    /// pass before moving to the next worm. Inputs shorter than `worms` leave the
-    /// remaining worms' control state unchanged.
+    /// **Input application** (Step 4½c-0, design §4.3): every worm's `control_states` is
+    /// overwritten from the tick's input (mirroring `ControlState::Unpack`) at the TOP of
+    /// the tick, before the object loops — as C++ controllers do before
+    /// `Game::ProcessFrame`, and as the dumper does on every path since 4½c-0. Inputs
+    /// shorter than `worms` leave the remaining worms' control state unchanged.
     ///
     /// Per-worm order (design doc, *Per-worm pass: exact ordering*):
     ///
@@ -1568,6 +1568,16 @@ impl SimState {
         crate::shake::begin_frame();
         // Step 4½a-1: publish this tick's settings->shadow for the CorrectShadow sites.
         crate::shadow::begin_frame(self.shadow);
+
+        // Step 4½c-0 (design §4.3): every worm's input is applied HERE, before any sim
+        // work — C++ controllers set `control_states` before `Game::ProcessFrame`
+        // (`localController.cpp:58-80` / `:175`; the dumper's `render_live` path and, since
+        // 4½c-0, its reduced tail too). The object loops therefore read THIS tick's input
+        // (the steerable Up boost, `weapon.cpp:152`; RemExp, `:139`). Inputs shorter than
+        // `worms` leave the remaining worms' control state unchanged.
+        for (w, input) in self.worms.iter_mut().zip(inputs) {
+            w.control_states = *input;
+        }
 
         // Disjoint field borrows: destructuring `&mut self` binds each field as a
         // separate `&mut` (default binding mode), so the object loops can hold
@@ -1958,10 +1968,7 @@ impl SimState {
         // both expressible. The visible arm rebinds `let w = &mut worms[i]` and is
         // otherwise unchanged.
         for i in 0..worms.len() {
-            // Interleave: apply this worm's input (≈ `Unpack`), then Process it.
-            if let Some(input) = inputs.get(i) {
-                worms[i].control_states = *input;
-            }
+            // (This tick's input was applied at the top of `process_frame` — 4½c-0 T8.)
 
             // Port of `Worm::Process` (worm.cpp:210-452). The C++ structure is:
             //   health = min(health, settings_health);          // 213 — ALWAYS
@@ -6456,5 +6463,22 @@ mod tests {
         );
         assert!(!w.movable, "Left held + a live missile: movable stays false");
         assert_eq!(state.worms[1].steerable_count, 0, "worm 1 owns no missile");
+    }
+
+    #[test]
+    fn the_object_loop_reads_this_ticks_input() {
+        // Step 4½c-0 T8 (design §4.3): C++ sets control_states BEFORE Game::ProcessFrame, so
+        // the MISSILE's Up boost (weapon.cpp:152) in the object loop sees THIS tick's Up:
+        // new_vel = dir*speed/100 + dir*add_speed/100; vel = (vel*8 + new_vel)/9.
+        let mut state = steer_state();
+        state.process_frame(&[ControlState::unpack(1), ControlState::new()]);
+        let dir = state.cossin[32];
+        let boosted = dir.mul(230).div(100).add(dir.mul(150).div(100));
+        let m = *state.wobjects.iter().next().expect("the missile flies on");
+        assert_eq!(
+            m.vel,
+            Vec2::zero().mul(8).add(boosted).div(9),
+            "boosted on the very first tick"
+        );
     }
 }

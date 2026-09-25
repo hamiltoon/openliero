@@ -32,7 +32,7 @@ use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
 use crate::blit::draw_dirt_effect;
-use crate::nobject::{check_for_spec_worm_hit, nobject_create2};
+use crate::nobject::{check_for_spec_worm_hit, nobject_create1, nobject_create2};
 use crate::pool::Pool;
 use crate::sobject::sobject_create;
 use crate::state::{do_damage, Bonus, ControlState, LevelSim, NObject, SObject, WObject, WormState};
@@ -322,11 +322,8 @@ pub enum WObjectOutcome {
 /// (`nobject.rs:300-324`) and the animation gates on the pre-`++cycles` snapshot
 /// `(cycles & 7) == 0` (the same threading the nobject animation uses).
 ///
-/// Deferred / inert branches (guarded by `debug_assert!` so a non-fan config
-/// trips loudly, or omitted because they need state the driver owns):
-/// steering (`shot_type` 2/3) and the laser do-loop, `mult_speed`, and
-/// object/particle trails are all `debug_assert`ed to their fan-shaped no-op
-/// values.
+/// Steering (`shot_type` 2/3), `mult_speed` and both trails (the particle trail since
+/// 4½c-0 T2) are LIVE; the laser do-loop is still `debug_assert`ed off (4½c-0 T3).
 ///
 /// **The `collide_with_objects` impulse loop (`weapon.cpp:212-232`) is now LIVE**
 /// (Slice-4½a-1 T8b): a constant `impulse = vel * blow_away / 100` is added to
@@ -382,20 +379,13 @@ pub fn wobject_process(
         }
     }
 
-    // Deferred-branch guards. shot_type 0/1/2/3 are all ported now: ST_NORMAL/
-    // ST_TYPE1 share the plain flight; ST_STEERABLE (2) and ST_TYPE2 (3, e.g.
-    // BAZOOKA) run the steering block below. Only the laser do-loop (shot_type 4)
-    // stays deferred. `mult_speed` and the `obj_trail` spawn are LIVE (T7b); the
-    // particle-trail spawn stays deferred (no fired weapon in this TC uses it —
-    // bazooka's part_trail_obj = -1). A config that would take an un-ported branch
-    // fails loudly in debug builds.
+    // Deferred-branch guard. shot_type 0/1/2/3 are ported (ST_NORMAL/ST_TYPE1 share the
+    // plain flight; ST_STEERABLE and ST_TYPE2 run the steering block below), and so are
+    // `mult_speed` and both trails (the particle trail since 4½c-0 T2). Only the laser
+    // do-loop (shot_type 4) stays deferred, until 4½c-0 T3.
     debug_assert!(
         weapon.shot_type != ST_LASER,
         "laser do-loop Process branch deferred"
-    );
-    debug_assert!(
-        weapon.part_trail_obj < 0,
-        "particle-trail spawn deferred (no fired weapon uses it)"
     );
 
     let mut do_explode = false;
@@ -534,9 +524,41 @@ pub fn wobject_process(
         );
     }
 
-    // The particle-trail spawn (weapon.cpp:201-210) goes here in C++; deferred (no
-    // fired weapon in this TC has part_trail_obj >= 0 — bazooka = -1; guarded above).
+    // Particle trail (weapon.cpp:201-210) — LIVE (4½c-0 T2): LARPA / BOUNCY LARPA
+    // (`part_trail_type == 1` -> Create1 of `vel / SplinterLarpaVelDiv`) and CRACKLER
+    // (else -> a `rand(128)` angle FIRST, then Create2 of `vel / SplinterCracklerVelDiv`).
+    // Same pre-`++cycles` gate as the obj trail; `vel` is the post-steering/bounce/
+    // mult_speed velocity, `pos` the FIXED post-move position (no Ftoi), colour 0, owner =
+    // this wobject's owner. The divisions truncate (`Vec2::div` == C++ `fixedvec / int`).
+    // `part_trail_delay > 0` for every trail weapon (`weapon_branch_inventory.rs`).
     // The worm-hit loop (weapon.cpp:287-326) is AFTER the timeout, below.
+    if weapon.part_trail_obj >= 0 && cycles % weapon.part_trail_delay == 0 {
+        let trail = &nobject_types[weapon.part_trail_obj as usize];
+        if weapon.part_trail_type == 1 {
+            nobject_create1(
+                trail,
+                obj.vel.div(consts.splinter_larpa_vel_div),
+                obj.pos,
+                0,
+                obj.owner_idx,
+                rand,
+                nobjects,
+            );
+        } else {
+            let angle = rand.bound(128) as i32;
+            nobject_create2(
+                trail,
+                angle,
+                obj.vel.div(consts.splinter_crackler_vel_div),
+                obj.pos,
+                0,
+                obj.owner_idx,
+                cossin,
+                rand,
+                nobjects,
+            );
+        }
+    }
 
     // collide_with_objects impulse (weapon.cpp:212-232) — LIVE (T8b). FAN is the
     // only TC weapon with the flag (`fan.cfg`, blowAway = 30). Draws NO rand.
@@ -3814,5 +3836,163 @@ mod tests {
             assert_eq!(out, WObjectOutcome::Keep, "weapon {weapon_id} controls {controls}");
             assert_eq!(obj.time_left, 99, "weapon {weapon_id} controls {controls}: countdown");
         }
+    }
+
+    // ---- 4½c-0 T2: the particle trail (weapon.cpp:201-210) --------------------------
+
+    // A LARPA/CRACKLER-shaped flight: ST_NORMAL, no bounce/gravity/timeout, a particle
+    // trail of nobject_types[0] every 4 cycles. part_trail_type 1 = LARPA (Create1),
+    // anything else = CRACKLER (rand(128) angle, then Create2).
+    fn part_trail_weapon(part_trail_type: i32) -> Weapon {
+        Weapon {
+            id: 11,
+            shot_type: ST_NORMAL,
+            mult_speed: 100,
+            gravity: 0,
+            expl_ground: false,
+            time_to_explo: 0,
+            obj_trail_type: -1,
+            part_trail_obj: 0,
+            part_trail_type,
+            part_trail_delay: 4,
+            ..Default::default()
+        }
+    }
+
+    // A splinter type whose Create1 and Create2 both draw: distribution 8 (two scatter
+    // draws), speed_v 50 (Create2's speed draw); start_frame 0 and time_to_explo_v 0, so
+    // Create itself draws nothing.
+    fn trail_particle() -> NObjectType {
+        NObjectType {
+            id: 0,
+            speed: 100,
+            speed_v: 50,
+            distribution: 8,
+            ..Default::default()
+        }
+    }
+
+    // Distinct divisors (the TC has 3/3), so a larpa<->crackler divisor swap is caught; 5
+    // also truncates the negative y toward zero (itof(-2) / 5 = -26214, not -26215).
+    fn trail_consts() -> WObjectConsts {
+        WObjectConsts {
+            splinter_larpa_vel_div: 3,
+            splinter_crackler_vel_div: 5,
+            ..WObjectConsts::default()
+        }
+    }
+
+    fn trail_shooter() -> WObject {
+        WObject {
+            pos: Vec2::new(itof(100), itof(200)),
+            vel: Vec2::new(itof(3), itof(-2)),
+            owner_idx: 1,
+            ty: Some(11),
+            ..WObject::default()
+        }
+    }
+
+    fn proc_part_trail(
+        obj: &mut WObject,
+        weapon: &Weapon,
+        cycles: i32,
+        nobjects: &mut Pool<NObject>,
+        rand: &mut Rand,
+    ) -> WObjectOutcome {
+        let mut level = air_level();
+        let mut worms: [WormState; 0] = [];
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bonuses: Pool<Bonus> = Pool::new(1);
+        let cossin = precompute_cossin();
+        wobject_process(
+            obj,
+            &mut level,
+            weapon,
+            &[],
+            cycles,
+            &mut worms,
+            &mut wobjects,
+            nobjects,
+            &[trail_particle()],
+            &mut sobjects,
+            &[],
+            &mut bonuses,
+            &SpriteSet::default(),
+            &SpriteSet::default(),
+            &[],
+            &cossin,
+            100,
+            0,
+            100,
+            trail_consts(),
+            rand,
+        )
+    }
+
+    #[test]
+    fn larpa_trail_is_create1_of_vel_over_the_larpa_divisor_at_the_moved_pos() {
+        // weapon.cpp:202-204: type 1 -> Create1(vel / SplinterLarpaVelDiv, pos, 0, owner)
+        // after the tick's `pos += vel` — no angle draw.
+        let mut obj = trail_shooter();
+        let (pos, vel) = (obj.pos.add(obj.vel), obj.vel);
+        let mut refr = seeded();
+        let mut want: Pool<NObject> = Pool::new(8);
+        nobject_create1(&trail_particle(), vel.div(3), pos, 0, 1, &mut refr, &mut want);
+
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+        let out = proc_part_trail(&mut obj, &part_trail_weapon(1), 8, &mut nobjects, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep);
+        assert_eq!(
+            nobjects.iter().copied().collect::<Vec<_>>(),
+            want.iter().copied().collect::<Vec<_>>(),
+            "one Create1 particle"
+        );
+        assert_eq!(rand.last(), refr.last(), "Create1's two scatter draws, nothing else");
+    }
+
+    #[test]
+    fn crackler_trail_draws_an_angle_then_create2_of_vel_over_the_crackler_divisor() {
+        // weapon.cpp:205-209: rand(128) FIRST, then Create2(angle, vel /
+        // SplinterCracklerVelDiv, pos, 0, owner).
+        let cossin = precompute_cossin();
+        let mut obj = trail_shooter();
+        let (pos, vel) = (obj.pos.add(obj.vel), obj.vel);
+        let mut refr = seeded();
+        let mut want: Pool<NObject> = Pool::new(8);
+        let angle = refr.bound(128) as i32;
+        nobject_create2(
+            &trail_particle(),
+            angle,
+            vel.div(5),
+            pos,
+            0,
+            1,
+            &cossin,
+            &mut refr,
+            &mut want,
+        );
+
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+        proc_part_trail(&mut obj, &part_trail_weapon(0), 8, &mut nobjects, &mut rand);
+        assert_eq!(
+            nobjects.iter().copied().collect::<Vec<_>>(),
+            want.iter().copied().collect::<Vec<_>>(),
+            "one Create2 particle"
+        );
+        assert_eq!(rand.last(), refr.last(), "rand(128), then Create2's three draws");
+    }
+
+    #[test]
+    fn particle_trail_waits_for_its_delay() {
+        let mut obj = trail_shooter();
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+        let before = rand.last();
+        proc_part_trail(&mut obj, &part_trail_weapon(0), 9, &mut nobjects, &mut rand);
+        assert!(nobjects.is_empty(), "9 % 4 != 0 -> no particle");
+        assert_eq!(rand.last(), before, "and no draw");
     }
 }

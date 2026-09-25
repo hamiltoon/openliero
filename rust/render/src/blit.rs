@@ -422,6 +422,24 @@ pub fn draw_bar(scr: &mut Bitmap, pal: &Pal32, x: i32, y: i32, width: i32, heigh
     }
 }
 
+/// `DrawRoundedBox` (`blit.cpp:128-140`): three clip-clamped `FillRect`s — the band `(x, y+1,
+/// width+3, height-2)` and the top and bottom rows `(x+1, y|y+height-1, width+1, 1)`, leaving
+/// the four corners open. The menu item box, the weapon-selection header and name boxes
+/// (Step 4½c), and 4½d's menus.
+pub fn draw_rounded_box(
+    scr: &mut Bitmap,
+    pal: &Pal32,
+    x: i32,
+    y: i32,
+    color: u8,
+    height: i32,
+    width: i32,
+) {
+    scr.fill_rect(x, y + 1, width + 3, height - 2, color, pal);
+    scr.fill_rect(x + 1, y, width + 1, 1, color, pal);
+    scr.fill_rect(x + 1, y + height - 1, width + 1, 1, color, pal);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +457,35 @@ mod tests {
             *e = 0xFF00_0000 | i as u32;
         }
         p
+    }
+
+    #[test]
+    fn draw_rounded_box_is_three_fills_with_open_corners() {
+        // blit.cpp:128-140: (x, y+1, w+3, h-2), (x+1, y, w+1, 1), (x+1, y+h-1, w+1, 1).
+        let pal = ramp_pal();
+        let mut bmp = Bitmap::new(20, 12);
+        draw_rounded_box(&mut bmp, &pal, 2, 1, 7, 7, 4);
+        let on = |x: i32, y: i32| bmp.get_pixel(x, y) == pal[7];
+        assert!(
+            on(2, 2) && on(8, 2) && on(2, 6) && on(8, 6),
+            "the band: x 2..=8, y 2..=6"
+        );
+        assert!(!on(1, 4) && !on(9, 4));
+        assert!(
+            on(3, 1) && on(7, 1) && on(3, 7) && on(7, 7),
+            "top/bottom rows: x 3..=7"
+        );
+        assert!(
+            !on(2, 1) && !on(8, 1) && !on(2, 7) && !on(8, 7),
+            "open corners"
+        );
+        assert!(!on(5, 0) && !on(5, 8));
+        assert_eq!(
+            bmp.pixels.iter().filter(|&&p| p == pal[7]).count(),
+            7 * 5 + 5 * 2
+        );
+        // Clip-clamped like FillRect: a box hanging off every edge must not panic.
+        draw_rounded_box(&mut bmp, &pal, -3, -2, 0, 40, 30);
     }
 
     fn sprite(width: i32, height: i32, data: Vec<u8>) -> SpriteSet {

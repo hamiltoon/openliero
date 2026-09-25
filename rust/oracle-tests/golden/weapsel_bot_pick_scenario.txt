@@ -1,0 +1,16 @@
+# Step 4½ slice 4½c — weapon-selection case `bot_pick` (design §6.4): a PICK bot (select_bot_weapons 1) is not ready and is driven by worm 1's keys (finding 2).
+# Read by oracle_dump_weapsel (golden/weapsel_bot_pick.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 0, 9 frames, 0 draws in frames, final rng 00000000
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 12
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_bot_pick_setup.cfg
+weapsel 0 0 2
+weapsel 2 0 8
+weapsel 4 1 1
+weapsel 6 16 1
+weapsel 8 0 16

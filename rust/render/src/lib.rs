@@ -6,7 +6,8 @@
 //! frame hash (`hash`) is the regression primitive differential-tested against
 //! C++. Slice 3a scope: `Bitmap`, per-frame palette build, `DrawLevel` Classic
 //! arm, the two-viewport 320x200 player layout, and the frame hash. Shadows,
-//! sprites, HUD, minimap arrive in 3b/3e.
+//! sprites, HUD, minimap arrive in 3b/3e. Step 4½c adds the menu-item recipe
+//! (menu) and the weapon-selection screen (weapsel), pulled forward from 4½d.
 pub mod bitmap;
 pub mod blit;
 pub mod fire_cone;
@@ -15,7 +16,9 @@ pub mod frame;
 pub mod hash;
 pub mod hud;
 pub mod level_draw;
+pub mod menu;
 pub mod object_draw;
 pub mod palette;
 pub mod shadow_query;
 pub mod viewport;
+pub mod weapsel;

@@ -50,6 +50,13 @@ pub struct SceneData {
     pub font: Font,
     /// The three HUD text labels from the TC's `[texts]` (`Kills`/`Lives`/`Reloading`).
     pub labels: HudLabels,
+    /// Step 4½c: the weapon-selection screen's TC strings (`tc.cfg:245-250`).
+    pub weapsel_texts: render::weapsel::WeapselTexts,
+    /// C++ `Common::bonus_frames` (`common.hpp:176`): the small-sprite frame of each bonus
+    /// kind, from tc.cfg `[[constants.bonuses]]` `frame`. Step 4½c: a live match with
+    /// `max_bonuses > 0` (the NEW GAME start) spawns bonuses, and `viewport.cpp:279,405`
+    /// index this table — an empty table panicked the draw.
+    pub bonus_frames: Vec<i32>,
 }
 
 impl SceneData {
@@ -65,7 +72,7 @@ impl SceneData {
             origpal: &self.origpal,
             color_anim: &self.color_anim,
             fire_cone_sprites: &self.fire_cone,
-            bonus_frames: &[],
+            bonus_frames: &self.bonus_frames,
             nr_begin: self.nr_begin,
             nr_end: self.nr_end,
             laser_weapon: self.laser_weapon,
@@ -120,9 +127,9 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     })
     .expect("object configs load");
 
-    // weap_order: indices sorted by weapon name; id == index (Common::Precompute).
-    let mut weap_order: Vec<usize> = (0..objects.weapons.len()).collect();
-    weap_order.sort_by(|&a, &b| objects.weapons[a].name.cmp(&objects.weapons[b].name));
+    // weap_order: indices sorted by weapon name; id == index (Common::Precompute). The one shared
+    // copy since Step 4½c (design finding 12).
+    let weap_order = sim::weapsel::weap_order(&objects.weapons);
     let settings_weapons = [1u32; NUM_WEAPONS];
     let mut resolved = WormInit::resolve_weapons(&objects, &weap_order, &settings_weapons);
 
@@ -237,6 +244,8 @@ pub(crate) fn scene_data(
         laser_weapon: tc.constants.LaserWeapon,
         font,
         labels,
+        weapsel_texts: render::weapsel::WeapselTexts::from_tc(&tc.texts),
+        bonus_frames: tc.bonuses.iter().map(|b| b.frame).collect(),
     }
 }
 
@@ -257,6 +266,16 @@ worm 0 6553600 7602176 100 10 0   1
 worm 1 3276800 7602176 100 10 218 1
 weapon 0 DART
 ";
+
+    #[test]
+    fn load_yields_the_weapsel_texts() {
+        let loaded = load(
+            Path::new(TC_ROOT),
+            &Scenario::parse(SAMPLE).expect("parses"),
+        );
+        assert_eq!(loaded.scene.weapsel_texts.sel_weap, "Select your weapons:");
+        assert_eq!(loaded.scene.weapsel_texts.done, "DONE!");
+    }
 
     #[test]
     fn load_yields_font_and_labels() {

@@ -48,11 +48,11 @@ mod tests {
 
     use render::bitmap::Bitmap;
     use render::viewport::Viewport;
-    use scenario::Scenario;
     use scenario::paths::TC_ROOT;
     use scenario::settings::Settings;
 
     use super::*;
+    use crate::new_game::NewGame;
 
     #[test]
     fn a_played_match_draws_the_hud_and_follows_the_map_setting() {
@@ -106,11 +106,16 @@ mod tests {
 
     #[test]
     fn the_flags_reach_the_frame_of_the_live_default_match() {
-        let scenario = Scenario::parse(include_str!("../scenarios/default_match.txt"))
-            .expect("the default match parses");
-        let loaded = scenario::load(Path::new(TC_ROOT), &scenario);
+        // Step 4½c: the live default match is the NEW GAME start (`game::new_game`), here in
+        // play (selection skipped: the saved picks, lives, the pool).
+        let settings = Settings::default();
+        let shadow = settings.shadow;
+        let ng = NewGame::new(Path::new(TC_ROOT), settings, Some(42), 0);
+        let loaded = ng
+            .start_without_selection(Path::new(TC_ROOT))
+            .expect("the default settings build");
         let frame = |flags: HudFlags| -> Vec<u32> {
-            let mut scene = loaded.scene.as_scene(0, scenario.shadow());
+            let mut scene = loaded.scene.as_scene(0, shadow);
             flags.apply(&mut scene);
             let mut viewports = Viewport::player_layout();
             let mut bmp = Bitmap::new(320, 200);

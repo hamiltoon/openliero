@@ -1,0 +1,106 @@
+# Step 4½ slice 4½c — weapon-selection case `disabled_saved_s1` (design §6.4): the loop runs only for disabled saved picks, uniqueness inside it; cycling skips bonus-only and banned weapons over a full lap.
+# Read by oracle_dump_weapsel (golden/weapsel_disabled_saved_s1.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 15, 99 frames, 0 draws in frames, final rng 350dde8a
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 3
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_disabled_saved_s1_setup.cfg
+weapsel 0 2 2
+weapsel 2 8 4
+weapsel 3 8 4
+weapsel 4 8 4
+weapsel 5 8 4
+weapsel 6 8 4
+weapsel 7 8 4
+weapsel 8 8 4
+weapsel 9 8 4
+weapsel 10 8 4
+weapsel 11 8 4
+weapsel 12 8 4
+weapsel 13 8 4
+weapsel 14 8 4
+weapsel 15 8 4
+weapsel 16 8 4
+weapsel 17 8 4
+weapsel 18 8 4
+weapsel 19 8 4
+weapsel 20 8 4
+weapsel 21 8 4
+weapsel 22 8 4
+weapsel 23 8 4
+weapsel 24 8 4
+weapsel 25 8 4
+weapsel 26 8 4
+weapsel 27 8 4
+weapsel 28 8 4
+weapsel 29 8 4
+weapsel 30 8 4
+weapsel 31 8 4
+weapsel 32 8 4
+weapsel 33 8 4
+weapsel 34 8 4
+weapsel 35 8 4
+weapsel 36 8 4
+weapsel 37 8 4
+weapsel 38 8 4
+weapsel 39 8 4
+weapsel 40 8 4
+weapsel 41 8 4
+weapsel 42 8 4
+weapsel 43 8 4
+weapsel 44 8 4
+weapsel 45 8 4
+weapsel 46 8 4
+weapsel 47 8 4
+weapsel 48 8 4
+weapsel 49 8 4
+weapsel 50 8 4
+weapsel 51 8 4
+weapsel 52 8 4
+weapsel 53 8 4
+weapsel 54 8 4
+weapsel 55 8 4
+weapsel 56 8 4
+weapsel 57 8 4
+weapsel 58 8 4
+weapsel 59 8 4
+weapsel 60 8 4
+weapsel 61 8 4
+weapsel 62 8 4
+weapsel 63 8 4
+weapsel 64 8 4
+weapsel 65 8 4
+weapsel 66 8 4
+weapsel 67 8 4
+weapsel 68 8 4
+weapsel 69 8 4
+weapsel 70 8 4
+weapsel 71 8 4
+weapsel 72 8 4
+weapsel 73 8 4
+weapsel 74 8 4
+weapsel 75 8 4
+weapsel 76 8 4
+weapsel 77 8 4
+weapsel 78 8 4
+weapsel 79 8 4
+weapsel 80 8 4
+weapsel 81 8 4
+weapsel 82 8 4
+weapsel 83 8 4
+weapsel 84 8 4
+weapsel 85 8 4
+weapsel 86 8 4
+weapsel 87 8 4
+weapsel 88 8 4
+weapsel 89 8 4
+weapsel 90 8 4
+weapsel 91 8 4
+weapsel 92 8 4
+weapsel 94 1 1
+weapsel 96 1 1
+weapsel 98 16 16

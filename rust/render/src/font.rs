@@ -219,6 +219,27 @@ impl Font {
             }
         }
     }
+
+    /// `Font::GetDims` (`font.cpp:87-112`) without the height out-param: the pixel width of
+    /// `s` — the widest line (a NUL codepoint breaks a line), summing `chars[c - 2].width` over
+    /// the bytes the `2..252` gate passes, decoded exactly as [`draw_string`](Self::draw_string)
+    /// decodes them.
+    pub fn get_dims(&self, s: &str) -> i32 {
+        let mut width = 0;
+        let mut max_width = 0;
+        for cp in s.chars() {
+            if cp == '\0' {
+                max_width = max_width.max(width);
+                width = 0;
+                continue;
+            }
+            let c = ascii_to_font_byte(cp);
+            if (2..252).contains(&c) {
+                width += self.chars[(c - 2) as usize].width;
+            }
+        }
+        max_width.max(width)
+    }
 }
 
 /// `font.cpp:51-54` `CodepointToFontByte` restricted to ASCII (spec §7 Q2). C++
@@ -252,6 +273,23 @@ mod tests {
         let bytes = std::fs::read(FONT_TGA).expect("read font.tga");
         let tga = Tga::load(&bytes).expect("font.tga parses");
         Font::load(&tga)
+    }
+
+    #[test]
+    fn get_dims_sums_the_advance_widths_of_the_widest_line() {
+        // font.cpp:87-112: the widths of the bytes the 2..252 gate passes; NUL breaks a line.
+        let font = real_font();
+        let w = |c: char| font.chars[c as usize - 2].width;
+        assert_eq!(font.get_dims(""), 0);
+        assert_eq!(font.get_dims("A"), w('A'));
+        assert!(w('A') > 0, "non-vacuous");
+        assert_eq!(font.get_dims("DONE!"), "DONE!".chars().map(w).sum::<i32>());
+        assert_eq!(font.get_dims("AB\0A"), w('A') + w('B'), "the widest line");
+        assert_eq!(
+            font.get_dims("A\u{1}\u{e9}"),
+            w('A'),
+            "skipped exactly as draw_string skips"
+        );
     }
 
     #[test]

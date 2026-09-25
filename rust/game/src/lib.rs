@@ -10,7 +10,9 @@
 //! its ordering can be gated headlessly), and since Step 4½a-1 T10 the
 //! post-weapon-selection match lifecycle (`match_flow` — the Bevy-free
 //! `LocalController` game/game-ended tail), the PR-preview URL parameters
-//! (`web_params`) and the browser build's on-screen controls (`touch`). All
+//! (`web_params`) and the browser build's on-screen controls (`touch`); since
+//! Step 4½c the live weapon-selection phase (`selection`) and the C++ NEW GAME
+//! start (`new_game`: settings, level generation, seed, the level-reuse rule). All
 //! Bevy binary logic (the app, the CPU blit, the tick/render loop) stays in
 //! `main.rs`, which uses these modules
 //! via `game::input` / `game::viewport_step` / `game::match_flow`.
@@ -18,6 +20,8 @@ pub mod audio;
 pub mod hud_mode;
 pub mod input;
 pub mod match_flow;
+pub mod new_game;
+pub mod selection;
 pub mod touch;
 pub mod viewport_step;
 pub mod web_params;

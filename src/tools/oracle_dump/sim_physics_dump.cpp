@@ -65,6 +65,12 @@
 //                                       LocalController state (no `worm` lines allowed) and
 //                                       every dump line gains a 12th column, IsGameOver 0/1.
 //                                       Excludes worm/weapon/game_mode/max_bonuses/render*.)
+//   weapsel <frame> <worm0_7bit> <worm1_7bit>  (Step 4½c; `settings` scenarios only: the
+//                                       weapon-selection phase runs in place of InitWeapons —
+//                                       the REAL WeaponSelection via weapsel_drive.hpp, frames
+//                                       0..the last `weapsel` frame, which must be the frame it
+//                                       ends on; sparse, absent => 0. The 12 columns are
+//                                       unchanged; the tick-0 rng is the post-selection last.)
 //
 // Diagnostic: set env OL_PHYS_TRACE=1 to also print per-tick pos/vel for both worms
 // to stderr (does not affect the golden output). Built via the
@@ -148,6 +154,7 @@
 #include "text.hpp"
 #include "viewport.hpp"
 #include "weapon.hpp"
+#include "weapsel_drive.hpp"
 #include "worm.hpp"
 
 namespace {
@@ -240,6 +247,10 @@ struct Scenario {
   // Settings::FromToml; the worms start in the C++ LocalController state and the dump gains a
   // 12th IsGameOver column. Empty (every pre-4½ scenario) => the classic path, byte-identical.
   std::string settings_file;
+  // Step 4½c `weapsel <frame> <w0> <w1>` (design §6.1): the weapon-selection phase's sparse
+  // per-frame input; `settings` scenarios only. Empty (every prior scenario) => InitWeapons as
+  // before, byte-identical.
+  weapsel_drive::Script weapsel;
   // Presence flags for the directives a `settings` scenario must not carry.
   bool game_mode_given = false;
   bool max_bonuses_given = false;
@@ -344,6 +355,20 @@ Scenario ParseScenario(char const* path) {
       std::array<uint32_t, 2> in{0, 0};
       ls >> tick >> in[0] >> in[1];
       s.inputs[tick] = in;
+    } else if (key == "weapsel") {
+      // Step 4½c: exactly 3 numbers, like the Rust parser (a `#` token starts a comment); a
+      // negative or duplicate frame is an error.
+      int frame = -1;
+      std::array<uint32_t, 2> in{0, 0};
+      std::string extra;
+      if (!(ls >> frame >> in[0] >> in[1]) || frame < 0 || (ls >> extra && extra[0] != '#')) {
+        std::fprintf(stderr, "weapsel expects <frame> <worm0_7bit> <worm1_7bit>\n");
+        std::exit(1);
+      }
+      if (!s.weapsel.emplace(frame, in).second) {
+        std::fprintf(stderr, "duplicate weapsel frame %d\n", frame);
+        std::exit(1);
+      }
     } else if (key == "weapon") {
       int slot = 0;
       std::string name;
@@ -362,6 +387,10 @@ Scenario ParseScenario(char const* path) {
       std::fprintf(stderr, "unknown scenario key: %s\n", key.c_str());
       std::exit(1);
     }
+  }
+  if (!s.weapsel.empty() && s.settings_file.empty()) {
+    std::fprintf(stderr, "weapsel is oracle-only: it needs a settings directive\n");
+    std::exit(1);
   }
   if (!s.settings_file.empty()) {
     bool const kForbidden = !s.worms.empty() || !s.weapon_overrides.empty() || s.game_mode_given ||
@@ -499,8 +528,22 @@ int main(int argc, char** argv) {
       w->stats_x = idx == 0 ? 0 : 218;
       game.AddWorm(w);
     }
-    for (auto const& w : game.worms) {
-      w->InitWeapons(game);
+    if (scn.weapsel.empty()) {
+      for (auto const& w : game.worms) {
+        w->InitWeapons(game);
+      }
+    } else {
+      // Step 4½c: the weapon-selection phase runs where C++ runs it — between the
+      // LocalController constructor and kStateGame (localController.cpp:224-235) — in place of
+      // the bare InitWeapons: the REAL constructor (it draws game.rand), one REAL ProcessFrame
+      // per `weapsel` frame and the REAL Finalize (InitWeapons + ReleaseControls), through the
+      // driver shared with oracle_dump_weapsel. ResetWorms below then equals kStateGame's lives
+      // + StartGame's pool (4½a design §7.2), and the tick-0 row carries the post-selection
+      // rand.last. The viewports the phase registers are gone before the first tick.
+      weapsel_drive::Run(
+          game, scn.weapsel, [](weapsel_drive::Driver const& /*driver*/) {},
+          [](weapsel_drive::Driver const& /*driver*/, int /*frame*/,
+             std::array<uint32_t, 2> const& /*words*/, bool /*done*/) {});
     }
     game.ResetWorms();
   } else {

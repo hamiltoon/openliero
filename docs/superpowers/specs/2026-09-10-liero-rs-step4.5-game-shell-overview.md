@@ -1,6 +1,6 @@
 # Step 4½ — Game shell: overview / altitude decisions
 
-Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, 4½c–4½h planned
+Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, **4½c LANDED**, 4½d–4½h planned
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 4½ — Game shell" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++ map, cited as **cpp-map §N**)
@@ -283,19 +283,40 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   RNG. **Note for Step 5:** this makes concrete the Step-5 deferral of weapon-select-phase rollback
   ("unless the netplay path includes weapon selection") — after 4½c it does, so Step 5 must decide
   whether 5a's snapshot machinery covers `WeaponSelectSnap` (`weapsel_snapshot.hpp:37`).
+  **Landed** (design `specs/2026-09-25-liero-rs-step4.5-slice4.5c-weapon-selection-design.md`, plan
+  `plans/2026-09-25-liero-rs-step4.5-slice4.5c-plan.md`). Corrections from its findings:
+  (1) the constructor's rejection loop runs only when a saved or rolled pick is DISABLED, and checks
+  uniqueness only inside that loop; the "redraw until enabled and unused" description fits RANDOMIZE;
+  (2) PICK does not make the bot navigate: the AI never runs during selection, and a PICK bot's menu is
+  driven by the keys bound to that worm;
+  (3) the phase uses LocalController's 12/3 repeat (RollbackController's differs, finding 5);
+  (4) `render::palette::rotate_from` already existed (finding 10); what was missing was `DrawRoundedBox`
+  and `Font::GetDims`, both landed here;
+  (5) the menu palette is `Origpal` rotated, and `Origpal` carries the worm colour ramps
+  (`Game::Focus` → `Palette::SetWormColour`), now `render::palette::set_worm_colour`.
+  The screen is gated bit-exact against the REAL C++ `WeaponSelection::Draw` run headlessly in the
+  cloud session (361 frames, plan Addendum A), not against Rust self-goldens. The live game starts like
+  C++ NEW GAME (default settings, a generated level from a fresh seed, selection, `enter_game`), and F5
+  or the match-end restart reuses the played level (`regenerate_level` is off by default).
+  **Step 5 note:** the weapon-select snapshot is `SimState` + a `WeaponSelection` clone (plain data;
+  `Rand: Clone` landed). Netplay must zero controllers before selection (`rollbackController.cpp:399-401`)
+  and finalize on the confirmed done frame (design §8).
 - **4½d — Menu framework + `ScreenStack` + main menu. THE MILESTONE.** `Menu` / `MenuItem` /
   `ItemBehavior` (`menu.hpp:26`, `menuItem.cpp:6-42`, `itemBehavior.hpp:8` and the
-  Integer/Time/BooleanSwitch/Enum/ArrayEnum family), `DrawRoundedBox` (missing from `render`,
-  rust-map §2), the scrollbar (`menu.cpp:107-124`), navigation and `SetVisibility`
+  Integer/Time/BooleanSwitch/Enum/ArrayEnum family), `DrawRoundedBox`, `Font::GetDims` and the
+  `MenuItem::Draw` text arm (landed in 4½c: `render::blit`, `render::font`, `render::menu`), the
+  scrollbar (`menu.cpp:107-124`), navigation and `SetVisibility`
   (`menu.cpp:227`, `:250`, `:263`), type-to-search with the 1500 ms prefix timeout
   (`menu.cpp:14-79`), palette rotation on indices 168..174 via `RotateFrom`
-  (`gfx.cpp:978-1006`; `Palette::RotateFrom` is missing from `render::palette`), menu fade in/out
+  (`gfx.cpp:978-1006`; `render::palette::rotate_from` exists; 4½c's
+  `render::weapsel::weapsel_palette` uses it), menu fade in/out
   (`mainMenuState.cpp:153-159`, `:604-609`), menu sounds through the existing `AudioSink`
   (`TcConfig.sound_hooks.MenuMoveUp/MenuMoveDown/MenuSelect`); the `ScreenStack`; `MainMenuState`
   with its item list (`gfx.cpp:505-521`) and the selection dispatch that is the real screen router
   (`gfx.cpp:1493-1593`) — including NEW GAME's rule that the previous level is **reused** unless
   `regenerate_level` is set or `random_level` / `level_file` / map width / height changed
-  (`gfx.cpp:1507-1523`), which decides whether 4½b's generator (and its seed) runs at all;
+  (`gfx.cpp:1507-1523`), which decides whether 4½b's generator (and its seed) runs at all (4½c's
+  live `game::new_game` already has the `regenerate_level` half; 4½d adds the settings-changed half);
   `DrawBasicMenu` (`gfx.cpp:1699`) and a `DrawSpectatorInfo` equivalent
   (`gfx.cpp:1739`). **Milestone:** bare run → main menu → NEW GAME → weapon selection → play → Esc →
   menu (RESUME / NEW GAME) → QUIT. **Gate:** menu frame-hash self-goldens + the standing re-diff.

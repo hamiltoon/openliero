@@ -1,0 +1,51 @@
+# Step 4½ slice 4½c — weapon-selection case `repeat_edge` (design §6.4): LocalController repeat: Left held unread on RANDOMIZE, then cycles on 21, 33, 36 (finding 5).
+# Read by oracle_dump_weapsel (golden/weapsel_repeat_edge.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 0, 43 frames, 0 draws in frames, final rng 00000000
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 10
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_repeat_edge_setup.cfg
+weapsel 0 4 0
+weapsel 1 4 0
+weapsel 2 4 0
+weapsel 3 4 0
+weapsel 4 4 0
+weapsel 5 4 0
+weapsel 6 4 0
+weapsel 7 4 0
+weapsel 8 4 0
+weapsel 9 4 0
+weapsel 10 4 0
+weapsel 11 4 0
+weapsel 12 4 0
+weapsel 13 4 0
+weapsel 14 4 0
+weapsel 15 4 0
+weapsel 16 4 0
+weapsel 17 4 0
+weapsel 18 4 0
+weapsel 19 4 0
+weapsel 20 6 0
+weapsel 21 4 0
+weapsel 22 4 0
+weapsel 23 4 0
+weapsel 24 4 0
+weapsel 25 4 0
+weapsel 26 4 0
+weapsel 27 4 0
+weapsel 28 4 0
+weapsel 29 4 0
+weapsel 30 4 0
+weapsel 31 4 0
+weapsel 32 4 0
+weapsel 33 4 0
+weapsel 34 4 0
+weapsel 35 4 0
+weapsel 36 4 0
+weapsel 38 1 0
+weapsel 40 1 1
+weapsel 42 16 16

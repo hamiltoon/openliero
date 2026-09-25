@@ -257,7 +257,7 @@ recording, `game.StartGame()` (`localController.cpp:213-286`).
 ### ⚠ Sim-affecting RNG in weapon selection
 
 **`WeaponSelection` draws from `game.rand`, the simulation RNG:**
-- Constructor: `ws.weapons[j] = game.rand(1, 41)` for any unset weapon or when a bot is set to RANDOM (`weapsel.cpp:57-61`), plus a rejection loop that redraws until an *enabled* and (if enough are enabled) unused weapon comes up (`weapsel.cpp:66-75`).
+- Constructor: `ws.weapons[j] = game.rand(1, 41)` for any unset weapon or when a bot is set to RANDOM (`weapsel.cpp:57-61`), plus a rejection loop that redraws until an *enabled* and (if enough are enabled) unused weapon comes up (`weapsel.cpp:66-75`). (**Corrected by the 4½c design, finding 1:** the constructor's loop runs only for a DISABLED pick and checks uniqueness only inside it; the "until enabled and unused" wording describes RANDOMIZE, weapsel.cpp:316-337.)
 - The `Randomize` menu item re-rolls all 5 in the same rejection loop (`weapsel.cpp:316-337`).
 - `enabled_weaps` counts `weap_table[i] == 0` (`weapsel.cpp:35-39`).
 - Bots auto-ready: `is_ready[i] = (ws.controller != 0 && select_bot_weapons != 1)` (`weapsel.cpp:95`).
@@ -431,7 +431,7 @@ comment about the original's `0xC000` bug).
 - **Both AIs use their own `Rand` member**, not `game.rand`: `DumbLieroAI::rand` (`worm.hpp:133`), `FollowAI::rand` (`predictive_ai.hpp:342`). They never disturb the sim RNG stream — but their *outputs are worm control states*, so they are fully sim-affecting via input. (How `DumbLieroAI::rand` is seeded must be pinned down in the 4½f design — the dumper needs a fixed seed.)
 - `Worm::ai` is a `shared_ptr<WormAI>` explicitly **excluded from snapshots** ("transient, rebuilt on load", `cereal_types.hpp:329`); its RNG state is not serialised. Consequently AI is single-player only.
 - Netplay force-disables it: `RollbackController::Focus` sets `w->settings->controller = 0` for all worms before weapon select (`controller/rollbackController.cpp:401`).
-- `HiddenMenu::kSelectBotWeapons` (RANDOM/PICK/KEEP) controls the weapsel interaction: RANDOM(0) re-rolls bot weapons from `game.rand`, PICK(1) makes the bot navigate the menu, KEEP(2) auto-readies with saved picks (`weapsel.cpp:57`, `:95`).
+- `HiddenMenu::kSelectBotWeapons` (RANDOM/PICK/KEEP) controls the weapsel interaction: RANDOM(0) re-rolls bot weapons from `game.rand`, PICK(1) leaves the bot not ready, its menu driven by the keys bound to that worm (the AI never runs during selection; 4½c design finding 2), KEEP(2) auto-readies with saved picks (`weapsel.cpp:57`, `:95`).
 
 ---
 

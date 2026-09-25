@@ -35,6 +35,9 @@ pub struct Config {
     /// Whether `--hud` was requested — opt-in full player view (HUD bars +
     /// minimap). Default false keeps the world-only path byte-identical.
     pub hud: bool,
+    /// `--weapsel` (Step 4½c): render the initial weapon-selection screen of a `settings`
+    /// scenario (needs `--scenario-path` and `--out`; no `--tick`).
+    pub weapsel: bool,
 }
 
 /// Parse the CLI arguments (already stripped of the program name).
@@ -50,6 +53,8 @@ pub struct Config {
 /// - `--hashes`
 /// - `--tc-root <path>`
 /// - `--hud` (opt-in full player view: HUD bars + minimap; default off)
+/// - `--weapsel` (Step 4½c: the initial weapon-selection screen of a `settings`
+///   scenario; needs `--scenario-path` and `--out`, takes no `--tick`/`--hashes`)
 ///
 /// Exactly one of `--scenario` / `--scenario-path` must be present. At least
 /// one of `--out` / `--hashes` must be present.
@@ -62,6 +67,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut hashes = false;
     let mut tc_root: Option<PathBuf> = None;
     let mut hud = false;
+    let mut weapsel = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -98,6 +104,9 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
             "--hud" => {
                 hud = true;
             }
+            "--weapsel" => {
+                weapsel = true;
+            }
             "--tc-root" => {
                 let v = value_for(args, &mut i, "--tc-root")?;
                 tc_root = Some(PathBuf::from(v));
@@ -118,7 +127,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         }
         _ => {}
     }
-    if ticks.is_empty() {
+    if ticks.is_empty() && !weapsel {
         return Err("missing required --tick".to_string());
     }
     if out.is_none() && !hashes {
@@ -131,6 +140,11 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
     if scale == 0 {
         return Err("--scale must be >= 1".to_string());
     }
+    if weapsel && (scenario_path.is_none() || out.is_none() || hashes || !ticks.is_empty()) {
+        return Err(
+            "--weapsel needs --scenario-path and --out, and takes no --tick/--hashes".to_string(),
+        );
+    }
 
     Ok(Config {
         scenario,
@@ -141,6 +155,7 @@ pub fn parse_args(args: &[String]) -> Result<Config, String> {
         hashes,
         tc_root,
         hud,
+        weapsel,
     })
 }
 
@@ -384,6 +399,66 @@ fn available_names(prefix: &str) -> Vec<String> {
     names
 }
 
+/// `--weapsel` (Step 4½c): the INITIAL weapon-selection screen of a `settings` scenario, built on
+/// the faithful path the C++ frame gate pins (`oracle-tests/tests/render_weapsel_golden.rs`) —
+/// `new_match` (invisible worms, lives 0) + `sim::weapsel` + the worm colour ramps of
+/// `Game::Focus` + `render::weapsel`, `menu_cycles` 0. The label follows `settings.level_file`
+/// (the C++ rule); the names are the setup's.
+pub fn render_weapsel(tc_root: &Path, scenario_path: &Path, scale: u32) -> Result<Vec<u8>, String> {
+    use render::palette::set_worm_colour;
+    use render::weapsel::{build_frozen, draw_screen, level_label, weapsel_palette};
+    use scenario::build::{new_match, weapsel_config};
+    use scenario::settings::MatchConfig;
+    use sim::weapsel::WeaponSelection;
+
+    let text = std::fs::read_to_string(scenario_path)
+        .map_err(|e| format!("read {}: {e}", scenario_path.display()))?;
+    let scenario = Scenario::parse(&text)?;
+    let rel = scenario
+        .settings
+        .as_ref()
+        .ok_or("--weapsel needs a `settings` scenario")?;
+    let dir = scenario_path.parent().unwrap_or(Path::new("."));
+    let setup = std::fs::read_to_string(dir.join(rel)).map_err(|e| format!("read {rel}: {e}"))?;
+    let settings =
+        scenario::settings_toml::settings_from_toml(&setup).map_err(|e| format!("{rel}: {e:?}"))?;
+    let level = assets::level::load(&scenario::assets::read_asset(tc_root, &scenario.level))
+        .map_err(|e| format!("{}: {e:?}", scenario.level))?;
+    let cfg = MatchConfig {
+        settings,
+        seed: scenario.seed,
+    };
+    let mut loaded = new_match(tc_root, &cfg, &level).map_err(|e| e.to_string())?;
+    let ws = WeaponSelection::new(&mut loaded.state, &weapsel_config(&cfg.settings))
+        .map_err(|e| e.to_string())?;
+    // Game::Focus (game.cpp:473-488): the worm colour ramps.
+    for (i, w) in cfg.settings.worm_settings.iter().take(2).enumerate() {
+        set_worm_colour(&mut loaded.scene.origpal, i, w.rgb);
+    }
+    let mut scene = loaded.scene.as_scene(0, cfg.settings.shadow);
+    scene.draw_hud = true;
+    scene.map = cfg.settings.map;
+    let label = level_label(&loaded.scene.weapsel_texts, &cfg.settings.level_file);
+    let frozen = build_frozen(&loaded.state, &scene, &label, 0);
+    let mut surface = Bitmap::new(320, 200);
+    let pal = weapsel_palette(&loaded.scene.origpal, 0);
+    let names = [
+        cfg.settings.worm_settings[0].name.as_str(),
+        cfg.settings.worm_settings[1].name.as_str(),
+    ];
+    draw_screen(
+        &mut surface,
+        &frozen,
+        &pal,
+        &loaded.scene.font,
+        &loaded.scene.weapsel_texts,
+        &ws,
+        &loaded.state.weapons,
+        names,
+    );
+    Ok(encode_png(&surface, scale))
+}
+
 /// Top-level CLI entry: resolve the TC root and scenario-text paths from `cfg`,
 /// load + drive + render the scenario, write the requested PNG(s), and (for
 /// `--hashes`) emit the sidecar grammar to STDOUT. All info/progress goes to
@@ -393,6 +468,21 @@ pub fn run(cfg: &Config) -> Result<(), String> {
         .tc_root
         .clone()
         .unwrap_or_else(|| PathBuf::from(scenario::paths::TC_ROOT));
+
+    if cfg.weapsel {
+        let path = cfg
+            .scenario_path
+            .as_ref()
+            .expect("parse_args: --weapsel has a path");
+        let out = cfg.out.as_ref().expect("parse_args: --weapsel has --out");
+        let png = render_weapsel(&tc_root, path, cfg.scale)?;
+        std::fs::write(out, &png).map_err(|e| format!("write {}: {e}", out.display()))?;
+        eprintln!(
+            "shot: wrote {} (the weapon-selection screen)",
+            out.display()
+        );
+        return Ok(());
+    }
 
     // `label` names the scenario for logging + the multi-tick PNG filename
     // stem. On the `--scenario <name>` path it is the resolved name
@@ -600,6 +690,18 @@ mod parse_tests {
         assert!(parse_args(&v(&["--scenario", "blood", "--tick", "1"])).is_err());
     }
     #[test]
+    fn weapsel_needs_a_path_and_out_and_takes_no_tick() {
+        let args = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        let ok = parse_args(&args("--weapsel --scenario-path a.txt --out b.png")).unwrap();
+        assert!(ok.weapsel && ok.ticks.is_empty());
+        assert!(parse_args(&args(
+            "--weapsel --scenario-path a.txt --out b.png --tick 3"
+        ))
+        .is_err());
+        assert!(parse_args(&args("--weapsel --scenario a --out b.png")).is_err());
+        assert!(parse_args(&args("--weapsel --scenario-path a.txt --hashes")).is_err());
+    }
+    #[test]
     fn scale_zero_is_error() {
         // `--scale 0` is rejected at the argument boundary (T0 review finding).
         let r = parse_args(&v(&[
@@ -641,6 +743,23 @@ mod render_tests {
         image::load_from_memory_with_format(png, image::ImageFormat::Png)
             .expect("decode PNG")
             .to_rgb8()
+    }
+
+    #[test]
+    fn render_weapsel_draws_a_committed_weapsel_scenario() {
+        // The bit-exact gate is oracle-tests/tests/render_weapsel_golden.rs; this pins the CLI
+        // path end to end: the header box row (y 3) is drawn over the frozen level.
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../oracle-tests/golden/weapsel_humans_default_scenario.txt"
+        ));
+        let img = decode(&render_weapsel(Path::new(TC_ROOT), path, 1).expect("renders"));
+        assert_eq!(img.dimensions(), (320, 200));
+        assert_eq!(
+            img.get_pixel(114, 5).0,
+            [0, 0, 0],
+            "the header box (colour 0)"
+        );
     }
 
     #[test]

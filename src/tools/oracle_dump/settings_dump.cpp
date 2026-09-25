@@ -135,6 +135,8 @@ int main(int argc, char** argv) {
   }
   std::string const kDir = argv[2];
   std::istringstream corpus(Slurp(argv[1]));
+  // The "e" (O_CLOEXEC) mode is a glibc extension; this tool also builds on macOS and never execs.
+  // NOLINTNEXTLINE(android-cloexec-fopen)
   std::FILE* hashes = std::fopen((kDir + "/hashes.txt").c_str(), "w");
   if (!hashes) {
     Fail("cannot write " + kDir + "/hashes.txt");

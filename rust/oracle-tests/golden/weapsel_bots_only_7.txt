@@ -1,0 +1,7 @@
+# oracle_dump_weapsel rust/oracle-tests/golden/weapsel_bots_only_7_scenario.txt — the REAL C++ weapon-selection phase (Step 4½c design §6.3)
+# init <enabled> <p0> <p1> <draws> <last> <next>
+# f <frame> <in0> <in1> <p0> <p1> <ctl0> <ctl1> <held0> <held1> <sounds> <draws> <last> <next> <done>
+# final <l0> <l1> <ctl0> <ctl1> <last> <next>
+init 40 21,2,3,4,5:0:1 9,9,9,9,9:0:1 1 8391ca6b ec013558
+f 0 0 0 21,2,3,4,5:0:1 9,9,9,9,9:0:1 00 00 0,0,0,0,0,0,0 0,0,0,0,0,0,0 - 0 8391ca6b ec013558 1
+final 18:40,19:1,12:3,34:1,27:4:0 33:1,33:1,33:1,33:1,33:1:0 00 00 8391ca6b ec013558

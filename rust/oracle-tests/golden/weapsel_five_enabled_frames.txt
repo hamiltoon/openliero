@@ -1,0 +1,8 @@
+# oracle_dump_weapsel rust/oracle-tests/golden/weapsel_five_enabled_scenario.txt <out> --frames <this> --menu-cycles 0 — the REAL
+# C++ WeaponSelection::Draw, headless (Step 4½c plan Addendum A1). One line per drawn frame
+# (the frame the phase ends on is not drawn):
+# <frame> <frame_hash16 at fade 33> <menu_cycles the draw read> <real fade min(frame+1,33)>
+0 dcca72d0da254393 0 1
+1 d9c1039291d55193 1 2
+2 9e30d48742bbc153 2 3
+3 3d4d8b192c34b2d3 3 4

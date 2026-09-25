@@ -1,0 +1,23 @@
+# Step 4½ slice 4½c — weapon-selection case `randomize_held` (design §6.4): Fire held 10 frames on RANDOMIZE: a silent re-roll every frame (finding 7).
+# Read by oracle_dump_weapsel (golden/weapsel_randomize_held.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 0, 14 frames, 54 draws in frames, final rng f1f8e23f
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 8
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_randomize_held_setup.cfg
+weapsel 0 16 0
+weapsel 1 16 0
+weapsel 2 16 0
+weapsel 3 16 0
+weapsel 4 16 0
+weapsel 5 16 0
+weapsel 6 16 0
+weapsel 7 16 0
+weapsel 8 16 0
+weapsel 9 16 0
+weapsel 11 1 1
+weapsel 13 16 16

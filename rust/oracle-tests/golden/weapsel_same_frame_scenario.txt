@@ -1,0 +1,17 @@
+# Step 4½ slice 4½c — weapon-selection case `same_frame` (design §6.4): in-frame order (finding 6): Down+Fire on slot 5 readies; Left+Right and Up+Down cancel with two sounds; Up+Fire randomizes.
+# Read by oracle_dump_weapsel (golden/weapsel_same_frame.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 0, 11 frames, 7 draws in frames, final rng 2242a6fb
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 9
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_same_frame_setup.cfg
+weapsel 0 1 2
+weapsel 2 1 12
+weapsel 4 0 3
+weapsel 6 18 17
+weapsel 8 0 1
+weapsel 10 0 16

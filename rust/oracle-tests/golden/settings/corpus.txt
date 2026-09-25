@@ -1,0 +1,26 @@
+# Step 4½a-2 settings byte-gate corpus (design §3.4, §9.3.1). Read by BOTH
+# src/tools/oracle_dump/settings_dump.cpp (gen_settings_golden.sh) and
+# rust/oracle-tests/tests/settings_toml_golden.rs. One entry per line: <kind> <id> [<path>];
+# <path> is the rest of the line (it may contain spaces), relative to the repo root.
+# Outputs: <id>.cfg + <id>.gameplay.toml per setup, <id>.toml per profile, hashes.txt.
+default-setup defaults
+default-profile default_profile
+setup liero data/Setups/liero.cfg
+setup orbmit data/Setups/orbmit.cfg
+setup sidecar_killemall rust/oracle-tests/golden/sim_slice4_5a_killemall_setup.cfg
+setup sidecar_scales rust/oracle-tests/golden/sim_slice4_5a_scales_setup.cfg
+setup sidecar_gametag rust/oracle-tests/golden/sim_slice4_5a_gametag_setup.cfg
+setup quoting rust/oracle-tests/golden/settings/in/quoting.cfg
+setup edge rust/oracle-tests/golden/settings/in/edge.cfg
+setup missing_tables rust/oracle-tests/golden/settings/in/missing_tables.cfg
+setup array_player rust/oracle-tests/golden/settings/in/array_player.cfg
+profile ai_l data/Profiles/AI (L).toml
+profile ai_r data/Profiles/AI (R).toml
+profile joystick0 data/Profiles/Joystick0.toml
+profile joystick1 data/Profiles/Joystick1.toml
+profile lefty_l data/Profiles/Lefty (L).toml
+profile lefty_r data/Profiles/Lefty (R).toml
+profile righty_l data/Profiles/Righty (L).toml
+profile righty_r data/Profiles/Righty (R).toml
+profile quoting_profile rust/oracle-tests/golden/settings/in/quoting_profile.toml
+profile edge_profile rust/oracle-tests/golden/settings/in/edge_profile.toml

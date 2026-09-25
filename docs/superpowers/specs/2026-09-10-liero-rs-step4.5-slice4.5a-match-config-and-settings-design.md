@@ -1,14 +1,15 @@
 # Step 4½ · Slice 4½a — `MatchConfig`, settings model, builder, match end, persistence: detailed design
 
-Status: **DESIGN — slice 4½a** (split into **4½a-1** and **4½a-2**, §0) · 2026-09-10 · 4½a-1 plan written,
-4½a-2 outlined
+Status: **DESIGN — slice 4½a** (split into **4½a-1** and **4½a-2**, §0) · 2026-09-10 · 4½a-1 and 4½a-2
+LANDED
 Part of: `2026-09-10-liero-rs-step4.5-game-shell-overview.md` (cited **overview §N** / **LD N** for its
 locked decisions)
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (**cpp-map §N**) and
 `2026-09-10-liero-rs-step4.5-rust-baseline-map.md` (**rust-map §N**)
 Precedents: the 4b record/replay design (the "one artifact, frozen grammar" argument), the 4e `.lrp` design
 (the phase split + a new C++ oracle tool), the slice-6 fuzz goldens (the seeded-dead, fuzz-input match shape)
-Companion plan: `plans/2026-09-10-liero-rs-step4.5-slice4.5a1-plan.md` (4½a-1 only)
+Companion plans: `plans/2026-09-10-liero-rs-step4.5-slice4.5a1-plan.md` (4½a-1) and
+`plans/2026-09-10-liero-rs-step4.5-slice4.5a2-plan.md` (4½a-2)
 
 4½a is the substrate every later 4½ slice configures a match through: a Rust model of the C++ `Settings` /
 `WormSettings`, a `MatchConfig → SimState` builder that is **bit-exact against a C++ setup file**, the
@@ -726,6 +727,12 @@ Made while writing `plans/2026-09-10-liero-rs-step4.5-slice4.5a2-plan.md`. Each 
 9. **Hash-subset fact** (for Step 5): `bloodParticleMax` (a sim-reaching pool cap, §1.1) and
    `randomMapWidth`/`randomMapHeight` are outside `SerializeGameplay`, so C++ `UpdateHash` doesn't
    cover them. Ported as is.
+10. **(2026-09-25, at landing) wasm now shows the HUD in its live match.** The PR-preview track (PR #11)
+    made the wasm build default to `Mode::Live` (the keyboard default match), so §8's `Live` arm
+    applies there and the preview draws the stats panel and minimap. `?demo` still selects the
+    `Scripted` `blood` demo, which stays world-only together with its debug frame-parity witness. The
+    witness is only loaded for `Scripted`, so no gate changes. §3.1/§3.2 held on the full corpus: G5a,
+    G5b and G5c passed on the first run with no reader or writer fix.
 
 ---
 

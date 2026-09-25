@@ -1,0 +1,14 @@
+color = 0
+controller = 1
+controls = [ 1, 2, 3, 4, 5, 6, 7 ]
+controlsEx = [ 0, 0, 0, 0, 0, 0, 0, 0 ]
+gamepadControls = [ 4294967295, 12, 13, 14, 110, 10, 0, 9 ]
+gamepadName = ''
+gamepadSerial = ''
+health = 100
+inputDevice = 0
+name = "nel\u0085Zoé"
+randomName = true
+rgb = [ 252, 0, 128 ]
+rgbDepth = 8
+weapons = [ 3, 1, 1, 1, 1 ]

@@ -1,0 +1,8 @@
+# Step 4½a-2 synthetic byte-gate profile: the quoting rules quoting.cfg has no room for -
+# a carriage return, newline + control (multi-line BASIC), backslash + newline (multi-line
+# literal).
+name = "cr\rhere"
+gamepadName = "x\ny\U00000002"
+gamepadSerial = "back\\slash\nnext"
+rgbDepth = 8
+rgb = [1, 2, 3]

@@ -7,11 +7,19 @@
 //! leaves the prior value, integers narrow like `static_cast`, arrays are positional,
 //! a missing/scalar worm table behaves like an empty one (an *array*-valued one is read
 //! positionally, as the C++ does), and the `rgbDepth` marker drives the legacy 6-bit
-//! expansion (`cereal_types.hpp:288-303`). The writer is 4½a-2.
+//! expansion (`cereal_types.hpp:288-303`).
+//!
+//! Step 4½a-2 adds the **writer** (`Settings::ToToml`, `WormSettings::ToToml`, the
+//! `SerializeGameplay` subset — design §3.3): the keys `TomlOutputArchive` inserts, laid out by
+//! the toml++ formatter port in `crate::toml_fmt`, plus the archive's closing `"\n"`.
+
+use std::collections::BTreeMap;
 
 use toml::{Table, Value};
+use twox_hash::XxHash3_64;
 
-use crate::settings::{Settings, WormSettings};
+use crate::settings::{Settings, WormSettings, CONFIG_VERSION};
+use crate::toml_fmt::{format_doc, KeyVals, Val};
 
 /// A TOML parse failure (C++ `TomlParseError`, `toml_archive.hpp:154-156`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,6 +241,133 @@ pub fn load_profile(text: &str, ws: &mut WormSettings) -> Result<(), TomlError> 
     read_worm(&mut Frame::new(Some(&root)), ws);
     ws.color = old_color;
     Ok(())
+}
+
+// --- Writer (Step 4½a-2, design §3.3) ----------------------------------------------------
+// The key ORDER below follows cereal_types.hpp for review only: `toml::table` sorts keys, so
+// the BTreeMap decides the byte order, exactly as in C++.
+
+/// An integer array as `TomlOutputArchive` stores it: every element widened to `int64`
+/// (`toml_archive.hpp:71-74`; `uint32_t` values are therefore never negative).
+fn ints<'a, T: Copy + Into<i64>>(a: &[T]) -> Val<'a> {
+    Val::Ints(a.iter().map(|&v| v.into()).collect())
+}
+
+/// `SerializeWormSettingsToml` on save (`cereal_types.hpp:282-308`): `rgbDepth` is 8.
+fn worm_keys(ws: &WormSettings) -> KeyVals<'_> {
+    let mut kv = KeyVals::new();
+    kv.insert("name", Val::Str(&ws.name));
+    kv.insert("health", Val::Int(ws.health.into()));
+    kv.insert("controller", Val::Int(ws.controller.into()));
+    kv.insert("randomName", Val::Bool(ws.random_name));
+    kv.insert("color", Val::Int(ws.color.into()));
+    kv.insert("inputDevice", Val::Int(ws.input_device.into()));
+    kv.insert("gamepadName", Val::Str(&ws.gamepad_name));
+    kv.insert("gamepadSerial", Val::Str(&ws.gamepad_serial));
+    kv.insert("rgbDepth", Val::Int(8));
+    kv.insert("rgb", ints(&ws.rgb));
+    kv.insert("weapons", ints(&ws.weapons));
+    kv.insert("controls", ints(&ws.controls));
+    kv.insert("controlsEx", ints(&ws.controls_ex));
+    kv.insert("gamepadControls", ints(&ws.gamepad_controls));
+    kv
+}
+
+/// `SerializeGameplay` (`cereal_types.hpp:218-239`) — the `UpdateHash` subset: the
+/// `GameplayExtensions`, the gameplay scalars, `weapTable`, `bonusTimeout`, `inputDelay`.
+/// `ToToml`'s `[settings]` is this plus nine more keys (`settings_to_toml`).
+fn gameplay_keys(s: &Settings) -> KeyVals<'_> {
+    let mut kv = KeyVals::new();
+    kv.insert("recordReplays", Val::Bool(s.record_replays));
+    kv.insert(
+        "loadPowerlevelPalette",
+        Val::Bool(s.load_powerlevel_palette),
+    );
+    kv.insert("aiFrames", Val::Int(s.ai_frames.into()));
+    kv.insert("aiMutations", Val::Int(s.ai_mutations.into()));
+    kv.insert("aiTraces", Val::Bool(s.ai_traces));
+    kv.insert("aiParallels", Val::Int(s.ai_parallels.into()));
+    kv.insert("zoneTimeout", Val::Int(s.zone_timeout.into()));
+    kv.insert("selectBotWeapons", Val::Int(s.select_bot_weapons.into()));
+    kv.insert(
+        "allowViewingSpawnPoint",
+        Val::Bool(s.allow_viewing_spawn_point),
+    );
+    kv.insert("tc", Val::Str(&s.tc));
+    kv.insert("maxBonuses", Val::Int(s.max_bonuses.into()));
+    kv.insert("blood", Val::Int(s.blood.into()));
+    kv.insert("timeToLose", Val::Int(s.time_to_lose.into()));
+    kv.insert("flagsToWin", Val::Int(s.flags_to_win.into()));
+    kv.insert("gameMode", Val::Int(s.game_mode.into()));
+    kv.insert("shadow", Val::Bool(s.shadow));
+    kv.insert("loadChange", Val::Bool(s.load_change));
+    kv.insert("namesOnBonuses", Val::Bool(s.names_on_bonuses));
+    kv.insert("regenerateLevel", Val::Bool(s.regenerate_level));
+    kv.insert("lives", Val::Int(s.lives.into()));
+    kv.insert("loadingTime", Val::Int(s.loading_time.into()));
+    kv.insert("randomLevel", Val::Bool(s.random_level));
+    kv.insert("levelFile", Val::Str(&s.level_file));
+    kv.insert("map", Val::Bool(s.map));
+    kv.insert("screenSync", Val::Bool(s.screen_sync));
+    kv.insert("weapTable", ints(&s.weap_table));
+    kv.insert("bonusTimeout", Val::Int(s.bonus_timeout.into()));
+    kv.insert("inputDelay", Val::Int(s.input_delay.into()));
+    kv
+}
+
+/// `~TomlOutputArchive` (`toml_archive.hpp:47`): `out_ << root_ << "\n"`.
+fn archive_bytes(values: &KeyVals<'_>, tables: &BTreeMap<&'static str, KeyVals<'_>>) -> String {
+    let mut out = format_doc(values, tables);
+    out.push('\n');
+    out
+}
+
+/// `Settings::ToToml` (`settings.cpp:103-131`) — the bytes `Settings::save` writes: a
+/// `[settings]` table (`version` = `kConfigVersion`, `modernColors`,
+/// `SerializeSettingsScalars`, `weapTable`) and the three worm tables.
+pub fn settings_to_toml(s: &Settings) -> String {
+    let mut st = gameplay_keys(s);
+    st.insert("version", Val::Int(CONFIG_VERSION.into()));
+    st.insert("modernColors", Val::Bool(s.modern_colors));
+    st.insert("fullscreen", Val::Bool(s.fullscreen));
+    st.insert("singleScreenReplay", Val::Bool(s.single_screen_replay));
+    st.insert("spectatorWindow", Val::Bool(s.spectator_window));
+    st.insert("bloodParticleMax", Val::Int(s.blood_particle_max.into()));
+    st.insert("randomMapWidth", Val::Int(s.random_map_width.into()));
+    st.insert("randomMapHeight", Val::Int(s.random_map_height.into()));
+    st.insert(
+        "maxSpectatorRenderHeight",
+        Val::Int(s.max_spectator_render_height.into()),
+    );
+    let mut tables = BTreeMap::new();
+    tables.insert("settings", st);
+    for (name, ws) in WORM_TABLE_NAMES.iter().zip(&s.worm_settings) {
+        tables.insert(*name, worm_keys(ws));
+    }
+    archive_bytes(&KeyVals::new(), &tables)
+}
+
+/// `WormSettings::ToToml` (`worm.cpp:45-52`) — the bytes `SaveProfile` writes (`:60-71`):
+/// the profile keys at the root.
+pub fn worm_settings_to_toml(ws: &WormSettings) -> String {
+    archive_bytes(&worm_keys(ws), &BTreeMap::new())
+}
+
+/// The `SerializeGameplay` TOML `Settings::UpdateHash` hashes (`settings.cpp:92-98`): the
+/// gameplay keys at the root.
+pub fn gameplay_toml(s: &Settings) -> String {
+    archive_bytes(&gameplay_keys(s), &BTreeMap::new())
+}
+
+/// `Settings::UpdateHash` (`settings.cpp:92-101`): XXH3-64 (seed 0) over [`gameplay_toml`].
+pub fn update_hash(s: &Settings) -> u64 {
+    XxHash3_64::oneshot(gameplay_toml(s).as_bytes())
+}
+
+/// `WormSettings::UpdateHash` (`worm.cpp:38-43`): XXH3-64 (seed 0) over
+/// [`worm_settings_to_toml`] — exactly the bytes `SaveProfile` writes.
+pub fn worm_update_hash(ws: &WormSettings) -> u64 {
+    XxHash3_64::oneshot(worm_settings_to_toml(ws).as_bytes())
 }
 
 #[cfg(test)]
@@ -462,5 +597,152 @@ mod tests {
         assert_eq!(ws.color, 41);
         assert_eq!(ws.name, "x");
         assert_eq!(ws.rgb, [1, 2, 3]);
+    }
+
+    const GOLDEN_SETTINGS: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../oracle-tests/golden/settings"
+    );
+
+    /// A C++-generated golden (T0, `gen_settings_golden.sh`).
+    fn golden(name: &str) -> String {
+        std::fs::read_to_string(format!("{GOLDEN_SETTINGS}/{name}"))
+            .unwrap_or_else(|e| panic!("read golden {name}: {e}"))
+    }
+
+    #[test]
+    fn the_default_profile_is_the_cpp_worm_settings_to_toml() {
+        // Sorted keys, inner-spaced inline arrays, literal '' strings, rgbDepth = 8 on save,
+        // exactly one trailing newline (the archive's "\n").
+        let want = "color = 0\ncontroller = 0\ncontrols = [ 0, 0, 0, 0, 0, 0, 0 ]\n\
+                    controlsEx = [ 0, 0, 0, 0, 0, 0, 0, 0 ]\n\
+                    gamepadControls = [ 11, 12, 13, 14, 110, 10, 0, 9 ]\n\
+                    gamepadName = ''\ngamepadSerial = ''\nhealth = 100\ninputDevice = 0\n\
+                    name = ''\nrandomName = true\nrgb = [ 104, 104, 248 ]\nrgbDepth = 8\n\
+                    weapons = [ 1, 1, 1, 1, 1 ]\n";
+        assert_eq!(worm_settings_to_toml(&WormSettings::default()), want);
+    }
+
+    #[test]
+    fn the_writer_reproduces_the_cpp_defaults_goldens() {
+        assert_eq!(
+            settings_to_toml(&Settings::default()),
+            golden("defaults.cfg")
+        );
+        assert_eq!(
+            gameplay_toml(&Settings::default()),
+            golden("defaults.gameplay.toml")
+        );
+        assert_eq!(
+            worm_settings_to_toml(&WormSettings::default()),
+            golden("default_profile.toml")
+        );
+    }
+
+    #[test]
+    fn the_settings_table_has_37_keys_and_the_gameplay_subset_28() {
+        let full = settings_to_toml(&Settings::default());
+        assert!(
+            full.starts_with("[network_player]\n"),
+            "tables are byte-sorted"
+        );
+        assert!(full.ends_with("zoneTimeout = 30\n") && !full.ends_with("\n\n"));
+        let settings_table = full
+            .split("[settings]\n")
+            .nth(1)
+            .expect("a [settings] table");
+        assert_eq!(
+            settings_table.lines().filter(|l| l.contains(" = ")).count(),
+            37
+        );
+        let gameplay = gameplay_toml(&Settings::default());
+        assert_eq!(gameplay.lines().filter(|l| l.contains(" = ")).count(), 28);
+        for absent in [
+            "version",
+            "modernColors",
+            "fullscreen",
+            "singleScreenReplay",
+            "spectatorWindow",
+            "bloodParticleMax",
+            "randomMapWidth",
+            "randomMapHeight",
+            "maxSpectatorRenderHeight",
+            "rgbDepth",
+        ] {
+            assert!(
+                !gameplay.contains(&format!("{absent} =")),
+                "{absent} is not in SerializeGameplay"
+            );
+        }
+        assert!(
+            !gameplay.starts_with('['),
+            "the gameplay subset sits at the root"
+        );
+        assert!(gameplay.starts_with("aiFrames = 140\n"));
+    }
+
+    #[test]
+    fn writing_then_reading_is_the_identity() {
+        let mut s = Settings::default();
+        s.tc = "it's\ta \"tc\"".to_string();
+        s.level_file = "two\nlines".to_string();
+        s.lives = -4;
+        s.game_mode = u32::MAX;
+        s.weap_table[7] = 2;
+        s.map = false;
+        s.worm_settings[0].name = "Zo\u{e9}\u{2028}".to_string();
+        s.worm_settings[1].rgb = [0, 255, 7];
+        s.worm_settings[2].controls_ex = [u32::MAX; 8];
+        assert_eq!(settings_from_toml(&settings_to_toml(&s)).unwrap(), s);
+        let ws = s.worm_settings[0].clone();
+        let mut back = WormSettings::default();
+        back.color = ws.color; // LoadProfile restores the pre-load colour
+        load_profile(&worm_settings_to_toml(&ws), &mut back).unwrap();
+        assert_eq!(back, ws);
+    }
+
+    use twox_hash::XxHash3_64;
+
+    #[test]
+    fn xxh3_64_known_answer() {
+        // The crate's own vector (`xxhash3_64.rs`, `oneshot_empty`); the C++ oracle writes the
+        // same value as `hashes.txt`'s first line.
+        assert_eq!(XxHash3_64::oneshot(b""), 0x2d06_8005_38d3_94c2);
+    }
+
+    #[test]
+    fn update_hash_is_xxh3_of_the_bytes_cpp_hashes() {
+        let s = Settings::default();
+        assert_eq!(
+            update_hash(&s),
+            XxHash3_64::oneshot(gameplay_toml(&s).as_bytes())
+        );
+        let ws = WormSettings::default();
+        assert_eq!(
+            worm_update_hash(&ws),
+            XxHash3_64::oneshot(worm_settings_to_toml(&ws).as_bytes())
+        );
+    }
+
+    #[test]
+    fn only_gameplay_fields_move_update_hash() {
+        let base = update_hash(&Settings::default());
+        let mut s = Settings::default();
+        s.fullscreen = true;
+        s.modern_colors = true;
+        s.blood_particle_max = 5;
+        s.random_map_width = 640;
+        s.max_spectator_render_height = 720;
+        s.worm_settings[0].name = "x".to_string();
+        assert_eq!(
+            update_hash(&s),
+            base,
+            "AppSettings, the map size and the worms are outside SerializeGameplay (design §9.3.9)"
+        );
+        s.lives = 3;
+        assert_ne!(update_hash(&s), base);
+        let mut t = Settings::default();
+        t.weap_table[39] = 1;
+        assert_ne!(update_hash(&t), base, "weapTable is hashed");
     }
 }

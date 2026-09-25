@@ -1,6 +1,6 @@
 # Step 4½ — Game shell: overview / altitude decisions
 
-Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a-1 LANDED** (4½a split into a-1/a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, 4½a-2 + 4½c–4½h planned
+Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, 4½c–4½h planned
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 4½ — Game shell" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++ map, cited as **cpp-map §N**)
@@ -248,7 +248,9 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   sim goldens via one new optional scenario directive `settings <file>` (the dumper reads it with
   the real `Settings::FromToml`; `scenario::load` refuses it) + the `sound_hooks` fix. **LANDED**
   (plan: `plans/2026-09-10-liero-rs-step4.5-slice4.5a1-plan.md`). **4½a-2** = TOML writer + the
-  byte gate + `UpdateHash` + storage + `TC_ROOT` centralisation + the HUD fix. Interim rulings: differing
+  byte gate + `UpdateHash` + storage + `TC_ROOT` centralisation + the HUD fix. **LANDED** (plan:
+  `plans/2026-09-10-liero-rs-step4.5-slice4.5a2-plan.md`; the binary does no config I/O until
+  4½d — slice design §9.3.6). Interim rulings: differing
   per-player health is refused until 4½f (Rust carries one health value); the live game restarts
   (the F5 path) 180 frames after game over until 4½g adds the stats screen.
 - **4½c-0 — the unported weapon branches (added 2026-09-10, 4½a design finding).** RIFLE,
@@ -344,6 +346,21 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   needs more. The wasm debug self-check retires on the live path (§Oracle). **Gate:** the existing
   build-only wasm CI job (`.github/workflows/rust.yml:216-229`) plus a headless-Chrome run of the
   menu → match flow, the 3f precedent.
+  **Pulled forward 2026-09-25 by the PR-preview track** (`.github/workflows/preview.yml`, PR #11):
+  live keyboard on wasm for the default match, `?weapons=` / `?level=` / `?seed=` URL parameters
+  (`game::web_params`), three more small levels embedded, Esc no longer quitting on wasm, and a
+  size-tuned `wasm-release` profile (14.5 MB). Every PR now deploys a playable build to Cloudflare
+  Pages. 4½h keeps the menu-driven shell, persistence and the headless-Chrome gate.
+  **Mobile (added 2026-09-25).** The preview opened on a phone crops the 960×600 canvas and has
+  no way to play: there is no keyboard. 4½h therefore also covers (1) a **responsive canvas** that
+  scales the 320×200 frame to fit the screen at an integer-or-fit scale, preferring landscape and
+  (2) **touch controls**: an on-screen pad plus Fire/Jump/Change buttons, mapped to the same 7-bit
+  `ControlState` the keyboard produces (Dig = the Left+Right chord), so the sim cannot tell them
+  apart and a touch session records and replays like a keyboard one. The natural phone mode is
+  one human against DumbLieroAI, so the touch layout is for one player and depends on 4½f's AI;
+  a two-thumbs-per-player hotseat on one phone is out of scope. Menus (4½d–4½f) need tap
+  navigation too. The responsive canvas alone is small and has no dependency, so it can land
+  early on the preview track whenever phone previews become useful; touch play waits for 4½f.
 
 *Parallelism: **4½a ∥ 4½b** (disjoint surfaces); **4½e ∥ 4½f** (both build on 4½d's framework and
 touch different menus). 4½c-0 can start as soon as 4½b's sim work lands (it touches weapon code,

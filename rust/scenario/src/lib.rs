@@ -11,8 +11,11 @@ pub mod assets;
 pub mod build;
 pub mod loader;
 pub mod parser;
+pub mod paths;
 pub mod settings;
 pub mod settings_toml;
+pub mod storage;
+mod toml_fmt;
 
 pub use loader::{load, HudLabels, Loaded, SceneData};
 pub use parser::{Scenario, ScenarioWorm};

@@ -23,19 +23,21 @@ use bevy::window::WindowResolution;
 use render::bitmap::Bitmap;
 use render::viewport::Viewport;
 use scenario::{Scenario, SceneData};
+// TC asset root, resolved at compile time so `cargo run -p game` works from any CWD —
+// centralised in `scenario::paths` since Step 4½a-2.
+use scenario::paths::TC_ROOT;
+use scenario::settings::Settings;
 use sim::sound::LoopKey;
 use sim::state::SimState;
 
 use game::audio::{AudioSink, Drainer, NullSink, RodioSink};
+use game::hud_mode::{HudFlags, hud_flags};
 use game::input::{InputSource, Mode, ParsedArgs, Recorder};
 use game::match_flow::{FlowStep, MatchFlow};
 use game::web_params::MatchParams;
 
 mod blit;
 
-/// TC asset root, resolved at compile time relative to this crate so `cargo run
-/// -p game` works from any CWD (constraint: CARGO_MANIFEST_DIR, not CWD).
-const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
 /// Committed golden dir — the scenario text and (debug) the self-check column.
 /// Native-only: on wasm the scenario text + sidecar are embedded via `include_str!`
 /// (there is no filesystem), so this path constant is not referenced there.
@@ -89,6 +91,10 @@ struct Demo {
     /// `Some` in `Mode::Live` only. Scripted loops its golden and Replay plays a fixed
     /// `ticks`, so neither ends a match.
     flow: Option<MatchFlow>,
+    /// Step 4½a-2 (live HUD bug, design §8): the HUD flags every draw applies — `Live`/`Replay`
+    /// draw the stats panel + (per `settings.map`) the minimap; `Scripted` follows its
+    /// scenario's `render_hud` directive. Fixed for the run (mode and scenario never change).
+    hud: HudFlags,
     /// PR-preview loadout (`?weapons=`, `web_params`): re-applied to the tick-0 state
     /// on every (re)start of the live match. Empty natively and without the parameter.
     loadout: Vec<String>,
@@ -445,8 +451,7 @@ fn setup(
         mut state,
         viewports,
         scene,
-        // `font`/`labels` (Slice 3e T0) are wired into the render path in T5; the
-        // interactive `game` binary does not draw the HUD yet.
+        // `font`/`labels` travel inside `scene`; the HUD is drawn per `Demo.hud` (4½a-2).
         ..
     } = loaded;
 
@@ -496,6 +501,10 @@ fn setup(
         (Vec::new(), Vec::new())
     };
 
+    // Step 4½a-2: the binary loads no setup yet (design §9.3.6), so the minimap follows the
+    // C++ default (`map = true`); 4½d passes the loaded setup's `map` here.
+    let hud = hud_flags(*mode, scenario.hud(), Settings::default().map);
+
     let mut demo = Demo {
         scenario,
         viewports,
@@ -503,6 +512,7 @@ fn setup(
         surface,
         tick: 0,
         flow: (*mode == Mode::Live).then(MatchFlow::new),
+        hud,
         loadout,
         #[cfg(debug_assertions)]
         golden_state: golden.0,
@@ -811,7 +821,9 @@ fn render_and_upload(
     // explosion raises it in `process_frame`, decrementing one per tick, driving
     // the palette `LightUp` blip at draw. For a no-flash scenario it stays 0, so
     // the frame is byte-identical to the pre-4d hardcoded `0`.
-    let scene = demo.scene.as_scene(sim.screen_flash, draw_shadow);
+    let mut scene = demo.scene.as_scene(sim.screen_flash, draw_shadow);
+    // Step 4½a-2: draw the HUD the mode calls for (world-only for the Scripted demo).
+    demo.hud.apply(&mut scene);
     render::frame::draw(&mut demo.surface, sim, &mut demo.viewports, &scene);
 
     // `get_mut` marks the Image dirty => Bevy re-uploads it to the GPU.

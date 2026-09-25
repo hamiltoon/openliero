@@ -8,7 +8,32 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-09-25 · **🔫 4½c-0 (the unported weapon branches) LANDED — all forty
+> **Last updated:** 2026-09-25 · **💾 4½a-2 (settings persistence) LANDED — 4½a is COMPLETE. 🎯
+> Rust saves settings with exactly the bytes C++ saves.** A private `scenario::toml_fmt` ports the
+> toml++ 3.4 `toml_formatter` subset the C++ archive reaches (sorted keys, table layout, the
+> 120-column array rule, literal-vs-basic string quoting), and `settings_to_toml` /
+> `worm_settings_to_toml` / `gameplay_toml` join the 4½a-1 reader. The truth is a new
+> corpus-driven C++ oracle, `oracle_dump_settings`, which runs the REAL `Settings::load`/`save`,
+> `LoadProfile`/`SaveProfile` and both `UpdateHash`es over `golden/settings/corpus.txt`. 🎯
+> **MILESTONE: Hard gate 5 green on all 21 corpus entries** (2 shipped setups, 8 shipped profiles,
+> the 3 4½a-1 sidecars, 6 synthetic quoting/edge/missing-table/array-player inputs, 2 defaults).
+> G5a: Rust load+save == C++ load+save. G5b: every C++-saved file round-trips through Rust. G5c:
+> the gameplay bytes and both `UpdateHash` vectors match (XXH3-64 via `twox-hash =2.1.3`, the one
+> new crate, `scenario` only). All three passed on the first run with no reader or writer fix.
+> The milestone guards (7/7) prove the corpus is not vacuous: every shipped file is listed, every
+> quoting rule appears in the C++ bytes, and the edge inputs change loaded values. The oracle also
+> regenerates byte-identically. **Finding:** the 4½a-1 sidecars were already in toml++'s canonical
+> layout (byte-identical to their C++ save). Also landed: the `ConfigStore` seam with
+> `NativeStore` (user dir over `data/`, mirroring `paths::Resolve`; writes go to the user dir
+> only; `ShadowsSystem` refusals; an SDL-compatible `pref_path`) and `MemoryStore`, plus
+> `load_setup`/`save_setup`; `scenario::paths::{DATA_ROOT, TC_ROOT}` centralised; and the live
+> `game` binary now draws the HUD + minimap in Live and Replay (`game::hud_mode`), which includes
+> the wasm PR preview's live match. The `Scripted` demo (and wasm `?demo`, with its frame-parity
+> witness) stays world-only. The binary does no config I/O until 4½d, and `LocalStorageStore` is
+> 4½h. No prior golden and nothing under `rust/sim*` changed. Step 4½ now: **4½a ✅ + 4½b ✅ + 4½c-0 ✅**; 4½c…4½h are
+> planned.
+>
+> Prior (2026-09-25): **🔫 4½c-0 (the unported weapon branches) LANDED — all forty
 > weapons are safe.** The inventory found **thirteen** weapons reaching unported Step-2 branches,
 > not five: the 4½a design's RIFLE, WINCHESTER, LASER, GAUSS GUN and MISSILE, plus LARPA, BOUNCY
 > LARPA, CRACKLER, MINI NUKE, BIG NUKE, NAPALM, HELLRAIDER and BOOBY TRAP. They group into eight
@@ -409,10 +434,10 @@ container + delta stream + `WideRollbackChecksum`, bit-exact over 1120 ticks), 4
 (cereal `Game` graph) is a bounded follow-on. **Step 4½ (game shell) is in progress** — inserted
 2026-09-10 because a playable default match is not yet a game: the menus, weapon selection, level
 select/generation, settings/profiles, DumbLieroAI and the stats screen are the remaining
-single-player surface. **4½a-1** (settings → sim, bit-exact incl. `IsGameOver`) and **4½b** (random
-level generation, bit-exact) and **4½c-0** (the unported weapon branches, bit-exact) are done; 4½a-2
-and 4½c…4½h are planned. Step 5 (netplay) is not
-started.
+single-player surface. **4½a** (4½a-1: settings → sim, bit-exact incl. `IsGameOver`; 4½a-2:
+settings persistence, byte-identical to C++'s saves) and **4½b** (random level generation,
+bit-exact) and **4½c-0** (the unported weapon branches, bit-exact) are done; 4½c…4½h are planned.
+Step 5 (netplay) is not started.
 
 The % was re-based on 2026-09-10: the denominator is now **steps 0–5 plus Step 4½** (~10 k C++
 LOC of shell, ~1.5 k of it sim-affecting), so the same finished work (steps 0–4) reads ~70%
@@ -426,7 +451,7 @@ REWRITE (steg 0–5, incl. 4½)                                ~70%
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
 ├─ ✅ Step 3  Bevy rendering / window (reproduce the SDL3 view) DONE — 3a–3f shipped (PR #4)
 ├─ ✅ Step 4  input + replay (.lrp) + audio                     COMPLETE — 4a–4g shipped (4e-phase2 bounded follow-on)
-├─ 🟡 Step 4½ game shell (menus, weapsel, level select/gen,     4½a-1 ✅ 4½b ✅, rest planned  ◀── YOU ARE HERE
+├─ 🟡 Step 4½ game shell (menus, weapsel, level select/gen,     4½a ✅ 4½b ✅ 4½c-0 ✅, rest planned  ◀── YOU ARE HERE
 │             settings/profiles, DumbLieroAI, match end + stats)
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
@@ -472,7 +497,7 @@ Six slices, each differential-tested against a per-tick `HashGameState` /
 
 | Level | Done |
 |---|---|
-| Rewrite track (steps 0–5, incl. 4½) | **~70%** (steps 0–4 done; step 4 (input/replay/audio, 4a–4g) COMPLETE — 4e-phase2 bounded follow-on + step 4½ game shell (in progress: 4½a-1 + 4½b done 2026-09-10) + step 5 netplay remain; re-based from ~80% when 4½ was added to the denominator) |
+| Rewrite track (steps 0–5, incl. 4½) | **~70%** (steps 0–4 done; step 4 (input/replay/audio, 4a–4g) COMPLETE — 4e-phase2 bounded follow-on + step 4½ game shell (in progress: 4½a-1 + 4½b done 2026-09-10, 4½c-0 + 4½a-2 done 2026-09-25) + step 5 netplay remain; re-based from ~80% when 4½ was added to the denominator) |
 | Step 3 (rendering) | **✅ COMPLETE** (slices 3a + 3b + 3c + 3d + 3e + 3f all shipped; PR #4 ready to merge) |
 | Slice 3f (wasm bring-up) | **✅ MILESTONE GREEN** (🎉 the **browser milestone**: the same CPU frame renders in the browser via **WebGL2**, **automated-proven** — a headless-Chrome controller ran the debug wasm bundle (SwiftShader-WebGL2, 30 s virtual time) and the screenshot shows the **blood** demo's split-screen world (sky/terrain/worms/blood), the console **PANIC-FREE**, and the determinism guard (per-tick `state_hash` **+** a wasm-only `frame_hash`) stayed **GREEN in the browser** = the wasm-parity witness. Built: a **`scenario::assets::read_asset` seam** (native = verbatim `std::fs::read` — all goldens green = no-op proof; wasm = embed) + `include_dir` (wasm-only dep) embedding sprites/weapons/nobjects/sobjects + `include_bytes!` tc.cfg + the demo level `render_stage.lev` — a **curated 276 KB total** (sounds/ and big levels excluded); a **target-scoped feature split** (base 6 draw-features; `x11`/`wayland` native-only; `webgl2` wasm-only — union verified per target via `cargo tree`) making `cargo build -p game --target wasm32-unknown-unknown` **GREEN first try**; an entry-fork (`const DEFAULT="blood"`, `include_str!` scenario+sidecar, **no** `env::args`/`read_dir`/`fs` on wasm; `canvas=None` auto-append verified against the `bevy_window` source; determinism guard hardened with a per-tick wasm-only `frame_hash`); a `.cargo/config.toml` (target-scoped `wasm-server-runner`) + `web/index.html` dev-loop (127.0.0.1:1334, 200 html+wasm) + a static `wasm-bindgen` **0.2.126** (lock-matched) bundle (game.js 97 KB + game_bg.wasm 52.9 MB release); a new **`game-wasm` CI job** (build-only, no browser/apt, own job independent of the determinism gate, mirrors `sim-core`'s no-cache posture). Fynd: cargo reads `.cargo/config.toml` from **CWD**, not `--manifest-path` — the wasm dev-loop runs from `rust/`) |
 | Slice 3e (HUD / font / bars / minimap) | **✅ MILESTONE GREEN** (🎯 the **full player view is PIXEL-EXACT** vs C++ — the in-game overlay ported verbatim + difftest green first run: new **`render::font::Font`** (font.tga loader `common.cpp:414-433`, width-detect + 0/50→0/8 remap) draws HUD labels (`font.cpp:8-80` verbatim — double `c>=2 && c<252` guard, CLIP_IMAGE inlined, newline on cp 0; ASCII-decode **identity for `cp<0x80`**, bevis-tested as the exact reach of the label corpus); **`blit::draw_bar`** (`blit.cpp:105-113`, unclipped + `width>0` anti-clamp witness); **`render::hud::draw_hud`** (`viewport.cpp:84-153` verbatim — two-arm life bar (`health*100/settings_health`, `100-(killed_timer*25)/37` clamped), two-arm ammo/loading bar, blinking **Reloading** (`(cycles%20)>10 && visible`, y=`164*multiplier` **absolute** — a plan-deviation caught vs C++), kills-always / lives-on-KillEmAll+Scales, `w/10+234` / `w/10+245` / 50 / 10 / 6 colour columns); **`draw_minimap`+`draw_miniature`** (`viewport.cpp:593-613` + `level.cpp:489-507` — the two *different* `step` ceil vs `bounds` round idioms preserved, worm-dots `ftoi(pos)/step` colour `129+worm.index*4`, clip-gated, `AppearanceAt` inlined). `Scene`/`frame::draw` composites per viewport (**HUD full-clip → world world-clip → minimap**, verbatim double-draw); C++ dumper gained opt-in **`render_hud`** mirroring `frame::draw`, **RE-DIFF gate empty** (3a/blood/shake/sim_slice2 byte-identical). 3 scenarios + goldens — **hud** 41t / **reload** 71t / **death** 141t — difftests **GREEN**: hud + death first run (per-tick + total + triple-isolation + suppression + non-vacuity); reload first **blocked** (T7 RIFLE = `ST_LASER` tripped the deferred laser do-loop), re-cut to **GRENADE** (`ST_NORMAL`, inert hit-arm, no in-window explosion) → GREEN (71 rows + total, settled 50/51 witness). Find: tick 0 is fade-to-black ⇒ the HUD witness reads tick 1. Holdazone/GameOfTag/replay HUD-arms tripwired. Milestone review: **0 Critical / 0 Important**; minors on the deferral track: DRY the inlined `clip_image`, a `size>1`-advance font test, minimap dot-index discrimination, reload's own suppression control (deliberately omitted)) |
@@ -753,7 +778,7 @@ TWO input formats by design (Rust-native round-trip artifact ≠ foreign `.lrp`)
 
 ---
 
-### Step 4½ — Game shell (🟡 IN PROGRESS — 4½a-1 ✅, 4½b ✅ · branch `liero-rs-step-4-5`, PR #7)
+### Step 4½ — Game shell (🟡 IN PROGRESS — 4½a ✅, 4½b ✅, 4½c-0 ✅ · branch `liero-rs-step-4-5`, PR #7)
 
 Turn "plays a hard-coded match" into a complete game, close to or exactly like openliero: bare
 `cargo run -p game` opens the main menu over a generated level; a match is configured, weapon-
@@ -765,14 +790,18 @@ fact maps: `specs/2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++) and
 `specs/2026-09-10-liero-rs-step4.5-rust-baseline-map.md` (Rust).
 
 ```
-├─ 🔶 4½a  split (design §0). 4½a-1 ✅ LANDED: Settings/WormSettings/MatchConfig + C++ TOML reader
+├─ ✅ 4½a  split (design §0). 4½a-1 ✅ LANDED: Settings/WormSettings/MatchConfig + C++ TOML reader
 │          + build_match (reproduces sim_slice6_fuzz5) + CorrectShadow + Scales/GameOfTag rules +
 │          IsGameOver + MatchFlow (180-frame post-mortem) + sound_hooks fix. Gate: `settings <file>`
 │          dumper directive, 4 settings-driven goldens bit-exact incl. IsGameOver.
 │          🎯 MILESTONE GREEN 2026-09-10: 4/4 variants, 5830 rows (defaults 401, killemall 1135,
 │          scales 2483, gametag 1811). The matrix exposed a Step-2 gap — WObject
 │          collide_with_objects impulse loop (weapon.cpp:212-232) — ported in T8b.
-│          4½a-2 ⬜: TOML writer + byte gate (vs C++ load+save) + UpdateHash + storage + HUD fix
+│          4½a-2 ✅ LANDED: toml++ formatter port + settings/profile writer, UpdateHash
+│          (XXH3-64, twox-hash), ConfigStore + NativeStore (paths::Resolve) + MemoryStore,
+│          TC_ROOT/DATA_ROOT, live HUD + minimap. 🎯 MILESTONE GREEN 2026-09-25: Hard gate 5 —
+│          Rust load+save == C++ load+save on 21 corpus entries (new oracle_dump_settings),
+│          C++-saved files round-trip, UpdateHash vectors match                  COMPLETE
 ├─ ✅ 4½b  random level generation (sim::levelgen: GenerateRandom stages, MakeShadow,
 │          generate_from_settings), dedicated Rand seeded from the match seed; SelectSpawn
 │          deferred with Holdazone. 🎯 MILESTONE GREEN 2026-09-10: new oracle_dump_levelgen
@@ -794,15 +823,20 @@ fact maps: `specs/2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++) and
 │          (RESUME/NEW) → QUIT. Gate: menu self-goldens + full re-diff             not started
 ├─ ⬜ 4½e  settings menu (per-game-mode visibility) + weapon availability + level selector (file
 │          picker, RANDOM node, minimap preview) + save/load setups + InputString/InfoBox
-│          overlays                                              (parallel with 4½f)   not started
+│          overlays; move settings/settings_toml/toml_fmt/storage into rust/settings (design
+│          §2.2 — 1179 non-test lines after 4½a-2)             (parallel with 4½f)   not started
 ├─ ⬜ 4½f  player menu (name, health, RGB bar, key bindings, weapons via Levenshtein,
 │          controller Human/DumbAI) + profiles + DumbLieroAI port (own Rand). Gate: fixed-seed
 │          AI control-state stream, bit-exact                    (parallel with 4½e)   not started
 ├─ ⬜ 4½g  match end + compact stats screen (hash-inert StatsRecorder subset; no heatmaps/graph)
 │          + hidden options subset (fullscreen, shadows, powerlevel palettes, auto-record, bot
 │          weapons)                                                                      not started
-└─ ⬜ 4½h  wasm: live keyboard, localStorage persistence, wider embedded level manifest — the
-           whole shell in the browser (wasm debug self-check retires on that path)   not started
+└─ ⬜ 4½h  wasm: the whole shell in the browser — localStorage persistence, menus on wasm, the
+           headless-Chrome gate (wasm debug self-check retires on the live path). Pulled forward
+           by the PR-preview track (PR #11): live keyboard, ?weapons/?level/?seed, 4 levels
+           embedded, every PR deployed to Cloudflare Pages. + MOBILE (added 2026-09-25):
+           responsive canvas (can land early) and touch controls for one player vs DumbLieroAI
+           (after 4½f)                                                            in progress
 ```
 
 Deferred out of 4½: modern (non-pixel-exact) UI (later post-step), FollowAI (needs Step 5a
@@ -811,7 +845,8 @@ TC selector, stats heatmaps/graphs, `.lrp` replay browser (needs `.lrp` phase 2)
 Open for John: the level corpus — ship stock levels, or rely on random generation (overview
 §Open Q6); and the restated TOML byte gate — the shipped files are
 legacy formats C++ itself rewrites, so 4½a-2's gate is "Rust save == C++ save for the same load",
-which rewords a signed-off done-when (4½a design §3.4, §11 Q3).
+which rewords a signed-off done-when (4½a design §3.4, §11 Q3) — now implemented as G5a/G5b/G5c
+(4½a-2), awaiting John's OK on the reworded done-when.
 
 ---
 

@@ -31,6 +31,9 @@
         -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
       body.touch #touch { display: block; }
       body.touch #help { display: none; }
+      /* iOS: double-tap-to-zoom fires on any element that allows it, including the
+         page behind the buttons, so switch every default touch gesture off. */
+      html.touch, body.touch, body.touch * { touch-action: none; }
       /* Portrait phone: the game at the top, the thumbs' space below it. */
       @media (orientation: portrait) {
         body.touch { justify-content: flex-start; padding-top: 28px; box-sizing: border-box; }
@@ -164,6 +167,7 @@
 
       function setUpTouch() {
         document.body.classList.add('touch');
+        document.documentElement.classList.add('touch');
         const held = new Map(); // pointerId -> bits held by that finger
         const update = () => {
           let mask = 0;
@@ -227,8 +231,10 @@
           }
         }
 
-        // No page scrolling, zooming or long-press menus while playing.
-        for (const ev of ['touchmove', 'gesturestart', 'contextmenu']) {
+        // No page scrolling, zooming or long-press menus while playing. Cancelling
+        // touchend stops iOS's double-tap zoom (fast FIRE taps); the controls use
+        // pointer events, so nothing here needs the synthesized click.
+        for (const ev of ['touchmove', 'touchend', 'dblclick', 'gesturestart', 'contextmenu']) {
           document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
         }
         // Release everything if the page loses focus mid-press.

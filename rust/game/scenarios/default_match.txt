@@ -8,16 +8,19 @@
 # frame/state sidecar (Live loads no golden column and runs no self-check).
 #
 # Fixed level + fixed seed 42 — NO random level generation / GenerateFromSettings
-# (a deferred, out-of-scope surface). Two VISIBLE worms spawn grounded on the
-# shipped render_stage level, each with a full default loadout (slot 0 = DART).
+# (a deferred, out-of-scope surface). Two worms on the shipped render_stage level,
+# each with a full default loadout (slot 0 = DART).
 # `ticks 0` / no `input` lines: both are unused in Live mode (the keyboard drives
 # every tick); `ticks` is present only because the grammar requires it.
 seed 42
 level Levels/render_stage.lev
-# Both VISIBLE and grounded (py = 7602176 == 116.0px, proven landable on this
-# level). worm0 px=100 (6553600), worm1 px=50 (3276800); stats_x mirrors the two
-# HUD columns (0 / 218).
+# Both worms start DEAD at (0,0) and respawn in-sim at a free spot, as a real C++
+# match starts (LocalController's worms are not visible until their first
+# respawn). A worm placed VISIBLE by the scenario keeps the constructor's
+# `killed_timer = 150`, and `Viewport::process` only follows a worm whose
+# `killed_timer <= 0` — so the camera never scrolled and a walking worm left the
+# view (seen on the PR previews). stats_x mirrors the two HUD columns (0 / 218).
 ticks 0
-worm 0 6553600 7602176 100 10 0   1
-worm 1 3276800 7602176 100 10 218 1
+worm 0 0 0 100 10 0   0
+worm 1 0 0 100 10 218 0
 weapon 0 DART

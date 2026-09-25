@@ -18,7 +18,7 @@
 use sim::state::{NUM_WEAPONS, SimState, WormWeapon};
 
 /// The level used when no (or an unknown) `level=` is given — the default
-/// match's level, where its fixed worm spawns are known to be grounded.
+/// match's level.
 pub const DEFAULT_LEVEL: &str = "render_stage";
 
 /// Levels a preview may pick: the stem of each `Levels/<stem>.lev` embedded in
@@ -97,19 +97,17 @@ impl MatchParams {
         p
     }
 
-    /// The live match's start scenario. On the default level the worms keep the
-    /// default match's grounded spawns; on any other level they start dead at
-    /// (0,0) and respawn in-sim at a free spot (the steer scenario's pattern), so
-    /// no level needs hand-picked spawn points.
+    /// The live match's start scenario. The worms start dead at (0,0) and
+    /// respawn in-sim at a free spot, as a real C++ match starts (and as the
+    /// default match does), so no level needs hand-picked spawn points and the
+    /// camera follows them (it only follows a worm with `killed_timer <= 0`).
     pub fn scenario_text(&self) -> String {
         let level = self.level.as_deref().unwrap_or(DEFAULT_LEVEL);
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let worms = if level == DEFAULT_LEVEL {
-            "worm 0 6553600 7602176 100 10 0   1\nworm 1 3276800 7602176 100 10 218 1\n"
-        } else {
-            "worm 0 0 0 100 10 0   0\nworm 1 0 0 100 10 218 0\n"
-        };
-        format!("seed {seed}\nlevel Levels/{level}.lev\nticks 0\n{worms}weapon 0 DART\n")
+        format!(
+            "seed {seed}\nlevel Levels/{level}.lev\nticks 0\n\
+             worm 0 0 0 100 10 0   0\nworm 1 0 0 100 10 218 0\nweapon 0 DART\n"
+        )
     }
 }
 
@@ -179,10 +177,7 @@ mod tests {
             let text = p.scenario_text();
             assert!(text.contains("seed 42\n"), "{text}");
             assert!(text.contains("level Levels/render_stage.lev\n"), "{text}");
-            assert!(
-                text.contains("worm 0 6553600 7602176 100 10 0   1\n"),
-                "{text}"
-            );
+            assert!(text.contains("worm 0 0 0 100 10 0   0\n"), "{text}");
         }
     }
 

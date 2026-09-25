@@ -385,6 +385,7 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
             s.blood,
             0,
             100,
+            sim::weapon::WObjectConsts::default(),
             &mut r2,
         ),
         WObjectOutcome::Explode,

@@ -26,7 +26,7 @@
 
 use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
-use assets::tc::Texture;
+use assets::tc::{TcConfig, Texture};
 use sim_core::fixed::{ftoi, itof};
 use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
@@ -44,6 +44,36 @@ const ST_TYPE1: i32 = 1;
 const ST_STEERABLE: i32 = 2;
 const ST_TYPE2: i32 = 3;
 const ST_LASER: i32 = 4;
+
+/// The TC constants/hacks `WObject::Process` reads beyond the weapon table (Step 4½c-0,
+/// design §4.4-§4.5): the RemExp hack and its object, and the two particle-trail velocity
+/// divisors. Not hashed. `Default` is inert — RemExp off, both divisors 0, which are read
+/// only when a `part_trail_obj >= 0` weapon flies — so a state that never assigns it (the
+/// older oracle harnesses) behaves exactly as before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WObjectConsts {
+    /// C++ `common.h[HRemExp]` (`weapon.cpp:138`; `tc.cfg [hacks] RemExp`).
+    pub h_rem_exp: bool,
+    /// C++ `LC(RemExpObject)` (`weapon.cpp:138`): the **1-based** weapon index of the
+    /// remote-explode object (35 = BOOBY TRAP in the openliero TC).
+    pub rem_exp_object: i32,
+    /// C++ `LC(SplinterLarpaVelDiv)` (`weapon.cpp:203`): the type-1 particle-trail divisor.
+    pub splinter_larpa_vel_div: i32,
+    /// C++ `LC(SplinterCracklerVelDiv)` (`weapon.cpp:208`): the other particle-trail divisor.
+    pub splinter_crackler_vel_div: i32,
+}
+
+impl WObjectConsts {
+    /// The values the loaded TC carries (`tc.cfg [constants]` / `[hacks]`).
+    pub fn from_tc(tc: &TcConfig) -> Self {
+        WObjectConsts {
+            h_rem_exp: tc.hacks.RemExp,
+            rem_exp_object: tc.constants.RemExpObject,
+            splinter_larpa_vel_div: tc.constants.SplinterLarpaVelDiv,
+            splinter_crackler_vel_div: tc.constants.SplinterCracklerVelDiv,
+        }
+    }
+}
 
 /// Port of `Weapon::Fire` (`weapon.cpp:16-76`): spawn one projectile.
 ///
@@ -314,10 +344,8 @@ pub enum WObjectOutcome {
 /// `DoDamage` + **the blood fan BEFORE the hit-sound gate** (the load-bearing
 /// order — the OPPOSITE of the nobject arm) + the `worm_collide` explode/remove
 /// verdict. See the inline block for the exact RNG order. The `RemExp` early-explode block
-/// (`weapon.cpp:138-142`, gated on the `HRemExp` hack AND the weapon being the
-/// configurable `RemExpObject` LC slot) is likewise omitted: fan is not the
-/// `RemExpObject` weapon, so it is inert here (differential-proven over 93 ticks);
-/// port it when a slice exercises `RemExpObject`.
+/// (`weapon.cpp:137-142`) is LIVE since 4½c-0 T1, driven by [`WObjectConsts`]; the hack is
+/// off in the openliero TC, so it is unit-tested only (design §4.4).
 #[allow(clippy::too_many_arguments)]
 pub fn wobject_process(
     obj: &mut WObject,
@@ -339,8 +367,21 @@ pub fn wobject_process(
     blood: i32,
     game_mode: u32,
     settings_health: i32,
+    consts: WObjectConsts,
     rand: &mut Rand,
 ) -> WObjectOutcome {
+    // weapon.cpp:137-142 — the RemExp hack (LIVE since 4½c-0 T1), once per Process call,
+    // BEFORE the do-loop: with `h[HRemExp]` set, the `LC(RemExpObject)` weapon (1-based;
+    // 35 = BOOBY TRAP) explodes the tick its owner holds Change AND Fire, by zeroing
+    // `time_left` so the timeout below fires. Off in the openliero TC. Reads the owner's
+    // control state as the object loop sees it (the top-of-tick input, design §4.3).
+    if consts.h_rem_exp && weapon.id == consts.rem_exp_object - 1 {
+        let owner = worms[obj.owner_idx as usize].control_states;
+        if owner.get(ControlState::CHANGE) && owner.get(ControlState::FIRE) {
+            obj.time_left = 0;
+        }
+    }
+
     // Deferred-branch guards. shot_type 0/1/2/3 are all ported now: ST_NORMAL/
     // ST_TYPE1 share the plain flight; ST_STEERABLE (2) and ST_TYPE2 (3, e.g.
     // BAZOOKA) run the steering block below. Only the laser do-loop (shot_type 4)
@@ -1450,6 +1491,7 @@ mod tests {
             100,
             0,
             100,
+            WObjectConsts::default(),
             rand,
         )
     }
@@ -1497,6 +1539,7 @@ mod tests {
             blood,
             0,
             100,
+            WObjectConsts::default(),
             rand,
         )
     }
@@ -3308,6 +3351,7 @@ mod tests {
             100,
             0,
             100,
+            WObjectConsts::default(),
             rand,
         )
     }
@@ -3480,6 +3524,7 @@ mod tests {
             100,
             0,
             100,
+            WObjectConsts::default(),
             rand,
         )
     }
@@ -3655,5 +3700,119 @@ mod tests {
         proc_impulse(&mut obj, &weapon, &mut wobjects, &mut nobjects, &mut rand);
 
         assert_eq!(rand.last(), before, "the impulse loop draws no rand");
+    }
+
+    // ---- 4½c-0 T1: WObjectConsts + the RemExp hack (weapon.cpp:137-142) ----------
+
+    #[test]
+    fn wobject_consts_from_tc_reads_the_hack_and_the_three_constants() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
+        let tc = TcConfig::load(&std::fs::read(format!("{root}/tc.cfg")).unwrap()).unwrap();
+        assert_eq!(
+            WObjectConsts::from_tc(&tc),
+            WObjectConsts {
+                h_rem_exp: false,
+                rem_exp_object: 35,
+                splinter_larpa_vel_div: 3,
+                splinter_crackler_vel_div: 3,
+            }
+        );
+    }
+
+    // A BOOBY-TRAP-shaped timed weapon: flight knobs neutral, a long timer.
+    fn rem_exp_weapon(id: i32) -> Weapon {
+        Weapon {
+            id,
+            shot_type: ST_NORMAL,
+            mult_speed: 100,
+            gravity: 0,
+            expl_ground: false,
+            time_to_explo: 4000,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    // HRemExp on; LC(RemExpObject) = 35 -> weapon id 34 (the TC's BOOBY TRAP).
+    fn rem_exp_on() -> WObjectConsts {
+        WObjectConsts {
+            h_rem_exp: true,
+            rem_exp_object: 35,
+            ..WObjectConsts::default()
+        }
+    }
+
+    // One Process on an air level with ONE worm — the owner, slot 0 — holding `controls`.
+    fn proc_rem_exp(
+        weapon: &Weapon,
+        controls: u32,
+        consts: WObjectConsts,
+    ) -> (WObjectOutcome, WObject) {
+        let mut level = air_level();
+        let mut worms = [hit_worm(900, 900, Vec2::zero())];
+        worms[0].control_states = ControlState::unpack(controls);
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::zero(),
+            time_left: 100,
+            ty: Some(weapon.id),
+            owner_idx: 0,
+            ..WObject::default()
+        };
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut nobjects: Pool<NObject> = Pool::new(1);
+        let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bonuses: Pool<Bonus> = Pool::new(1);
+        let cossin = precompute_cossin();
+        let mut rand = seeded();
+        let out = wobject_process(
+            &mut obj,
+            &mut level,
+            weapon,
+            &[],
+            0,
+            &mut worms,
+            &mut wobjects,
+            &mut nobjects,
+            &[],
+            &mut sobjects,
+            &[],
+            &mut bonuses,
+            &SpriteSet::default(),
+            &SpriteSet::default(),
+            &[],
+            &cossin,
+            100,
+            0,
+            100,
+            consts,
+            &mut rand,
+        );
+        (out, obj)
+    }
+
+    #[test]
+    fn rem_exp_zeroes_the_timer_when_the_owner_holds_change_and_fire() {
+        // Change (32) + Fire (16): time_left := 0, then the timeout (weapon.cpp:281-285)
+        // `--time_left < 0` explodes it THIS tick.
+        let (out, obj) = proc_rem_exp(&rem_exp_weapon(34), 32 | 16, rem_exp_on());
+        assert_eq!(out, WObjectOutcome::Explode, "Change+Fire detonates the RemExp object");
+        assert_eq!(obj.time_left, -1, "zeroed, then decremented past 0");
+    }
+
+    #[test]
+    fn rem_exp_needs_the_hack_the_slot_and_both_keys() {
+        // Fire alone, Change alone, the hack off, or another weapon: a plain countdown.
+        for (weapon_id, controls, consts) in [
+            (34, 16, rem_exp_on()),
+            (34, 32, rem_exp_on()),
+            (34, 32 | 16, WObjectConsts::default()),
+            (33, 32 | 16, rem_exp_on()),
+        ] {
+            let (out, obj) = proc_rem_exp(&rem_exp_weapon(weapon_id), controls, consts);
+            assert_eq!(out, WObjectOutcome::Keep, "weapon {weapon_id} controls {controls}");
+            assert_eq!(obj.time_left, 99, "weapon {weapon_id} controls {controls}: countdown");
+        }
     }
 }

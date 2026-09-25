@@ -31,7 +31,7 @@ use crate::pool::{BloodPool, Pool};
 use crate::sobject::{sobject_process, SObjectOutcome};
 use crate::shake::ShakeEvent;
 use crate::sound::{HookIndices, SoundEvent};
-use crate::weapon::{blow_up, wobject_process, worm_fire, WObjectOutcome};
+use crate::weapon::{blow_up, wobject_process, worm_fire, WObjectConsts, WObjectOutcome};
 
 /// Number of weapon slots per worm. Mirrors C++ `NUM_WEAPONS` (`worm.hpp:13`).
 /// `Settings::kSelectableWeapons` is also 5, so `InitWeapons` fills every slot.
@@ -1069,6 +1069,10 @@ pub struct SimState {
     /// the index arm is inert and only the per-weapon `laser_sight` flag can arm the
     /// sight. Keeps every prior golden byte-identical (the sight fields are unhashed).
     pub laser_weapon: i32,
+    /// The TC constants/hacks `WObject::Process` reads (Step 4½c-0: RemExp + the particle-
+    /// trail divisors). **Not hashed.** Defaulted inert by `new`; assigned post-`new` by
+    /// `scenario::build::build_match` and `scenario::load` (`WObjectConsts::from_tc`).
+    pub wobject_consts: WObjectConsts,
     /// C++ `Settings::max_bonuses` (`settings.hpp:69`, in-game default 4): the cap the
     /// per-tick **bonus-drop roll** gates on (`game.cpp:359`). The roll `if (max_bonuses
     /// > 0 && rand(CBonusDropChance) == 0) CreateBonus()` fires in [`process_frame`]
@@ -1380,6 +1384,9 @@ impl SimState {
             // sight); the difftest assigns the real `LC(LaserWeapon)` after `new`. The
             // sight fields are unhashed, so this leaves every golden byte-identical.
             laser_weapon: 0,
+            // 4½c-0: the WObject::Process TC consts — inert Default (RemExp off, trail
+            // divisors unread), assigned post-`new` by the builder / loader.
+            wobject_consts: WObjectConsts::default(),
             // Bonus-drop roll inputs: defaulted (0). Left at 0 the roll short-circuits
             // (NO rand) so slices 1-5b stay byte-identical; the difftest assigns the
             // real `max_bonuses`/`BonusDropChance` after `new` (post-`new` pattern, like
@@ -1583,6 +1590,7 @@ impl SimState {
             first_blood_colour,
             bobj_gravity,
             laser_weapon,
+            wobject_consts,
             settings_max_bonuses,
             bonus_drop_chance,
             bonus_spawn_rect_w,
@@ -1627,6 +1635,7 @@ impl SimState {
         let first_blood_colour = *first_blood_colour;
         let bobj_gravity = *bobj_gravity;
         let laser_weapon = *laser_weapon;
+        let wobject_consts = *wobject_consts;
         let settings_max_bonuses = *settings_max_bonuses;
         let bonus_drop_chance = *bonus_drop_chance;
         let bonus_spawn_rect_w = *bonus_spawn_rect_w;
@@ -1765,6 +1774,7 @@ impl SimState {
                 blood,
                 game_mode,
                 settings_health,
+                wobject_consts,
                 rand,
             ) {
                 WObjectOutcome::Keep => {

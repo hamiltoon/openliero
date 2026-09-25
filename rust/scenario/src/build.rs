@@ -169,6 +169,7 @@ pub fn build_match(
     state.bobj_gravity = tc.constants.BObjGravity;
     state.small_sprites = load_sprites(tc_root, "small.tga", 7, 7, 130);
     state.laser_weapon = tc.constants.LaserWeapon;
+    state.wobject_consts = sim::weapon::WObjectConsts::from_tc(&tc); // 4½c-0 (design §4.9)
     state.worm_spawn_rect_x = tc.constants.WormSpawnRectX;
     state.worm_spawn_rect_y = tc.constants.WormSpawnRectY;
     state.worm_spawn_rect_w = tc.constants.WormSpawnRectW;
@@ -392,6 +393,11 @@ mod tests {
         assert_eq!(st.bonus_health_var, tc.constants.BonusHealthVar);
         assert_eq!(st.worm_spawn_rect_w, tc.constants.WormSpawnRectW);
         assert_eq!(st.laser_weapon, tc.constants.LaserWeapon);
+        assert_eq!(
+            st.wobject_consts,
+            sim::weapon::WObjectConsts::from_tc(&tc),
+            "4½c-0: the WObject::Process TC consts"
+        );
         assert_eq!(st.rand.last(), 0, "building consumes no RNG");
 
         // Both poles of the shadow flag (T3 review): `SimState.shadow` is the builder's

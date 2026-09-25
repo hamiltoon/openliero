@@ -183,6 +183,10 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     state.worm_spawn_rect_h = tc.constants.WormSpawnRectH;
     state.worm_min_spawn_dist_last = tc.constants.WormMinSpawnDistLast;
     state.worm_min_spawn_dist_enemy = tc.constants.WormMinSpawnDistEnemy;
+    // Step 4½c-0 (design §4.9): the WObject::Process TC consts and `LC(LaserWeapon)` —
+    // both unhashed; no golden fires a trail weapon or holds the LASER.
+    state.wobject_consts = sim::weapon::WObjectConsts::from_tc(&tc);
+    state.laser_weapon = tc.constants.LaserWeapon;
     state.game_mode = scenario.game_mode as u32;
     // Step 4½a-1 (live bug, design §8): the worm-hook sound indices. Left at
     // `SoundHooks::default()` every hook played sample 0. Unhashed (sound never
@@ -294,5 +298,21 @@ weapon 0 DART
         let s = Scenario::parse("seed 1\nlevel Levels/render_stage.lev\nticks 1\nsettings x.cfg\n")
             .expect("parses");
         let _ = load(Path::new(TC_ROOT), &s);
+    }
+
+    #[test]
+    fn load_assigns_the_wobject_consts_and_the_laser_weapon() {
+        // Step 4½c-0 T1 (design §4.9): the game/`shot` path gets the WObject::Process TC
+        // consts (a LARPA picked up live must not divide by zero) and `LC(LaserWeapon)`,
+        // so the LASER's sight walk (worm.cpp:1196) arms. Both unhashed.
+        let scenario = Scenario::parse(SAMPLE).expect("scenario parses");
+        let loaded = load(Path::new(TC_ROOT), &scenario);
+        let tc = TcConfig::load(&std::fs::read(format!("{TC_ROOT}/tc.cfg")).unwrap()).unwrap();
+        assert_eq!(
+            loaded.state.wobject_consts,
+            sim::weapon::WObjectConsts::from_tc(&tc)
+        );
+        assert_eq!(loaded.state.wobject_consts.splinter_larpa_vel_div, 3);
+        assert_eq!(loaded.state.laser_weapon, tc.constants.LaserWeapon);
     }
 }

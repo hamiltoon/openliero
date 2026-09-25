@@ -271,6 +271,55 @@ pub fn worm_fire(
     worm.vel = worm.vel.sub(cossin[angle as usize].mul(recoil).div(100));
 }
 
+/// Port of `Worm::ProcessSteerables` (`worm.cpp:1214-1241`), called from the visible arm
+/// of `Worm::Process` right after the bonus pickup (`worm.cpp:324`).
+///
+/// Zeroes `steerable_count/sum_x/sum_y`, then — only when the worm's CURRENT weapon is
+/// `kStSteerable` (MISSILE) — walks the wobjects in slot order and, for each of that SAME
+/// weapon type (`i->type == ww.type`) owned by this worm (`owner_idx == index`): Left →
+/// `cur_frame -= (cycles & 1) + 1`, Right → `+=` (both when both are held), then
+/// `cur_frame &= 127` (the hashed wobject field), `movable = false`, and the centroid sums
+/// `+= Ftoi(pos)`, `++count`. `cycles` is the worm-loop value (post-`++cycles`). Draws no
+/// rand. An unresolved slot or a missing weapon definition is treated as non-steerable,
+/// like `current_weapon_loops` (`state.rs`).
+pub fn process_steerables(
+    worm: &mut WormState,
+    weapons: &[Weapon],
+    wobjects: &mut Pool<WObject>,
+    cycles: i32,
+) {
+    worm.steerable_count = 0;
+    worm.steerable_sum_x = 0;
+    worm.steerable_sum_y = 0;
+    let Some(ty) = worm.weapons[worm.current_weapon as usize].ty else {
+        return;
+    };
+    let steerable = weapons
+        .get(ty as usize)
+        .is_some_and(|w| w.shot_type == ST_STEERABLE);
+    if !steerable {
+        return;
+    }
+    let left = worm.control_states.get(ControlState::LEFT);
+    let right = worm.control_states.get(ControlState::RIGHT);
+    let step = (cycles & 1) + 1;
+    for i in wobjects.iter_mut() {
+        if i.ty == Some(ty) && i.owner_idx == worm.index {
+            if left {
+                i.cur_frame -= step;
+            }
+            if right {
+                i.cur_frame += step;
+            }
+            i.cur_frame &= 127;
+            worm.movable = false;
+            worm.steerable_sum_x += ftoi(i.pos.x);
+            worm.steerable_sum_y += ftoi(i.pos.y);
+            worm.steerable_count += 1;
+        }
+    }
+}
+
 /// The verdict a single [`wobject_process`] pass returns to the driver
 /// (Task 3), mirroring the `do_explode` / `do_remove` flags at the tail of C++
 /// `WObject::Process` (`weapon.cpp:328-335`):
@@ -4212,5 +4261,91 @@ mod tests {
         assert_eq!(out, WObjectOutcome::Remove, "worm_collide without worm_explode");
         assert_eq!(obj.pos.x, itof(51), "removed on step 4");
         assert_eq!(worms[0].health, 99, "one hit, not one per remaining step");
+    }
+
+    // ---- 4½c-0 T7: Worm::ProcessSteerables (worm.cpp:1214-1241) ---------------------
+
+    // weapons[0] steerable (MISSILE-shaped), weapons[1] ST_TYPE2 (BAZOOKA-shaped).
+    fn steer_weapons() -> Vec<Weapon> {
+        vec![
+            Weapon {
+                id: 0,
+                shot_type: ST_STEERABLE,
+                ..Default::default()
+            },
+            Weapon {
+                id: 1,
+                shot_type: ST_TYPE2,
+                ..Default::default()
+            },
+        ]
+    }
+
+    // Worm index 0 whose current slot (0) holds weapon `current_ty`, holding `controls`.
+    fn steer_worm(current_ty: i32, controls: u32) -> WormState {
+        let mut w = hit_worm(20, 20, Vec2::zero());
+        w.index = 0;
+        w.weapons[0].ty = Some(current_ty);
+        w.current_weapon = 0;
+        w.control_states = ControlState::unpack(controls);
+        w
+    }
+
+    fn missile(owner: i32, ty: i32, cur_frame: i32, px: i32, py: i32) -> WObject {
+        WObject {
+            pos: Vec2::new(itof(px), itof(py)),
+            ty: Some(ty),
+            owner_idx: owner,
+            cur_frame,
+            ..WObject::default()
+        }
+    }
+
+    #[test]
+    fn steerables_turn_the_owners_current_type_missiles_and_sum_their_pixels() {
+        // Left (4), cycles 1 -> step (1 & 1) + 1 = 2; `&= 127` wraps. Only wobjects of the
+        // CURRENT weapon's type AND this worm's index are steered; each clears `movable`
+        // and feeds the centroid sums.
+        let weapons = steer_weapons();
+        let mut w = steer_worm(0, 4);
+        let mut pool: Pool<WObject> = Pool::new(8);
+        pool.spawn(missile(0, 0, 32, 100, 50)); // steered: 32 - 2
+        pool.spawn(missile(0, 0, 1, 110, 70)); // steered, wraps: (1 - 2) & 127 = 127
+        pool.spawn(missile(1, 0, 40, 10, 10)); // another worm's: untouched
+        pool.spawn(missile(0, 1, 50, 10, 10)); // another weapon type: untouched
+        process_steerables(&mut w, &weapons, &mut pool, 1);
+        let frames: Vec<i32> = pool.iter().map(|o| o.cur_frame).collect();
+        assert_eq!(frames, vec![30, 127, 40, 50]);
+        assert_eq!(
+            (w.steerable_count, w.steerable_sum_x, w.steerable_sum_y),
+            (2, 210, 120)
+        );
+        assert!(!w.movable, "a steered missile freezes the worm (movable = false)");
+    }
+
+    #[test]
+    fn steerables_step_by_one_on_even_cycles_and_right_adds() {
+        let weapons = steer_weapons();
+        let mut w = steer_worm(0, 8); // Right
+        let mut pool: Pool<WObject> = Pool::new(2);
+        pool.spawn(missile(0, 0, 127, 5, 5));
+        process_steerables(&mut w, &weapons, &mut pool, 2); // (2 & 1) + 1 = 1
+        assert_eq!(pool.iter().next().unwrap().cur_frame, 0, "127 + 1 wraps to 0");
+        assert_eq!(w.steerable_count, 1);
+    }
+
+    #[test]
+    fn steerables_zero_the_sums_and_ignore_a_non_steerable_current_weapon() {
+        let weapons = steer_weapons();
+        let mut w = steer_worm(1, 4); // the current weapon is ST_TYPE2
+        w.steerable_count = 7;
+        w.steerable_sum_x = 7;
+        w.steerable_sum_y = 7;
+        let mut pool: Pool<WObject> = Pool::new(2);
+        pool.spawn(missile(0, 1, 32, 5, 5));
+        process_steerables(&mut w, &weapons, &mut pool, 1);
+        assert_eq!((w.steerable_count, w.steerable_sum_x, w.steerable_sum_y), (0, 0, 0));
+        assert_eq!(pool.iter().next().unwrap().cur_frame, 32, "not steerable: untouched");
+        assert!(w.movable);
     }
 }

@@ -31,7 +31,9 @@ use crate::pool::{BloodPool, Pool};
 use crate::sobject::{sobject_process, SObjectOutcome};
 use crate::shake::ShakeEvent;
 use crate::sound::{HookIndices, SoundEvent};
-use crate::weapon::{blow_up, wobject_process, worm_fire, WObjectConsts, WObjectOutcome};
+use crate::weapon::{
+    blow_up, process_steerables, wobject_process, worm_fire, WObjectConsts, WObjectOutcome,
+};
 
 /// Number of weapon slots per worm. Mirrors C++ `NUM_WEAPONS` (`worm.hpp:13`).
 /// `Settings::kSelectableWeapons` is also 5, so `InitWeapons` fills every slot.
@@ -342,6 +344,14 @@ pub struct WormState {
     /// steerable-object accumulator the dead arm zeroes each tick. Default 0.
     /// **Not hashed.**
     pub steerable_count: i32,
+    /// `Worm::steerable_sum_x` (`worm.hpp:267`): the sum of `Ftoi(pos.x)` over the
+    /// wobjects `ProcessSteerables` steered this tick — with `steerable_sum_y` and
+    /// `steerable_count`, the centroid the viewport follows (`viewport.cpp:30-32`).
+    /// Written only by [`crate::weapon::process_steerables`]. **Not hashed** (absent from
+    /// `stateHash.hpp` and `WideRollbackChecksum`). Default 0.
+    pub steerable_sum_x: i32,
+    /// `Worm::steerable_sum_y` (`worm.hpp:267`), see [`steerable_sum_x`](Self::steerable_sum_x).
+    pub steerable_sum_y: i32,
 
     // --- Slice 5' T1: worm-sprite selection (NOT hashed) -------------------
     // The render-frame selector `CheckForSpecWormHit` (T2) reads to pick the
@@ -437,6 +447,8 @@ impl WormState {
             ready: true, // ctor `ready(true)` (worm.hpp:179); ResetWorms keeps it
             make_sight_green: false,
             steerable_count: 0,
+            steerable_sum_x: 0,
+            steerable_sum_y: 0,
 
             // Slice 5' T1 worm-sprite selection: fresh-worm defaults
             // (`worm.hpp:244` current_frame{0}, `worm.hpp:232` animate{false}).
@@ -1523,7 +1535,7 @@ impl SimState {
     /// 2. [`worm_reactions`] → `reacts` (may nudge `pos.y`/`vel.y`). Computed
     ///    **once** and read by BOTH `process_tasks` (jump) AND `worm_process_physics`
     ///    — never recomputed between (load-bearing).
-    /// 3. `process_steerables` — no-op (empty `wobjects`).
+    /// 3. [`process_steerables`] — steers this worm's steerable wobjects (4½c-0 T7).
     /// 4. movable reset.
     /// 5. [`process_aiming`].
     /// 6. [`process_tasks`] — jump reads `reacts[kRfUp]` and writes `vel.y`
@@ -2019,7 +2031,13 @@ impl SimState {
                 // directly so `begin_respawn` can also read the enemy slot.
                 let w = &mut worms[i];
 
-                // 3. process_steerables: no-op this slice (empty wobjects).
+                // 3. ProcessSteerables (worm.cpp:324, :1214-1241) — LIVE (4½c-0 T7): turn
+                //    this worm's wobjects of its CURRENT steerable weapon type by
+                //    (cycles & 1) + 1 per held Left/Right — `*cycles` is the post-`++cycles`
+                //    worm-loop value — clear `movable`, and accumulate the centroid the
+                //    viewport follows. The movable reset below keeps `movable` false while
+                //    Left/Right are held, freezing aim and walk.
+                process_steerables(w, weapons, wobjects, *cycles);
 
                 // 4. movable reset (worm.cpp:330-333).
                 if !w.movable
@@ -6350,5 +6368,93 @@ mod tests {
         state.process_frame(&[ControlState::new(), ControlState::new()]);
         assert!(state.wobjects.is_empty(), "the wobject exploded and is gone");
         assert_eq!(state.sobjects.len(), 1, "exactly one blast — no self-chain");
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4½c-0 T7/T8: a MISSILE-shaped steerable in flight.
+    // -----------------------------------------------------------------------
+
+    /// Two visible worms on a 200x200 all-background level, every slot holding weapon 0 —
+    /// a MISSILE-shaped steerable (shot_type 2, speed 230, add_speed 150) — and one such
+    /// missile of worm 0 at rest at (100,100) aiming at cossin[32].
+    fn steer_state() -> SimState {
+        let w = 200i32;
+        let level = LevelData {
+            width: w,
+            height: w,
+            material_id: vec![1u8; (w * w) as usize],
+            palette: None,
+            display: None,
+        };
+        let mut flags = [0u8; 256];
+        flags[0] = MAT_BACKGROUND;
+        flags[1] = MAT_BACKGROUND;
+        let weapons = vec![Weapon {
+            id: 0,
+            shot_type: 2,
+            speed: 230,
+            add_speed: 150,
+            mult_speed: 100,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ammo: 1,
+            ..Default::default()
+        }];
+        let mk = |index: i32, pos: Vec2| WormInit {
+            index,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit { ty: Some(0), ammo: 1 }; NUM_WEAPONS],
+            start_pos: pos,
+            visible: true,
+        };
+        let mut state = SimState::new(
+            &level,
+            &[
+                mk(0, Vec2::new(itof(20), itof(20))),
+                mk(1, Vec2::new(itof(180), itof(20))),
+            ],
+            1,
+            &flags,
+            weapons,
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            SpriteSet::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            100,
+            true,
+            100,
+        );
+        state.wobjects.spawn(WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::zero(),
+            cur_frame: 32,
+            time_left: 0,
+            ty: Some(0),
+            owner_idx: 0,
+        });
+        state
+    }
+
+    #[test]
+    fn the_visible_arm_steers_the_worms_missile_with_the_post_increment_cycles() {
+        // worm.cpp:324: ProcessSteerables runs in the worm loop, AFTER `++cycles`
+        // (game.cpp:357): cycles 0 -> 1 -> step (1 & 1) + 1 = 2.
+        let mut state = steer_state();
+        state.process_frame(&[ControlState::unpack(4), ControlState::new()]);
+        let m = *state.wobjects.iter().next().expect("the missile flies on");
+        assert_eq!(m.cur_frame, 30, "32 - 2");
+        let w = &state.worms[0];
+        assert_eq!(w.steerable_count, 1);
+        assert_eq!(
+            (w.steerable_sum_x, w.steerable_sum_y),
+            (ftoi(m.pos.x), ftoi(m.pos.y))
+        );
+        assert!(!w.movable, "Left held + a live missile: movable stays false");
+        assert_eq!(state.worms[1].steerable_count, 0, "worm 1 owns no missile");
     }
 }

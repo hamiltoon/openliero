@@ -781,6 +781,11 @@ T8 needs T2. T9 needs T3 and T8. T10 is last.
 
 ## 13. Open questions (with recommendations)
 
+**Rulings (John, 2026-09-25):** Q1 — draw the weapon menu **pixel-exact in 4½c** (pull the menu
+drawing subset forward). Q3 — `?weapons=` **skips** selection. Q8 — on touch-only devices player 2
+is an **auto-ready bot**. The remaining questions are the plan's to settle, per the recommendations
+below.
+
 1. **Rendering scope (§5): pull the pixel-exact subset forward, or ship a placeholder draw?** *(decision
    for John)* **Recommendation: pull it forward.** That means `draw_rounded_box`, `get_dims`, the
    `MenuItem::Draw` text arm and the weapsel screen, about 150 lines, all of which 4½d needs anyway.

@@ -14,6 +14,7 @@
 //! CPU blit, the tick/render loop) stays in `main.rs`, which uses these modules
 //! via `game::input` / `game::viewport_step` / `game::match_flow`.
 pub mod audio;
+pub mod hud_mode;
 pub mod input;
 pub mod match_flow;
 pub mod viewport_step;

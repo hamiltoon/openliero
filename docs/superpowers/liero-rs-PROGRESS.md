@@ -8,7 +8,29 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-09-10 · **⚙️ 4½a-1 (match config + settings → sim) LANDED — 🎯
+> **Last updated:** 2026-09-25 · **🔫 4½c-0 (the unported weapon branches) LANDED — all forty
+> weapons are safe.** The inventory found **thirteen** weapons reaching unported Step-2 branches,
+> not five: the 4½a design's RIFLE, WINCHESTER, LASER, GAUSS GUN and MISSILE, plus LARPA, BOUNCY
+> LARPA, CRACKLER, MINI NUKE, BIG NUKE, NAPALM, HELLRAIDER and BOOBY TRAP. They group into eight
+> mechanisms, pinned against the TC by `weapon_branch_inventory.rs`. Ported bit-exact: the
+> `ST_LASER` do-loop (8 steps per tick, and the unbounded `id == 28` LASER arm),
+> `ProcessSteerables` + the `steerable_sum` accumulators + the steerable camera (closes the 4d
+> deferral), the particle trail (`Create1`/`Create2`), `Create1` splinters, the nobject `leave_obj`
+> sobject trail, chain explosions (the driver now frees before `blow_up`, like C++), and RemExp.
+> **Finding:** C++ sets every control state before `Game::ProcessFrame`, so the object loops read
+> *this* tick's input (the MISSILE Up boost). Rust and the dumper's reduced tail now apply inputs
+> at the top of the tick. With the edited dumper, the 21 prior regeneration scripts rewrote **41
+> golden files byte-identically**. 🎯 **MILESTONE:** four settings-driven goldens and one
+> `render_live` camera golden are bit-exact vs C++ on the first run: laser (seed 2, 1501 rows),
+> missile (seed 1, 1501), trails (seed 1, 2001) and booby (seed 1, 2001), all 12 columns with
+> `IsGameOver` constant 0 and every reach witness re-derived; the steerable camera uses seed 1
+> (500 ticks), and on an off-worm tick the camera sits on the missile centroid. No prior golden
+> changed, and zero weapon tripwires remain. The C++ oracle was built in a cloud session: GitHub
+> `/archive/` tarballs were rebuilt from `git fetch --depth 1` + `git archive | gzip -n` and
+> verified against vcpkg's SHA-512s. Step 4½ now: **4½a-1 ✅ + 4½b ✅ + 4½c-0 ✅**; 4½a-2 and
+> 4½c…4½h are planned.
+>
+> Prior (2026-09-10): **⚙️ 4½a-1 (match config + settings → sim) LANDED — 🎯
 > settings-driven matches bit-exact vs C++, incl. `IsGameOver`.** 4½a split in two (design §0):
 > 4½a-1 is the sim side, 4½a-2 (TOML writer + byte gate + `UpdateHash` + storage + HUD fix) is
 > still planned. 4½a-1 ships `Settings`/`WormSettings`/`MatchConfig` (C++ names + defaults) and a
@@ -388,7 +410,8 @@ container + delta stream + `WideRollbackChecksum`, bit-exact over 1120 ticks), 4
 2026-09-10 because a playable default match is not yet a game: the menus, weapon selection, level
 select/generation, settings/profiles, DumbLieroAI and the stats screen are the remaining
 single-player surface. **4½a-1** (settings → sim, bit-exact incl. `IsGameOver`) and **4½b** (random
-level generation, bit-exact) are done; 4½a-2 and 4½c-0…4½h are planned. Step 5 (netplay) is not
+level generation, bit-exact) and **4½c-0** (the unported weapon branches, bit-exact) are done; 4½a-2
+and 4½c…4½h are planned. Step 5 (netplay) is not
 started.
 
 The % was re-based on 2026-09-10: the denominator is now **steps 0–5 plus Step 4½** (~10 k C++
@@ -757,9 +780,12 @@ fact maps: `specs/2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++) and
 │          incl. a MakeShadow fixture) bit-exact across every stage + rand.last + rock stats,
 │          FIRST RUN. T8 (eyeball example, README) done. T9 done: the 21 shadow=1 dig tokens
 │          now run through 4½a's correct_shadow — bit-exact, first run          COMPLETE
-├─ ⬜ 4½c-0 unported Step-2 weapon branches (RIFLE, WINCHESTER, LASER, GAUSS GUN, MISSILE — the
-│          laser do-loop + ProcessSteerables) ported bit-exact with sim goldens BEFORE 4½c makes
-│          them choosable; banned from 4½a's goldens (added 2026-09-10, 4½a design §11 Q1) not started
+├─ ✅ 4½c-0 unported Step-2 weapon branches — 13 weapons (not 5): ST_LASER do-loop (RIFLE,
+│          WINCHESTER, GAUSS GUN, LASER id 28 unbounded), ProcessSteerables + steerable camera
+│          (MISSILE), particle trail (LARPA, BOUNCY LARPA, CRACKLER), Create1 splinters + leave_obj
+│          trails (MINI NUKE, BIG NUKE, NAPALM, HELLRAIDER), chain explosions (BOOBY TRAP), RemExp;
+│          inputs now apply at the top of the tick (as C++). 🎯 4 settings goldens + 1 render_live
+│          golden bit-exact; weap_table all 0 — all 40 weapons safe for 4½c           COMPLETE
 ├─ ⬜ 4½c  weapon selection phase in sim (draws the sim RNG) + 12/3 key repeat + per-viewport
 │          menu + frozen-screen look. Gate: new oracle_dump_weapsel, bit-exact RNG     not started
 ├─ ⬜ 4½d  menu framework (Menu/MenuItem/behaviors, DrawRoundedBox, scrollbar, type-to-search,
@@ -783,9 +809,7 @@ Deferred out of 4½: modern (non-pixel-exact) UI (later post-step), FollowAI (ne
 snapshots), netplay menus/states (Step 5), the F8 weapon-randomiser easter egg, spectator window,
 TC selector, stats heatmaps/graphs, `.lrp` replay browser (needs `.lrp` phase 2), gamepad.
 Open for John: the level corpus — ship stock levels, or rely on random generation (overview
-§Open Q6); where the laser/steerable weapons deferred from Step 2 get ported — the controller
-ruled a dedicated slice 4½c-0 before 4½c (4½a design §11 Q1; the alternative is hiding them
-with `weap_table = 2` until ported); and the restated TOML byte gate — the shipped files are
+§Open Q6); and the restated TOML byte gate — the shipped files are
 legacy formats C++ itself rewrites, so 4½a-2's gate is "Rust save == C++ save for the same load",
 which rewords a signed-off done-when (4½a design §3.4, §11 Q3).
 

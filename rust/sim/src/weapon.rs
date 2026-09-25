@@ -325,8 +325,8 @@ pub fn process_steerables(
 /// `WObject::Process` (`weapon.cpp:328-335`):
 ///
 /// * [`Keep`](WObjectOutcome::Keep) — the projectile lives on (no flag set).
-/// * [`Explode`](WObjectOutcome::Explode) — `do_explode`: the driver calls
-///   [`blow_up`] then frees the slot.
+/// * [`Explode`](WObjectOutcome::Explode) — `do_explode`: the driver frees the
+///   slot, then calls [`blow_up`] (`weapon.cpp:87`; Step 4½c-0 T6).
 /// * [`Remove`](WObjectOutcome::Remove) — `do_remove`: the driver frees the
 ///   slot **without** exploding (the `worm_collide` path). Never produced for
 ///   fan in 4a — the worm-hit loop is deferred — but part of the contract Task
@@ -917,8 +917,8 @@ fn wobject_pass(
 /// In C++ this frees the wobject, then (conditionally) spawns a `create_on_exp`
 /// sobject, plays the explosion sound, scatters `splinter_amount` nobjects, and
 /// applies a `dirt_effect` crater. The actual `Pool::free` is the driver's job
-/// (it frees the slot after this returns), and the sound is a render-only side
-/// effect with no sim/RNG impact, so it is omitted.
+/// (it frees the slot before calling this, like C++ — Step 4½c-0 T6), and the
+/// sound is a render-only side effect with no sim/RNG impact, so it is omitted.
 ///
 /// **`create_on_exp` is now live** (Slice-4c Task 4): when `create_on_exp >= 0`
 /// it calls [`sobject_create`] for `sobject_types[create_on_exp]` at

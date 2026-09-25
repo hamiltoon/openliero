@@ -1781,6 +1781,11 @@ impl SimState {
                     *wobjects.get_mut(slot).expect("slot still live") = obj;
                 }
                 WObjectOutcome::Explode => {
+                    // weapon.cpp:87 — BlowUpObject frees `this` FIRST, then explodes: the
+                    // blast's own wobject loop (and a chain it sets off, sobject.cpp:148-150)
+                    // must not see this wobject's stale slot. Hash-neutral for every
+                    // non-chain blast (the stale slot was only nudged, then freed anyway).
+                    wobjects.free(slot);
                     blow_up(
                         weapon,
                         level,
@@ -1803,7 +1808,6 @@ impl SimState {
                         settings_health,
                         rand,
                     );
-                    wobjects.free(slot);
                 }
                 WObjectOutcome::Remove => {
                     wobjects.free(slot);
@@ -6252,5 +6256,99 @@ mod tests {
         do_healing(&mut worms, 0, 30, 0, 100);
         assert_eq!(worms[0].health, 100);
         assert_eq!(worms[1].health, 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4½c-0 T6: the wobjects driver frees an exploding wobject BEFORE blow_up
+    // (weapon.cpp:87), so its own blast's chain loop never sees its stale slot.
+    // -----------------------------------------------------------------------
+
+    fn chain_state() -> SimState {
+        let w = 200i32;
+        let level = LevelData {
+            width: w,
+            height: w,
+            material_id: vec![1u8; (w * w) as usize],
+            palette: None,
+            display: None,
+        };
+        let mut flags = [0u8; 256];
+        flags[0] = MAT_BACKGROUND;
+        flags[1] = MAT_BACKGROUND;
+        let weapons = vec![Weapon {
+            id: 0,
+            shot_type: 0,
+            mult_speed: 100,
+            affect_by_explosions: true,
+            chain_explosion: true,
+            time_to_explo: 5,
+            create_on_exp: 0,
+            dirt_effect: -1,
+            splinter_amount: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ammo: 1,
+            ..Default::default()
+        }];
+        let blast = SObjectType {
+            id: 0,
+            start_sound: -1,
+            num_sounds: 0,
+            anim_delay: 3,
+            num_frames: 4,
+            detect_range: 10,
+            damage: 5,
+            blow_away: 0,
+            dirt_effect: -1,
+            ..Default::default()
+        };
+        let mk = |index: i32, pos: Vec2| WormInit {
+            index,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit { ty: Some(0), ammo: 1 }; NUM_WEAPONS],
+            start_pos: pos,
+            visible: true,
+        };
+        SimState::new(
+            &level,
+            &[
+                mk(0, Vec2::new(itof(20), itof(20))),
+                mk(1, Vec2::new(itof(180), itof(20))),
+            ],
+            1,
+            &flags,
+            weapons,
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            SpriteSet::default(),
+            Vec::new(),
+            vec![blast],
+            Vec::new(),
+            100,
+            true,
+            100,
+        )
+    }
+
+    #[test]
+    fn an_exploding_chain_wobject_is_freed_before_its_own_blast() {
+        // time_left 0 -> the timeout explodes it this tick. Its blast (damage 5, ±10 box)
+        // is centred on it: with the free AFTER blow_up, the stale slot would sit inside
+        // the box and chain a second explosion.
+        let mut state = chain_state();
+        state.wobjects.spawn(WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::zero(),
+            cur_frame: 0,
+            time_left: 0,
+            ty: Some(0),
+            owner_idx: 0,
+        });
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert!(state.wobjects.is_empty(), "the wobject exploded and is gone");
+        assert_eq!(state.sobjects.len(), 1, "exactly one blast — no self-chain");
     }
 }

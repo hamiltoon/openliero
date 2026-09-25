@@ -1,3 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["sim-core", "assets", "sim", "render", "scenario", "game", "oracle-tests", "shot", "replay"]
+
+# The browser build a PR preview deploys (`.github/workflows/preview.yml`): release
+# semantics, tuned for download size — Cloudflare Pages caps a single file at 25 MiB,
+# and the default release `game.wasm` is ~57 MB. Native and test builds never use it.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1

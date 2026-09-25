@@ -3,15 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Liero-rs — 3f wasm demo</title>
+    <title>Liero-rs</title>
     <style>
       /* Dark backdrop so the auto-appended canvas is easy to spot. Bevy's
          winit canvas is created and appended to <body> at run time (the game's
          WindowPlugin leaves `Window.canvas = None`, so we do NOT hard-code a
          canvas id here — a bare page is exactly what bevy_winit expects). */
-      html, body { margin: 0; height: 100%; background: #101014; }
-      body { display: flex; align-items: center; justify-content: center; }
-      canvas { image-rendering: pixelated; }
+      html, body { margin: 0; height: 100%; background: #101014; color: #b8b8c8;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      body { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+      canvas { image-rendering: pixelated; outline: none; }
+      #help { order: 2; margin-top: 12px; max-width: 960px; padding: 0 16px; text-align: center; }
+      #help kbd { color: #fff; }
+      #help .dim { color: #707080; }
+      #status { order: 1; margin-bottom: 8px; color: #707080; }
     </style>
   </head>
   <body>
@@ -20,6 +25,14 @@
       emscripten/gh-pages analog). This file is the ONLY tracked artifact in
       web/; the sibling `game.js` + `game_bg.wasm` are GENERATED (gitignored)
       by wasm-bindgen and must exist next to this page before it will load.
+
+      Since the PR-preview build the page plays the LIVE default match on the
+      keyboard; the URL picks the match (game::web_params):
+        ?weapons=MISSILE,LASER,BIG%20NUKE   up to five slots, both worms
+        ?level=water_stage                  render_stage | water_stage |
+                                            see_shadow_test | physics_fall_test
+        ?seed=7                             the match seed
+        ?demo                               the scripted `blood` demo instead
 
       ── Dev loop (one command, no static bundle, no hand-written page) ──
         cargo run -p game --target wasm32-unknown-unknown   # run from rust/
@@ -31,10 +44,12 @@
         cargo --config 'target.wasm32-unknown-unknown.runner="wasm-server-runner"'
           run --manifest-path rust/Cargo.toml -p game --target wasm32-unknown-unknown)
 
-      ── Static bundle (this page) ──
-        cargo build -p game --release --target wasm32-unknown-unknown
-        wasm-bindgen --out-dir web --target web \
-          target/wasm32-unknown-unknown/release/game.wasm
+      ── Static bundle (this page; what .github/workflows/preview.yml deploys) ──
+        cargo build --manifest-path rust/Cargo.toml -p game \
+          --profile wasm-release --target wasm32-unknown-unknown
+        wasm-bindgen --out-dir web --out-name game --target web \
+          --remove-name-section --remove-producers-section \
+          rust/target/wasm32-unknown-unknown/wasm-release/game.wasm
         # then serve web/ with any static server, e.g.:
         python3 -m http.server --directory web 8080
       Install once (version MUST match the wasm-bindgen dep in Cargo.lock):
@@ -46,9 +61,44 @@
       game binary), so there is no canvas element to wire up here — just load
       and init the glue.
     -->
+    <div id="status">Loading…</div>
+    <div id="help">
+      Click the game to give it the keyboard.
+      <br />
+      <b>Player 1</b>: <kbd>R</kbd>/<kbd>F</kbd> aim · <kbd>D</kbd>/<kbd>G</kbd> move ·
+      <kbd>Left Ctrl</kbd> fire · <kbd>Left Shift</kbd> change weapon · <kbd>Left Alt</kbd> jump
+      <br />
+      <b>Player 2</b>: <kbd>↑</kbd>/<kbd>↓</kbd> aim · <kbd>←</kbd>/<kbd>→</kbd> move ·
+      <kbd>Right Ctrl</kbd> fire · <kbd>Right Alt</kbd> change weapon · <kbd>Right Shift</kbd> jump
+      <br />
+      Dig: hold left + right · <kbd>F5</kbd> restarts the match
+      <br />
+      <span class="dim">
+        URL: <code>?weapons=MISSILE,LASER,BIG%20NUKE</code> · <code>&amp;level=water_stage</code>
+        (render_stage, water_stage, see_shadow_test, physics_fall_test) ·
+        <code>&amp;seed=7</code> · <code>?demo</code> for the scripted demo
+      </span>
+    </div>
     <script type="module">
       import init from './game.js';
-      init();
+      const status = document.getElementById('status');
+      // The Bevy app never returns from `init()` (its event loop takes over), so
+      // mark the page ready once the canvas appears and give it the keyboard.
+      new MutationObserver((_, obs) => {
+        const canvas = document.querySelector('canvas');
+        if (!canvas) return;
+        obs.disconnect();
+        status.textContent = '';
+        canvas.tabIndex = 0;
+        canvas.focus();
+      }).observe(document.body, { childList: true });
+      init().catch((e) => {
+        // winit uses an exception for control flow on the web; anything else is real.
+        if (!String(e).includes('Using exceptions for control flow')) {
+          status.textContent = 'Failed to start: ' + e;
+          console.error(e);
+        }
+      });
     </script>
   </body>
 </html>

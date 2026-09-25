@@ -66,11 +66,25 @@ pub fn read_asset(_tc_root: &Path, rel: &str) -> Vec<u8> {
         "/../../data/TC/openliero/tc.cfg"
     ));
     // The demo level the shipped `blood` scenario references (`level` line):
-    // `Levels/render_stage.lev`. The other big levels are NOT embedded.
+    // `Levels/render_stage.lev`, plus the other small stock levels a PR preview
+    // may pick with `?level=` (`game::web_params::LEVELS`). `modern_test.lev`
+    // (1.2 MB) is NOT embedded.
     const DEMO_LEVEL_REL: &str = "Levels/render_stage.lev";
     static DEMO_LEVEL: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../data/TC/openliero/Levels/render_stage.lev"
+    ));
+    static WATER_LEVEL: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/TC/openliero/Levels/water_stage.lev"
+    ));
+    static SHADOW_LEVEL: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/TC/openliero/Levels/see_shadow_test.lev"
+    ));
+    static FALL_LEVEL: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/TC/openliero/Levels/physics_fall_test.lev"
     ));
 
     let from_dir = |dir: &Dir<'_>, key: &str| -> Vec<u8> {
@@ -98,6 +112,9 @@ pub fn read_asset(_tc_root: &Path, rel: &str) -> Vec<u8> {
     match rel {
         "tc.cfg" => TC_CFG.to_vec(),
         DEMO_LEVEL_REL => DEMO_LEVEL.to_vec(),
+        "Levels/water_stage.lev" => WATER_LEVEL.to_vec(),
+        "Levels/see_shadow_test.lev" => SHADOW_LEVEL.to_vec(),
+        "Levels/physics_fall_test.lev" => FALL_LEVEL.to_vec(),
         _ => panic!("wasm embed: no asset {rel}"),
     }
 }

@@ -11,11 +11,13 @@
 //! Setups load like `Gfx::LoadSettings` (a fresh `Settings`, then `FromToml`); profiles like
 //! `LoadProfile` over a bare `WormSettings()` — the tool's starting values (design §9.3.1).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use scenario::settings::{Settings, WormSettings};
 use scenario::settings_toml::{
-    load_profile, settings_from_toml, settings_to_toml, worm_settings_to_toml,
+    gameplay_toml, load_profile, settings_from_toml, settings_to_toml, update_hash,
+    worm_settings_to_toml, worm_update_hash,
 };
 
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/golden/settings");
@@ -168,6 +170,56 @@ fn g5b_cpp_saved_files_round_trip_through_rust() {
                 back,
                 e.load_profile(),
                 "G5b {}: rust_load(O) == rust_load(I)",
+                e.id
+            );
+        }
+    }
+}
+
+/// `hashes.txt`: `<kind> <id> <hash %016x>` → id ↦ hash; the `xxh3-empty -` KAT sits under `"-"`.
+fn hashes() -> BTreeMap<String, u64> {
+    golden("hashes.txt")
+        .lines()
+        .map(|l| {
+            let cols: Vec<&str> = l.split(' ').collect();
+            assert_eq!(cols.len(), 3, "hashes.txt line {l:?}");
+            (
+                cols[1].to_string(),
+                u64::from_str_radix(cols[2], 16).expect("hex hash"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn g5c_gameplay_bytes_and_update_hash_match_cpp() {
+    let hashes = hashes();
+    assert_eq!(
+        hashes["-"], 0x2d06_8005_38d3_94c2,
+        "C++ XXH3_64 of zero bytes == the twox-hash known answer"
+    );
+    let entries = corpus();
+    assert_eq!(
+        hashes.len(),
+        entries.len() + 1,
+        "one hash per corpus entry + the KAT"
+    );
+    for e in &entries {
+        let want = hashes[&e.id];
+        if e.is_setup() {
+            let s = e.load_setup();
+            assert_same(
+                &format!("G5c {} gameplay", e.id),
+                &gameplay_toml(&s),
+                &golden(&format!("{}.gameplay.toml", e.id)),
+            );
+            assert_eq!(update_hash(&s), want, "G5c {}: Settings::UpdateHash", e.id);
+        } else {
+            let ws = e.load_profile();
+            assert_eq!(
+                worm_update_hash(&ws),
+                want,
+                "G5c {}: WormSettings::UpdateHash",
                 e.id
             );
         }

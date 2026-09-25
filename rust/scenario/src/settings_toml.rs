@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 
 use toml::{Table, Value};
+use twox_hash::XxHash3_64;
 
 use crate::settings::{Settings, WormSettings, CONFIG_VERSION};
 use crate::toml_fmt::{format_doc, KeyVals, Val};
@@ -358,6 +359,17 @@ pub fn gameplay_toml(s: &Settings) -> String {
     archive_bytes(&gameplay_keys(s), &BTreeMap::new())
 }
 
+/// `Settings::UpdateHash` (`settings.cpp:92-101`): XXH3-64 (seed 0) over [`gameplay_toml`].
+pub fn update_hash(s: &Settings) -> u64 {
+    XxHash3_64::oneshot(gameplay_toml(s).as_bytes())
+}
+
+/// `WormSettings::UpdateHash` (`worm.cpp:38-43`): XXH3-64 (seed 0) over
+/// [`worm_settings_to_toml`] — exactly the bytes `SaveProfile` writes.
+pub fn worm_update_hash(ws: &WormSettings) -> u64 {
+    XxHash3_64::oneshot(worm_settings_to_toml(ws).as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,5 +699,50 @@ mod tests {
         back.color = ws.color; // LoadProfile restores the pre-load colour
         load_profile(&worm_settings_to_toml(&ws), &mut back).unwrap();
         assert_eq!(back, ws);
+    }
+
+    use twox_hash::XxHash3_64;
+
+    #[test]
+    fn xxh3_64_known_answer() {
+        // The crate's own vector (`xxhash3_64.rs`, `oneshot_empty`); the C++ oracle writes the
+        // same value as `hashes.txt`'s first line.
+        assert_eq!(XxHash3_64::oneshot(b""), 0x2d06_8005_38d3_94c2);
+    }
+
+    #[test]
+    fn update_hash_is_xxh3_of_the_bytes_cpp_hashes() {
+        let s = Settings::default();
+        assert_eq!(
+            update_hash(&s),
+            XxHash3_64::oneshot(gameplay_toml(&s).as_bytes())
+        );
+        let ws = WormSettings::default();
+        assert_eq!(
+            worm_update_hash(&ws),
+            XxHash3_64::oneshot(worm_settings_to_toml(&ws).as_bytes())
+        );
+    }
+
+    #[test]
+    fn only_gameplay_fields_move_update_hash() {
+        let base = update_hash(&Settings::default());
+        let mut s = Settings::default();
+        s.fullscreen = true;
+        s.modern_colors = true;
+        s.blood_particle_max = 5;
+        s.random_map_width = 640;
+        s.max_spectator_render_height = 720;
+        s.worm_settings[0].name = "x".to_string();
+        assert_eq!(
+            update_hash(&s),
+            base,
+            "AppSettings, the map size and the worms are outside SerializeGameplay (design §9.3.9)"
+        );
+        s.lives = 3;
+        assert_ne!(update_hash(&s), base);
+        let mut t = Settings::default();
+        t.weap_table[39] = 1;
+        assert_ne!(update_hash(&t), base, "weapTable is hashed");
     }
 }

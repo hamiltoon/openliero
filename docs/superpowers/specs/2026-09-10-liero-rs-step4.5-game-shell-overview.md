@@ -1,6 +1,6 @@
 # Step 4½ — Game shell: overview / altitude decisions
 
-Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a-1 LANDED** (4½a split into a-1/a-2), **4½b complete on `liero-rs-step-4-5`**, 4½a-2 + 4½c–4½h planned
+Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a-1 LANDED** (4½a split into a-1/a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, 4½a-2 + 4½c–4½h planned
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 4½ — Game shell" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++ map, cited as **cpp-map §N**)
@@ -264,6 +264,12 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   control read). Design: `specs/2026-09-10-liero-rs-step4.5-slice4.5c0-weapon-branches-design.md`;
   plan: `plans/2026-09-10-liero-rs-step4.5-slice4.5c0-plan.md` (T0–T13). 4½a-2 plan:
   `plans/2026-09-10-liero-rs-step4.5-slice4.5a2-plan.md` (T0–T7).
+  **Landed** (design `specs/2026-09-10-liero-rs-step4.5-slice4.5c0-weapon-branches-design.md`): the
+  inventory found **thirteen** weapons, not five. LARPA, BOUNCY LARPA, CRACKLER, MINI NUKE, BIG
+  NUKE, NAPALM, HELLRAIDER and BOOBY TRAP also reached unported branches, and MISSILE was a silent
+  divergence, not a panic. All are ported bit-exact; the steerable camera deferral from 4d is
+  closed; input application moved to the top of the tick (the C++ order, exposed by the MISSILE
+  Up boost). 4½c may offer all forty weapons.
 - **4½c — Weapon selection phase.** The `weapsel.cpp` port into `sim` as a Bevy-free struct with
   `process_frame(inputs) -> bool`; the constructor's RNG rejection loops, `Randomize`, bot auto-ready
   (`is_ready[i] = controller != 0 && select_bot_weapons != 1`, `weapsel.cpp:95`), left/right cycling

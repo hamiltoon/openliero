@@ -13,7 +13,7 @@ use std::fmt;
 use assets::object::Weapon;
 use sim_core::rng::Rand;
 
-use crate::state::{SimState, NUM_WEAPONS};
+use crate::state::{ControlState, SimState, NUM_WEAPONS};
 
 /// `rand(1, 41)` hard-codes forty weapons (`weapsel.cpp:61`, `:68`, `:323`, finding 8).
 pub const WEAPON_COUNT: usize = 40;
@@ -113,6 +113,53 @@ impl fmt::Display for WeapselError {
 
 impl std::error::Error for WeapselError {}
 
+impl KeyRepeat {
+    /// One frame of `LocalController`'s weapsel input for one worm, on a SAMPLED word (design
+    /// §4.5). First the key events the change implies (`OnKey`, `localController.cpp:58-67`:
+    /// key-down sets the clean bit and the control bit, key-up clears both). Then the repeat
+    /// loop verbatim (`:128-148`): a held key whose control bit was consumed counts up and is
+    /// re-pressed at 12, 15, 18, …; a set bit or a released key resets its counter. `OnKey`'s
+    /// Dig block (`:69-79`) is a no-op here: a sampled word has no bit 7, and a Left/Right
+    /// control bit is only ever set while its clean bit is.
+    pub fn apply(&mut self, sampled: ControlState, ctl: &mut ControlState) {
+        let cur = sampled.pack();
+        let rising = cur & !self.prev;
+        let falling = self.prev & !cur;
+        for bit in 0..REPEAT_BITS {
+            if rising >> bit & 1 != 0 {
+                ctl.set(bit, true);
+            }
+            if falling >> bit & 1 != 0 {
+                ctl.set(bit, false);
+            }
+        }
+        for bit in 0..REPEAT_BITS {
+            let held = &mut self.held[bit as usize];
+            if cur >> bit & 1 != 0 {
+                if !ctl.get(bit) {
+                    // uint16_t in C++ (localController.hpp:46): wraps, never saturates.
+                    *held = held.wrapping_add(1);
+                    if *held >= KEY_REPEAT_INITIAL
+                        && (*held - KEY_REPEAT_INITIAL) % KEY_REPEAT_INTERVAL == 0
+                    {
+                        ctl.press(bit);
+                    }
+                } else {
+                    *held = 0;
+                }
+            } else {
+                *held = 0;
+            }
+        }
+        self.prev = cur;
+    }
+
+    /// The seven held counters.
+    pub fn held(&self) -> [u16; 7] {
+        self.held
+    }
+}
+
 /// The phase (design §4.2): plain data, `Clone` — Step 5 snapshots it next to `SimState`
 /// (design §8). `weap_order`, `weap_table` and `enabled_weaps` are derived once and immutable;
 /// `menu_sounds` is per-frame output, not state.
@@ -199,6 +246,112 @@ impl WeaponSelection {
             };
         }
         Ok(ws)
+    }
+
+    /// One `LocalController::Process` weapsel frame (design §4.4): the key repeat for EVERY
+    /// worm, ready or not (`localController.cpp:128-148`), then `ProcessFrame`
+    /// (`weapsel.cpp:219-350`). Returns `all_ready`: true on the frame the last player readies
+    /// (and on every later frame; the owner then calls `finalize`).
+    pub fn process_frame(&mut self, state: &mut SimState, inputs: &[ControlState; 2]) -> bool {
+        self.menu_sounds.clear();
+        for (i, input) in inputs.iter().enumerate() {
+            self.repeat[i].apply(*input, &mut state.worms[i].control_states);
+        }
+        let move_up = state.sound_hooks.MenuMoveUp;
+        let move_down = state.sound_hooks.MenuMoveDown;
+        let select = state.sound_hooks.MenuSelect;
+        let n = self.weap_order.len() as u32; // common.weapons.size() (:253, :275)
+        let mut all_ready = true;
+        for i in 0..2 {
+            if !self.players[i].ready {
+                // :225 — the slot is fixed by the cursor at FRAME START (finding 6).
+                let weap_id = self.players[i].cursor as i32 - 1;
+                if (0..NUM_WEAPONS as i32).contains(&weap_id) {
+                    let k = weap_id as usize;
+                    if state.worms[i].control_states.get(ControlState::LEFT) {
+                        state.worms[i].control_states.release(ControlState::LEFT); // :246
+                        self.play(move_up); // :248
+                        let mut pick = self.players[i].picks[k];
+                        loop {
+                            // :250-255, a do-while
+                            pick = if pick <= 1 { n } else { pick - 1 };
+                            if self.weap_table[self.weapon_of(pick)] == 0 {
+                                break;
+                            }
+                        }
+                        self.players[i].picks[k] = pick;
+                        state.worms[i].weapons[k].ty = Some(state.weapons[self.weapon_of(pick)].id);
+                    }
+                    if state.worms[i].control_states.get(ControlState::RIGHT) {
+                        state.worms[i].control_states.release(ControlState::RIGHT); // :269
+                        self.play(move_down); // :271
+                        let mut pick = self.players[i].picks[k];
+                        loop {
+                            // :273-278
+                            pick = if pick >= n { 1 } else { pick + 1 };
+                            if self.weap_table[self.weapon_of(pick)] == 0 {
+                                break;
+                            }
+                        }
+                        self.players[i].picks[k] = pick;
+                        state.worms[i].weapons[k].ty = Some(state.weapons[self.weapon_of(pick)].id);
+                    }
+                }
+                // :286-306 — Up plays MenuMoveDown and Down plays MenuMoveUp (finding 11); both
+                // wrap over the seven items (finding 3).
+                if state.worms[i].control_states.pressed_once(ControlState::UP) {
+                    self.play(move_down);
+                    self.players[i].cursor = (self.players[i].cursor + MENU_ITEMS - 1) % MENU_ITEMS;
+                }
+                if state.worms[i]
+                    .control_states
+                    .pressed_once(ControlState::DOWN)
+                {
+                    self.play(move_up);
+                    self.players[i].cursor = (self.players[i].cursor + 1) % MENU_ITEMS;
+                }
+                // :309 — Pressed, not consumed: a held Fire confirms every frame (finding 7).
+                if state.worms[i].control_states.get(ControlState::FIRE) {
+                    match self.players[i].cursor {
+                        RANDOMIZE_ITEM => self.randomize(i, &mut state.rand),
+                        DONE_ITEM => {
+                            self.play(select); // :340
+                            self.players[i].ready = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            all_ready = all_ready && self.players[i].ready; // :346
+        }
+        all_ready
+    }
+
+    /// `game.sound_player->Play(hook)`: `SoundPlayer::Play` skips a negative id
+    /// (`mixer/player.hpp:19`).
+    fn play(&mut self, sound: i32) {
+        if sound >= 0 {
+            self.menu_sounds.push(sound);
+        }
+    }
+
+    /// RANDOMIZE (`weapsel.cpp:316-337`, design §3.4): a fresh `weap_used`; per slot the loop
+    /// ALWAYS runs (unlike the constructor's) and enforces uniqueness when `enough`. No sound,
+    /// and `worm.weapons[].type` is left stale (`finalize` overwrites it).
+    fn randomize(&mut self, i: usize, rand: &mut Rand) {
+        let enough = self.enough();
+        let mut used = [false; WEAPON_COUNT];
+        for j in 0..NUM_WEAPONS {
+            let w = loop {
+                let pick = roll(rand); // :323
+                self.players[i].picks[j] = pick;
+                let w = self.weapon_of(pick);
+                if (!enough || !used[w]) && self.weap_table[w] == 0 {
+                    break w; // :327
+                }
+            };
+            used[w] = true; // :334
+        }
     }
 
     /// `enabled_weaps >= Settings::kSelectableWeapons` (`weapsel.cpp:64`, `:319`).
@@ -592,5 +745,284 @@ mod tests {
             st.worms[0].weapons.iter().all(|w| w.ty.is_none()),
             "and writes nothing"
         );
+    }
+
+    // ---- 4½c T2: process_frame (localController.cpp:128-152, weapsel.cpp:219-350) ------
+
+    use crate::state::ControlState;
+
+    const UP: u32 = 1;
+    const DOWN: u32 = 2;
+    const LEFT: u32 = 4;
+    const RIGHT: u32 = 8;
+    const FIRE: u32 = 16;
+    const JUMP: u32 = 64;
+
+    fn step(ws: &mut WeaponSelection, st: &mut SimState, a: u32, b: u32) -> bool {
+        ws.process_frame(st, &[ControlState::unpack(a), ControlState::unpack(b)])
+    }
+
+    /// One worm's repeat over `words`; after each frame the bits `consume(f)` are cleared, as
+    /// ProcessFrame's Release/PressedOnce would. Returns the frames on which `bit` was set.
+    fn repeat_frames(words: &[u32], bit: u32, consume: impl Fn(usize) -> bool) -> Vec<usize> {
+        let mut r = KeyRepeat::default();
+        let mut ctl = ControlState::new();
+        let mut seen = Vec::new();
+        for (f, &w) in words.iter().enumerate() {
+            r.apply(ControlState::unpack(w), &mut ctl);
+            if ctl.pack() & bit != 0 {
+                seen.push(f);
+                if consume(f) {
+                    ctl = ControlState::unpack(ctl.pack() & !bit);
+                }
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn a_consumed_held_key_repeats_at_held_frames_12_15_18() {
+        // Rising edge on frame 0, then localController.cpp:136-139.
+        assert_eq!(
+            repeat_frames(&[RIGHT; 19], RIGHT, |_| true),
+            vec![0, 12, 15, 18]
+        );
+    }
+
+    #[test]
+    fn an_unconsumed_held_key_keeps_its_counter_at_zero_finding_5() {
+        // Left held from frame 0 but only read from frame 21 on (the repeat_edge case): Local
+        // cycles on 21, 33, 36 — the Rollback controller would give 21, 24, 27.
+        let consumed: Vec<usize> = repeat_frames(&[LEFT; 37], LEFT, |f| f >= 21)
+            .into_iter()
+            .filter(|&f| f >= 21)
+            .collect();
+        assert_eq!(consumed, vec![21, 33, 36]);
+    }
+
+    #[test]
+    fn a_release_clears_the_bit_and_the_counter() {
+        let mut r = KeyRepeat::default();
+        let mut ctl = ControlState::new();
+        for _ in 0..5 {
+            r.apply(ControlState::unpack(DOWN), &mut ctl);
+            ctl = ControlState::new(); // consumed every frame: the counter climbs
+        }
+        assert_eq!(r.held()[1], 4);
+        r.apply(ControlState::new(), &mut ctl);
+        assert_eq!(
+            (r.held()[1], ctl.pack()),
+            (0, 0),
+            "key-up: :144-146 + OnKey"
+        );
+    }
+
+    #[test]
+    fn the_cursor_wraps_both_ways_with_the_crossed_sounds() {
+        let mut st = state(1);
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap();
+        step(&mut ws, &mut st, UP, 0);
+        assert_eq!(
+            (ws.player(0).cursor, ws.menu_sounds()),
+            (6, &[MOVE_DOWN][..])
+        );
+        step(&mut ws, &mut st, 0, 0);
+        assert!(ws.menu_sounds().is_empty(), "cleared every frame");
+        step(&mut ws, &mut st, DOWN, 0);
+        assert_eq!((ws.player(0).cursor, ws.menu_sounds()), (0, &[MOVE_UP][..]));
+    }
+
+    #[test]
+    fn cycling_wraps_skips_disabled_weapons_and_updates_the_worm() {
+        let mut t = [0u32; WEAPON_COUNT];
+        t[39] = 1; // pick 40 disabled (bonus only still counts as disabled)
+        let mut st = state(1);
+        let mut ws = WeaponSelection::new(&mut st, &cfg(t, 1, ([2; 5], 0), ([2; 5], 0))).unwrap();
+        for (bits, want_pick, want_sound) in [
+            (DOWN, 2, MOVE_UP), // cursor 0 -> 1 (slot 0)
+            (LEFT, 1, MOVE_UP),
+            (LEFT, 39, MOVE_UP),   // 1 -> 40 (disabled) -> 39
+            (RIGHT, 1, MOVE_DOWN), // 39 -> 40 (disabled) -> 1
+        ] {
+            step(&mut ws, &mut st, bits, 0);
+            assert_eq!(ws.player(0).picks[0], want_pick, "bits {bits}");
+            assert_eq!(ws.menu_sounds(), &[want_sound][..]);
+            step(&mut ws, &mut st, 0, 0);
+        }
+        assert_eq!(st.worms[0].weapons[0].ty, Some(0), "weapsel.cpp:258");
+        assert_eq!(st.rand.draws(), 0, "cycling never draws");
+    }
+
+    #[test]
+    fn with_one_weapon_enabled_a_cycle_is_a_full_lap_back() {
+        let mut st = state(1);
+        let mut ws =
+            WeaponSelection::new(&mut st, &cfg(only(&[5]), 1, ([5; 5], 0), ([5; 5], 0))).unwrap();
+        step(&mut ws, &mut st, DOWN, 0);
+        step(&mut ws, &mut st, 0, 0);
+        step(&mut ws, &mut st, LEFT, 0);
+        assert_eq!((ws.player(0).picks[0], ws.menu_sounds().len()), (5, 1));
+    }
+
+    #[test]
+    fn left_and_right_in_one_frame_cancel_with_two_sounds() {
+        let mut st = state(1);
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap();
+        step(&mut ws, &mut st, DOWN, 0);
+        step(&mut ws, &mut st, 0, 0);
+        step(&mut ws, &mut st, LEFT | RIGHT, 0);
+        assert_eq!(ws.player(0).picks[0], 1, "Left then Right: net zero");
+        assert_eq!(ws.menu_sounds(), &[MOVE_UP, MOVE_DOWN][..]);
+    }
+
+    #[test]
+    fn up_and_down_in_one_frame_cancel_with_two_sounds() {
+        let mut st = state(1);
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap();
+        step(&mut ws, &mut st, UP | DOWN, 0);
+        assert_eq!(ws.player(0).cursor, 0);
+        assert_eq!(
+            ws.menu_sounds(),
+            &[MOVE_DOWN, MOVE_UP][..],
+            ":293 then :304"
+        );
+    }
+
+    #[test]
+    fn down_and_fire_on_slot_5_readies_in_the_same_frame_finding_6() {
+        let mut st = state(1);
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap();
+        step(&mut ws, &mut st, UP, 0); // 0 -> 6
+        step(&mut ws, &mut st, 0, 0);
+        step(&mut ws, &mut st, UP, 0); // 6 -> 5
+        step(&mut ws, &mut st, 0, 0);
+        assert!(
+            !step(&mut ws, &mut st, DOWN | FIRE, 0),
+            "player 1 is not ready yet"
+        );
+        assert!(ws.player(0).ready);
+        assert_eq!(ws.menu_sounds(), &[MOVE_UP, SELECT][..]);
+    }
+
+    #[test]
+    fn up_and_fire_on_slot_1_randomizes_in_the_same_frame() {
+        let mut st = state(4);
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap();
+        step(&mut ws, &mut st, DOWN, 0);
+        step(&mut ws, &mut st, 0, 0);
+        let before = st.rand.draws();
+        step(&mut ws, &mut st, UP | FIRE, 0);
+        assert_eq!(ws.player(0).cursor, 0);
+        assert!(
+            st.rand.draws() - before >= 5,
+            "RANDOMIZE ran on the moved cursor"
+        );
+    }
+
+    #[test]
+    fn a_held_fire_rerolls_every_frame_silently_and_leaves_the_worm_types() {
+        // Finding 7: Pressed(kFire) is not consumed; RANDOMIZE plays no sound and leaves
+        // worm.weapons[].type stale (weapsel.cpp:316-337).
+        let mut st = state(8);
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap();
+        let types = st.worms[0].weapons.map(|w| w.ty);
+        let mut r = stream(8);
+        for frame in 0..3 {
+            let before = st.rand.draws();
+            step(&mut ws, &mut st, FIRE, 0);
+            let mut used = [false; 41];
+            let mut want = [0u32; 5];
+            for slot in want.iter_mut() {
+                *slot = loop {
+                    let p = r.bound_range(1, 41);
+                    if !used[p as usize] {
+                        break p;
+                    }
+                };
+                used[*slot as usize] = true;
+            }
+            assert_eq!(
+                ws.player(0).picks,
+                want,
+                "frame {frame}: 40 enabled => unique picks"
+            );
+            assert!(st.rand.draws() - before >= 5);
+            assert!(ws.menu_sounds().is_empty());
+        }
+        assert_eq!(st.worms[0].weapons.map(|w| w.ty), types, "types stay stale");
+    }
+
+    #[test]
+    fn randomize_without_enough_weapons_keeps_duplicates() {
+        let mut st = state(6);
+        let mut ws =
+            WeaponSelection::new(&mut st, &cfg(only(&[3]), 1, ([3; 5], 0), ([3; 5], 0))).unwrap();
+        step(&mut ws, &mut st, FIRE, 0);
+        assert_eq!(ws.player(0).picks, [3; 5]);
+        assert!(st.rand.draws() > 5);
+    }
+
+    #[test]
+    fn a_ready_player_ignores_input_but_its_keys_still_repeat_state() {
+        let mut st = state(1);
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap();
+        step(&mut ws, &mut st, UP, 0);
+        step(&mut ws, &mut st, 0, 0);
+        step(&mut ws, &mut st, FIRE, 0);
+        assert!(ws.player(0).ready);
+        for _ in 0..14 {
+            assert!(!step(&mut ws, &mut st, DOWN | JUMP, 0));
+        }
+        assert_eq!(ws.player(0).cursor, 6, "no menu input once ready (:232)");
+        assert_eq!(
+            st.worms[0].control_states.pack(),
+            DOWN | JUMP,
+            "never consumed"
+        );
+        assert_eq!(
+            ws.held(0),
+            [0; 7],
+            "a set bit resets its counter (:140-143)"
+        );
+    }
+
+    #[test]
+    fn done_needs_both_players_and_stays_true() {
+        let mut st = state(1);
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap();
+        assert!(!step(&mut ws, &mut st, UP, UP));
+        assert!(!step(&mut ws, &mut st, FIRE, 0));
+        assert!(step(&mut ws, &mut st, 0, FIRE), ":346 all_ready");
+        assert_eq!(ws.menu_sounds(), &[SELECT][..]);
+        assert!(step(&mut ws, &mut st, 0, 0));
+    }
+
+    #[test]
+    fn a_negative_hook_plays_nothing() {
+        let mut st = state(1);
+        st.sound_hooks.MenuMoveUp = -1;
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap();
+        step(&mut ws, &mut st, DOWN, 0);
+        assert!(
+            ws.menu_sounds().is_empty(),
+            "SoundPlayer::Play's sound >= 0 guard"
+        );
+    }
+
+    #[test]
+    fn the_repeat_edge_cycles_at_frames_21_33_36() {
+        // The corpus's repeat_edge case, end to end: Left held from frame 0 on RANDOMIZE,
+        // Down at frame 20 (it runs after the Left check, so the first cycle is frame 21).
+        let mut st = state(10);
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap();
+        let mut cycles = Vec::new();
+        for f in 0..=36 {
+            let before = ws.player(0).picks[0];
+            step(&mut ws, &mut st, LEFT | if f == 20 { DOWN } else { 0 }, 0);
+            if ws.player(0).picks[0] != before {
+                cycles.push(f);
+            }
+        }
+        assert_eq!(cycles, vec![21, 33, 36]);
     }
 }

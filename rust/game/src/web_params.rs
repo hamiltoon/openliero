@@ -1,25 +1,25 @@
 //! Preview-build match parameters (the "mini" playable web build).
 //!
-//! A PR preview needs to reach the feature under test without menus (4½d) or a
-//! weapon-selection phase (4½c), so the page URL picks the loadout, level and
-//! seed of the live default match:
+//! A PR preview needs to reach the feature under test without menus (4½d), so the
+//! page URL can pick the loadout, level and seed of the live match:
 //!
 //! ```text
 //! ?weapons=MISSILE,LASER,BIG%20NUKE&level=water_stage&seed=7
 //! ?demo            (the old scripted `blood` demo instead of a live match)
 //! ```
 //!
+//! A bare preview starts like C++ NEW GAME (`game::new_game`): a generated level, a fresh
+//! seed, then weapon selection (4½c). `weapons=` skips selection (John's Q3 ruling) and loads
+//! the named weapons; `level=` loads a stock level instead of generating one; `seed=` fixes
+//! the seed.
+//!
 //! This module is Bevy-free and target-independent so it is unit-tested natively;
 //! `main.rs` feeds it `window.location.search` on wasm. Nothing here touches the
-//! simulation after tick 0: [`MatchParams::scenario_text`] only chooses the start
-//! scenario and [`apply_weapons`] only rewrites the tick-0 loadout, so a preview
-//! match is exactly as deterministic as the default match.
+//! simulation after tick 0: [`MatchParams::level_file`] and [`MatchParams::seed`] only choose
+//! the start and [`apply_weapons`] only rewrites the tick-0 loadout, so a preview match is
+//! exactly as deterministic as any other match with the same seed.
 
 use sim::state::{NUM_WEAPONS, SimState, WormWeapon};
-
-/// The level used when no (or an unknown) `level=` is given — the default
-/// match's level.
-pub const DEFAULT_LEVEL: &str = "render_stage";
 
 /// Levels a preview may pick: the stem of each `Levels/<stem>.lev` embedded in
 /// the wasm build (`scenario::assets`). `modern_test` (1.2 MB) is left out to
@@ -31,20 +31,17 @@ pub const LEVELS: [&str; 4] = [
     "physics_fall_test",
 ];
 
-/// The default match's seed (`scenarios/default_match.txt`).
-pub const DEFAULT_SEED: u32 = 42;
-
 /// Parsed URL parameters. Unknown keys are ignored; bad values fall back to the
-/// default match and are reported in [`MatchParams::warnings`].
+/// NEW GAME defaults and are reported in [`MatchParams::warnings`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MatchParams {
     /// `demo`: play the scripted `blood` demo instead of a live match.
     pub demo: bool,
     /// `weapons=`: up to five weapon names for slots 0..4, applied to both worms.
     pub weapons: Vec<String>,
-    /// `level=`: one of [`LEVELS`].
+    /// `level=`: one of [`LEVELS`] (default: a generated level).
     pub level: Option<String>,
-    /// `seed=`: the match seed.
+    /// `seed=`: the match seed (default: a fresh one per match).
     pub seed: Option<u32>,
     /// Human-readable notes about ignored values (logged to the console).
     pub warnings: Vec<String>,
@@ -97,17 +94,18 @@ impl MatchParams {
         p
     }
 
-    /// The live match's start scenario. The worms start dead at (0,0) and
-    /// respawn in-sim at a free spot, as a real C++ match starts (and as the
-    /// default match does), so no level needs hand-picked spawn points and the
-    /// camera follows them (it only follows a worm with `killed_timer <= 0`).
-    pub fn scenario_text(&self) -> String {
-        let level = self.level.as_deref().unwrap_or(DEFAULT_LEVEL);
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        format!(
-            "seed {seed}\nlevel Levels/{level}.lev\nticks 0\n\
-             worm 0 0 0 100 10 0   0\nworm 1 0 0 100 10 218 0\nweapon 0 DART\n"
-        )
+    /// The TC-relative stock level file `level=` names (`Levels/<stem>.lev`), which the NEW
+    /// GAME start loads instead of generating a level (C++ `random_level = false` +
+    /// `level_file`). `None`: generate one.
+    pub fn level_file(&self) -> Option<String> {
+        self.level.as_ref().map(|stem| format!("Levels/{stem}.lev"))
+    }
+
+    /// Q3 (Step 4½c): `?weapons=` naming at least one weapon skips weapon selection — the
+    /// preview reaches the thing under test in one click. Without it the match opens on the
+    /// selection screen.
+    pub fn skips_weapon_selection(&self) -> bool {
+        !self.weapons.is_empty()
     }
 }
 
@@ -170,28 +168,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_query_is_the_default_match() {
+    fn empty_query_is_a_plain_new_game() {
+        // No parameter: a generated level, a fresh seed, weapon selection (as `cargo run -p game`).
         for q in ["", "?"] {
             let p = MatchParams::parse(q);
             assert_eq!(p, MatchParams::default());
-            let text = p.scenario_text();
-            assert!(text.contains("seed 42\n"), "{text}");
-            assert!(text.contains("level Levels/render_stage.lev\n"), "{text}");
-            assert!(text.contains("worm 0 0 0 100 10 0   0\n"), "{text}");
+            assert_eq!((p.level_file(), p.seed), (None, None));
+            assert!(!p.skips_weapon_selection());
         }
-    }
-
-    #[test]
-    fn default_match_text_matches_the_fixture() {
-        // The URL-less preview must be the same match as `cargo run -p game`.
-        let fixture = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/scenarios/default_match.txt"
-        ));
-        let a = scenario::Scenario::parse(fixture).expect("fixture parses");
-        let b = scenario::Scenario::parse(&MatchParams::default().scenario_text())
-            .expect("generated text parses");
-        assert_eq!(a, b);
     }
 
     #[test]
@@ -203,16 +187,23 @@ mod tests {
         assert_eq!(p.seed, Some(7));
         assert!(p.demo);
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
-        let text = p.scenario_text();
+        assert_eq!(p.level_file().as_deref(), Some("Levels/water_stage.lev"));
+    }
+
+    #[test]
+    fn weapons_skips_weapon_selection() {
+        // Q3 (John): a preview link with ?weapons= skips selection.
+        assert!(!MatchParams::parse("").skips_weapon_selection());
+        assert!(!MatchParams::parse("?level=water_stage&seed=3").skips_weapon_selection());
+        assert!(MatchParams::parse("?weapons=missile").skips_weapon_selection());
         assert!(
-            text.contains("seed 7\nlevel Levels/water_stage.lev\n"),
-            "{text}"
+            MatchParams::parse("?weapons=NOPE").skips_weapon_selection(),
+            "a named loadout"
         );
         assert!(
-            text.contains("worm 0 0 0 100 10 0   0\n"),
-            "respawn in-sim: {text}"
+            !MatchParams::parse("?weapons=").skips_weapon_selection(),
+            "names nothing"
         );
-        scenario::Scenario::parse(&text).expect("generated text parses");
     }
 
     #[test]
@@ -237,7 +228,11 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../data/TC/openliero"
         ));
-        let scn = scenario::Scenario::parse(&MatchParams::default().scenario_text()).unwrap();
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/default_match.txt"
+        ));
+        let scn = scenario::Scenario::parse(fixture).unwrap();
         let mut state = scenario::load(tc, &scn).state;
         let names: Vec<String> = ["MISSILE", "big nuke", "NOPE"].map(String::from).to_vec();
         let before = state.worms[0].weapons[2];

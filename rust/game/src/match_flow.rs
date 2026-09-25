@@ -6,9 +6,10 @@
 //! `fade_value = 180` (`:277-282`); the sim KEEPS TICKING (the frame loop runs for
 //! `kStateGame || kStateGameEnded`, `:153-155`); each call decrements the fade and the
 //! call that finds it at 0 ends the match (`:185-194`) — 180 more simulated frames.
-//! `fade_value` is also the C++ renderer fade (`:211`); 4½d draws it. Seams: 4½c adds a
-//! weapon-selection phase in front, 4½d the Esc fade (`OnKey`, `:82-85`), 4½g routes
-//! `Finished` to the stats screen.
+//! `fade_value` is also the C++ renderer fade (`:211`); 4½d draws it. Since 4½c the flow
+//! starts in the weapon-selection phase (`with_weapon_selection`; `LocalController::Focus`,
+//! `:112-119`) unless selection is skipped. Seams: 4½d the Esc fade (`OnKey`, `:82-85`), 4½g
+//! routes `Finished` to the stats screen.
 
 use sim::state::SimState;
 
@@ -18,9 +19,11 @@ pub const POST_MORTEM_FRAMES: i32 = 180;
 /// weapon selection (`:285`).
 pub const FADE_IN_MAX: i32 = 33;
 
-/// `kStateGame` / `kStateGameEnded`.
+/// `kStateWeaponSelection` / `kStateGame` / `kStateGameEnded`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatchPhase {
+    /// `kStateWeaponSelection` (Step 4½c): `game::selection` runs the phase; the sim does not tick.
+    WeaponSelection,
     Game,
     GameEnded,
 }
@@ -55,6 +58,32 @@ impl MatchFlow {
         }
     }
 
+    /// A fresh controller's `Focus` (`localController.cpp:112-119`): weapon selection first,
+    /// `fade_value = 0`.
+    pub fn with_weapon_selection() -> Self {
+        MatchFlow {
+            phase: MatchPhase::WeaponSelection,
+            fade_value: 0,
+            going_to_menu: false,
+        }
+    }
+
+    /// One weapon-selection `Process` (`localController.cpp:195-199`): the fade counts up to 33.
+    pub fn weapsel_frame(&mut self) {
+        debug_assert_eq!(self.phase, MatchPhase::WeaponSelection);
+        if self.fade_value < FADE_IN_MAX {
+            self.fade_value += 1;
+        }
+    }
+
+    /// `ChangeState(kStateGame)` from weapon selection (`:284-287`): fade 33; the next tick is
+    /// match tick 0.
+    pub fn enter_game(&mut self) {
+        debug_assert_eq!(self.phase, MatchPhase::WeaponSelection);
+        self.phase = MatchPhase::Game;
+        self.fade_value = FADE_IN_MAX;
+    }
+
     pub fn phase(&self) -> MatchPhase {
         self.phase
     }
@@ -66,6 +95,11 @@ impl MatchFlow {
     /// Call once per tick AFTER `process_frame` (the C++ order: `ProcessFrame`, then
     /// `IsGameOver`, then the fade bookkeeping).
     pub fn after_frame(&mut self, state: &SimState) -> FlowStep {
+        debug_assert_ne!(
+            self.phase,
+            MatchPhase::WeaponSelection,
+            "after_frame runs after a match tick, not during weapon selection"
+        );
         if self.phase == MatchPhase::Game && sim::game_over::is_game_over(state) {
             self.phase = MatchPhase::GameEnded;
             if !self.going_to_menu {
@@ -160,6 +194,40 @@ mod tests {
         }
         assert_eq!(steps, 180);
         assert_eq!(f.phase(), MatchPhase::GameEnded);
+    }
+
+    #[test]
+    fn weapon_selection_fades_in_from_zero_then_the_game_starts_at_33() {
+        // localController.cpp:119 (Focus: fade 0), :195-199 (+1 per Process, up to 33),
+        // :284-287 (ChangeState from weapsel: 33).
+        let mut f = MatchFlow::with_weapon_selection();
+        assert_eq!(
+            (f.phase(), f.fade_value()),
+            (MatchPhase::WeaponSelection, 0)
+        );
+        for n in 1..=40 {
+            f.weapsel_frame();
+            assert_eq!(f.fade_value(), n.min(FADE_IN_MAX));
+        }
+        f.enter_game();
+        assert_eq!((f.phase(), f.fade_value()), (MatchPhase::Game, FADE_IN_MAX));
+    }
+
+    #[test]
+    fn entering_the_game_mid_fade_jumps_to_33() {
+        let mut f = MatchFlow::with_weapon_selection();
+        for _ in 0..3 {
+            f.weapsel_frame();
+        }
+        f.enter_game();
+        assert_eq!(f.fade_value(), FADE_IN_MAX);
+        assert_eq!(f.after_frame(&state()), FlowStep::Continue);
+    }
+
+    #[test]
+    #[should_panic(expected = "weapon selection")]
+    fn after_frame_is_for_the_match_only() {
+        MatchFlow::with_weapon_selection().after_frame(&state());
     }
 
     #[test]

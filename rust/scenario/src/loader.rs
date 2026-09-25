@@ -52,6 +52,11 @@ pub struct SceneData {
     pub labels: HudLabels,
     /// Step 4½c: the weapon-selection screen's TC strings (`tc.cfg:245-250`).
     pub weapsel_texts: render::weapsel::WeapselTexts,
+    /// C++ `Common::bonus_frames` (`common.hpp:176`): the small-sprite frame of each bonus
+    /// kind, from tc.cfg `[[constants.bonuses]]` `frame`. Step 4½c: a live match with
+    /// `max_bonuses > 0` (the NEW GAME start) spawns bonuses, and `viewport.cpp:279,405`
+    /// index this table — an empty table panicked the draw.
+    pub bonus_frames: Vec<i32>,
 }
 
 impl SceneData {
@@ -67,7 +72,7 @@ impl SceneData {
             origpal: &self.origpal,
             color_anim: &self.color_anim,
             fire_cone_sprites: &self.fire_cone,
-            bonus_frames: &[],
+            bonus_frames: &self.bonus_frames,
             nr_begin: self.nr_begin,
             nr_end: self.nr_end,
             laser_weapon: self.laser_weapon,
@@ -240,6 +245,7 @@ pub(crate) fn scene_data(
         font,
         labels,
         weapsel_texts: render::weapsel::WeapselTexts::from_tc(&tc.texts),
+        bonus_frames: tc.bonuses.iter().map(|b| b.frame).collect(),
     }
 }
 

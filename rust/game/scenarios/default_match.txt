@@ -1,5 +1,8 @@
-# The default match (Slice 4f): bare `cargo run -p game` loads THIS in
-# Mode::Live — a keyboard-driven, respawning, F5-restartable 2P-hotseat match.
+# The default match (Slice 4f): a keyboard-driven, respawning, F5-restartable
+# 2P-hotseat match in Mode::Live. Since Step 4½c the bare `cargo run -p game` starts
+# like C++ NEW GAME instead (game::new_game: a generated level, a fresh seed, weapon
+# selection); this fixture is what `--live --record <path> default_match` plays and
+# records (a recording starts from a scenario), and the scenario-path test fixture.
 #
 # It is deliberately NOT one of the `render_slice3b_*` goldens: those are fixed
 # recorded-input demos (Scripted), whereas the default match is played live. It

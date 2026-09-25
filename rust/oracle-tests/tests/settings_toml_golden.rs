@@ -225,3 +225,201 @@ fn g5c_gameplay_bytes_and_update_hash_match_cpp() {
         }
     }
 }
+
+#[test]
+fn milestone_the_corpus_covers_every_shipped_file_and_the_4_5a1_sidecars() {
+    let entries = corpus();
+    let paths: Vec<&str> = entries.iter().filter_map(|e| e.path.as_deref()).collect();
+    for (dir, ext) in [("data/Setups", ".cfg"), ("data/Profiles", ".toml")] {
+        let mut seen = 0;
+        for file in std::fs::read_dir(Path::new(REPO).join(dir)).expect("shipped dir") {
+            let name = file
+                .expect("dir entry")
+                .file_name()
+                .into_string()
+                .expect("utf-8");
+            if name.ends_with(ext) {
+                seen += 1;
+                let rel = format!("{dir}/{name}");
+                assert!(
+                    paths.contains(&rel.as_str()),
+                    "{rel} is shipped but not in corpus.txt"
+                );
+            }
+        }
+        assert!(seen > 0, "{dir} has shipped files");
+    }
+    for v in ["killemall", "scales", "gametag"] {
+        let rel = format!("rust/oracle-tests/golden/sim_slice4_5a_{v}_setup.cfg");
+        assert!(paths.contains(&rel.as_str()), "{rel} is in corpus.txt");
+    }
+    let count = |kind: &str| entries.iter().filter(|e| e.kind == kind).count();
+    assert_eq!(
+        (
+            count("default-setup"),
+            count("default-profile"),
+            count("setup"),
+            count("profile")
+        ),
+        (1, 1, 9, 10)
+    );
+}
+
+#[test]
+fn milestone_cpp_cross_checks_and_layout() {
+    // The shipped legacy liero.cfg loads as exactly Settings() (design §2.1): same bytes, hash.
+    assert_eq!(golden("liero.cfg"), golden("defaults.cfg"));
+    let h = hashes();
+    assert_eq!(h["liero"], h["defaults"]);
+    assert_ne!(
+        h["orbmit"], h["defaults"],
+        "orbmit changes four gameplay fields"
+    );
+    assert_ne!(
+        h["quoting"], h["defaults"],
+        "tc and levelFile are in the gameplay subset"
+    );
+    // The 4½a-1 generator wrote its sidecars in toml++'s canonical layout (T0 Step 5).
+    for v in ["killemall", "scales", "gametag"] {
+        let sidecar = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("golden/sim_slice4_5a_{v}_setup.cfg"));
+        assert_eq!(
+            golden(&format!("sidecar_{v}.cfg")),
+            read(&sidecar),
+            "sidecar {v}"
+        );
+    }
+    // Design §9.3.3: weapTable is the only multiline array; 3 worm tables x 5 inline arrays;
+    // exactly one trailing newline.
+    for e in corpus().iter().filter(|e| e.is_setup()) {
+        let cfg = golden(&e.saved_name());
+        assert!(
+            cfg.contains("weapTable = [\n    "),
+            "{}: weapTable is multiline",
+            e.id
+        );
+        assert_eq!(cfg.matches(" = [ ").count(), 15, "{}: inline arrays", e.id);
+        assert!(
+            cfg.ends_with('\n') && !cfg.ends_with("\n\n"),
+            "{}: one trailing newline",
+            e.id
+        );
+    }
+}
+
+#[test]
+fn milestone_every_quoting_rule_appears_in_the_cpp_bytes() {
+    let cfg = golden("quoting.cfg");
+    for want in [
+        "tc = \"mix \\\"q\\\" 'a' \\\\x\"\n",
+        "levelFile = \"del\\u007F\"\n",
+        "name = \"O'Brien\"\n",
+        "gamepadName = 'say \"hi\"'\n",
+        "gamepadSerial = 'C:\\pads\\1'\n",
+        "name = 'tab\there'\n",
+        "gamepadName = 'Zo\u{e9}'\n",
+        "gamepadSerial = \"a\\u2028b\"\n",
+        "name = \"bell\\u0001esc\\u001B\"\n",
+        "gamepadName = '''two\nlines'''\n",
+        "gamepadSerial = '''it's\nmulti'''\n",
+    ] {
+        assert!(cfg.contains(want), "quoting.cfg lacks {want:?}");
+    }
+    let profile = golden("quoting_profile.toml");
+    for want in [
+        "name = \"cr\\rhere\"\n",
+        "gamepadName = \"\"\"x\ny\\u0002\"\"\"\n",
+        "gamepadSerial = '''back\\slash\nnext'''\n",
+    ] {
+        assert!(
+            profile.contains(want),
+            "quoting_profile.toml lacks {want:?}"
+        );
+    }
+    assert!(golden("edge_profile.toml").contains("name = \"nel\\u0085Zo\u{e9}\"\n"));
+}
+
+#[test]
+fn milestone_edge_inputs_load_with_the_toml_input_archive_semantics() {
+    // edge.cfg — every value below is also C++'s (G5a compared the saved bytes).
+    let s = entry("edge").load_setup();
+    assert_eq!(s.lives, 15, "4294967311 -> static_cast<int32_t> 15");
+    assert_eq!(s.game_mode, u32::MAX);
+    assert_eq!(s.select_bot_weapons, u32::MAX);
+    assert_eq!(s.max_bonuses, -1, "i64::MAX -> int32 -1");
+    assert_eq!(s.loading_time, -7);
+    assert_eq!(
+        (s.blood, s.shadow, s.ai_traces),
+        (100, true, false),
+        "wrong types keep"
+    );
+    assert_eq!(
+        &s.weap_table[..4],
+        &[2, 0, 1, 0],
+        "positional; a string element keeps 0"
+    );
+    let [p1, p2, np] = &s.worm_settings;
+    assert_eq!(p1.name, "", "a wrongly typed name keeps ''");
+    assert_eq!(p1.health, i32::MAX, "-2147483649 wraps");
+    assert_eq!(
+        p1.rgb,
+        [252, 0, 4],
+        "rgbDepth 7 => (v & 63) << 2; the 4th element ignored"
+    );
+    assert_eq!(p1.weapons, [5, 6, 7, 8, 9]);
+    assert_eq!(
+        p1.controls,
+        [1, 2, 32, 34, 29, 42, 56],
+        "short array: the default tail stays"
+    );
+    assert_eq!(p1.controls_ex, [u32::MAX; 8]);
+    assert_eq!(
+        p2.rgb,
+        [240, 176, 240],
+        "missing [player2]: the DEFAULT rgb is 6-bit expanded"
+    );
+    assert_eq!(np.rgb, [255, 0, 70], "8-bit values clamp");
+    assert_eq!(np.weapons, [1; 5], "an empty array keeps every slot");
+
+    let m = entry("missing_tables").load_setup();
+    assert_eq!(m.lives, 3);
+    for (i, v) in m.weap_table.iter().enumerate() {
+        assert_eq!(
+            *v as usize,
+            i % 3,
+            "weapTable[{i}]; the 41st entry is ignored"
+        );
+    }
+    let rgbs: Vec<[i32; 3]> = m.worm_settings.iter().map(|ws| ws.rgb).collect();
+    assert_eq!(rgbs, [[160, 160, 240], [240, 176, 240], [160, 160, 240]]);
+
+    // array_player.cfg — design §3.2's positional reading, now confirmed by the real C++.
+    let a = entry("array_player").load_setup();
+    assert!(
+        a.modern_colors && !a.record_replays,
+        "slots 1 and 2 of `settings`"
+    );
+    assert_eq!(a.lives, 15, "no slot left for lives");
+    let p = &a.worm_settings[0];
+    assert_eq!((p.name.as_str(), p.health, p.controller), ("Pos", 55, 7));
+    assert_eq!((p.random_name, p.color, p.input_device), (false, 3, 1));
+    assert_eq!(
+        (p.gamepad_name.as_str(), p.gamepad_serial.as_str()),
+        ("g", "s")
+    );
+    assert_eq!((p.rgb, p.weapons), ([1, 2, 3], [9, 1, 1, 1, 1]));
+
+    // edge_profile.toml — LoadProfile over a bare WormSettings().
+    let q = entry("edge_profile").load_profile();
+    assert_eq!(q.name, "nel\u{85}Zo\u{e9}");
+    assert_eq!(
+        (q.health, q.controller, q.color),
+        (100, 1, 0),
+        "keep; 2^32+1 -> 1; restored"
+    );
+    assert!(q.random_name, "a wrongly typed randomName keeps true");
+    assert_eq!(q.weapons, [3, 1, 1, 1, 1]);
+    assert_eq!(q.controls, [1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(q.gamepad_controls, [u32::MAX, 12, 13, 14, 110, 10, 0, 9]);
+    assert_eq!(q.rgb, [252, 0, 128], "no rgbDepth => 6-bit expansion");
+}

@@ -50,6 +50,8 @@ pub struct SceneData {
     pub font: Font,
     /// The three HUD text labels from the TC's `[texts]` (`Kills`/`Lives`/`Reloading`).
     pub labels: HudLabels,
+    /// Step 4½c: the weapon-selection screen's TC strings (`tc.cfg:245-250`).
+    pub weapsel_texts: render::weapsel::WeapselTexts,
 }
 
 impl SceneData {
@@ -237,6 +239,7 @@ pub(crate) fn scene_data(
         laser_weapon: tc.constants.LaserWeapon,
         font,
         labels,
+        weapsel_texts: render::weapsel::WeapselTexts::from_tc(&tc.texts),
     }
 }
 
@@ -257,6 +260,16 @@ worm 0 6553600 7602176 100 10 0   1
 worm 1 3276800 7602176 100 10 218 1
 weapon 0 DART
 ";
+
+    #[test]
+    fn load_yields_the_weapsel_texts() {
+        let loaded = load(
+            Path::new(TC_ROOT),
+            &Scenario::parse(SAMPLE).expect("parses"),
+        );
+        assert_eq!(loaded.scene.weapsel_texts.sel_weap, "Select your weapons:");
+        assert_eq!(loaded.scene.weapsel_texts.done, "DONE!");
+    }
 
     #[test]
     fn load_yields_font_and_labels() {

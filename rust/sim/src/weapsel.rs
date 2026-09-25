@@ -13,7 +13,7 @@ use std::fmt;
 use assets::object::Weapon;
 use sim_core::rng::Rand;
 
-use crate::state::{ControlState, SimState, NUM_WEAPONS};
+use crate::state::{ControlState, SimState, WormWeapon, NUM_WEAPONS};
 
 /// `rand(1, 41)` hard-codes forty weapons (`weapsel.cpp:61`, `:68`, `:323`, finding 8).
 pub const WEAPON_COUNT: usize = 40;
@@ -354,6 +354,16 @@ impl WeaponSelection {
         }
     }
 
+    /// `WeaponSelection::Finalize` (`weapsel.cpp:352-361`, design §3.5): `InitWeapons` for
+    /// every worm, then `Game::ReleaseControls`. Draws nothing. Returns the picks, which the
+    /// owner writes back to its in-memory settings (the C++ `shared_ptr` aliasing, finding 4).
+    pub fn finalize(self, state: &mut SimState) -> [[u32; NUM_WEAPONS]; 2] {
+        let picks = [self.players[0].picks, self.players[1].picks];
+        init_weapons(state, &self.weap_order, &picks);
+        release_controls(state);
+        picks
+    }
+
     /// `enabled_weaps >= Settings::kSelectableWeapons` (`weapsel.cpp:64`, `:319`).
     fn enough(&self) -> bool {
         self.enabled_weaps >= NUM_WEAPONS as i32
@@ -388,6 +398,35 @@ impl WeaponSelection {
     /// hash-inert, not snapshotted, drained by `game` into its `AudioSink`.
     pub fn menu_sounds(&self) -> &[i32] {
         &self.menu_sounds
+    }
+}
+
+/// `Worm::InitWeapons` for worms 0 and 1 (`worm.cpp:698-709`): `current_weapon = 0`, and per
+/// slot `type = weapons[weap_order[pick - 1]]`, `ammo = type.ammo`, `delay_left =
+/// loading_left = 0`. Shared by `finalize` and `scenario::build::build_match` (design §4.7).
+/// The caller guarantees two worms and picks in `1..=weap_order.len()`.
+pub fn init_weapons(state: &mut SimState, weap_order: &[usize], picks: &[[u32; NUM_WEAPONS]; 2]) {
+    for (i, worm_picks) in picks.iter().enumerate() {
+        state.worms[i].current_weapon = 0;
+        for (j, &pick) in worm_picks.iter().enumerate() {
+            let w = &state.weapons[weap_order[pick as usize - 1]];
+            let (id, ammo) = (w.id, w.ammo);
+            state.worms[i].weapons[j] = WormWeapon {
+                ty: Some(id),
+                ammo,
+                delay_left: 0,
+                loading_left: 0,
+            };
+        }
+    }
+}
+
+/// `Game::ReleaseControls` (`game.cpp:110-118`): release control bits 0..6 of every worm.
+fn release_controls(state: &mut SimState) {
+    for worm in state.worms.iter_mut() {
+        for bit in 0..REPEAT_BITS {
+            worm.control_states.release(bit);
+        }
     }
 }
 
@@ -1024,5 +1063,47 @@ mod tests {
             }
         }
         assert_eq!(cycles, vec![21, 33, 36]);
+    }
+
+    // ---- 4½c T3: Finalize (weapsel.cpp:352-361) -----------------------------------------
+
+    #[test]
+    fn finalize_loads_every_pick_with_full_ammo_and_releases_the_controls() {
+        let mut st = state(5);
+        let c = cfg(
+            [0; WEAPON_COUNT],
+            1,
+            ([3, 4, 5, 6, 7], 0),
+            ([8, 9, 10, 11, 12], 0),
+        );
+        let mut ws = WeaponSelection::new(&mut st, &c).unwrap();
+        st.worms[0].weapons[1].delay_left = 9;
+        st.worms[1].current_weapon = 3;
+        // Left at cursor 0, Jump and Change are never read: their bits stay set (32 = Change).
+        step(&mut ws, &mut st, LEFT | JUMP | 32, LEFT);
+        assert_ne!(st.worms[0].control_states.pack(), 0);
+        let draws = st.rand.draws();
+        let picks = ws.finalize(&mut st);
+        assert_eq!(picks, [[3, 4, 5, 6, 7], [8, 9, 10, 11, 12]]);
+        assert_eq!(
+            st.rand.draws(),
+            draws,
+            "Finalize draws nothing (design §3.5)"
+        );
+        for (i, worm) in st.worms.iter().enumerate() {
+            assert_eq!(
+                worm.control_states.pack(),
+                0,
+                "ReleaseControls (game.cpp:110-118)"
+            );
+            assert_eq!(worm.current_weapon, 0, "worm.cpp:700");
+            for (j, w) in worm.weapons.iter().enumerate() {
+                let id = picks[i][j] as i32 - 1; // identity weap_order
+                assert_eq!(
+                    (w.ty, w.ammo, w.delay_left, w.loading_left),
+                    (Some(id), 100 + id, 0, 0)
+                );
+            }
+        }
     }
 }

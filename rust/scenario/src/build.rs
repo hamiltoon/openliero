@@ -9,6 +9,13 @@
 //! `SimState::new`'s signature is unchanged; every other setting is a post-`new`
 //! assignment (LD 5). The level arrives READY: level preparation (random vs file +
 //! `MakeShadow`) is 4½b's `sim::levelgen::generate_from_settings`, composed in 4½d.
+//!
+//! Step 4½c (design §4.7) cuts the seam in three: [`new_match`] is the `LocalController`
+//! constructor (`localController.cpp:30-54`: `health`, `stats_x`, invisible, `lives = 0`
+//! (`worm.hpp:238`), no weapons); `sim::weapsel` runs the selection phase on it; [`enter_game`]
+//! is `ChangeState(kStateGame)`'s lives (`:232-235`) + `StartGame`'s pool (`game.cpp:513`).
+//! [`build_match`] = `new_match` → `sim::weapsel::init_weapons` (the saved picks) → `enter_game`,
+//! with output identical to before.
 
 use std::path::Path;
 
@@ -19,11 +26,12 @@ use render::viewport::Viewport;
 use sim::control::ControlConsts;
 use sim::physics::PhysicsConsts;
 use sim::pool::BloodPool;
-use sim::state::{SimState, WormInit};
+use sim::state::{SimState, WeaponInit, WormInit, NUM_WEAPONS};
+use sim::weapsel::{WeapselConfig, WeapselPlayer};
 use sim_core::vec::Vec2;
 
 use crate::loader::{load_sprites, scene_data, Loaded};
-use crate::settings::{MatchConfig, GM_HOLDAZONE, GM_SCALES_OF_JUSTICE, WEAP_TABLE_LEN};
+use crate::settings::{MatchConfig, Settings, GM_HOLDAZONE, GM_SCALES_OF_JUSTICE, WEAP_TABLE_LEN};
 
 /// Why a `MatchConfig` cannot become a match. Every variant is a configuration a menu
 /// or a file can produce, so it is an error, never a panic (design §4.3).
@@ -38,7 +46,8 @@ pub enum BuildError {
     /// The two players' healths differ: the sim carries one `settings_health` (design
     /// §1.3 finding 4); lifted with the player-menu HEALTH item in 4½f.
     AsymmetricHealth { p1: i32, p2: i32 },
-    /// A weapon pick outside `1..=weap_order.len()` (`worm.cpp:704` indexes unchecked).
+    /// A weapon pick outside `1..=weap_order.len()` (`worm.cpp:704` indexes unchecked) — or, in
+    /// front of a selection ([`new_match`]), outside `0..=weap_order.len()`.
     InvalidWeapon {
         worm: usize,
         slot: usize,
@@ -75,9 +84,27 @@ impl std::fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
+/// How [`validate`] treats a pick of `0`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Picks {
+    /// `build_match`: every pick names a weapon (`InitWeapons` runs at once).
+    Strict,
+    /// `new_match`: `0` is unset and the selection's constructor rolls it (`weapsel.cpp:60`).
+    AllowUnset,
+}
+
 /// Check `cfg` against a TC with `n_weapons` weapons. Only the two playing worms
 /// (indices 0 and 1) are checked; the network player never plays a local match.
 pub fn validate(cfg: &MatchConfig, n_weapons: usize) -> Result<(), BuildError> {
+    validate_with(cfg, n_weapons, Picks::Strict)
+}
+
+/// [`validate`] for a match that runs weapon selection first: a `0` pick is legal (design §4.7).
+pub fn validate_for_selection(cfg: &MatchConfig, n_weapons: usize) -> Result<(), BuildError> {
+    validate_with(cfg, n_weapons, Picks::AllowUnset)
+}
+
+fn validate_with(cfg: &MatchConfig, n_weapons: usize, picks: Picks) -> Result<(), BuildError> {
     let s = &cfg.settings;
     if s.game_mode == GM_HOLDAZONE {
         return Err(BuildError::HoldazoneUnsupported);
@@ -99,7 +126,7 @@ pub fn validate(cfg: &MatchConfig, n_weapons: usize) -> Result<(), BuildError> {
     }
     for worm in 0..2 {
         for (slot, &value) in s.worm_settings[worm].weapons.iter().enumerate() {
-            if value == 0 || value as usize > n_weapons {
+            if (value == 0 && picks == Picks::Strict) || value as usize > n_weapons {
                 return Err(BuildError::InvalidWeapon { worm, slot, value });
             }
         }
@@ -110,11 +137,24 @@ pub fn validate(cfg: &MatchConfig, n_weapons: usize) -> Result<(), BuildError> {
     Ok(())
 }
 
-/// Build the tick-0 match for `cfg` on the ready `level` (design §4.2).
-pub fn build_match(
+/// The `LocalController` constructor (`localController.cpp:30-54`): everything
+/// [`build_match`] does EXCEPT the weapons, the lives and the blood pool, which weapon
+/// selection and [`enter_game`] supply (design §4.7). A `0` pick is legal (the selection rolls
+/// it). Worms: `health = ws.health`, `stats_x` 0/218, invisible, `lives = 0` (`worm.hpp:238`),
+/// empty weapon slots; the blood pool keeps `SimState::new`'s default until `enter_game`.
+pub fn new_match(
     tc_root: &Path,
     cfg: &MatchConfig,
     level: &LevelData,
+) -> Result<Loaded, BuildError> {
+    new_match_with(tc_root, cfg, level, Picks::AllowUnset)
+}
+
+fn new_match_with(
+    tc_root: &Path,
+    cfg: &MatchConfig,
+    level: &LevelData,
+    picks: Picks,
 ) -> Result<Loaded, BuildError> {
     let tc = TcConfig::load(&crate::assets::read_asset(tc_root, "tc.cfg")).expect("tc.cfg parses");
     let objects = Objects::load(&tc.types, |sub, id| {
@@ -124,24 +164,18 @@ pub fn build_match(
         ))
     })
     .expect("object configs load");
-    validate(cfg, objects.weapons.len())?;
+    validate_with(cfg, objects.weapons.len(), picks)?;
     let s = &cfg.settings;
 
-    // weap_order: indices sorted by weapon name (Common::Precompute, common.cpp:491-499) — the
-    // one shared copy since Step 4½c (design finding 12).
-    let weap_order = sim::weapsel::weap_order(&objects.weapons);
     let worms_init: Vec<WormInit> = (0..2)
-        .map(|i| {
-            let ws = &s.worm_settings[i];
-            WormInit {
-                index: i as i32,
-                health: ws.health,
-                lives: s.lives,
-                stats_x: if i == 0 { 0 } else { 218 },
-                weapons: WormInit::resolve_weapons(&objects, &weap_order, &ws.weapons),
-                start_pos: Vec2::zero(),
-                visible: false,
-            }
+        .map(|i| WormInit {
+            index: i as i32,
+            health: s.worm_settings[i].health,
+            lives: 0, // Worm::lives{0} (worm.hpp:238): set from settings only at kStateGame
+            stats_x: if i == 0 { 0 } else { 218 },
+            weapons: [WeaponInit::default(); NUM_WEAPONS], // no InitWeapons before selection
+            start_pos: Vec2::zero(),
+            visible: false,
         })
         .collect();
 
@@ -199,14 +233,13 @@ pub fn build_match(
     state.h_bonus_reload_only = tc.hacks.BonusReloadOnly;
     state.sound_hooks = tc.sound_hooks.clone();
 
-    // Settings (design §4.2).
+    // Settings (design §4.2). The blood pool is `enter_game`'s (StartGame, game.cpp:513).
     state.settings_max_bonuses = s.max_bonuses;
     state.weap_table = s.weap_table.iter().map(|&v| v as i32).collect();
     state.settings_health = s.worm_settings[0].health; // == [1] (validated)
     state.game_mode = s.game_mode;
     state.time_to_lose = s.time_to_lose;
     state.shadow = s.shadow;
-    state.bobjects = BloodPool::new(s.blood_particle_max as usize);
 
     // Palette (design §4.1): the level's POWERLEVEL palette only when
     // load_powerlevel_palette (level.cpp:281-294), else exepal == small.tga's palette
@@ -224,6 +257,50 @@ pub fn build_match(
         viewports: Viewport::player_layout(),
         scene,
     })
+}
+
+/// `ChangeState(kStateGame)` after weapon selection (`localController.cpp:232-235`: `lives =
+/// settings.lives`) and `Game::StartGame`'s blood pool (`game.cpp:513`). Draws nothing.
+pub fn enter_game(state: &mut SimState, cfg: &MatchConfig) {
+    for worm in state.worms.iter_mut() {
+        worm.lives = cfg.settings.lives;
+    }
+    state.bobjects = BloodPool::new(cfg.settings.blood_particle_max as usize);
+}
+
+/// Build the tick-0 match for `cfg` on the ready `level` (design §4.2) — the C++ settings path
+/// without a selection phase: [`new_match`] (strict picks) → `InitWeapons` from the saved
+/// picks → [`enter_game`]. Output identical to the 4½a-1 builder (the unit tests + the eight
+/// settings-path goldens).
+pub fn build_match(
+    tc_root: &Path,
+    cfg: &MatchConfig,
+    level: &LevelData,
+) -> Result<Loaded, BuildError> {
+    let mut loaded = new_match_with(tc_root, cfg, level, Picks::Strict)?;
+    let order = sim::weapsel::weap_order(&loaded.state.weapons);
+    let s = &cfg.settings;
+    sim::weapsel::init_weapons(
+        &mut loaded.state,
+        &order,
+        &[s.worm_settings[0].weapons, s.worm_settings[1].weapons],
+    );
+    enter_game(&mut loaded.state, cfg);
+    Ok(loaded)
+}
+
+/// The `WeapselConfig` a `Settings` gives (design §4.7): `weap_table`, the raw
+/// `select_bot_weapons`, and players 0/1's picks + controller (the network player never plays
+/// a local match).
+pub fn weapsel_config(s: &Settings) -> WeapselConfig {
+    WeapselConfig {
+        weap_table: s.weap_table,
+        select_bot_weapons: s.select_bot_weapons,
+        players: [0, 1].map(|i| WeapselPlayer {
+            weapons: s.worm_settings[i].weapons,
+            controller: s.worm_settings[i].controller,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -442,5 +519,92 @@ mod tests {
             "level.cpp:385-392: reset to exepal (small.tga's)"
         );
         assert_ne!(exepal, custom, "non-vacuous: the two palettes differ");
+    }
+
+    // ---- 4½c T3: the seam split (design §4.7) ------------------------------------------
+
+    use sim::hash::{hash_components, hash_game_state};
+
+    #[test]
+    fn a_zero_pick_is_legal_only_in_front_of_a_selection() {
+        let mut c = cfg();
+        c.settings.worm_settings[0].weapons = [0, 5, 0, 40, 0];
+        assert_eq!(validate_for_selection(&c, 40), Ok(()));
+        assert!(validate(&c, 40).is_err(), "build_match stays strict");
+        c.settings.worm_settings[1].weapons[2] = 41;
+        assert_eq!(
+            validate_for_selection(&c, 40),
+            Err(BuildError::InvalidWeapon {
+                worm: 1,
+                slot: 2,
+                value: 41
+            })
+        );
+    }
+
+    #[test]
+    fn new_match_is_the_localcontroller_start_before_selection() {
+        let mut c = cfg();
+        c.settings.worm_settings[0].weapons = [0, 5, 0, 40, 0];
+        c.settings.lives = 7;
+        let st = new_match(Path::new(TC_ROOT), &c, &level())
+            .expect("a zero pick is legal here")
+            .state;
+        for (i, w) in st.worms.iter().enumerate() {
+            assert_eq!(
+                (w.lives, w.health, w.visible, w.stats_x, w.killed_timer),
+                (0, 100, false, [0, 218][i], 150),
+                "Worm::lives{{0}} (worm.hpp:238) until kStateGame"
+            );
+            assert!(
+                w.weapons.iter().all(|ww| ww.ty.is_none() && ww.ammo == 0),
+                "no InitWeapons yet"
+            );
+        }
+        assert_eq!(st.rand.last(), 0, "building consumes no RNG");
+        assert_eq!(st.weap_table.len(), 40);
+    }
+
+    #[test]
+    fn build_match_is_new_match_then_init_weapons_then_enter_game() {
+        let mut c = cfg();
+        c.settings.lives = 7;
+        c.settings.blood_particle_max = 300;
+        c.settings.worm_settings[0].weapons = [2, 3, 4, 5, 6];
+        c.settings.worm_settings[1].weapons = [40, 12, 1, 26, 31];
+        let built = build_match(Path::new(TC_ROOT), &c, &level()).unwrap().state;
+        let mut split = new_match(Path::new(TC_ROOT), &c, &level()).unwrap().state;
+        let order = sim::weapsel::weap_order(&split.weapons);
+        sim::weapsel::init_weapons(
+            &mut split,
+            &order,
+            &[
+                c.settings.worm_settings[0].weapons,
+                c.settings.worm_settings[1].weapons,
+            ],
+        );
+        enter_game(&mut split, &c);
+        assert_eq!(built.worms, split.worms);
+        assert_eq!(hash_components(&built), hash_components(&split));
+        assert_eq!(hash_game_state(&built), hash_game_state(&split));
+        assert_eq!(built.bobjects.capacity(), split.bobjects.capacity());
+        assert_eq!(split.bobjects.capacity(), 300);
+        assert_eq!(split.worms[1].lives, 7);
+    }
+
+    #[test]
+    fn weapsel_config_maps_the_settings() {
+        let mut s = Settings::default();
+        s.weap_table[3] = 2;
+        s.select_bot_weapons = 0;
+        s.worm_settings[1].controller = 1;
+        s.worm_settings[0].weapons = [0, 1, 2, 3, 4];
+        s.worm_settings[2].weapons = [9; 5]; // the network player is not a player here
+        let w = weapsel_config(&s);
+        assert_eq!(w.weap_table, s.weap_table);
+        assert_eq!(w.select_bot_weapons, 0);
+        assert_eq!(w.players[0].weapons, [0, 1, 2, 3, 4]);
+        assert_eq!((w.players[0].controller, w.players[1].controller), (0, 1));
+        assert_eq!(w.players[1].weapons, [1; 5]);
     }
 }

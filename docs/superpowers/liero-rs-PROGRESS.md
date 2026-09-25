@@ -801,8 +801,12 @@ fact maps: `specs/2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++) and
 ├─ ⬜ 4½g  match end + compact stats screen (hash-inert StatsRecorder subset; no heatmaps/graph)
 │          + hidden options subset (fullscreen, shadows, powerlevel palettes, auto-record, bot
 │          weapons)                                                                      not started
-└─ ⬜ 4½h  wasm: live keyboard, localStorage persistence, wider embedded level manifest — the
-           whole shell in the browser (wasm debug self-check retires on that path)   not started
+└─ ⬜ 4½h  wasm: the whole shell in the browser — localStorage persistence, menus on wasm, the
+           headless-Chrome gate (wasm debug self-check retires on the live path). Pulled forward
+           by the PR-preview track (PR #11): live keyboard, ?weapons/?level/?seed, 4 levels
+           embedded, every PR deployed to Cloudflare Pages. + MOBILE (added 2026-09-25):
+           responsive canvas (can land early) and touch controls for one player vs DumbLieroAI
+           (after 4½f)                                                            in progress
 ```
 
 Deferred out of 4½: modern (non-pixel-exact) UI (later post-step), FollowAI (needs Step 5a

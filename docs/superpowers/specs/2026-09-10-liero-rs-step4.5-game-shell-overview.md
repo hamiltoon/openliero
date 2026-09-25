@@ -344,6 +344,21 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   needs more. The wasm debug self-check retires on the live path (§Oracle). **Gate:** the existing
   build-only wasm CI job (`.github/workflows/rust.yml:216-229`) plus a headless-Chrome run of the
   menu → match flow, the 3f precedent.
+  **Pulled forward 2026-09-25 by the PR-preview track** (`.github/workflows/preview.yml`, PR #11):
+  live keyboard on wasm for the default match, `?weapons=` / `?level=` / `?seed=` URL parameters
+  (`game::web_params`), three more small levels embedded, Esc no longer quitting on wasm, and a
+  size-tuned `wasm-release` profile (14.5 MB). Every PR now deploys a playable build to Cloudflare
+  Pages. 4½h keeps the menu-driven shell, persistence and the headless-Chrome gate.
+  **Mobile (added 2026-09-25).** The preview opened on a phone crops the 960×600 canvas and has
+  no way to play: there is no keyboard. 4½h therefore also covers (1) a **responsive canvas** that
+  scales the 320×200 frame to fit the screen at an integer-or-fit scale, preferring landscape and
+  (2) **touch controls**: an on-screen pad plus Fire/Jump/Change buttons, mapped to the same 7-bit
+  `ControlState` the keyboard produces (Dig = the Left+Right chord), so the sim cannot tell them
+  apart and a touch session records and replays like a keyboard one. The natural phone mode is
+  one human against DumbLieroAI, so the touch layout is for one player and depends on 4½f's AI;
+  a two-thumbs-per-player hotseat on one phone is out of scope. Menus (4½d–4½f) need tap
+  navigation too. The responsive canvas alone is small and has no dependency, so it can land
+  early on the preview track whenever phone previews become useful; touch play waits for 4½f.
 
 *Parallelism: **4½a ∥ 4½b** (disjoint surfaces); **4½e ∥ 4½f** (both build on 4½d's framework and
 touch different menus). 4½c-0 can start as soon as 4½b's sim work lands (it touches weapon code,

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/tmp/claude-*/-home-*-openliero/*/scratchpad/vcpkg_fetch.sh:*)",
+      "Bash(X_VCPKG_ASSET_SOURCES=*)"
+    ]
+  }
+}

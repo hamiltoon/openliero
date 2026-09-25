@@ -484,7 +484,20 @@ fn setup(
     let handle = images.add(image);
 
     // 5. Camera + one sprite scaled ×3 into the 960×600 window.
-    commands.spawn(Camera2d);
+    //    `AutoMin` keeps the whole 960x600 frame in view whatever the window's
+    //    size: natively the window is exactly 960x600 (1:1, unchanged), but in a
+    //    browser winit sizes the surface to the canvas's CSS box, which
+    //    `web/index.html` fits to the screen (a phone would otherwise crop it).
+    commands.spawn((
+        Camera2d,
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: bevy::camera::ScalingMode::AutoMin {
+                min_width: 960.0,
+                min_height: 600.0,
+            },
+            ..OrthographicProjection::default_2d()
+        }),
+    ));
     commands.spawn((
         Sprite::from_image(handle.clone()),
         Transform::from_scale(Vec3::splat(3.0)),
@@ -700,7 +713,16 @@ fn tick_and_render(
         //    `input 8 16 0` — so empty inputs would diverge and trip the
         //    self-check.) `Live` (--live, T2) instead polls the held-key set;
         //    `Replay` (--replay, 4b T2) is `Scripted` over the replay file.
-        let inputs = source.sample(demo.tick, &keys);
+        #[allow(unused_mut)] // only the wasm build merges touch input
+        let mut inputs = source.sample(demo.tick, &keys);
+        // Browser build: the on-screen controls (`game::touch`, drawn by
+        // `web/index.html` on touch devices) drive player 1 alongside the
+        // keyboard. Merged here, before the recorder tap, so a touch session
+        // records and replays exactly like a keyboard one.
+        #[cfg(target_arch = "wasm32")]
+        if *mode == Mode::Live {
+            inputs[0] = game::touch::merge(inputs[0], touch_mask());
+        }
         // 4b recorder seam (spec §4.1): tap the SAMPLED array here — after
         // `sample` (so the Dig→Left+Right chord is already resolved into the
         // words the sim sees) and before `process_frame`. Present only in
@@ -851,6 +873,16 @@ fn restart_match(sim: &mut SimState, demo: &mut Demo, recorder: Option<&mut Reco
 
 /// The scenario text for `name`. **Native:** read the committed
 /// `render_slice3b_<name>_scenario.txt` from `GOLDEN_DIR` (`std::fs`, unchanged).
+/// The on-screen controls' held set: the page keeps it in `window.lieroTouch`
+/// (`game::touch` has the bit layout). Absent or non-numeric reads as 0.
+#[cfg(target_arch = "wasm32")]
+fn touch_mask() -> u32 {
+    js_sys::Reflect::get(&js_sys::global(), &"lieroTouch".into())
+        .ok()
+        .and_then(|v| v.as_f64())
+        .map_or(0, |v| v as u32)
+}
+
 /// Apply a PR-preview loadout to a freshly loaded tick-0 state (no-op when empty);
 /// names that match no weapon are reported and leave their slot unchanged.
 fn apply_loadout(state: &mut SimState, loadout: &[String]) {

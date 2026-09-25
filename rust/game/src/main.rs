@@ -450,7 +450,7 @@ fn setup(
     let scenario::Loaded {
         mut state,
         viewports,
-        scene,
+        mut scene,
         // `font`/`labels` travel inside `scene`; the HUD is drawn per `Demo.hud` (4½a-2).
         ..
     } = loaded;
@@ -462,6 +462,12 @@ fn setup(
         Vec::new()
     };
     apply_loadout(&mut state, &loadout);
+    // A played match (Live, Replay) takes focus like C++ `Game::Focus`: the worm
+    // colour ramps go into the palette. The scripted demo keeps the golden's
+    // palette (its C++ dumper never focuses a game).
+    if *mode != Mode::Scripted {
+        set_worm_colours(&mut scene);
+    }
 
     // 3. Owned CPU surface the `render` crate paints into.
     let surface = Bitmap::new(SURFACE_W as i32, SURFACE_H as i32);
@@ -865,6 +871,7 @@ fn restart_match(sim: &mut SimState, demo: &mut Demo, recorder: Option<&mut Reco
     apply_loadout(sim, &demo.loadout);
     demo.viewports = loaded.viewports;
     demo.scene = loaded.scene;
+    set_worm_colours(&mut demo.scene);
     demo.tick = 0;
     if demo.flow.is_some() {
         demo.flow = Some(MatchFlow::new());
@@ -881,6 +888,18 @@ fn touch_mask() -> u32 {
         .ok()
         .and_then(|v| v.as_f64())
         .map_or(0, |v| v as u32)
+}
+
+/// C++ `Game::UpdateSettings` (`game.cpp:475-488`, reached via `Game::Focus` when a
+/// match starts): write both worms' colour ramps into the palette, with the default
+/// worm colours (the binary has no player menu until 4½f). Without it the TC's
+/// colour animation rotates stock colours through the worm-status entries (129-136)
+/// — `render_stage.lev`'s sky (index 130) blinked white/blue.
+fn set_worm_colours(scene: &mut SceneData) {
+    let settings = Settings::default();
+    for (i, ws) in settings.worm_settings.iter().take(2).enumerate() {
+        render::palette::set_worm_colour(&mut scene.origpal, i, ws.rgb);
+    }
 }
 
 /// Apply a PR-preview loadout to a freshly loaded tick-0 state (no-op when empty);

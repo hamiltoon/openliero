@@ -32,6 +32,35 @@ pub fn light_up(pal: &mut Palette, amount: i32) {
     }
 }
 
+/// `palette.hpp:69-86` + `palette.cpp:77-104`, classic mode: write worm `worm`'s
+/// colour ramp into the palette, as C++ `Game::UpdateSettings` does when a match
+/// takes focus (`game.cpp:475-488`). The 5-entry shaded ramp lands at
+/// `base-2..=base+2` (`base` 32 for worm 0, 41 for worm 1), then it is copied to
+/// the worm's secondary sprite copies (`0x58`/`0x78`, six entries) and to its
+/// minimap/status entries (129 / 133, three entries). Those status entries sit
+/// inside the TC's `colorAnim` ranges (129-131, 133-136), so without this the
+/// animation rotates unrelated stock colours — e.g. `render_stage.lev`'s sky,
+/// painted with index 130, blinked white/blue in the live game.
+pub fn set_worm_colour(pal: &mut Palette, worm: usize, rgb: [i32; 3]) {
+    // (base, colour_index, status_index), `Palette::kWormColorBlocks`.
+    const BLOCKS: [(usize, usize, usize); 2] = [(32, 0x58, 129), (41, 0x78, 133)];
+    // `SetWormColoursSpan`'s hand-tuned (scale, add) steps.
+    const STEPS: [(i32, i32); 5] = [(38, 0), (50, 0), (64, 0), (47, 1008), (28, 2205)];
+    let (base, colour_index, status_index) = BLOCKS[worm];
+    let input = rgb.map(|c| c.clamp(0, 255) >> 2);
+    for (j, &(scale, add)) in STEPS.iter().enumerate() {
+        let [r, g, b] = input.map(|c| (((add + c * scale) / 64) << 2) as u8);
+        let e = &mut pal.entries[base - 2 + j];
+        (e.r, e.g, e.b) = (r, g, b);
+    }
+    for j in 0..6 {
+        pal.entries[colour_index + j] = pal.entries[base + (j % 3) - 1];
+    }
+    for j in 0..3 {
+        pal.entries[status_index + j] = pal.entries[base + j];
+    }
+}
+
 /// `renderer.cpp:23-30`: `0xFF000000 | r<<16 | g<<8 | b`, entries verbatim.
 pub fn pack_pal32(pal: &Palette) -> Pal32 {
     let mut out = [0u32; 256];
@@ -64,6 +93,33 @@ pub fn build_palette(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_worm_colour_matches_cpp() {
+        use assets::palette::{Color, Palette};
+        let mut pal = Palette { entries: [Color::default(); 256] };
+        // Worm 0's default colour (`worm.hpp:87-89`); >>2 gives (26, 26, 62).
+        set_worm_colour(&mut pal, 0, [104, 104, 248]);
+        let rgb = |i: usize| (pal.entries[i].r, pal.entries[i].g, pal.entries[i].b);
+        // step 0 (38, 0): 26*38/64 = 15, 62*38/64 = 36 -> <<2.
+        assert_eq!(rgb(30), (60, 60, 144));
+        // step 2 (64, 0) reproduces the quantized input.
+        assert_eq!(rgb(32), (104, 104, 248));
+        // step 4 (28, 2205): (2205 + 26*28)/64 = 45, (2205 + 62*28)/64 = 61.
+        assert_eq!(rgb(34), (180, 180, 244));
+        // Copies: 0x58+j = base + (j%3) - 1; status 129+j = base + j.
+        for j in 0..6 {
+            assert_eq!(rgb(0x58 + j), rgb(32 + (j % 3) - 1));
+        }
+        for j in 0..3 {
+            assert_eq!(rgb(129 + j), rgb(32 + j));
+        }
+        // Worm 1 lands on its own block and leaves worm 0's alone.
+        let before = pal.clone();
+        set_worm_colour(&mut pal, 1, [60, 172, 60]);
+        assert_eq!(pal.entries[32], before.entries[32]);
+        assert_eq!(pal.entries[133], pal.entries[41]);
+    }
 
     #[test]
     fn rotate_from_matches_cpp_formula() {

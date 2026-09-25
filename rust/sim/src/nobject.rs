@@ -331,8 +331,8 @@ pub(crate) fn check_for_spec_worm_hit(
 /// * **ground vs air** (`:115-141`) — fully ported via [`LevelSim::inside`] /
 ///   [`LevelSim::dirt_rock`] (NOT `checked_mat_background`), exactly as
 ///   `wobject_process`. The `BlitImageOnMap`-on-ground arm (`:119-128`, gated
-///   `start_frame > 0 && draw_on_map`) and the `leave_obj` sobject trail
-///   (`:133-138`) are `debug_assert!`ed off (need sprite-blit / sobject Create).
+///   `start_frame > 0 && draw_on_map`) is LIVE (4d) and so is the `leave_obj` sobject
+///   trail (`:133-138`, 4½c-0 T5).
 /// * **animation** (`:143-158`) — `if ty.num_frames > 0` natural guard; fully
 ///   ported (no rand). Inert for the dirt particle (`num_frames=0`).
 /// * **timeout** (`:160-164`) — `if ty.time_to_explo > 0` natural guard; fully
@@ -498,15 +498,41 @@ pub fn nobject_process(
             do_explode = true;
         }
     } else {
-        // :133-138 leave_obj sobject trail — deferred (needs SObject Create).
-        // C++ gate is `!bounced && leave_obj_delay != 0 && leave_obj >= 0 && ...`;
-        // the assert reproduces that gate so `bounced` is load-bearing (the trail
-        // is suppressed right after a bounce). Inert for the dirt particle
-        // (leave_obj=-1).
-        debug_assert!(
-            bounced || ty.leave_obj < 0 || ty.leave_obj_delay == 0,
-            "leave_obj sobject trail deferred (needs SObject Create)"
-        );
+        // :133-138 leave_obj sobject trail — LIVE (4½c-0 T5): napalm fireballs, small /
+        // large nukes and hellraider bullets. Gate `!bounced && leave_obj_delay != 0 &&
+        // leave_obj >= 0 && cycles % leave_obj_delay == 0` (`bounced` is load-bearing: no
+        // trail right after a bounce); `cycles` is the pre-`++cycles` snapshot. Spawns at
+        // Ftoi of the post-move (post-clamp) pos. The driver's stale copy of THIS nobject
+        // may be nudged by the trail blast's nobject loop and is then overwritten on Keep;
+        // C++ nudges `this`, whose delta to the blast is 0 — a no-op. Equal.
+        if !bounced
+            && ty.leave_obj_delay != 0
+            && ty.leave_obj >= 0
+            && cycles.wrapping_rem(ty.leave_obj_delay) == 0
+        {
+            sobject_create(
+                &sobject_types[ty.leave_obj as usize],
+                ftoi(obj.pos.x),
+                ftoi(obj.pos.y),
+                obj.owner_idx,
+                worms,
+                wobjects,
+                weapons,
+                nobjects,
+                nobject_types,
+                level,
+                cossin,
+                large_sprites,
+                textures,
+                sobjects,
+                bonuses,
+                sobject_types,
+                blood,
+                game_mode,
+                settings_health,
+                rand,
+            );
+        }
         // :140 vel.y += gravity.
         obj.vel.y = obj.vel.y.wrapping_add(ty.gravity);
     }
@@ -2388,5 +2414,109 @@ mod tests {
         assert_eq!(out, NObjectOutcome::Remove, "worm_destroy && used -> Remove");
         assert_eq!(worms[0].health, 98, "DoDamage(2) still applied before remove");
         assert_eq!(nobjects.len(), 10, "blood fan still sprayed (10 particles)");
+    }
+
+    // ---- 4½c-0 T5: the leave_obj sobject trail (nobject.cpp:133-138) ----------------
+
+    // A NAPALM-fireball-shaped type: flies (no ground explode, no gravity) and leaves
+    // sobject_types[0] every 4 cycles; `bounce` per test.
+    fn trail_nobject(bounce: i32) -> NObjectType {
+        NObjectType {
+            id: 12,
+            expl_ground: false,
+            bounce,
+            gravity: 0,
+            leave_obj: 0,
+            leave_obj_delay: 4,
+            num_frames: 0,
+            hit_damage: 0,
+            time_to_explo: 0,
+            create_on_exp: -1,
+            dirt_effect: -1,
+            splinter_amount: 0,
+            ..Default::default()
+        }
+    }
+
+    fn run_leave_obj(
+        obj: &mut NObject,
+        ty: &NObjectType,
+        level: &mut LevelSim,
+        cycles: i32,
+        sobjects: &mut Pool<SObject>,
+    ) -> NObjectOutcome {
+        let cossin = precompute_cossin();
+        let sprites = no_sprites();
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut bobjects: BloodPool<BObject> = BloodPool::new(700);
+        let mut rand = seeded();
+        nobject_process(
+            obj,
+            ty,
+            &[],
+            &[inert_sobject(0)],
+            level,
+            &cossin,
+            &sprites,
+            &sprites,
+            &sprites,
+            &[],
+            &mut worms,
+            &mut wobjects,
+            &[],
+            &mut nobjects,
+            sobjects,
+            &mut Pool::<Bonus>::new(1),
+            &mut bobjects,
+            cycles,
+            100,
+            0,
+            0,
+            0,
+            100,
+            &mut rand,
+        )
+    }
+
+    fn fireball() -> NObject {
+        NObject {
+            pos: Vec2::new(itof(50), itof(50)),
+            vel: Vec2::new(itof(1), 0),
+            ty: Some(12),
+            owner_idx: 1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn leave_obj_spawns_its_sobject_at_the_moved_pos_on_the_delay_cycle() {
+        // In free air, on `cycles % leave_obj_delay == 0`: sobject_types[leave_obj].Create
+        // at Ftoi(post-move pos) — the `-8` centre->top-left offset is sobject_create's.
+        let mut sobjects: Pool<SObject> = Pool::new(8);
+        let mut obj = fireball();
+        let mut level = bg_level(100, 100);
+        let out = run_leave_obj(&mut obj, &trail_nobject(0), &mut level, 8, &mut sobjects);
+        assert_eq!(out, NObjectOutcome::Keep);
+        assert_eq!(sobjects.len(), 1, "one trail sobject");
+        let s = *sobjects.get(0).expect("trail sobject in slot 0");
+        assert_eq!((s.id, s.x, s.y), (0, 51 - 8, 50 - 8), "at Ftoi(post-move pos) - 8");
+    }
+
+    #[test]
+    fn leave_obj_waits_for_its_delay_and_skips_a_bounce_tick() {
+        let mut sobjects: Pool<SObject> = Pool::new(8);
+        // Off the delay cycle: nothing.
+        let mut obj = fireball();
+        run_leave_obj(&mut obj, &trail_nobject(0), &mut bg_level(100, 100), 9, &mut sobjects);
+        assert!(sobjects.is_empty(), "9 % 4 != 0 -> no trail");
+        // A bounce this tick suppresses it (`!bounced`): rock from x = 52 — after the move
+        // to x = 51 the x-probe at 52 reflects vel.x.
+        let mut obj = fireball();
+        let mut level = level_with_wall(100, 100, 52);
+        run_leave_obj(&mut obj, &trail_nobject(50), &mut level, 8, &mut sobjects);
+        assert!(obj.vel.x < 0, "it did bounce");
+        assert!(sobjects.is_empty(), "bounced -> no trail");
     }
 }

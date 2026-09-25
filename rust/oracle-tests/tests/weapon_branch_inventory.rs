@@ -169,5 +169,30 @@ fn the_tc_facts_the_ports_rely_on() {
         if w.part_trail_obj >= 0 {
             assert!(w.part_trail_delay > 0, "{}: zero part_trail_delay", w.name);
         }
+        // The wobject driver runs `wobject_process` on a by-value copy. A damaging trail
+        // blast can set off a SECOND blast elsewhere (a chained BOOBY TRAP, a bonus), which
+        // in C++ nudges the live `this` (sobject.cpp:118-153); Rust would nudge the stale
+        // pool copy and lose it on write-back. Safe only while no weapon with a damaging
+        // obj trail is itself `affect_by_explosions` (4½c-0 review, design §4.7).
+        if w.obj_trail_type >= 0 && o.sobject_types[w.obj_trail_type as usize].damage > 0 {
+            assert!(
+                !w.affect_by_explosions,
+                "{}: a damaging obj trail on an explosion-affected weapon",
+                w.name
+            );
+        }
+    }
+    // The same stale-copy argument for the nobject `leave_obj` trail (nobject.cpp:133-138,
+    // sobject.cpp:155-186): a damaging trail must not ride an explosion-affected nobject.
+    for (i, t) in o.nobject_types.iter().enumerate() {
+        if t.leave_obj >= 0
+            && t.leave_obj_delay != 0
+            && o.sobject_types[t.leave_obj as usize].damage > 0
+        {
+            assert!(
+                !t.affect_by_explosions,
+                "nobject {i}: a damaging leave_obj trail on an explosion-affected nobject"
+            );
+        }
     }
 }

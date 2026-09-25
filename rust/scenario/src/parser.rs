@@ -27,6 +27,10 @@
 //! settings    <file>                             # Step 4½a-1; oracle-only setup sidecar — see
 //!                                                 # [`Scenario::settings`]. Excludes `worm`,
 //!                                                 # `weapon`, `game_mode`, `max_bonuses`, `render*`
+//! weapsel     <frame> <worm0_7bit> <worm1_7bit>  # Step 4½c; oracle-only, needs `settings`: the
+//!                                                 # weapon-selection phase input, sparse (absent
+//!                                                 # => 0); the LAST line's frame is the frame the
+//!                                                 # phase ends on — see [`Scenario::weapsel_end`]
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
@@ -77,6 +81,12 @@ pub struct Scenario {
     /// rejects `worm`/`weapon`/`game_mode`/`max_bonuses`/`render*`, and
     /// [`crate::load`] refuses it (design §7.1).
     pub settings: Option<String>,
+    /// Step-4½c `weapsel <frame> <worm0_7bit> <worm1_7bit>` — the weapon-selection phase's
+    /// sparse per-frame input (design §6.1). Oracle-only, legal only with `settings`. Present
+    /// => the phase runs (constructor + frames `0..=weapsel_end()`) before match tick 0; the
+    /// last line's frame is exactly the frame `ProcessFrame` returns true (the dumpers and the
+    /// Rust drivers check it). Empty on every pre-4½c scenario.
+    weapsel: HashMap<u32, (u32, u32)>,
     /// Sparse per-tick input overrides: `tick -> (worm0_7bit, worm1_7bit)`.
     inputs: HashMap<u32, (u32, u32)>,
     /// Per-slot weapon overrides: `slot -> weapon_name`.
@@ -120,6 +130,7 @@ impl Scenario {
         let mut game_mode: i32 = 0;
         let mut worms = Vec::new();
         let mut inputs = HashMap::new();
+        let mut weapsel: HashMap<u32, (u32, u32)> = HashMap::new();
         let mut weapons: HashMap<usize, String> = HashMap::new();
         let mut weapon_ammo: HashMap<usize, i32> = HashMap::new();
         let mut render_shadow = false;
@@ -254,6 +265,19 @@ impl Scenario {
                         return Err(format!("line {n}: duplicate input for tick {tick}"));
                     }
                 }
+                "weapsel" => {
+                    // Step 4½c: shaped like `input`; a frame is 0-based, the first ProcessFrame.
+                    expect_args(n, key, &nums, 3)?;
+                    let frame = parse_at(0)?;
+                    if frame < 0 {
+                        return Err(format!("line {n}: weapsel frame {frame} is negative"));
+                    }
+                    let w0 = parse_at(1)? as u32;
+                    let w1 = parse_at(2)? as u32;
+                    if weapsel.insert(frame as u32, (w0, w1)).is_some() {
+                        return Err(format!("line {n}: duplicate weapsel for frame {frame}"));
+                    }
+                }
                 "weapon" => {
                     // 2 args (slot, name) OR 3 args (slot, name, ammo). The optional
                     // 3rd token overrides the weapon type's default starting ammo —
@@ -299,6 +323,9 @@ impl Scenario {
                     .to_string(),
             );
         }
+        if !weapsel.is_empty() && settings.is_none() {
+            return Err("`weapsel` is oracle-only: it needs a `settings` directive".to_string());
+        }
 
         Ok(Scenario {
             seed: seed.ok_or("missing `seed`")?,
@@ -308,6 +335,7 @@ impl Scenario {
             game_mode,
             worms,
             settings,
+            weapsel,
             inputs,
             weapons,
             weapon_ammo,
@@ -323,6 +351,23 @@ impl Scenario {
     /// without an `input` override — the absence of a line *is* "no keys".
     pub fn input(&self, tick: u32, worm: usize) -> u32 {
         let (w0, w1) = self.inputs.get(&tick).copied().unwrap_or((0, 0));
+        match worm {
+            0 => w0,
+            1 => w1,
+            _ => 0,
+        }
+    }
+
+    /// The frame the weapon-selection phase ends on — the last `weapsel` line's frame — or
+    /// `None` when the scenario has no phase (design §6.1).
+    pub fn weapsel_end(&self) -> Option<u32> {
+        self.weapsel.keys().copied().max()
+    }
+
+    /// The raw `weapsel` word for `worm` (0 or 1) at `frame`; `0` when the frame has no line.
+    /// Callers mask it through `ControlState::unpack`, as for [`Scenario::input`].
+    pub fn weapsel_input(&self, frame: u32, worm: usize) -> u32 {
+        let (w0, w1) = self.weapsel.get(&frame).copied().unwrap_or((0, 0));
         match worm {
             0 => w0,
             1 => w1,
@@ -384,7 +429,8 @@ impl Scenario {
     /// result to an **identical** `Scenario` (round-trip identity — see the T0
     /// property test), covering every directive the parser *stores*. Emits the
     /// grammar documented at the top of this module (`seed`/`level`/`ticks`/
-    /// `max_bonuses`/`game_mode`/`worm`/`weapon`/`render_*`/`input`).
+    /// `max_bonuses`/`game_mode`/`settings`/`weapsel`/`worm`/`weapon`/`render_*`/`input`).
+    /// `weapsel` lines are NOT sparse: every stored frame is written, all-zero ones included.
     ///
     /// `input` lines are **sparse** (spec §3): only ticks whose word is nonzero
     /// for some worm are emitted, in ascending tick order — an all-zero tick
@@ -411,6 +457,14 @@ impl Scenario {
                 out.push_str(&format!("max_bonuses {}\n", self.max_bonuses));
                 out.push_str(&format!("game_mode {}\n", self.game_mode));
             }
+        }
+        // Step 4½c: every `weapsel` line, ascending — an all-zero line is kept (its presence
+        // opts in, and the last one marks the end frame).
+        let mut frames: Vec<u32> = self.weapsel.keys().copied().collect();
+        frames.sort_unstable();
+        for f in frames {
+            let (w0, w1) = self.weapsel[&f];
+            out.push_str(&format!("weapsel {f} {w0} {w1}\n"));
         }
         // Worms in stored order; `visible` back to 0/1.
         for w in &self.worms {
@@ -954,5 +1008,80 @@ input 10 127 64
         assert!(text.contains("settings a_setup.cfg\n"));
         assert!(!text.contains("game_mode") && !text.contains("max_bonuses"));
         assert_eq!(Scenario::parse(&text).unwrap(), s);
+    }
+
+    // ---- Step 4½c: the `weapsel` directive (design §6.1) ------------------------------
+
+    const WEAPSEL: &str = "\
+seed 1
+level Levels/render_stage.lev
+ticks 0
+settings s_setup.cfg
+weapsel 0 1 0
+# frame 1 is absent: both words 0
+weapsel 2 16 144
+";
+
+    #[test]
+    fn weapsel_lines_are_sparse_and_end_at_the_last_frame() {
+        let s = Scenario::parse(WEAPSEL).expect("parses");
+        assert_eq!(s.weapsel_end(), Some(2));
+        assert_eq!(
+            (s.weapsel_input(0, 0), s.weapsel_input(1, 0), s.weapsel_input(2, 1)),
+            (1, 0, 144)
+        );
+        assert_eq!(s.weapsel_input(9, 0), 0);
+        assert_eq!(
+            sim::state::ControlState::unpack(s.weapsel_input(2, 1)).pack(),
+            16,
+            "masked to 7 bits at use, like `input`"
+        );
+    }
+
+    #[test]
+    fn a_scenario_without_weapsel_has_no_phase() {
+        assert_eq!(Scenario::parse(SAMPLE).unwrap().weapsel_end(), None);
+        let settings_only = WEAPSEL
+            .lines()
+            .filter(|l| !l.starts_with("weapsel"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(Scenario::parse(&settings_only).unwrap().weapsel_end(), None);
+    }
+
+    #[test]
+    fn weapsel_is_oracle_only_it_needs_settings() {
+        let e = Scenario::parse(
+            "seed 1\nlevel a.lev\nticks 0\nworm 0 0 0 100 10 0 1\nworm 1 0 0 100 10 218 1\nweapsel 0 0 0\n",
+        )
+        .unwrap_err();
+        assert!(e.contains("weapsel") && e.contains("settings"), "{e}");
+    }
+
+    #[test]
+    fn weapsel_rejects_duplicates_bad_arity_and_negative_frames() {
+        for (bad, why) in [
+            ("weapsel 0 1 0\nweapsel 0 2 0\n", "duplicate"),
+            ("weapsel 0 1\n", "expects 3"),
+            ("weapsel 0 1 2 3\n", "expects 3"),
+            ("weapsel -1 0 0\n", "negative"),
+        ] {
+            let text = format!("seed 1\nlevel a.lev\nticks 0\nsettings s.cfg\n{bad}");
+            let e = Scenario::parse(&text).unwrap_err();
+            assert!(e.contains(why), "{bad:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn weapsel_round_trips_through_to_text_including_an_all_zero_line() {
+        let text = "seed 3\nlevel a.lev\nticks 5\nsettings s.cfg\nweapsel 4 0 0\nweapsel 1 8 0\ninput 2 16 0\n";
+        let s = Scenario::parse(text).unwrap();
+        let out = s.to_text();
+        let sel = out.find("settings s.cfg").unwrap();
+        let w1 = out.find("weapsel 1 8 0\n").expect("sorted");
+        let w4 = out.find("weapsel 4 0 0\n").expect("the all-zero end line is kept");
+        let inp = out.find("input 2 16 0").unwrap();
+        assert!(sel < w1 && w1 < w4 && w4 < inp, "{out}");
+        assert_eq!(Scenario::parse(&out).unwrap(), s);
     }
 }

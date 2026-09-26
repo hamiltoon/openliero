@@ -4,15 +4,20 @@
 //! boxes). C++ hands each a lambda capturing `gfx`; Rust tags each with a purpose, and the shell
 //! runs the continuation inside the overlay's update step (`ui::shell::Shell::frame`).
 
+use std::fmt;
+
 use assets::palette::Palette;
 use render::bitmap::{Bitmap, Pal32};
 use render::blit::{blit_bitmap, draw_rounded_box};
 use render::font::Font;
 use render::palette::pack_pal32;
-use scenario::build::BuildError;
-use sim::weapsel::WeapselError;
+use scenario::build::{self, BuildError};
+use scenario::settings::{MatchConfig, Settings};
+use sim::weapsel::{WeaponSelection, WeapselError};
 
 use super::KeyEvent;
+use super::main_menu::{MA_NEW_GAME, MA_RESUME_GAME};
+use super::selection::new_game_config;
 use crate::keys::{DK_BACKSPACE, DK_ESCAPE, DK_KP_ENTER, DK_RETURN};
 use crate::menu::ValueEntry;
 use crate::text::utf8_to_dos;
@@ -145,12 +150,71 @@ impl InputStringState {
     }
 }
 
-/// Why the shell refused a NEW GAME or a RESUME (design Q2, plan D5): T4 adds the check and the
-/// box texts.
+/// Why the shell refused a NEW GAME or a RESUME (design Q2, plan D5; Rust only). Its box text is
+/// `crate::text::refusal_text`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     Build(BuildError),
     Weapsel(WeapselError),
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refusal::Build(e) => e.fmt(f),
+            Refusal::Weapsel(e) => e.fmt(f),
+        }
+    }
+}
+
+/// What the shell tells `MainMenuState` so it can refuse a selection before its fade-out (plan
+/// T4 Step 5): whether the current match takes the menu's settings at RESUME (`Match::attached`,
+/// D7), the start options that shape NEW GAME, and the TC's weapon count.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RefusalGate {
+    pub attached: bool,
+    pub skip_selection: bool,
+    pub touch_only: bool,
+    pub n_weapons: usize,
+}
+
+impl RefusalGate {
+    /// The Rust-only refusal of main-menu item `selected` under `settings` (Q2, D5), or `None`.
+    ///
+    /// - NEW GAME: `build::validate_for_selection` (`build::validate` on the skip route), then
+    ///   `WeaponSelection::validate` over the selection config NEW GAME would build.
+    /// - RESUME of an attached match: `validate_for_selection`, whose first check is Holdazone. A
+    ///   detached match keeps the settings it started with, so nothing is checked.
+    /// - Anything else (QUIT): never refused.
+    pub fn refusal(&self, settings: &Settings, selected: i32) -> Option<Refusal> {
+        let cfg = MatchConfig {
+            settings: settings.clone(),
+            seed: 0,
+        };
+        match selected {
+            MA_NEW_GAME => {
+                let built = if self.skip_selection {
+                    build::validate(&cfg, self.n_weapons)
+                } else {
+                    build::validate_for_selection(&cfg, self.n_weapons)
+                };
+                if let Err(e) = built {
+                    return Some(Refusal::Build(e));
+                }
+                WeaponSelection::validate(
+                    self.n_weapons,
+                    2,
+                    &new_game_config(settings, self.touch_only),
+                )
+                .err()
+                .map(Refusal::Weapsel)
+            }
+            MA_RESUME_GAME if self.attached => build::validate_for_selection(&cfg, self.n_weapons)
+                .err()
+                .map(Refusal::Build),
+            _ => None,
+        }
+    }
 }
 
 /// What an `InfoBoxState` reports. Neither e-1 purpose has an `on_dismiss` (4½e-2's

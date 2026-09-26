@@ -7,8 +7,11 @@ use assets::object::{Objects, Weapon};
 use assets::palette::Palette;
 use assets::sprite::Tga;
 use assets::tc::TcConfig;
+use scenario::build::BuildError;
+use sim::weapsel::WeapselError;
 
 use crate::menu::MenuHooks;
+use crate::shell::overlay::Refusal;
 
 /// `Texts::game_modes` (`common.cpp:206-209`), indexed by `Settings::game_mode`.
 pub const GAME_MODES: [&str; 4] = [
@@ -22,6 +25,21 @@ pub const ONOFF: [&str; 2] = ["OFF", "ON"];
 /// `Texts::weap_states` (`common.cpp:222-224`), indexed by a `Settings::weap_table` entry: the
 /// WEAPON OPTIONS values (Step 4½e-1).
 pub const WEAP_STATES: [&str; 3] = ["Menu", "Bonus", "Banned"];
+
+/// The Rust-only refusal boxes' texts (plan D5; Q2), drawn at (160, 100) without clearing. A NUL
+/// breaks the line, as in the TC's own texts. Zero enabled weapons reuses the TC's `NoWeaps`.
+pub fn refusal_text(r: &Refusal, tc: &UiTc) -> String {
+    match r {
+        Refusal::Build(BuildError::HoldazoneUnsupported) => {
+            "HOLDAZONE IS NOT\0SUPPORTED YET".into()
+        }
+        Refusal::Build(BuildError::AsymmetricHealth { .. }) => {
+            "BOTH PLAYERS NEED\0THE SAME HEALTH".into()
+        }
+        Refusal::Weapsel(WeapselError::NoWeaponsEnabled) => tc.no_weaps.clone(),
+        _ => "THIS SETUP CANNOT\0BE PLAYED YET".into(),
+    }
+}
 
 /// `Utf8ToDos` (`text.cpp:99-118`; plan fact 7): ONE whole `SDL_EVENT_TEXT_INPUT` string to one
 /// byte. A 1-byte string is that byte; the six two-byte sequences å ä ö Å Ä Ö are CP437
@@ -300,5 +318,42 @@ mod tests {
         );
         let small = Tga::load(&scenario::assets::read_asset(root, "sprites/small.tga")).unwrap();
         assert_eq!(tc.exepal, small.palette);
+    }
+
+    #[test]
+    fn the_refusal_boxes_carry_the_d5_texts() {
+        use crate::shell::overlay::Refusal;
+        let tc = UiTc::load(std::path::Path::new(scenario::paths::TC_ROOT));
+        let t = |r: Refusal| refusal_text(&r, &tc);
+        assert_eq!(
+            t(Refusal::Build(BuildError::HoldazoneUnsupported)),
+            "HOLDAZONE IS NOT\0SUPPORTED YET"
+        );
+        assert_eq!(
+            t(Refusal::Build(BuildError::AsymmetricHealth {
+                p1: 100,
+                p2: 50
+            })),
+            "BOTH PLAYERS NEED\0THE SAME HEALTH"
+        );
+        assert_eq!(
+            t(Refusal::Weapsel(WeapselError::NoWeaponsEnabled)),
+            tc.no_weaps
+        );
+        for r in [
+            Refusal::Build(BuildError::InvalidBloodParticleMax(0)),
+            Refusal::Build(BuildError::InvalidWeapon {
+                worm: 0,
+                slot: 1,
+                value: 41,
+            }),
+            Refusal::Weapsel(WeapselError::InvalidPick {
+                worm: 1,
+                slot: 0,
+                value: 41,
+            }),
+        ] {
+            assert_eq!(t(r), "THIS SETUP CANNOT\0BE PLAYED YET");
+        }
     }
 }

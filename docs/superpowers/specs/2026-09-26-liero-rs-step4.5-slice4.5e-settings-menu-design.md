@@ -1,6 +1,6 @@
 # Step 4½, Slice 4½e — the settings menu, weapon options, the level selector and setup files: design
 
-Status: **DESIGN** · 2026-09-26 · branch `claude/cpp-oracle-vcpkg-assets-chcwcm` (on `liero-rs-step-4-5`; 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅ landed)
+Status: **DESIGN — rulings in §14** · 2026-09-26 · branch `claude/cpp-oracle-vcpkg-assets-chcwcm` (on `liero-rs-step-4-5`; 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅ landed)
 Part of: `2026-09-10-liero-rs-step4.5-game-shell-overview.md` (the 4½e bullet, §4½h, §Deferrals, open Q5/Q6; cited **overview**)
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` §1–§5 (cited **cpp-map**) and
 `2026-09-10-liero-rs-step4.5-rust-baseline-map.md` (cited **rust-map**)
@@ -863,3 +863,14 @@ phone?**
 - **B:** Also put `modern_test` in the web build (+1.2 MB before compression).
 - **C:** Add the original Liero level pack. That needs a licence check first and would be a separate follow-up, not
   part of 4½e.
+
+## 14. Rulings (John, 2026-09-26)
+
+All six recommendations were accepted:
+
+- **Q1 → A, two parts.** 4½e-1 (settings menu, weapon options, number entry, `liero.cfg` load/save, small-text labels, live settings on RESUME, G3) and 4½e-2 (file listing, level selector, SAVE SETUP AS… / LOAD SETUP, the wasm catalogue), each with its own milestone, PR and preview.
+- **Q2 → A.** Starting or resuming a Holdazone match shows a "HOLDAZONE IS NOT SUPPORTED YET" box and stays in the menu; the settings menu itself is unchanged from C++.
+- **Q3 → A.** Desktop Rust reads and writes the same config root as C++ OpenLiero (`paths::Resolve` semantics).
+- **Q4 → A.** Fix the shipped-level bug: a picked level is played. This is the one intended difference from C++, and the oracle case that would show it is documented rather than gated.
+- **Q5 → A.** On a phone, a text box opens the device keyboard; FIRE confirms and MENU cancels.
+- **Q6 → A.** Today's level set: RANDOM, the 5 test levels on desktop, the 4 small ones on the web.

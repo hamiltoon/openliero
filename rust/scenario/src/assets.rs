@@ -26,6 +26,43 @@ pub fn read_asset(tc_root: &Path, rel: &str) -> Vec<u8> {
     std::fs::read(tc_root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
+/// [`read_asset`] that reports a miss instead of panicking (Step 4½e-1): the level a settings
+/// file names may be absent (`ui::shell::level_path`'s TC-relative rule, fact 22).
+///
+/// Native impl: `std::fs::read(tc_root.join(rel)).ok()`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn try_read_asset(tc_root: &Path, rel: &str) -> Option<Vec<u8>> {
+    std::fs::read(tc_root.join(rel)).ok()
+}
+
+/// The shipped setups, embedded (Step 4½e-1, plan D11): the browser's config store carries them
+/// in its read-only system layer (`game::config`), keyed as config paths, so `liero.cfg` loads
+/// at boot as it does from `data/` natively. About 2 KB each; compiled on every target so the
+/// native tests pin them. The level catalogue joins them in 4½e-2.
+pub static EMBEDDED_SETUPS: &[(&str, &[u8])] = &[
+    (
+        "Setups/liero.cfg",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Setups/liero.cfg"
+        )),
+    ),
+    (
+        "Setups/orbmit.cfg",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Setups/orbmit.cfg"
+        )),
+    ),
+];
+
+/// wasm [`read_asset`]: the embedded set's [`try_read_asset`], panicking on a miss (a bug: the
+/// key set is build-time-known).
+#[cfg(target_arch = "wasm32")]
+pub fn read_asset(tc_root: &Path, rel: &str) -> Vec<u8> {
+    try_read_asset(tc_root, rel).unwrap_or_else(|| panic!("wasm embed: no asset {rel}"))
+}
+
 /// wasm impl (Slice 3f T2; `sounds/` added Slice 4c T5): the browser has no
 /// filesystem, so the curated TC set is embedded in the binary at compile time
 /// and `rel` is keyed into it. The set is exactly what [`crate::loader::load`]
@@ -36,9 +73,9 @@ pub fn read_asset(tc_root: &Path, rel: &str) -> Vec<u8> {
 /// and `sounds/` (31 WAVs, ~505 KB raw — the whole dir, not curated to the demo
 /// scenario's reachable set, so a future live-wasm build stays correct without
 /// re-touching this file, design §8 "wasm embed decision"). The unused big
-/// levels are still deliberately excluded. `tc_root` is ignored. A miss
-/// `panic!`s — the key set is build-time-known, so a miss is a bug, mirroring
-/// the native `read {rel}: {e}`.
+/// levels are still deliberately excluded. `tc_root` is ignored. A miss is
+/// `None` (Step 4½e-1); [`read_asset`] turns it into the `panic!` — the key set is
+/// build-time-known, so a miss there is a bug, mirroring the native `read {rel}: {e}`.
 ///
 /// Keying: `include_dir!` indexes each subtree relative to *its own* root, so the
 /// stored key for `sprites/small.tga` is `small.tga`. We strip the leading
@@ -46,7 +83,7 @@ pub fn read_asset(tc_root: &Path, rel: &str) -> Vec<u8> {
 /// `Dir::get_file`, so the one source of truth — the loader's `rel` — drives both
 /// branches (verified against include_dir 0.7 `Dir::get_file`/`File::contents`).
 #[cfg(target_arch = "wasm32")]
-pub fn read_asset(_tc_root: &Path, rel: &str) -> Vec<u8> {
+pub fn try_read_asset(_tc_root: &Path, rel: &str) -> Option<Vec<u8>> {
     use include_dir::{include_dir, Dir};
 
     // Curated subtrees (whole dirs: object-config ids come from `tc.types`).
@@ -66,18 +103,29 @@ pub fn read_asset(_tc_root: &Path, rel: &str) -> Vec<u8> {
         "/../../data/TC/openliero/tc.cfg"
     ));
     // The demo level the shipped `blood` scenario references (`level` line):
-    // `Levels/render_stage.lev`. The other big levels are NOT embedded.
+    // `Levels/render_stage.lev`, plus the other small stock levels a PR preview
+    // may pick with `?level=` (`game::web_params::LEVELS`). `modern_test.lev`
+    // (1.2 MB) is NOT embedded.
     const DEMO_LEVEL_REL: &str = "Levels/render_stage.lev";
     static DEMO_LEVEL: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../data/TC/openliero/Levels/render_stage.lev"
     ));
+    static WATER_LEVEL: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/TC/openliero/Levels/water_stage.lev"
+    ));
+    static SHADOW_LEVEL: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/TC/openliero/Levels/see_shadow_test.lev"
+    ));
+    static FALL_LEVEL: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/TC/openliero/Levels/physics_fall_test.lev"
+    ));
 
-    let from_dir = |dir: &Dir<'_>, key: &str| -> Vec<u8> {
-        dir.get_file(key)
-            .unwrap_or_else(|| panic!("wasm embed: no asset {rel}"))
-            .contents()
-            .to_vec()
+    let from_dir = |dir: &Dir<'_>, key: &str| -> Option<Vec<u8>> {
+        Some(dir.get_file(key)?.contents().to_vec())
     };
 
     if let Some(key) = rel.strip_prefix("sprites/") {
@@ -95,9 +143,56 @@ pub fn read_asset(_tc_root: &Path, rel: &str) -> Vec<u8> {
     if let Some(key) = rel.strip_prefix("sounds/") {
         return from_dir(&SOUNDS, key);
     }
-    match rel {
-        "tc.cfg" => TC_CFG.to_vec(),
-        DEMO_LEVEL_REL => DEMO_LEVEL.to_vec(),
-        _ => panic!("wasm embed: no asset {rel}"),
+    let bytes: &[u8] = match rel {
+        "tc.cfg" => TC_CFG,
+        DEMO_LEVEL_REL => DEMO_LEVEL,
+        "Levels/water_stage.lev" => WATER_LEVEL,
+        "Levels/see_shadow_test.lev" => SHADOW_LEVEL,
+        "Levels/physics_fall_test.lev" => FALL_LEVEL,
+        _ => return None,
+    };
+    Some(bytes.to_vec())
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
+
+    #[test]
+    fn try_read_asset_hits_and_misses() {
+        let root = Path::new(TC_ROOT);
+        let hit = try_read_asset(root, "Levels/water_stage.lev").expect("a shipped level");
+        assert_eq!(hit, read_asset(root, "Levels/water_stage.lev"));
+        assert!(!hit.is_empty());
+        assert_eq!(try_read_asset(root, "Levels/no_such_level.lev"), None);
+        assert_eq!(
+            try_read_asset(root, "sprites"),
+            None,
+            "a directory is not a file"
+        );
+    }
+
+    #[test]
+    fn the_embedded_setups_are_the_shipped_files_and_parse() {
+        let data = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data");
+        let rels: Vec<&str> = EMBEDDED_SETUPS.iter().map(|(rel, _)| *rel).collect();
+        assert_eq!(rels, ["Setups/liero.cfg", "Setups/orbmit.cfg"]);
+        for (rel, bytes) in EMBEDDED_SETUPS {
+            assert_eq!(
+                *bytes,
+                std::fs::read(Path::new(data).join(rel)).unwrap().as_slice(),
+                "{rel}"
+            );
+            let text = std::str::from_utf8(bytes).expect("UTF-8");
+            crate::settings_toml::settings_from_toml(text).expect("a shipped setup parses");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "read Levels/no_such_level.lev")]
+    fn read_asset_still_panics_with_the_read_text() {
+        let _ = read_asset(Path::new(TC_ROOT), "Levels/no_such_level.lev");
     }
 }

@@ -2,16 +2,103 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Liero-rs — 3f wasm demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <title>Liero-rs</title>
     <style>
       /* Dark backdrop so the auto-appended canvas is easy to spot. Bevy's
          winit canvas is created and appended to <body> at run time (the game's
          WindowPlugin leaves `Window.canvas = None`, so we do NOT hard-code a
          canvas id here — a bare page is exactly what bevy_winit expects). */
-      html, body { margin: 0; height: 100%; background: #101014; }
-      body { display: flex; align-items: center; justify-content: center; }
-      canvas { image-rendering: pixelated; }
+      html, body { margin: 0; height: 100%; background: #101014; color: #b8b8c8;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      body { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+      /* Fit the 960x600 canvas to the screen (winit sets fixed pixel sizes inline,
+         hence !important): as wide as possible without overflowing either axis. */
+      canvas { image-rendering: pixelated; outline: none; touch-action: none;
+        width: min(100vw, 960px, 160vh) !important; height: auto !important;
+        aspect-ratio: 8 / 5; }
+      @supports (height: 100dvh) {
+        canvas { width: min(100vw, 960px, 160dvh) !important; }
+      }
+      /* The game keeps its size; on a short window the help scrolls in the space left below it. */
+      canvas { flex-shrink: 0; }
+      #help { order: 2; margin-top: 12px; max-width: 960px; padding: 0 16px; text-align: center;
+        min-height: 0; overflow-y: auto; }
+      #help kbd { color: #fff; }
+      #help .dim { color: #707080; }
+      #status { order: 1; margin-bottom: 8px; color: #707080; }
+
+      /* On-screen controls (touch devices, or ?touch=1). They set window.lieroTouch,
+         which the game reads once per tick for player 1 (rust/game/src/touch.rs). */
+      #touch { display: none; position: fixed; inset: 0; pointer-events: none; z-index: 10;
+        -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+      body.touch #touch { display: block; }
+      body.touch #help { display: none; }
+      /* iOS: double-tap-to-zoom fires on any element that allows it, including the
+         page behind the buttons, so switch every default touch gesture off. */
+      html.touch, body.touch, body.touch * { touch-action: none; }
+      /* Portrait phone: the game at the top (below the hint and MENU), the thumbs' space below it. */
+      @media (orientation: portrait) {
+        body.touch { justify-content: flex-start; padding-top: 50px; box-sizing: border-box; }
+      }
+      #touch .ctl { position: absolute; pointer-events: auto; touch-action: none;
+        border: 2px solid rgba(255, 255, 255, 0.35); background: rgba(255, 255, 255, 0.10);
+        color: rgba(255, 255, 255, 0.85); font: bold 13px/1 ui-monospace, Menlo, monospace;
+        display: flex; align-items: center; justify-content: center; }
+      #touch .ctl.on { background: rgba(255, 255, 255, 0.35); }
+      #pad { left: max(16px, env(safe-area-inset-left)); bottom: max(20px, env(safe-area-inset-bottom));
+        width: 150px; height: 150px; border-radius: 50%; }
+      #knob { width: 56px; height: 56px; border-radius: 50%; background: rgba(255, 255, 255, 0.35);
+        transform: translate(0, 0); pointer-events: none; }
+      #btns { position: absolute; right: max(16px, env(safe-area-inset-right));
+        bottom: max(20px, env(safe-area-inset-bottom)); width: 180px; height: 170px; }
+      #btns .ctl { border-radius: 50%; }
+      #b-fire { right: 0; bottom: 40px; width: 84px; height: 84px; }
+      #b-jump { right: 96px; bottom: 0; width: 64px; height: 64px; }
+      #b-change { right: 96px; bottom: 84px; width: 64px; height: 64px; font-size: 11px; }
+      #b-dig { right: 10px; bottom: 136px; width: 52px; height: 34px; border-radius: 17px;
+        font-size: 11px; }
+      /* Step 4½d: MENU is Esc (pause to the main menu). Top right: above the game's top-right
+         corner in portrait, in the right gutter above the buttons in landscape. */
+      #b-menu { top: max(8px, env(safe-area-inset-top)); right: max(8px, env(safe-area-inset-right));
+        width: 64px; height: 34px; border-radius: 17px; font-size: 11px; }
+      /* Step 4½d: QUIT TO OS in the browser stops on the black frame (like the C++ web build);
+         this overlay reloads the page. */
+      #quit { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 16px;
+        text-align: center; padding: 16px; box-sizing: border-box; }
+      #quit[hidden] { display: none; }
+      /* The hint stays out of the canvas's top centre, where the weapon-selection title is:
+         one short line above the game in portrait, a small block in the top-left gutter
+         (beside the game, above the pad) in landscape. */
+      #touch-hint { position: absolute; top: max(6px, env(safe-area-inset-top)); left: 0; right: 0;
+        text-align: center; color: #707080; font-size: 11px; }
+      #touch-hint span + span::before { content: ' · '; }
+      @media (orientation: portrait) {
+        #touch-hint { left: max(8px, env(safe-area-inset-left)); right: 80px; top: max(16px, env(safe-area-inset-top)); }
+      }
+      @media (orientation: landscape) {
+        #touch-hint { left: max(8px, env(safe-area-inset-left)); right: auto; width: 96px;
+          text-align: left; line-height: 1.5; }
+        #touch-hint span { display: block; }
+        #touch-hint span + span::before { content: none; }
+      }
+      /* Step 4½e-1 (Q5): a number box on a phone takes the device keyboard through this field.
+         It stays in the layout (a hidden element cannot take focus), invisible; 16px keeps iOS
+         from zooming in on focus. */
+      #text-form { position: fixed; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden;
+        opacity: 0; margin: 0; }
+      #text-entry { font-size: 16px; width: 100px; }
+      /* iOS raises its keyboard only from a real tap, so the box also offers a button: below the
+         game in portrait, in the left gutter under the hint in landscape. */
+      #tap-type { pointer-events: auto; left: 50%; transform: translateX(-50%);
+        top: calc(62px + min(100vw, 960px) * 0.625); width: 150px; height: 40px; border-radius: 20px;
+        font-size: 12px; }
+      #tap-type[hidden] { display: none; }
+      @media (orientation: landscape) {
+        #tap-type { left: max(8px, env(safe-area-inset-left)); transform: none; top: 130px;
+          width: 96px; height: 48px; }
+      }
     </style>
   </head>
   <body>
@@ -20,6 +107,20 @@
       emscripten/gh-pages analog). This file is the ONLY tracked artifact in
       web/; the sibling `game.js` + `game_bg.wasm` are GENERATED (gitignored)
       by wasm-bindgen and must exist next to this page before it will load.
+
+      Since the PR-preview build the page plays the LIVE default match on the
+      keyboard; the URL picks the match (game::web_params):
+      Since Step 4½d it boots the C++ main menu (ui::shell); NEW GAME starts like
+      C++ NEW GAME (a generated level, a fresh seed) and opens on weapon selection.
+      weapons/level/seed skip the menu and go straight into a match.
+        ?weapons=MISSILE,LASER,BIG%20NUKE   up to five slots, both worms;
+                                            skips weapon selection
+        ?level=water_stage                  a stock level instead of a generated
+                                            one: render_stage | water_stage |
+                                            see_shadow_test | physics_fall_test
+        ?seed=7                             fix the match seed (default: fresh)
+        ?menu=1                             show the menu even with the above
+        ?demo                               the scripted `blood` demo instead
 
       ── Dev loop (one command, no static bundle, no hand-written page) ──
         cargo run -p game --target wasm32-unknown-unknown   # run from rust/
@@ -31,10 +132,12 @@
         cargo --config 'target.wasm32-unknown-unknown.runner="wasm-server-runner"'
           run --manifest-path rust/Cargo.toml -p game --target wasm32-unknown-unknown)
 
-      ── Static bundle (this page) ──
-        cargo build -p game --release --target wasm32-unknown-unknown
-        wasm-bindgen --out-dir web --target web \
-          target/wasm32-unknown-unknown/release/game.wasm
+      ── Static bundle (this page; what .github/workflows/preview.yml deploys) ──
+        cargo build --manifest-path rust/Cargo.toml -p game \
+          --profile wasm-release --target wasm32-unknown-unknown
+        wasm-bindgen --out-dir web --out-name game --target web \
+          --remove-name-section --remove-producers-section \
+          rust/target/wasm32-unknown-unknown/wasm-release/game.wasm
         # then serve web/ with any static server, e.g.:
         python3 -m http.server --directory web 8080
       Install once (version MUST match the wasm-bindgen dep in Cargo.lock):
@@ -46,9 +149,322 @@
       game binary), so there is no canvas element to wire up here — just load
       and init the glue.
     -->
+    <div id="status">Loading…</div>
+    <div id="quit" hidden>Quit — tap or press a key to play again</div>
+    <div id="touch" aria-hidden="true">
+      <div id="touch-hint"></div>
+      <div id="tap-type" class="ctl" hidden>TAP TO TYPE</div>
+      <div id="b-menu" class="ctl" data-bit="menu">MENU</div>
+      <div id="pad" class="ctl"><div id="knob"></div></div>
+      <div id="btns">
+        <div id="b-fire" class="ctl" data-bit="fire">FIRE</div>
+        <div id="b-jump" class="ctl" data-bit="jump">JUMP</div>
+        <div id="b-change" class="ctl" data-bit="change">WEAPON</div>
+        <div id="b-dig" class="ctl" data-bit="dig">DIG</div>
+      </div>
+    </div>
+    <form id="text-form" autocomplete="off" aria-hidden="true">
+      <input id="text-entry" type="text" inputmode="numeric" autocomplete="off" autocorrect="off"
+        autocapitalize="off" spellcheck="false" enterkeyhint="done" tabindex="-1" />
+    </form>
+    <div id="help">
+      Click the game to give it the keyboard.
+      <br />
+      <b>Main menu</b>: <kbd>↑</kbd>/<kbd>↓</kbd> (or P1 aim) pick · <kbd>Enter</kbd> (or fire) selects ·
+      <kbd>Esc</kbd> (or jump) goes to QUIT TO OS · NEW GAME starts weapon selection; <kbd>Esc</kbd> in a
+      match pauses to the menu (RESUME GAME)
+      <br />
+      <b>Match setup</b>: <kbd>F7</kbd> (or <kbd>Enter</kbd> on MATCH SETUP) moves the cursor into
+      the settings · <kbd>←</kbd>/<kbd>→</kbd> change a value · <kbd>Enter</kbd> on a number types a
+      new one (digits, then <kbd>Enter</kbd>; <kbd>Esc</kbd> cancels) · WEAPON OPTIONS:
+      <kbd>←</kbd>/<kbd>→</kbd> makes a weapon Menu / Bonus / Banned, <kbd>Esc</kbd> closes ·
+      <kbd>Esc</kbd> back to the main menu · edits reach a paused match at RESUME GAME
+      <br />
+      <b>Player 1</b>: <kbd>R</kbd>/<kbd>F</kbd> aim · <kbd>D</kbd>/<kbd>G</kbd> move ·
+      <kbd>Left Ctrl</kbd> fire · hold <kbd>Left Shift</kbd> and tap <kbd>D</kbd>/<kbd>G</kbd> to
+      change weapon · <kbd>Left Alt</kbd> jump
+      <br />
+      <b>Player 2</b>: <kbd>↑</kbd>/<kbd>↓</kbd> aim · <kbd>←</kbd>/<kbd>→</kbd> move ·
+      <kbd>Right Ctrl</kbd> fire · hold <kbd>Right Alt</kbd> and tap <kbd>←</kbd>/<kbd>→</kbd> to
+      change weapon · <kbd>Right Shift</kbd> jump
+      <br />
+      <b>Phone</b>: tap WEAPON for the next weapon (or hold it and tap the pad ←/→ as on a
+      keyboard; WEAPON + JUMP throws the rope)
+      <br />
+      <b>Weapon selection</b> first, both players: aim up/down picks a line · move left/right
+      changes the weapon · fire on <i>Randomize</i> re-rolls all five · fire on <i>DONE!</i>
+      when ready
+      <br />
+      Dig: hold left + right · <kbd>F5</kbd> restarts a match (back to weapon selection)
+      <br />
+      <span class="dim">
+        URL (<code>weapons</code>/<code>level</code>/<code>seed</code> skip the menu):
+        <code>?weapons=MISSILE,LASER,BIG%20NUKE</code> (skips weapon selection) ·
+        <code>&amp;level=water_stage</code> instead of a generated level
+        (render_stage, water_stage, see_shadow_test, physics_fall_test) ·
+        <code>&amp;seed=7</code> fixes the seed · <code>?menu=1</code> shows the menu even with
+        weapons/level/seed · <code>?demo</code> for the scripted demo ·
+        <code>?touch=1</code> for on-screen controls
+      </span>
+      <br />
+      <span class="dim">Settings are kept until you reload the page.</span>
+    </div>
     <script type="module">
       import init from './game.js';
-      init();
+      const status = document.getElementById('status');
+
+      // --- Audio: browsers keep a new AudioContext suspended until a user
+      // gesture, and iOS only resumes one from inside a gesture handler. Track
+      // the contexts the game creates and resume them on the first tap/key.
+      const audioContexts = [];
+      const BaseAudioContext = window.AudioContext || window.webkitAudioContext;
+      if (BaseAudioContext) {
+        window.AudioContext = class extends BaseAudioContext {
+          constructor(...args) {
+            super(...args);
+            audioContexts.push(this);
+          }
+        };
+      }
+      const resumeAudio = () => {
+        for (const ctx of audioContexts) {
+          if (ctx.state !== 'running') ctx.resume().catch(() => {});
+        }
+      };
+      for (const ev of ['pointerdown', 'keydown', 'touchend']) {
+        window.addEventListener(ev, resumeAudio, { capture: true, passive: true });
+      }
+
+      // --- On-screen controls. Bit layout = rust/game/src/touch.rs TOUCH_* (MENU: Esc, 4½d).
+      const TOUCH = { up: 1, down: 2, left: 4, right: 8, fire: 16, change: 32, jump: 64, dig: 128,
+        menu: 256 };
+      window.lieroTouch = 0;
+      const params = new URLSearchParams(location.search);
+      const touchParam = params.get('touch');
+      const wantTouch = touchParam === '1' ||
+        (touchParam !== '0' && (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window));
+      // Step 4½c: a touch-only page has no keyboard for player 2, so the game makes player 2 a
+      // bot that is ready at once in weapon selection (rust/game/src/selection.rs). ?touch=1
+      // emulates a phone, so it counts as touch-only; a touch laptop (a fine pointer too) does not.
+      window.lieroTouchOnly = wantTouch &&
+        (touchParam === '1' || !matchMedia('(any-pointer: fine)').matches);
+      if (wantTouch) setUpTouch();
+
+      function setUpTouch() {
+        document.body.classList.add('touch');
+        document.documentElement.classList.add('touch');
+        const held = new Map(); // pointerId -> bits held by that finger
+        const update = () => {
+          let mask = 0;
+          for (const bits of held.values()) mask |= bits;
+          window.lieroTouch = mask;
+          for (const el of document.querySelectorAll('#touch .ctl[data-bit]')) {
+            el.classList.toggle('on', (mask & TOUCH[el.dataset.bit]) !== 0);
+          }
+        };
+        const release = (e) => {
+          held.delete(e.pointerId);
+          update();
+        };
+
+        // Pad: the finger's offset from the centre picks the directions (with a
+        // dead zone), so sliding between directions and diagonals just works.
+        const pad = document.getElementById('pad');
+        const knob = document.getElementById('knob');
+        const padMove = (e) => {
+          const r = pad.getBoundingClientRect();
+          const radius = r.width / 2;
+          let dx = (e.clientX - (r.left + radius)) / radius;
+          let dy = (e.clientY - (r.top + radius)) / radius;
+          const dead = 0.3;
+          let bits = 0;
+          if (dx < -dead) bits |= TOUCH.left;
+          if (dx > dead) bits |= TOUCH.right;
+          if (dy < -dead) bits |= TOUCH.up;
+          if (dy > dead) bits |= TOUCH.down;
+          held.set(e.pointerId, bits);
+          const len = Math.hypot(dx, dy);
+          if (len > 1) { dx /= len; dy /= len; }
+          knob.style.transform = `translate(${dx * radius * 0.6}px, ${dy * radius * 0.6}px)`;
+          update();
+        };
+        // Real fingers use Touch Events, not pointer events: iOS Safari cancels a held finger's
+        // pointer (pointercancel) when a second finger lands and it guesses a pinch, so WEAPON
+        // dropped the moment the thumb touched the pad (John: the weapon name flashed but never
+        // changed). Touch Events with preventDefault on touchstart never start a gesture, and a
+        // touch keeps reporting to the element it started on. Pointer events remain for a mouse
+        // (?touch=1 on a desktop); `held` keys the two apart ('t' + touch id / 'p' + pointer id).
+        const fingers = 'ontouchstart' in window;
+        const isFinger = (e) => fingers && e.pointerType === 'touch';
+        const padAt = (key, x, y) => {
+          padMove({ pointerId: key, clientX: x, clientY: y });
+        };
+        const padRelease = (key) => {
+          knob.style.transform = 'translate(0, 0)';
+          release({ pointerId: key });
+        };
+        pad.addEventListener('pointerdown', (e) => {
+          if (isFinger(e)) return;
+          e.preventDefault();
+          pad.setPointerCapture(e.pointerId);
+          padAt('p' + e.pointerId, e.clientX, e.clientY);
+        });
+        pad.addEventListener('pointermove', (e) => {
+          if (!isFinger(e) && held.has('p' + e.pointerId)) padAt('p' + e.pointerId, e.clientX, e.clientY);
+        });
+        for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+          pad.addEventListener(ev, (e) => {
+            if (!isFinger(e)) padRelease('p' + e.pointerId);
+          });
+        }
+        pad.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          for (const t of e.changedTouches) padAt('t' + t.identifier, t.clientX, t.clientY);
+        }, { passive: false });
+        pad.addEventListener('touchmove', (e) => {
+          e.preventDefault();
+          for (const t of e.changedTouches) {
+            if (held.has('t' + t.identifier)) padAt('t' + t.identifier, t.clientX, t.clientY);
+          }
+        }, { passive: false });
+        for (const ev of ['touchend', 'touchcancel']) {
+          pad.addEventListener(ev, (e) => {
+            e.preventDefault();
+            for (const t of e.changedTouches) padRelease('t' + t.identifier);
+          }, { passive: false });
+        }
+
+        // Buttons: held while the finger that pressed them is down.
+        for (const el of document.querySelectorAll('#touch .ctl[data-bit]')) {
+          const bit = TOUCH[el.dataset.bit];
+          el.addEventListener('pointerdown', (e) => {
+            if (isFinger(e)) return;
+            e.preventDefault();
+            el.setPointerCapture(e.pointerId);
+            held.set('p' + e.pointerId, bit);
+            update();
+          });
+          for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+            el.addEventListener(ev, (e) => {
+              if (!isFinger(e)) release({ pointerId: 'p' + e.pointerId });
+            });
+          }
+          el.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            for (const t of e.changedTouches) held.set('t' + t.identifier, bit);
+            update();
+          }, { passive: false });
+          for (const ev of ['touchend', 'touchcancel']) {
+            el.addEventListener(ev, (e) => {
+              e.preventDefault();
+              for (const t of e.changedTouches) release({ pointerId: 't' + t.identifier });
+            }, { passive: false });
+          }
+        }
+
+        // No page scrolling, zooming or long-press menus while playing. Cancelling
+        // touchend stops iOS's double-tap zoom (fast FIRE taps); the controls use
+        // pointer events, so nothing here needs the synthesized click.
+        for (const ev of ['touchmove', 'touchend', 'dblclick', 'gesturestart', 'contextmenu']) {
+          document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+        }
+        // Release everything if the page loses focus mid-press.
+        window.addEventListener('blur', () => {
+          held.clear();
+          update();
+        });
+      }
+      // --- Step 4½d: the page follows the game's phase (window.lieroPhase: menu | text (4½e-1) |
+      // weapsel | game | quit). The touch hint changes with it, and QUIT (the game stops on its black
+      // frame, like the C++ web build) shows an overlay that reloads the page.
+      const HINTS = {
+        menu: ['↑↓ pick', '←→ change', 'FIRE selects', 'MATCH SETUP: rules', 'JUMP: back'],
+        text: ['Type, FIRE = OK', 'MENU = cancel'],
+        weapsel: ['Pick ↑↓ ←→', 'FIRE on DONE!', 'You: blue worm', 'P2: a bot'],
+        game: ['MENU pauses', 'Tap WEAPON: next weapon', 'You: blue worm'],
+      };
+      const hint = document.getElementById('touch-hint');
+      const quit = document.getElementById('quit');
+
+      // --- Step 4½e-1 (Q5, plan D9): while a number box is up (phase "text") on a touch page,
+      // the hidden field takes the device keyboard. It holds a two-space sentinel: what is typed
+      // after it goes to the game as text, a deletion into it as Backspace, and the keyboard's
+      // Enter/Done as Return; then the sentinel is restored. The game drains window.lieroText
+      // once per tick (rust/game/src/touch.rs page_text_events). FIRE confirms and MENU cancels
+      // in the game itself. Android raises the keyboard on focus(); iOS only from a real tap,
+      // hence TAP TO TYPE.
+      window.lieroText = [];
+      const SENTINEL = '  ';
+      const entry = document.getElementById('text-entry');
+      const tapType = document.getElementById('tap-type');
+      const resetEntry = () => {
+        entry.value = SENTINEL;
+        try { entry.setSelectionRange(SENTINEL.length, SENTINEL.length); } catch (_) {}
+      };
+      const focusEntry = () => {
+        resetEntry();
+        entry.focus({ preventScroll: true });
+      };
+      entry.addEventListener('input', () => {
+        const v = entry.value;
+        let keep = 0;
+        while (keep < SENTINEL.length && keep < v.length && v[keep] === SENTINEL[keep]) keep++;
+        for (let i = keep; i < SENTINEL.length; i++) window.lieroText.push({ k: 'Backspace' });
+        for (const ch of v.slice(keep)) window.lieroText.push(ch);
+        resetEntry();
+      });
+      document.getElementById('text-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        window.lieroText.push({ k: 'Enter' });
+      });
+      for (const ev of ['pointerup', 'touchend', 'click']) {
+        tapType.addEventListener(ev, (e) => {
+          e.preventDefault();
+          focusEntry();
+        });
+      }
+
+      let shownPhase = null;
+      setInterval(() => {
+        const phase = window.lieroPhase;
+        if (phase === shownPhase) return;
+        shownPhase = phase;
+        if (wantTouch) {
+          const typing = phase === 'text';
+          tapType.hidden = !typing;
+          if (typing) focusEntry();
+          else if (document.activeElement === entry) entry.blur();
+        }
+        hint.replaceChildren(...(HINTS[phase] || []).map((t) => {
+          const span = document.createElement('span');
+          span.textContent = t;
+          return span;
+        }));
+        if (phase === 'quit' && quit.hidden) {
+          quit.hidden = false;
+          // A key still held from selecting QUIT auto-repeats: only a fresh press reloads.
+          window.addEventListener('keydown', (e) => { if (!e.repeat) location.reload(); });
+          window.addEventListener('pointerdown', () => location.reload(), { once: true });
+        }
+      }, 200);
+
+      // The Bevy app never returns from `init()` (its event loop takes over), so
+      // mark the page ready once the canvas appears and give it the keyboard.
+      new MutationObserver((_, obs) => {
+        const canvas = document.querySelector('canvas');
+        if (!canvas) return;
+        obs.disconnect();
+        status.textContent = '';
+        canvas.tabIndex = 0;
+        canvas.focus();
+      }).observe(document.body, { childList: true });
+      init().catch((e) => {
+        // winit uses an exception for control flow on the web; anything else is real.
+        if (!String(e).includes('Using exceptions for control flow')) {
+          status.textContent = 'Failed to start: ' + e;
+          console.error(e);
+        }
+      });
     </script>
   </body>
 </html>

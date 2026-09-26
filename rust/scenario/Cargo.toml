@@ -8,6 +8,11 @@ sim-core = { path = "../sim-core" }
 assets = { path = "../assets" }
 sim = { path = "../sim" }
 render = { path = "../render" }
+toml = "0.8"
+# Step 4½a-2: XXH3-64 for Settings/WormSettings::UpdateHash (design §3.4, §9.3.5). Exact pin:
+# the vetted source, resolvable offline from the local cargo cache. Pure Rust, no
+# dependencies with default features off; wasm32 takes its scalar path.
+twox-hash = { version = "=2.1.3", default-features = false, features = ["xxhash3_64"] }
 
 # Wasm-only: the curated TC asset set is embedded in the binary (there is no
 # filesystem in the browser). Native never pulls this in, so the host dep tree

@@ -24,6 +24,18 @@
 //! render_flash <tick> <amount>                  # Slice 3b; draw-only screen-flash injection
 //! render_hud                                     # Slice 3e; draw-time HUD/minimap draw (0 args)
 //! render_live                                    # Slice 4d; opt-in live-viewport path (0 args)
+//! settings    <file>                             # Step 4½a-1; oracle-only setup sidecar — see
+//!                                                 # [`Scenario::settings`]. Excludes `worm`,
+//!                                                 # `weapon`, `game_mode`, `max_bonuses`, `render*`
+//! weapsel     <frame> <worm0_7bit> <worm1_7bit>  # Step 4½c; oracle-only, needs `settings`: the
+//!                                                 # weapon-selection phase input, sparse (absent
+//!                                                 # => 0); the LAST line's frame is the frame the
+//!                                                 # phase ends on — see [`Scenario::weapsel_end`]
+//! generate    <level_seed>                       # Step 4½e-1; oracle-only, needs `settings`,
+//!                                                 # excludes `level` (exactly one of the two):
+//!                                                 # the level is GenerateFromSettings with a
+//!                                                 # `Rand` seeded `level_seed` (a u32) — see
+//!                                                 # [`Scenario::generate`]
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
@@ -52,7 +64,8 @@ pub struct ScenarioWorm {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Scenario {
     pub seed: u32,
-    /// Level path relative to the TC root (`data/TC/openliero`).
+    /// Level path relative to the TC root (`data/TC/openliero`). Empty for a `generate`
+    /// scenario (Step 4½e-1).
     pub level: String,
     pub ticks: u32,
     /// C++ `Settings::max_bonuses` — the cap the per-tick bonus-drop roll gates on
@@ -65,6 +78,27 @@ pub struct Scenario {
     /// scenario keeps the shared scenario file parsing on both sides (Slice 6, T0).
     pub game_mode: i32,
     pub worms: Vec<ScenarioWorm>,
+    /// Step-4½a-1 `settings <file>` — the oracle-harness-only setup sidecar (a
+    /// C++-schema TOML file; the path is relative to the scenario file's directory).
+    /// Absent => `None` (every pre-4½ scenario, byte-identical meaning). Present => the
+    /// C++ dumper reads it with the real `Settings::FromToml` and starts the worms in
+    /// the C++ LocalController state; the Rust golden test uses
+    /// `settings_toml::settings_from_toml` + `build::build_match`. A settings scenario
+    /// rejects `worm`/`weapon`/`game_mode`/`max_bonuses`/`render*`, and
+    /// [`crate::load`] refuses it (design §7.1).
+    pub settings: Option<String>,
+    /// Step-4½c `weapsel <frame> <worm0_7bit> <worm1_7bit>` — the weapon-selection phase's
+    /// sparse per-frame input (design §6.1). Oracle-only, legal only with `settings`. Present
+    /// => the phase runs (constructor + frames `0..=weapsel_end()`) before match tick 0; the
+    /// last line's frame is exactly the frame `ProcessFrame` returns true (the dumpers and the
+    /// Rust drivers check it). Empty on every pre-4½c scenario.
+    weapsel: HashMap<u32, (u32, u32)>,
+    /// Step-4½e-1 `generate <level_seed>` — the oracle-only generated level (LD 4 amended): the
+    /// C++ dumper builds it with the real `Level::GenerateFromSettings` over a dedicated `Rand`
+    /// seeded `level_seed`; Rust with `sim::levelgen::generate_from_settings` (`file = None`).
+    /// Needs `settings`; replaces `level` (exactly one of the two). `None` on every other
+    /// scenario, and [`crate::load`] refuses it (it refuses every `settings` scenario).
+    generate: Option<u32>,
     /// Sparse per-tick input overrides: `tick -> (worm0_7bit, worm1_7bit)`.
     inputs: HashMap<u32, (u32, u32)>,
     /// Per-slot weapon overrides: `slot -> weapon_name`.
@@ -108,6 +142,7 @@ impl Scenario {
         let mut game_mode: i32 = 0;
         let mut worms = Vec::new();
         let mut inputs = HashMap::new();
+        let mut weapsel: HashMap<u32, (u32, u32)> = HashMap::new();
         let mut weapons: HashMap<usize, String> = HashMap::new();
         let mut weapon_ammo: HashMap<usize, i32> = HashMap::new();
         let mut render_shadow = false;
@@ -115,6 +150,11 @@ impl Scenario {
         let mut render_flash: Vec<(u32, i32)> = Vec::new();
         let mut render_hud = false;
         let mut render_live = false;
+        let mut settings: Option<String> = None;
+        let mut generate: Option<u32> = None;
+        let mut game_mode_given = false;
+        let mut max_bonuses_given = false;
+        let mut render_given = false;
 
         for (lineno, raw) in text.lines().enumerate() {
             let n = lineno + 1;
@@ -150,10 +190,12 @@ impl Scenario {
                 "max_bonuses" => {
                     expect_args(n, key, &nums, 1)?;
                     max_bonuses = parse_at(0)? as i32;
+                    max_bonuses_given = true;
                 }
                 "game_mode" => {
                     expect_args(n, key, &nums, 1)?;
                     game_mode = parse_at(0)? as i32;
+                    game_mode_given = true;
                 }
                 "render" => {
                     // Opt-in render-layout directive for the shared scenario (Slice 3a).
@@ -163,6 +205,7 @@ impl Scenario {
                     // Accepted (not rejected) so the shared scenario file parses on BOTH
                     // sides — same discipline as `game_mode`/`max_bonuses` above.
                     expect_args(n, key, &nums, 1)?;
+                    render_given = true;
                 }
                 "render_shadow" => {
                     // Slice 3b: draw-time-only shadow flip (0 args — presence flips it).
@@ -202,6 +245,23 @@ impl Scenario {
                     expect_args(n, key, &nums, 0)?;
                     render_live = true;
                 }
+                "settings" => {
+                    // Step 4½a-1: the oracle-only setup sidecar (design §7.1).
+                    expect_args(n, key, &nums, 1)?;
+                    if settings.replace(nums[0].to_string()).is_some() {
+                        return Err(format!("line {n}: duplicate `settings`"));
+                    }
+                }
+                "generate" => {
+                    // Step 4½e-1: exactly one u32 (no sign, no overflow), once.
+                    expect_args(n, key, &nums, 1)?;
+                    let seed = nums[0].parse::<u32>().map_err(|e| {
+                        format!("line {n}: bad `generate` level seed {:?}: {e}", nums[0])
+                    })?;
+                    if generate.replace(seed).is_some() {
+                        return Err(format!("line {n}: duplicate `generate`"));
+                    }
+                }
                 "worm" => {
                     expect_args(n, key, &nums, 7)?;
                     let visible = match parse_at(6)? {
@@ -226,6 +286,19 @@ impl Scenario {
                     let w1 = parse_at(2)? as u32;
                     if inputs.insert(tick, (w0, w1)).is_some() {
                         return Err(format!("line {n}: duplicate input for tick {tick}"));
+                    }
+                }
+                "weapsel" => {
+                    // Step 4½c: shaped like `input`; a frame is 0-based, the first ProcessFrame.
+                    expect_args(n, key, &nums, 3)?;
+                    let frame = parse_at(0)?;
+                    if frame < 0 {
+                        return Err(format!("line {n}: weapsel frame {frame} is negative"));
+                    }
+                    let w0 = parse_at(1)? as u32;
+                    let w1 = parse_at(2)? as u32;
+                    if weapsel.insert(frame as u32, (w0, w1)).is_some() {
+                        return Err(format!("line {n}: duplicate weapsel for frame {frame}"));
                     }
                 }
                 "weapon" => {
@@ -256,6 +329,38 @@ impl Scenario {
             }
         }
 
+        if settings.is_some()
+            && (!worms.is_empty()
+                || !weapons.is_empty()
+                || game_mode_given
+                || max_bonuses_given
+                || render_given
+                || render_shadow
+                || !render_shake.is_empty()
+                || !render_flash.is_empty()
+                || render_hud
+                || render_live)
+        {
+            return Err(
+                "`settings` excludes the worm, weapon, game_mode, max_bonuses and render* directives"
+                    .to_string(),
+            );
+        }
+        if !weapsel.is_empty() && settings.is_none() {
+            return Err("`weapsel` is oracle-only: it needs a `settings` directive".to_string());
+        }
+        if generate.is_some() {
+            if settings.is_none() {
+                return Err(
+                    "`generate` is oracle-only: it needs a `settings` directive".to_string()
+                );
+            }
+            if level.is_some() {
+                return Err("`generate` excludes `level`: give exactly one of them".to_string());
+            }
+            level = Some(String::new());
+        }
+
         Ok(Scenario {
             seed: seed.ok_or("missing `seed`")?,
             level: level.ok_or("missing `level`")?,
@@ -263,6 +368,9 @@ impl Scenario {
             max_bonuses,
             game_mode,
             worms,
+            settings,
+            weapsel,
+            generate,
             inputs,
             weapons,
             weapon_ammo,
@@ -274,10 +382,33 @@ impl Scenario {
         })
     }
 
+    /// Step 4½e-1: the `generate <level_seed>` directive's seed, or `None` for a scenario that
+    /// names its `level`.
+    pub fn generate(&self) -> Option<u32> {
+        self.generate
+    }
+
     /// The 7-bit input for `worm` (0 or 1) at `tick`. Returns `0` for any tick
     /// without an `input` override — the absence of a line *is* "no keys".
     pub fn input(&self, tick: u32, worm: usize) -> u32 {
         let (w0, w1) = self.inputs.get(&tick).copied().unwrap_or((0, 0));
+        match worm {
+            0 => w0,
+            1 => w1,
+            _ => 0,
+        }
+    }
+
+    /// The frame the weapon-selection phase ends on — the last `weapsel` line's frame — or
+    /// `None` when the scenario has no phase (design §6.1).
+    pub fn weapsel_end(&self) -> Option<u32> {
+        self.weapsel.keys().copied().max()
+    }
+
+    /// The raw `weapsel` word for `worm` (0 or 1) at `frame`; `0` when the frame has no line.
+    /// Callers mask it through `ControlState::unpack`, as for [`Scenario::input`].
+    pub fn weapsel_input(&self, frame: u32, worm: usize) -> u32 {
+        let (w0, w1) = self.weapsel.get(&frame).copied().unwrap_or((0, 0));
         match worm {
             0 => w0,
             1 => w1,
@@ -339,7 +470,8 @@ impl Scenario {
     /// result to an **identical** `Scenario` (round-trip identity — see the T0
     /// property test), covering every directive the parser *stores*. Emits the
     /// grammar documented at the top of this module (`seed`/`level`/`ticks`/
-    /// `max_bonuses`/`game_mode`/`worm`/`weapon`/`render_*`/`input`).
+    /// `max_bonuses`/`game_mode`/`settings`/`weapsel`/`worm`/`weapon`/`render_*`/`input`).
+    /// `weapsel` lines are NOT sparse: every stored frame is written, all-zero ones included.
     ///
     /// `input` lines are **sparse** (spec §3): only ticks whose word is nonzero
     /// for some worm are emitted, in ascending tick order — an all-zero tick
@@ -352,13 +484,33 @@ impl Scenario {
     /// value and its absence does not affect the round-trip identity.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
-        // Required globals, then the always-defaulted ones (0 re-parses to 0, so
-        // emitting them unconditionally still round-trips and is explicit/diffable).
+        // The three required globals, then EITHER the `settings` sidecar OR the two
+        // always-defaulted directives it replaces (0 re-parses to 0, so emitting those
+        // unconditionally on the classic path still round-trips and is explicit/diffable).
         out.push_str(&format!("seed {}\n", self.seed));
-        out.push_str(&format!("level {}\n", self.level));
+        // Step 4½e-1: a generated level is written where `level` would be.
+        match self.generate {
+            Some(level_seed) => out.push_str(&format!("generate {level_seed}\n")),
+            None => out.push_str(&format!("level {}\n", self.level)),
+        }
         out.push_str(&format!("ticks {}\n", self.ticks));
-        out.push_str(&format!("max_bonuses {}\n", self.max_bonuses));
-        out.push_str(&format!("game_mode {}\n", self.game_mode));
+        match &self.settings {
+            // A settings scenario carries mode/bonuses in its setup; the parser rejects
+            // the two directives alongside `settings`.
+            Some(path) => out.push_str(&format!("settings {path}\n")),
+            None => {
+                out.push_str(&format!("max_bonuses {}\n", self.max_bonuses));
+                out.push_str(&format!("game_mode {}\n", self.game_mode));
+            }
+        }
+        // Step 4½c: every `weapsel` line, ascending — an all-zero line is kept (its presence
+        // opts in, and the last one marks the end frame).
+        let mut frames: Vec<u32> = self.weapsel.keys().copied().collect();
+        frames.sort_unstable();
+        for f in frames {
+            let (w0, w1) = self.weapsel[&f];
+            out.push_str(&format!("weapsel {f} {w0} {w1}\n"));
+        }
         // Worms in stored order; `visible` back to 0/1.
         for w in &self.worms {
             out.push_str(&format!(
@@ -848,5 +1000,205 @@ input 10 127 64
             "no input lines for all-zero stream"
         );
         assert_eq!(Scenario::parse(&zeros.to_text()).unwrap(), zeros);
+    }
+
+    const SETTINGS_SCN: &str =
+        "seed 7\nlevel Levels/modern_test.lev\nticks 3\nsettings a_setup.cfg\ninput 1 16 0\n";
+
+    #[test]
+    fn settings_directive_parses_and_defaults_absent() {
+        let s = Scenario::parse(SETTINGS_SCN).expect("parses");
+        assert_eq!(s.settings.as_deref(), Some("a_setup.cfg"));
+        assert!(s.worms.is_empty());
+        let plain = Scenario::parse("seed 1\nlevel L\nticks 1\n").unwrap();
+        assert_eq!(
+            plain.settings, None,
+            "absent => None: every existing scenario is unchanged"
+        );
+    }
+
+    #[test]
+    fn settings_excludes_the_directives_it_replaces() {
+        for extra in [
+            "worm 0 0 0 100 10 0 0",
+            "weapon 0 DART",
+            "game_mode 1",
+            "max_bonuses 0",
+            "render player",
+            "render_shadow",
+            "render_shake 1 0 2",
+            "render_flash 1 3",
+            "render_hud",
+            "render_live",
+        ] {
+            let text = format!("{SETTINGS_SCN}{extra}\n");
+            assert!(
+                Scenario::parse(&text).is_err(),
+                "`settings` + `{extra}` must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_arity_and_duplicates_error() {
+        assert!(Scenario::parse("seed 1\nlevel L\nticks 1\nsettings\n").is_err());
+        assert!(Scenario::parse("seed 1\nlevel L\nticks 1\nsettings a b\n").is_err());
+        assert!(Scenario::parse("seed 1\nlevel L\nticks 1\nsettings a\nsettings b\n").is_err());
+    }
+
+    #[test]
+    fn to_text_round_trips_a_settings_scenario() {
+        let s = Scenario::parse(SETTINGS_SCN).unwrap();
+        let text = s.to_text();
+        assert!(text.contains("settings a_setup.cfg\n"));
+        assert!(!text.contains("game_mode") && !text.contains("max_bonuses"));
+        assert_eq!(Scenario::parse(&text).unwrap(), s);
+    }
+
+    // ---- Step 4½c: the `weapsel` directive (design §6.1) ------------------------------
+
+    const WEAPSEL: &str = "\
+seed 1
+level Levels/render_stage.lev
+ticks 0
+settings s_setup.cfg
+weapsel 0 1 0
+# frame 1 is absent: both words 0
+weapsel 2 16 144
+";
+
+    #[test]
+    fn weapsel_lines_are_sparse_and_end_at_the_last_frame() {
+        let s = Scenario::parse(WEAPSEL).expect("parses");
+        assert_eq!(s.weapsel_end(), Some(2));
+        assert_eq!(
+            (s.weapsel_input(0, 0), s.weapsel_input(1, 0), s.weapsel_input(2, 1)),
+            (1, 0, 144)
+        );
+        assert_eq!(s.weapsel_input(9, 0), 0);
+        assert_eq!(
+            sim::state::ControlState::unpack(s.weapsel_input(2, 1)).pack(),
+            16,
+            "masked to 7 bits at use, like `input`"
+        );
+    }
+
+    #[test]
+    fn a_scenario_without_weapsel_has_no_phase() {
+        assert_eq!(Scenario::parse(SAMPLE).unwrap().weapsel_end(), None);
+        let settings_only = WEAPSEL
+            .lines()
+            .filter(|l| !l.starts_with("weapsel"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(Scenario::parse(&settings_only).unwrap().weapsel_end(), None);
+    }
+
+    #[test]
+    fn weapsel_is_oracle_only_it_needs_settings() {
+        let e = Scenario::parse(
+            "seed 1\nlevel a.lev\nticks 0\nworm 0 0 0 100 10 0 1\nworm 1 0 0 100 10 218 1\nweapsel 0 0 0\n",
+        )
+        .unwrap_err();
+        assert!(e.contains("weapsel") && e.contains("settings"), "{e}");
+    }
+
+    #[test]
+    fn weapsel_rejects_duplicates_bad_arity_and_negative_frames() {
+        for (bad, why) in [
+            ("weapsel 0 1 0\nweapsel 0 2 0\n", "duplicate"),
+            ("weapsel 0 1\n", "expects 3"),
+            ("weapsel 0 1 2 3\n", "expects 3"),
+            ("weapsel -1 0 0\n", "negative"),
+        ] {
+            let text = format!("seed 1\nlevel a.lev\nticks 0\nsettings s.cfg\n{bad}");
+            let e = Scenario::parse(&text).unwrap_err();
+            assert!(e.contains(why), "{bad:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn weapsel_round_trips_through_to_text_including_an_all_zero_line() {
+        let text = "seed 3\nlevel a.lev\nticks 5\nsettings s.cfg\nweapsel 4 0 0\nweapsel 1 8 0\ninput 2 16 0\n";
+        let s = Scenario::parse(text).unwrap();
+        let out = s.to_text();
+        let sel = out.find("settings s.cfg").unwrap();
+        let w1 = out.find("weapsel 1 8 0\n").expect("sorted");
+        let w4 = out.find("weapsel 4 0 0\n").expect("the all-zero end line is kept");
+        let inp = out.find("input 2 16 0").unwrap();
+        assert!(sel < w1 && w1 < w4 && w4 < inp, "{out}");
+        assert_eq!(Scenario::parse(&out).unwrap(), s);
+    }
+
+    // ---- Step 4½e-1: the `generate` directive (LD 4 amended, plan §Formats) -------------
+
+    const GENERATE: &str = "\
+seed 5
+generate 77   # the level seed
+ticks 50
+settings g_setup.cfg
+";
+
+    #[test]
+    fn generate_parses_and_replaces_level() {
+        let s = Scenario::parse(GENERATE).expect("parses");
+        assert_eq!(s.generate(), Some(77));
+        assert_eq!(s.level, "", "a generate scenario has no level path");
+        assert_eq!(s.settings.as_deref(), Some("g_setup.cfg"));
+        assert_eq!(Scenario::parse(SETTINGS_SCN).unwrap().generate(), None);
+        assert_eq!(Scenario::parse(SAMPLE).unwrap().generate(), None);
+        let max = GENERATE.replace("generate 77", "generate 4294967295");
+        assert_eq!(Scenario::parse(&max).unwrap().generate(), Some(u32::MAX));
+    }
+
+    #[test]
+    fn generate_needs_settings_and_excludes_level() {
+        let e = Scenario::parse("seed 5\ngenerate 77\nticks 50\n").unwrap_err();
+        assert!(e.contains("generate") && e.contains("settings"), "{e}");
+        let e = Scenario::parse(&format!("{GENERATE}level Levels/a.lev\n")).unwrap_err();
+        assert!(e.contains("generate") && e.contains("level"), "{e}");
+        let e = Scenario::parse("seed 5\nticks 50\nsettings g.cfg\n").unwrap_err();
+        assert!(e.contains("missing `level`"), "neither: {e}");
+    }
+
+    #[test]
+    fn generate_rejects_a_bad_argument() {
+        for (bad, why) in [
+            ("generate", "expects 1"),
+            ("generate 1 2", "expects 1"),
+            ("generate -1", "bad `generate`"),
+            ("generate 4294967296", "bad `generate`"),
+            ("generate x", "bad `generate`"),
+            ("generate 1\ngenerate 2", "duplicate"),
+        ] {
+            let text = format!("seed 5\nticks 50\nsettings g.cfg\n{bad}\n");
+            let e = Scenario::parse(&text).unwrap_err();
+            assert!(e.contains(why), "{bad:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn generate_round_trips_through_to_text() {
+        let s = Scenario::parse(&format!("{GENERATE}weapsel 3 1 0\n")).unwrap();
+        let out = s.to_text();
+        assert!(
+            out.contains("generate 77\n") && !out.contains("level"),
+            "{out}"
+        );
+        assert_eq!(Scenario::parse(&out).unwrap(), s);
+    }
+
+    #[test]
+    #[should_panic(expected = "settings")]
+    fn scenario_load_refuses_a_generate_scenario() {
+        // `crate::load` refuses every `settings` scenario (loader.rs), `generate` included.
+        let s = Scenario::parse(GENERATE).unwrap();
+        let _ = crate::loader::load(
+            std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../data/TC/openliero"
+            )),
+            &s,
+        );
     }
 }

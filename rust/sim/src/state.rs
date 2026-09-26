@@ -31,7 +31,9 @@ use crate::pool::{BloodPool, Pool};
 use crate::sobject::{sobject_process, SObjectOutcome};
 use crate::shake::ShakeEvent;
 use crate::sound::{HookIndices, SoundEvent};
-use crate::weapon::{blow_up, wobject_process, worm_fire, WObjectOutcome};
+use crate::weapon::{
+    blow_up, process_steerables, wobject_process, worm_fire, WObjectConsts, WObjectOutcome,
+};
 
 /// Number of weapon slots per worm. Mirrors C++ `NUM_WEAPONS` (`worm.hpp:13`).
 /// `Settings::kSelectableWeapons` is also 5, so `InitWeapons` fills every slot.
@@ -342,6 +344,14 @@ pub struct WormState {
     /// steerable-object accumulator the dead arm zeroes each tick. Default 0.
     /// **Not hashed.**
     pub steerable_count: i32,
+    /// `Worm::steerable_sum_x` (`worm.hpp:267`): the sum of `Ftoi(pos.x)` over the
+    /// wobjects `ProcessSteerables` steered this tick — with `steerable_sum_y` and
+    /// `steerable_count`, the centroid the viewport follows (`viewport.cpp:30-32`).
+    /// Written only by [`crate::weapon::process_steerables`]. **Not hashed** (absent from
+    /// `stateHash.hpp` and `WideRollbackChecksum`). Default 0.
+    pub steerable_sum_x: i32,
+    /// `Worm::steerable_sum_y` (`worm.hpp:267`), see [`steerable_sum_x`](Self::steerable_sum_x).
+    pub steerable_sum_y: i32,
 
     // --- Slice 5' T1: worm-sprite selection (NOT hashed) -------------------
     // The render-frame selector `CheckForSpecWormHit` (T2) reads to pick the
@@ -437,6 +447,8 @@ impl WormState {
             ready: true, // ctor `ready(true)` (worm.hpp:179); ResetWorms keeps it
             make_sight_green: false,
             steerable_count: 0,
+            steerable_sum_x: 0,
+            steerable_sum_y: 0,
 
             // Slice 5' T1 worm-sprite selection: fresh-worm defaults
             // (`worm.hpp:244` current_frame{0}, `worm.hpp:232` animate{false}).
@@ -521,6 +533,37 @@ pub fn do_damage(
                 settings_health,
             );
         }
+    }
+}
+
+/// Port of `Game::DoHealing` (`game.cpp:591-609`) — the pickup heal. `DoHealingDirect`
+/// on the healed worm, then in Scales (`game_mode == 3`) the SAME amount is dealt to
+/// the other worms, split by truncating division in source order (`parts`/`left`,
+/// `:595-604`) through `DoDamageDirect(other, k, w.index)` — the healer is the
+/// attributed killer if one dies. Every other mode clamps (`:607`; already applied by
+/// `do_healing_direct`, so KillEmAll is byte-identical to the prior pickup port).
+pub fn do_healing(
+    worms: &mut [WormState],
+    w_idx: usize,
+    amount: i32,
+    game_mode: u32,
+    settings_health: i32,
+) {
+    crate::bonus::do_healing_direct(&mut worms[w_idx], amount, game_mode, settings_health);
+    if game_mode == 3 {
+        let healer = worms[w_idx].index;
+        let mut parts = worms.len() as i32 - 1;
+        let mut left = amount;
+        for j in 0..worms.len() {
+            if j != w_idx {
+                let k = left / parts;
+                worms[j].do_damage_direct(k, healer);
+                parts -= 1;
+                left -= k;
+            }
+        }
+    } else {
+        worms[w_idx].health = worms[w_idx].health.min(settings_health);
     }
 }
 
@@ -661,6 +704,9 @@ pub const MAT_DIRT_ROCK: u8 = MAT_DIRT | MAT_DIRT2 | MAT_ROCK;
 /// worm-body palette index carries. `CheckForSpecWormHit` (T2) tests it on the
 /// worm-sprite pixel via [`LevelSim::worm_pixel`].
 pub const MAT_WORM: u8 = 1 << 5;
+/// `Material::kSeeShadow` (`material.hpp:11`, `1 << 4`): a pixel that shows a shadow
+/// when a `DirtRock` pixel sits at `(x + 3, y - 3)` — `CorrectShadow`'s predicate.
+pub const MAT_SEE_SHADOW: u8 = 1 << 4;
 
 impl LevelSim {
     /// Port of `Level::CheckedMatWrap(x, y).Background()` (`level.hpp:124-130` +
@@ -737,32 +783,54 @@ impl LevelSim {
     // takes a flat index because Task 1 computes the index once per pixel and
     // both reads and the write share it.
 
+    /// The material flag byte of `(x, y)` — C++ `Level::Mat(x, y)`
+    /// (`materials[x + y * width]`), the unchecked read behind `Background()`,
+    /// `Rock()`, `Dirt()` and friends.
+    ///
+    /// **Safe edges (John's ruling, 4½e-1 plan, Addendum G3).** C++ indexes
+    /// `materials[]` with the flat `x + y * width` and never checks it. On a level
+    /// smaller than the TC's `WormSpawnRect` the spawn path (`Worm::BeginRespawn`'s
+    /// drop-down `Mat(x, y + 4)`, `worm.cpp:731-734`, and `CheckRespawnPosition`'s
+    /// `!=`-bounded rock scan, `game.cpp:640-647`) walks past the end of the
+    /// vector: undefined behaviour (a segfault or garbage). Rust instead treats a
+    /// flat index outside `material_id` as **solid rock** (not background), so a
+    /// spawn candidate touching it is rejected and the worm draws another. A flat
+    /// index inside the array — including C++'s defined wrap onto the next row for
+    /// `x >= width` — reads the real pixel exactly as before, so every run on which
+    /// C++ stays inside the vector is unchanged (every golden re-diffs identical).
+    #[inline]
+    fn mat_flags(&self, x: i32, y: i32) -> u8 {
+        let idx = x as i64 + y as i64 * self.width as i64;
+        if idx >= 0 && (idx as u64) < self.material_id.len() as u64 {
+            self.material_flags[self.material_id[idx as usize] as usize]
+        } else {
+            MAT_ROCK
+        }
+    }
+
     /// Background bit (`material.hpp:18`) of the **in-bounds** pixel `(x, y)`.
     /// Looks up `material_flags[material_id[x + y*width]]` and tests
-    /// [`MAT_BACKGROUND`]. In-bounds only (see the shape note above).
+    /// [`MAT_BACKGROUND`]. Meant for in-bounds pixels (see the shape note above);
+    /// a flat index outside the array reads as rock ([`mat_flags`](Self::mat_flags)).
     pub fn background(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_BACKGROUND) != 0
+        (self.mat_flags(x, y) & MAT_BACKGROUND) != 0
     }
 
     /// Either dirt bit (`material.hpp`: `kDirt | kDirt2`) of the in-bounds
     /// pixel `(x, y)` — the "any destructible dirt" predicate `DrawDirtEffect`
     /// uses to decide a pixel may be dug.
     pub fn any_dirt(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & (MAT_DIRT | MAT_DIRT2)) != 0
+        (self.mat_flags(x, y) & (MAT_DIRT | MAT_DIRT2)) != 0
     }
 
     /// First dirt bit ([`MAT_DIRT`]) of the in-bounds pixel `(x, y)`.
     pub fn dirt(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_DIRT) != 0
+        (self.mat_flags(x, y) & MAT_DIRT) != 0
     }
 
     /// Second dirt bit ([`MAT_DIRT2`]) of the in-bounds pixel `(x, y)`.
     pub fn dirt2(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_DIRT2) != 0
+        (self.mat_flags(x, y) & MAT_DIRT2) != 0
     }
 
     /// The FIRST `material_id` writer (used by `DrawDirtEffect` in Task 1 to
@@ -787,10 +855,11 @@ impl LevelSim {
     }
 
     /// Rock bit ([`MAT_ROCK`], `material.hpp:17`) of the in-bounds pixel `(x, y)`.
-    /// The `BObject::Process` rock-landing probe (`bobject.cpp:43`). In-bounds only.
+    /// The `BObject::Process` rock-landing probe (`bobject.cpp:43`) and
+    /// `CheckRespawnPosition`'s scan. A flat index outside the array reads as rock
+    /// ([`mat_flags`](Self::mat_flags), the safe-edges ruling).
     pub fn rock(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_ROCK) != 0
+        (self.mat_flags(x, y) & MAT_ROCK) != 0
     }
 
     /// Port of `common.materials[pal].Worm()` (`worm.cpp:1181` + `material.hpp:25`):
@@ -1035,6 +1104,10 @@ pub struct SimState {
     /// the index arm is inert and only the per-weapon `laser_sight` flag can arm the
     /// sight. Keeps every prior golden byte-identical (the sight fields are unhashed).
     pub laser_weapon: i32,
+    /// The TC constants/hacks `WObject::Process` reads (Step 4½c-0: RemExp + the particle-
+    /// trail divisors). **Not hashed.** Defaulted inert by `new`; assigned post-`new` by
+    /// `scenario::build::build_match` and `scenario::load` (`WObjectConsts::from_tc`).
+    pub wobject_consts: WObjectConsts,
     /// C++ `Settings::max_bonuses` (`settings.hpp:69`, in-game default 4): the cap the
     /// per-tick **bonus-drop roll** gates on (`game.cpp:359`). The roll `if (max_bonuses
     /// > 0 && rand(CBonusDropChance) == 0) CreateBonus()` fires in [`process_frame`]
@@ -1175,6 +1248,12 @@ pub struct SimState {
     /// (it uses the `Settings` default), so this defaults to **600** post-`new` — no
     /// scenario directive, mirroring the dumper. **Not hashed** (settings scalar).
     pub time_to_lose: i32,
+    /// C++ `Settings::shadow` (`settings.hpp:74`, in-game default `true`): gates
+    /// `CorrectShadow` after every in-frame crater (`sim::shadow`, Step 4½a-1). The
+    /// oracle dumper's classic path forces it `false`, so it defaults to **false**
+    /// post-`new` and every prior golden stays byte-identical; the 4½a builder assigns
+    /// the setting. **Not hashed** (its effect on `material_id` is).
+    pub shadow: bool,
 
     /// C++ `Game::last_killed_idx` (`game.hpp`, default `-1`): the index of the
     /// most recently killed worm. Written by the death block (`worm.cpp:393-401`)
@@ -1221,7 +1300,7 @@ pub struct SimState {
     /// [`crate::sound`] context at the top of [`process_frame`](Self::process_frame)
     /// so a deep callsite can play a hook without threading its index. **Not
     /// hashed** (a sound-table input, like the object `start_sound`s); defaulted to
-    /// [`SoundHooks::default`] post-`new` (the difftest/game assign the real TC
+    /// [`SoundHooks::default`] post-`new` (`scenario::load` assigns the real TC
     /// values), so every prior golden stays byte-identical (sound never hashes).
     pub sound_hooks: SoundHooks,
     /// The per-tick **sound-event stream** (Slice-4c, `sound.rs`): the one-shot /
@@ -1340,6 +1419,9 @@ impl SimState {
             // sight); the difftest assigns the real `LC(LaserWeapon)` after `new`. The
             // sight fields are unhashed, so this leaves every golden byte-identical.
             laser_weapon: 0,
+            // 4½c-0: the WObject::Process TC consts — inert Default (RemExp off, trail
+            // divisors unread), assigned post-`new` by the builder / loader.
+            wobject_consts: WObjectConsts::default(),
             // Bonus-drop roll inputs: defaulted (0). Left at 0 the roll short-circuits
             // (NO rand) so slices 1-5b stay byte-identical; the difftest assigns the
             // real `max_bonuses`/`BonusDropChance` after `new` (post-`new` pattern, like
@@ -1388,6 +1470,7 @@ impl SimState {
             // defaults to the C++ `Settings` value 600 (the dumper never overrides it).
             game_mode: 0,
             time_to_lose: 600,
+            shadow: false,
             // Game-level kill bookkeeping (worm.cpp:393-401). C++ defaults:
             // last_killed_idx = -1, got_changed = false. Not hashed; written only
             // when a worm dies (unreached for slices 1-5c) => priors identical.
@@ -1462,11 +1545,11 @@ impl SimState {
     /// [`Explode`]: WObjectOutcome::Explode
     /// [`Remove`]: WObjectOutcome::Remove
     ///
-    /// **Input interleave** (matches the C++ dumper `sim_physics_dump.cpp:233-238`):
-    /// for each worm in `worms` order, overwrite its `control_states` from the
-    /// tick's input (mirroring `ControlState::Unpack`), then run that worm's full
-    /// pass before moving to the next worm. Inputs shorter than `worms` leave the
-    /// remaining worms' control state unchanged.
+    /// **Input application** (Step 4½c-0, design §4.3): every worm's `control_states` is
+    /// overwritten from the tick's input (mirroring `ControlState::Unpack`) at the TOP of
+    /// the tick, before the object loops — as C++ controllers do before
+    /// `Game::ProcessFrame`, and as the dumper does on every path since 4½c-0. Inputs
+    /// shorter than `worms` leave the remaining worms' control state unchanged.
     ///
     /// Per-worm order (design doc, *Per-worm pass: exact ordering*):
     ///
@@ -1475,7 +1558,7 @@ impl SimState {
     /// 2. [`worm_reactions`] → `reacts` (may nudge `pos.y`/`vel.y`). Computed
     ///    **once** and read by BOTH `process_tasks` (jump) AND `worm_process_physics`
     ///    — never recomputed between (load-bearing).
-    /// 3. `process_steerables` — no-op (empty `wobjects`).
+    /// 3. [`process_steerables`] — steers this worm's steerable wobjects (4½c-0 T7).
     /// 4. movable reset.
     /// 5. [`process_aiming`].
     /// 6. [`process_tasks`] — jump reads `reacts[kRfUp]` and writes `vel.y`
@@ -1506,6 +1589,18 @@ impl SimState {
         // panic or a direct unit-test call can never leak stale ones in). Drained
         // into `self.shake_events` at the BOTTOM of the tick. Determinism-inert.
         crate::shake::begin_frame();
+        // Step 4½a-1: publish this tick's settings->shadow for the CorrectShadow sites.
+        crate::shadow::begin_frame(self.shadow);
+
+        // Step 4½c-0 (design §4.3): every worm's input is applied HERE, before any sim
+        // work — C++ controllers set `control_states` before `Game::ProcessFrame`
+        // (`localController.cpp:58-80` / `:175`; the dumper's `render_live` path and, since
+        // 4½c-0, its reduced tail too). The object loops therefore read THIS tick's input
+        // (the steerable Up boost, `weapon.cpp:152`; RemExp, `:139`). Inputs shorter than
+        // `worms` leave the remaining worms' control state unchanged.
+        for (w, input) in self.worms.iter_mut().zip(inputs) {
+            w.control_states = *input;
+        }
 
         // Disjoint field borrows: destructuring `&mut self` binds each field as a
         // separate `&mut` (default binding mode), so the object loops can hold
@@ -1540,6 +1635,7 @@ impl SimState {
             first_blood_colour,
             bobj_gravity,
             laser_weapon,
+            wobject_consts,
             settings_max_bonuses,
             bonus_drop_chance,
             bonus_spawn_rect_w,
@@ -1584,6 +1680,7 @@ impl SimState {
         let first_blood_colour = *first_blood_colour;
         let bobj_gravity = *bobj_gravity;
         let laser_weapon = *laser_weapon;
+        let wobject_consts = *wobject_consts;
         let settings_max_bonuses = *settings_max_bonuses;
         let bonus_drop_chance = *bonus_drop_chance;
         let bonus_spawn_rect_w = *bonus_spawn_rect_w;
@@ -1722,18 +1819,25 @@ impl SimState {
                 blood,
                 game_mode,
                 settings_health,
+                wobject_consts,
                 rand,
             ) {
                 WObjectOutcome::Keep => {
                     *wobjects.get_mut(slot).expect("slot still live") = obj;
                 }
                 WObjectOutcome::Explode => {
+                    // weapon.cpp:87 — BlowUpObject frees `this` FIRST, then explodes: the
+                    // blast's own wobject loop (and a chain it sets off, sobject.cpp:148-150)
+                    // must not see this wobject's stale slot. Hash-neutral for every
+                    // non-chain blast (the stale slot was only nudged, then freed anyway).
+                    wobjects.free(slot);
                     blow_up(
                         weapon,
                         level,
                         large_sprites,
                         textures,
                         obj.pos,
+                        obj.vel,
                         obj.owner_idx,
                         sobject_types,
                         nobject_types,
@@ -1749,7 +1853,6 @@ impl SimState {
                         settings_health,
                         rand,
                     );
-                    wobjects.free(slot);
                 }
                 WObjectOutcome::Remove => {
                     wobjects.free(slot);
@@ -1888,10 +1991,7 @@ impl SimState {
         // both expressible. The visible arm rebinds `let w = &mut worms[i]` and is
         // otherwise unchanged.
         for i in 0..worms.len() {
-            // Interleave: apply this worm's input (≈ `Unpack`), then Process it.
-            if let Some(input) = inputs.get(i) {
-                worms[i].control_states = *input;
-            }
+            // (This tick's input was applied at the top of `process_frame` — 4½c-0 T8.)
 
             // Port of `Worm::Process` (worm.cpp:210-452). The C++ structure is:
             //   health = min(health, settings_health);          // 213 — ALWAYS
@@ -1961,7 +2061,13 @@ impl SimState {
                 // directly so `begin_respawn` can also read the enemy slot.
                 let w = &mut worms[i];
 
-                // 3. process_steerables: no-op this slice (empty wobjects).
+                // 3. ProcessSteerables (worm.cpp:324, :1214-1241) — LIVE (4½c-0 T7): turn
+                //    this worm's wobjects of its CURRENT steerable weapon type by
+                //    (cycles & 1) + 1 per held Left/Right — `*cycles` is the post-`++cycles`
+                //    worm-loop value — clear `movable`, and accumulate the centroid the
+                //    viewport follows. The movable reset below keeps `movable` false while
+                //    Left/Right are held, freezing aim and walk.
+                process_steerables(w, weapons, wobjects, *cycles);
 
                 // 4. movable reset (worm.cpp:330-333).
                 if !w.movable
@@ -2098,6 +2204,8 @@ impl SimState {
                     nobjects,
                     last_killed_idx,
                     got_changed,
+                    game_mode,
+                    settings_health,
                 ) {
                     deferred_kills.push(killer);
                 }
@@ -2175,6 +2283,7 @@ impl SimState {
                         large_sprites,
                         textures,
                         settings_health,
+                        game_mode,
                         rand,
                     );
                 }
@@ -2274,6 +2383,8 @@ impl SimState {
         // max(type.flash, screen_flash) at each sobject-create). Unhashed side
         // channel — the render reads it, the hash never does (design §0).
         *screen_flash = crate::flash::take_frame();
+        // Step 4½a-1: the CorrectShadow flag is off again outside the tick.
+        crate::shadow::end_frame();
     }
 }
 
@@ -2528,8 +2639,10 @@ fn begin_respawn(
         worms[index].pos.y = itof(cand_y);
 
         // :731-734 drop-down: slide `pos.y` down over Background pixels. Reads the
-        // LIVE level via `Mat(x, y+4).Background()` (in-bounds; guarded by
-        // `Ftoi(pos.y)+4 < height`), draws NO rand.
+        // LIVE level via `Mat(x, y+4).Background()`, draws NO rand. `y + 4 < height`
+        // is guarded but `x` is not: a candidate right of a narrow level reads on
+        // through the flat index, and past the array's end C++ is UB; Rust reads
+        // rock there (safe edges, `LevelSim::mat_flags`), which stops the slide.
         while ftoi(worms[index].pos.y) + 4 < level.height
             && level.background(ftoi(worms[index].pos.x), ftoi(worms[index].pos.y) + 4)
         {
@@ -2622,10 +2735,21 @@ fn check_respawn_position(
     min_x = min_x.max(0);
     min_y = min_y.max(0);
 
-    // :640-647 reject on any Rock() pixel (half-open `!=` bounds, exactly as C++;
-    // the clamps guarantee `min <= max`). The "special rock respawn bug" TODO
-    // (:642) behaviour is intentionally preserved.
-    let mut i = min_x;
+    // :640-647 reject on any Rock() pixel (half-open `!=` bounds, exactly as C++).
+    // The clamps do NOT guarantee `min <= max`: a candidate below or right of a
+    // small level (the spawn rect is 5,5 + 494x340) has `min > max`, and the `!=`
+    // walk runs on through the flat index until it finds rock. C++ reads past
+    // `materials[]` there (UB); Rust's `rock` reads an out-of-array index as rock
+    // (safe edges, `LevelSim::mat_flags`), so the walk always ends in a reject.
+    // The "special rock respawn bug" TODO (:642) behaviour is intentionally
+    // preserved.
+    //
+    // With `min_y == max_y` (a candidate exactly 3 rows below the level) the inner
+    // walk is empty, so the outer walk reads nothing; with `min_x > max_x` too it
+    // would only spin `i` through a signed overflow (C++ UB; in practice the loop
+    // does nothing and the candidate is accepted). Skipping it is exact for every
+    // non-overflowing walk and keeps that accept without the overflow.
+    let mut i = if min_y == max_y { max_x } else { min_x };
     while i != max_x {
         let mut j = min_y;
         while j != max_y {
@@ -2667,11 +2791,11 @@ fn limit_xy(x: &mut i32, y: &mut i32, max_x: i32, max_y: i32) {
 ///    HIGH bit of the same draw): they advance the RNG identically but select
 ///    different bits, so the call form is load-bearing.
 ///
-/// Omissions (faithful to the dumper's settings): `CorrectShadow` (`:784-786`,
-/// gated on `settings->shadow`, **false**), the `SoundAlive` play (`:789`) and
+/// `CorrectShadow` (`:784-786`) is live since 4½a-1 (behind `SimState.shadow`).
+/// Omissions (faithful to the dumper's settings): the `SoundAlive` play (`:789`) and
 /// `AfterSpawn` stats (`:807`) — all render/sound/stats side effects the sim
-/// drops. The Scales-of-Justice guard on the health restore (`:794`) folds away
-/// (the TC is KillEmAll), so `health` is always restored here.
+/// drops. The Scales-of-Justice guard on the health restore (`:794`) is live since
+/// 4½a-1.
 #[allow(clippy::too_many_arguments)]
 fn do_respawning(
     worm: &mut WormState,
@@ -2679,6 +2803,7 @@ fn do_respawning(
     large_sprites: &SpriteSet,
     textures: &[Texture],
     settings_health: i32,
+    game_mode: u32,
     rand: &mut Rand,
 ) {
     // :758-770 step the cursor toward Ftoi(pos)-80 by ±1, FOUR times per tick,
@@ -2727,7 +2852,14 @@ fn do_respawning(
         let ipos_y = ftoi(worm.pos.y);
         draw_dirt_effect(level, large_sprites, textures, 0, ipos_x - 7, ipos_y - 7, rand);
 
-        // :784-786 CorrectShadow — gated on settings->shadow (false) => OMITTED.
+        // :784-786 CorrectShadow behind settings->shadow (Step 4½a-1).
+        crate::shadow::correct_shadow_if_enabled(
+            level,
+            ipos_x - 10,
+            ipos_y - 10,
+            ipos_x + 11,
+            ipos_y + 11,
+        );
 
         // :788 ready = false; :789 `Play(sound_hook[SoundAlive])` — Slice-4c
         // respawn one-shot (no rand; not hashed).
@@ -2737,8 +2869,10 @@ fn do_respawning(
         worm.visible = true;
         worm.fire_cone = 0;
         worm.vel = Vec2::zero();
-        // :794-796 health = settings->health (Scales guard folds away; KillEmAll).
-        worm.health = settings_health;
+        // :794-796 health = settings->health, except in Scales (game_mode 3).
+        if game_mode != 3 {
+            worm.health = settings_health;
+        }
 
         // :799-805 the lone no-arg `rand() & 1` (raw next draw's LOW bit). Odd =>
         // face left-ish (Itof(32), dir 0); even => face right-ish (Itof(96), dir 1).
@@ -2863,6 +2997,8 @@ fn worm_death(
     nobjects: &mut Pool<NObject>,
     last_killed_idx: &mut i32,
     got_changed: &mut bool,
+    game_mode: u32,
+    settings_health: i32,
 ) -> Option<usize> {
     // :369 gate. Inert (zero draws, no mutation) while the worm is alive.
     if w.health > 0 {
@@ -2889,21 +3025,31 @@ fn worm_death(
     w.fire_cone = 0;
     w.ninjarope.out = false;
 
-    // :384-391 lives. KillEmAll: `--lives` (:390). The Scales death branch
-    // (`while health <= 0 { health += settings->health; --lives }`, :385-388) is
-    // UNPORTED — deferred past step 2: game_mode IS modelled since slice-6 T5,
-    // but no committed Scales scenario kills a worm, so the branch is unreached
-    // (the sim_slice6_scales golden wounds without killing).
-    w.lives -= 1;
+    // :384-391 lives. Scales (game_mode 3): wrap every whole settings->health of
+    // overkill into a lost life, leaving health in (0, settings_health]; every other
+    // mode: one life. `settings_health >= 1` is guaranteed by the 4½a builder
+    // (BuildError::InvalidHealth), so the loop terminates.
+    if game_mode == 3 {
+        while w.health <= 0 {
+            w.health += settings_health;
+            w.lives -= 1;
+        }
+    } else {
+        w.lives -= 1;
+    }
 
-    // :393-401 last_killed_idx / got_changed bookkeeping (no rand; unhashed).
-    // The GameOfTag multi-kill guard at :396-398 is UNPORTED — deferred past
-    // step 2: the assignment below matches C++ whenever the guard evaluates
-    // true, which holds for the first kill (last_killed_idx starts at -1) and
-    // always outside GameOfTag; the committed gametag golden has exactly one
-    // kill, so the divergent second-kill path is unreached.
+    // :393-401 last_killed_idx / got_changed (no rand; unhashed). GameOfTag keeps "it"
+    // when the killer is neither the victim nor "it" (:396-398) — unobservable with two
+    // worms (design §1.3 finding 3), ported for fidelity.
     let old_last_killed = *last_killed_idx;
-    *last_killed_idx = index;
+    if game_mode != 1
+        || *last_killed_idx < 0
+        || w.last_killed_by_idx < 0
+        || w.last_killed_by_idx == index
+        || w.last_killed_by_idx == *last_killed_idx
+    {
+        *last_killed_idx = index;
+    }
     *got_changed = old_last_killed != *last_killed_idx;
 
     // :403-405 the killer's `kills++` (hashed on master). Deferred to the caller
@@ -4504,7 +4650,7 @@ mod tests {
         let before = rand.last();
         let (mut lki, mut gc) = (-1i32, false);
 
-        let killer = worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        let killer = worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(rand.last(), before, "live worm: death block draws NO rand");
         assert_eq!(pool.len(), 0, "live worm: no spray");
@@ -4536,7 +4682,7 @@ mod tests {
             let _speed = refr.bound(20); // gib[0] speed_v (distribution 0 => no dist draws)
         }
 
-        let killer = worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        let killer = worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(rand.last(), refr.last(), "draws: sound(1) + 8 gibs x (angle+speed)");
         assert_eq!(pool.len(), 8, "blood 0 => kMax 0 => NO blood spray; exactly 8 gibs");
@@ -4567,7 +4713,7 @@ mod tests {
         let mut rand = seeded_rand(3);
         let (mut lki, mut gc) = (-1i32, false);
 
-        let killer = worm_death(&mut w, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        let killer = worm_death(&mut w, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(killer, Some(0), "killer worm 0 gets kills++ (:403-405)");
     }
@@ -4584,7 +4730,7 @@ mod tests {
         let mut rand = seeded_rand(3);
         let (mut lki, mut gc) = (-1i32, false);
         let self_killer =
-            worm_death(&mut w_self, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+            worm_death(&mut w_self, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
         assert_eq!(self_killer, None, "self-kill (killed_by == index) => no kills++");
 
         let mut w_none = dying_worm(0, 0, -1);
@@ -4592,7 +4738,7 @@ mod tests {
         let mut rand2 = seeded_rand(3);
         let (mut lki2, mut gc2) = (-1i32, false);
         let none_killer =
-            worm_death(&mut w_none, 0, 0, &types, &cossin, &mut rand2, &mut pool2, &mut lki2, &mut gc2);
+            worm_death(&mut w_none, 0, 0, &types, &cossin, &mut rand2, &mut pool2, &mut lki2, &mut gc2, 0, 100);
         assert_eq!(none_killer, None, "unknown killer (< 0) => no kills++");
     }
 
@@ -4628,7 +4774,7 @@ mod tests {
             refr.bound(10000);
         }
 
-        worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(
             rand.last(),
@@ -4660,7 +4806,7 @@ mod tests {
             refr.bound(20);
         }
 
-        worm_death(&mut w, 0, 1, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        worm_death(&mut w, 0, 1, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(rand.last(), refr.last(), "blood 1 => no blood draws; only sound + 8 gibs");
         assert_eq!(pool.len(), 8, "kMax == 1 is NOT > 1 => no blood spray; exactly 8 gibs");
@@ -4679,7 +4825,7 @@ mod tests {
         let mut rand = seeded_rand(1);
         let (mut lki, mut gc) = (-1i32, false);
 
-        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
 
         assert_eq!(pool.len(), 8, "gib loop runs EXACTLY 8 times ({{7,21,..,105}})");
     }
@@ -4699,7 +4845,7 @@ mod tests {
         let mut pool0: Pool<NObject> = Pool::new(600);
         let mut r0 = seeded_rand(2);
         let (mut lki0, mut gc0) = (-1i32, false);
-        worm_death(&mut w0, 0, 0, &types, &cossin, &mut r0, &mut pool0, &mut lki0, &mut gc0);
+        worm_death(&mut w0, 0, 0, &types, &cossin, &mut r0, &mut pool0, &mut lki0, &mut gc0, 0, 100);
         let mut ref0 = seeded_rand(2);
         ref0.bound(3); // sound
         for _ in 0..8 {
@@ -4712,7 +4858,7 @@ mod tests {
         let mut pool1: Pool<NObject> = Pool::new(600);
         let mut r1 = seeded_rand(2);
         let (mut lki1, mut gc1) = (-1i32, false);
-        worm_death(&mut w1, 1, 0, &types, &cossin, &mut r1, &mut pool1, &mut lki1, &mut gc1);
+        worm_death(&mut w1, 1, 0, &types, &cossin, &mut r1, &mut pool1, &mut lki1, &mut gc1, 0, 100);
         let mut ref1 = seeded_rand(2);
         ref1.bound(3); // sound
         for _ in 0..8 {
@@ -4983,6 +5129,35 @@ mod tests {
         );
     }
 
+    /// 4½e-1 Addendum G3, safe edges (John's ruling): a candidate below or right of a small
+    /// level makes the `!=` rock walk run past `materials[]` (C++ UB). Rust reads rock there,
+    /// so the walk rejects; a walk that stays in the array (the flat wrap) is unchanged; and a
+    /// walk that reads nothing still accepts, without the signed-overflow spin.
+    #[test]
+    fn safe_edges_check_respawn_position_past_the_array_rejects_without_panicking() {
+        let level = flat_level(20, 10); // all no-flag: no rock anywhere in the array
+        let far = 9999;
+        let ok = |l: &LevelSim, x, y| check_respawn_position(l, far, far, far, far, x, y, 30, 30);
+        // Below the level (y >= height + 4): min_y > max_y, the walk leaves the array.
+        assert!(!ok(&level, 10, 40));
+        // Right of the level (x >= width + 3), inside rows: it wraps in-array, then leaves it.
+        assert!(!ok(&level, 300, 5));
+        // The drop-down read past the end (last row, x beyond the width) is rock, not
+        // background, so the slide stops.
+        assert!(!level.background(60, 9) && level.rock(60, 9));
+        // x == width + 2: min_x == max_x, nothing is read, accept (C++-defined).
+        assert!(ok(&level, 22, 300));
+        // y == height + 3 with x far right: the inner walk is empty for every i; C++ spins i
+        // through a signed overflow and reads nothing; Rust accepts at once.
+        assert!(ok(&level, 400, 13));
+        // In-array rock found through the defined flat wrap still rejects as before.
+        let mut rlevel = flat_level(20, 10);
+        rlevel.material_flags[9] = MAT_ROCK;
+        rlevel.material_id[(1 + 3 * 20) as usize] = 9; // (21, 2) wraps to (1, 3)
+        assert!(rlevel.rock(21, 2));
+        assert!(!ok(&rlevel, 24, 5));
+    }
+
     // ------------------------------------------------------------------------
     // Slice 5d T5: DoRespawning (worm.cpp:755-809) — the drop-in convergence
     // walk (+/-1 four times/tick, no rand), the LimitXy clamp, and — on
@@ -5036,7 +5211,7 @@ mod tests {
         let mut w = respawn_worm(150, 150, (0, 200), true);
         let mut rand = seeded_rand(999);
 
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, 0, &mut rand);
 
         // 4 steps: x 0->4 (++), y 200->196 (--). No rand consumed.
         assert_eq!(
@@ -5060,7 +5235,7 @@ mod tests {
         let mut level = flat_level(200, 200);
         let mut w = respawn_worm(150, 150, (1000, 1000), false);
         let mut rand = seeded_rand(1);
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, 0, &mut rand);
         assert_eq!(w.logic_respawn, Vec2::new(42, 42), "clamped to [.,width-158]=42");
         assert_eq!(rand.last(), 0, "ready=false => no draw even when (clamped) converged");
         assert!(!w.visible, "ready=false => no respawn");
@@ -5069,7 +5244,7 @@ mod tests {
         let mut level2 = flat_level(200, 200);
         let mut w2 = respawn_worm(150, 150, (-1000, -1000), false);
         let mut rand2 = seeded_rand(1);
-        do_respawning(&mut w2, &mut level2, &sprites, &tex, 100, &mut rand2);
+        do_respawning(&mut w2, &mut level2, &sprites, &tex, 100, 0, &mut rand2);
         assert_eq!(w2.logic_respawn, Vec2::new(0, 0), "clamped to [0,.]");
     }
 
@@ -5084,7 +5259,7 @@ mod tests {
         let mut w = respawn_worm(150, 150, (70, 70), false);
         let mut rand = seeded_rand(7);
 
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, 0, &mut rand);
 
         assert_eq!(rand.last(), 0, "converged but !ready => zero rand draws");
         assert!(!w.visible, "converged but !ready => no respawn");
@@ -5118,7 +5293,7 @@ mod tests {
             w.direction = 9;
             let mut rand = seeded_rand(seed);
 
-            do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+            do_respawning(&mut w, &mut level, &sprites, &tex, 100, 0, &mut rand);
 
             // Exactly 2 draws, in order: dirt puff THEN the lone aiming rand.
             assert_eq!(
@@ -5175,7 +5350,7 @@ mod tests {
         let mut level = flat_level(400, 400);
         let mut w = respawn_worm(150, 150, (70, 70), true);
         let mut rand = seeded_rand(seed);
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, 0, &mut rand);
 
         // The facing must follow the LOW bit (odd => Itof(32)/dir0).
         if low != 0 {
@@ -6065,5 +6240,310 @@ mod tests {
         do_damage(&mut ws, 1, 0, 0, 3, 100);
         assert_eq!(ws[1].health, 100);
         assert_eq!(ws[0].health, 50, "no heal when amount == 0");
+    }
+
+    #[test]
+    fn a45_shadow_defaults_off_and_process_frame_clears_the_frame_flag() {
+        let mut state = idle_state(3);
+        assert!(!state.shadow, "post-new default false => every golden byte-identical");
+        state.shadow = true;
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert!(!crate::shadow::enabled(), "end_frame clears the flag after the tick");
+    }
+
+    #[test]
+    fn a45_scales_death_wraps_the_overkill_into_lives() {
+        let mut w = dying_worm(0, -130, -1); // lives 5 (two_worms)
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (-1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 3, 100);
+        assert_eq!(w.lives, 3, "two whole settings_health of overkill => two lives (worm.cpp:385-388)");
+        assert_eq!(w.health, 70, "-130 + 100 + 100");
+    }
+
+    #[test]
+    fn a45_killemall_death_keeps_the_negative_health() {
+        let mut w = dying_worm(0, -130, -1);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (-1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0, 100);
+        assert_eq!(w.lives, 4);
+        assert_eq!(w.health, -130);
+    }
+
+    #[test]
+    fn a45_gameoftag_guard_keeps_it_for_a_third_party_killer() {
+        // "it" = worm 1; worm 0 is killed by worm 2 (neither victim nor "it") => "it" stays.
+        let mut w = dying_worm(0, 0, 2);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 1, 100);
+        assert_eq!(lki, 1, "worm.cpp:396-398: the guard is false => no reassignment");
+        assert!(!gc);
+    }
+
+    #[test]
+    fn a45_gameoftag_guard_reassigns_when_it_is_the_killer() {
+        let mut w = dying_worm(0, 0, 1);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 1, 100);
+        assert_eq!(lki, 0, "killer == it => the victim becomes it");
+        assert!(gc);
+    }
+
+    #[test]
+    fn a45_scales_respawn_does_not_restore_health() {
+        let sprites = dirt_sprites();
+        let tex = [dirt_texture()];
+        let mut level = flat_level(400, 400);
+        let mut w = respawn_worm(150, 150, (70, 70), true);
+        w.health = 37;
+        let mut rand = seeded_rand(7);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 100, 3, &mut rand);
+        assert!(w.visible, "converged + ready => respawned");
+        assert_eq!(w.health, 37, "Scales: no restore (worm.cpp:794-796)");
+
+        let mut level2 = flat_level(400, 400);
+        let mut w2 = respawn_worm(150, 150, (70, 70), true);
+        w2.health = 37;
+        let mut rand2 = seeded_rand(7);
+        do_respawning(&mut w2, &mut level2, &sprites, &tex, 100, 0, &mut rand2);
+        assert_eq!(w2.health, 100, "KillEmAll: health = settings->health");
+    }
+
+    #[test]
+    fn a45_do_healing_scales_damages_the_other_worm() {
+        let mut worms: Vec<WormState> = two_worms().iter().map(WormState::from_init).collect();
+        worms[0].health = 50;
+        do_healing(&mut worms, 0, 30, 3, 100);
+        assert_eq!(worms[0].health, 80);
+        assert_eq!(worms[1].health, 70, "game.cpp:594-605: the healed amount is dealt to the others");
+        assert_eq!(worms[1].last_killed_by_idx, -1, "not killed => no attribution");
+
+        worms[1].health = 10;
+        do_healing(&mut worms, 0, 30, 3, 100);
+        assert_eq!(worms[1].health, -20);
+        assert_eq!(worms[1].last_killed_by_idx, 0, "the healer is the killer (DoDamageDirect by_idx)");
+    }
+
+    #[test]
+    fn a45_do_healing_killemall_clamps_and_leaves_the_others() {
+        let mut worms: Vec<WormState> = two_worms().iter().map(WormState::from_init).collect();
+        worms[0].health = 90;
+        do_healing(&mut worms, 0, 30, 0, 100);
+        assert_eq!(worms[0].health, 100);
+        assert_eq!(worms[1].health, 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4½c-0 T6: the wobjects driver frees an exploding wobject BEFORE blow_up
+    // (weapon.cpp:87), so its own blast's chain loop never sees its stale slot.
+    // -----------------------------------------------------------------------
+
+    fn chain_state() -> SimState {
+        let w = 200i32;
+        let level = LevelData {
+            width: w,
+            height: w,
+            material_id: vec![1u8; (w * w) as usize],
+            palette: None,
+            display: None,
+        };
+        let mut flags = [0u8; 256];
+        flags[0] = MAT_BACKGROUND;
+        flags[1] = MAT_BACKGROUND;
+        let weapons = vec![Weapon {
+            id: 0,
+            shot_type: 0,
+            mult_speed: 100,
+            affect_by_explosions: true,
+            chain_explosion: true,
+            time_to_explo: 5,
+            create_on_exp: 0,
+            dirt_effect: -1,
+            splinter_amount: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ammo: 1,
+            ..Default::default()
+        }];
+        let blast = SObjectType {
+            id: 0,
+            start_sound: -1,
+            num_sounds: 0,
+            anim_delay: 3,
+            num_frames: 4,
+            detect_range: 10,
+            damage: 5,
+            blow_away: 0,
+            dirt_effect: -1,
+            ..Default::default()
+        };
+        let mk = |index: i32, pos: Vec2| WormInit {
+            index,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit { ty: Some(0), ammo: 1 }; NUM_WEAPONS],
+            start_pos: pos,
+            visible: true,
+        };
+        SimState::new(
+            &level,
+            &[
+                mk(0, Vec2::new(itof(20), itof(20))),
+                mk(1, Vec2::new(itof(180), itof(20))),
+            ],
+            1,
+            &flags,
+            weapons,
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            SpriteSet::default(),
+            Vec::new(),
+            vec![blast],
+            Vec::new(),
+            100,
+            true,
+            100,
+        )
+    }
+
+    #[test]
+    fn an_exploding_chain_wobject_is_freed_before_its_own_blast() {
+        // time_left 0 -> the timeout explodes it this tick. Its blast (damage 5, ±10 box)
+        // is centred on it: with the free AFTER blow_up, the stale slot would sit inside
+        // the box and chain a second explosion.
+        let mut state = chain_state();
+        state.wobjects.spawn(WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::zero(),
+            cur_frame: 0,
+            time_left: 0,
+            ty: Some(0),
+            owner_idx: 0,
+        });
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert!(state.wobjects.is_empty(), "the wobject exploded and is gone");
+        assert_eq!(state.sobjects.len(), 1, "exactly one blast — no self-chain");
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4½c-0 T7/T8: a MISSILE-shaped steerable in flight.
+    // -----------------------------------------------------------------------
+
+    /// Two visible worms on a 200x200 all-background level, every slot holding weapon 0 —
+    /// a MISSILE-shaped steerable (shot_type 2, speed 230, add_speed 150) — and one such
+    /// missile of worm 0 at rest at (100,100) aiming at cossin[32].
+    fn steer_state() -> SimState {
+        let w = 200i32;
+        let level = LevelData {
+            width: w,
+            height: w,
+            material_id: vec![1u8; (w * w) as usize],
+            palette: None,
+            display: None,
+        };
+        let mut flags = [0u8; 256];
+        flags[0] = MAT_BACKGROUND;
+        flags[1] = MAT_BACKGROUND;
+        let weapons = vec![Weapon {
+            id: 0,
+            shot_type: 2,
+            speed: 230,
+            add_speed: 150,
+            mult_speed: 100,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ammo: 1,
+            ..Default::default()
+        }];
+        let mk = |index: i32, pos: Vec2| WormInit {
+            index,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit { ty: Some(0), ammo: 1 }; NUM_WEAPONS],
+            start_pos: pos,
+            visible: true,
+        };
+        let mut state = SimState::new(
+            &level,
+            &[
+                mk(0, Vec2::new(itof(20), itof(20))),
+                mk(1, Vec2::new(itof(180), itof(20))),
+            ],
+            1,
+            &flags,
+            weapons,
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            SpriteSet::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            100,
+            true,
+            100,
+        );
+        state.wobjects.spawn(WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::zero(),
+            cur_frame: 32,
+            time_left: 0,
+            ty: Some(0),
+            owner_idx: 0,
+        });
+        state
+    }
+
+    #[test]
+    fn the_visible_arm_steers_the_worms_missile_with_the_post_increment_cycles() {
+        // worm.cpp:324: ProcessSteerables runs in the worm loop, AFTER `++cycles`
+        // (game.cpp:357): cycles 0 -> 1 -> step (1 & 1) + 1 = 2.
+        let mut state = steer_state();
+        state.process_frame(&[ControlState::unpack(4), ControlState::new()]);
+        let m = *state.wobjects.iter().next().expect("the missile flies on");
+        assert_eq!(m.cur_frame, 30, "32 - 2");
+        let w = &state.worms[0];
+        assert_eq!(w.steerable_count, 1);
+        assert_eq!(
+            (w.steerable_sum_x, w.steerable_sum_y),
+            (ftoi(m.pos.x), ftoi(m.pos.y))
+        );
+        assert!(!w.movable, "Left held + a live missile: movable stays false");
+        assert_eq!(state.worms[1].steerable_count, 0, "worm 1 owns no missile");
+    }
+
+    #[test]
+    fn the_object_loop_reads_this_ticks_input() {
+        // Step 4½c-0 T8 (design §4.3): C++ sets control_states BEFORE Game::ProcessFrame, so
+        // the MISSILE's Up boost (weapon.cpp:152) in the object loop sees THIS tick's Up:
+        // new_vel = dir*speed/100 + dir*add_speed/100; vel = (vel*8 + new_vel)/9.
+        let mut state = steer_state();
+        state.process_frame(&[ControlState::unpack(1), ControlState::new()]);
+        let dir = state.cossin[32];
+        let boosted = dir.mul(230).div(100).add(dir.mul(150).div(100));
+        let m = *state.wobjects.iter().next().expect("the missile flies on");
+        assert_eq!(
+            m.vel,
+            Vec2::zero().mul(8).add(boosted).div(9),
+            "boosted on the very first tick"
+        );
     }
 }

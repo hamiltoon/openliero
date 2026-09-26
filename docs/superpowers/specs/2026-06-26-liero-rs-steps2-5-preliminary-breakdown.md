@@ -277,6 +277,87 @@ start, sound triggers).
 
 ---
 
+## Step 4½ — Game shell
+
+> **Added 2026-09-10 — inserted between Step 4 and Step 5.** Step 4 (complete) stopped at a
+> minimal start flow by design: 4f made a bare run a playable *default match* from a hard-coded
+> fixture and deferred the whole menu / weapon-selection / level-select tree. This step ports that
+> shell. The authoritative doc is `2026-09-10-liero-rs-step4.5-game-shell-overview.md` (locked
+> decisions, slice detail, open questions), built on the research maps
+> `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` and
+> `2026-09-10-liero-rs-step4.5-rust-baseline-map.md`. This section is the preliminary summary only.
+
+### Goal / done-when
+Turn "plays a hard-coded match" into a complete game, close to or exactly like openliero:
+bare `cargo run -p game` opens the **main menu over a generated level**; a full match is
+configured (settings, weapon availability, level file or random, player profiles and controls),
+weapon-selected, played (against a human or **DumbLieroAI**), ended and summarised on a compact
+stats screen using only the menus; John's existing `liero.cfg` / profiles load and round-trip
+byte-identical; the same shell runs on wasm. Every sim-affecting part is bit-exact vs C++ and
+every prior golden stays byte-identical.
+
+### Provisional sub-slice breakdown
+Sim-first, thin-vertical-then-widen (detail and citations in the overview):
+1. **4½a — `MatchConfig` + settings model + builder.** C++ `Settings`/`WormSettings` mirrored
+   (same names/defaults); a `MatchConfig → SimState` builder in `scenario` closing
+   `scenario::load`'s gaps (per-worm weapons, lives, loading time, health, bonuses, `weap_table`,
+   sound hooks) with the scenario format **frozen**; `IsGameOver` + Scales extra-life rule +
+   180-frame post-mortem; C++-schema TOML persistence + `UpdateHash`; fixes for the two live bugs
+   (sound hooks all play sample 0; HUD off in the live binary).
+2. **4½b — Random level generation** (`GenerateRandom` + `MakeShadow` + `SelectSpawn`) from a
+   dedicated `Rand` seeded from the match seed. *Parallel with 4½a.*
+3. **4½c — Weapon selection phase** in `sim` (it consumes the sim RNG), incl. the 12/3-frame
+   key-repeat emulation and per-viewport menu rendering.
+4. **4½d — Menu framework + `ScreenStack` + main menu.** **Milestone:** bare run → main menu →
+   NEW GAME → weapon selection → play → Esc → menu (RESUME/NEW) → QUIT.
+5. **4½e — Settings menu, weapon availability, level selector** (file picker + RANDOM node +
+   minimap preview), save/load setups. *Parallel with 4½f.*
+6. **4½f — Player menu + profiles + DumbLieroAI** (own `Rand`, bit-exact control stream).
+7. **4½g — Match end + compact stats screen** (hash-inert StatsRecorder subset) + hidden-options
+   subset.
+8. **4½h — wasm**: live keyboard, localStorage persistence, wider embedded level manifest.
+
+### Oracle / verification strategy
+- **Sim-affecting parts get C++ goldens**, like every prior step: settings→sim plumbing (non-default
+  settings via new dumper directives), new `oracle_dump_levelgen` (seed × size × shadow →
+  `material_id` hashes pre/post `MakeShadow`) and `oracle_dump_weapsel` (RNG state + five picks),
+  a fixed-seed DumbLieroAI control-state stream, `IsGameOver`.
+- **Persistence gets a byte-gate:** C++-saved `data/Setups/liero.cfg` / `data/Profiles/*.toml` →
+  Rust load → Rust save → byte-identical.
+- **Presentation is not C++-dumpable** (the C++ menus are `Gfx`-driven): Rust-only frame-hash
+  self-goldens for regression + PNG eyeballing against the C++ build via `shot` / the `liero-shot`
+  skill.
+- **Determinism firewall** proven structurally (menus cannot reach `Sim`; `tick_and_render` stays the
+  only mutator) and empirically (every existing golden re-diffed after each slice).
+
+### Key risks & the hard 10%
+- **Weapon-selection RNG** runs before match frame 0 in data-dependent rejection loops over the sim
+  RNG — one extra draw shifts every later tick.
+- **Level-generation draw counts** are data-dependent (rejection caps, per-call `DrawDirtEffect`
+  draws); the golden matrix must cover them.
+- **Quiet settings plumbing** — a field left at its default yields a plausible but divergent match.
+- **TOML byte-identity** (key order, number formatting, `rgbDepth` marker) is stricter than value
+  equality.
+- **Scope** — ~10 k C++ LOC, ~1.5 k of it sim-affecting; if cut short, cut after 4½d, never by
+  weakening a/b/c's gates.
+
+### Dependencies
+- Needs Steps 2–4 (sim, render, live loop, audio, record/replay). Reuses `WormInit::resolve_weapons`
+  (already the exact `InitWeapons` mapping), `render::font`/`blit`/palette, the `AudioSink` trait,
+  and the dumper-directive golden pattern.
+- **Step 5 depends on it:** netplay's rematch flow, weapon selection under rollback, and the
+  settings-hash exchange (`Settings::UpdateHash`) are all built on the 4½ shell.
+
+### Open questions to resolve before detailed planning
+Listed with recommendations in the overview's §Open questions: where the `Menu` framework lives
+(recommend a new Bevy-free `rust/ui` crate so `shot` can screenshot menus); `MatchConfig` in
+`scenario` vs a new `settings` crate (recommend `scenario`); how C++ seeds `DumbLieroAI`'s `Rand`
+(pin in the 4½f design); DOS scancodes vs Bevy `KeyCode` in the TOML (recommend DOS scancodes +
+a ported translation table); level-selector preview on wasm (embedded set only); and the level
+corpus — ship stock levels or rely on random generation (John's call).
+
+---
+
 ## Step 5 — bevy_ggrs (rollback netplay)
 
 ### Goal / done-when
@@ -334,6 +415,9 @@ reorder — i.e. the Rust equivalent of the C++ `test_rollback_*` suite passes.
 - Needs steps 2–4. Critically depends on **step 2 having been built
   ordering-clean and float-free** and **step 4's deterministic per-tick input
   model**. Possibly reuses the Go `server/` for signaling.
+- **(2026-09-10)** Weapon-select-phase rollback is now concrete: Step 4½c ports the weapon
+  selection phase into `sim` (it draws from the sim RNG), so Step 5 must decide whether its
+  snapshot/rollback set includes the weapon-selection state (C++ `WeaponSelectSnap`).
 
 ### Open questions to resolve before detailed planning
 - Adopt the `GgrsSchedule` cadence as early as step 4 to avoid a re-home?

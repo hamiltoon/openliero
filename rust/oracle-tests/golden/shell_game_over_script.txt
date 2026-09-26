@@ -1,0 +1,47 @@
+# Step 4½d G2 case game_over (design §6.4; plan Task 9) — written by gen_slice4_5d.
+# Rust ledger: 742 frames, end `end 741 quit`, NEW GAME 1, RESUME 0, back-to-menu 1 (game over: true), black presents 1
+setup shell_game_over_setup.cfg
+boot_seed 41
+match_seed 2
+frames 751
+expect quit
+key 40 down RETURN
+key 42 up RETURN
+key 74 down R
+key 74 down UP
+key 76 up R
+key 76 up UP
+key 77 down LCTRL
+key 77 down RCTRL
+key 79 up LCTRL
+key 79 up RCTRL
+key 80 down F
+key 105 up F
+key 106 down LCTRL
+key 108 up LCTRL
+key 121 down LCTRL
+key 123 up LCTRL
+key 136 down LCTRL
+key 138 up LCTRL
+key 151 down LCTRL
+key 153 up LCTRL
+key 166 down LCTRL
+key 168 up LCTRL
+key 181 down LCTRL
+key 183 up LCTRL
+key 196 down LCTRL
+key 198 up LCTRL
+key 211 down LCTRL
+key 213 up LCTRL
+key 226 down LCTRL
+key 228 up LCTRL
+key 241 down LCTRL
+key 243 up LCTRL
+key 256 down LCTRL
+key 258 up LCTRL
+key 271 down LCTRL
+key 273 up LCTRL
+key 700 down ESC
+key 702 up ESC
+key 708 down RETURN
+key 710 up RETURN

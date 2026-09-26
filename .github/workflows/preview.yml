@@ -1,0 +1,194 @@
+---
+
+# A playable browser build of every PR, on Cloudflare Pages.
+#
+# On each push to a PR this builds the Rust `game` for wasm32 (the size-tuned
+# `wasm-release` profile), runs wasm-bindgen, deploys the bundle to the Pages
+# project `openliero-preview` under the PR's branch, and posts (or updates) one
+# comment on the PR with the link. When the PR closes, that branch's deployments
+# are deleted and the comment says so.
+#
+# Needs two repository secrets: CLOUDFLARE_API_TOKEN (Account > Cloudflare Pages >
+# Edit) and CLOUDFLARE_ACCOUNT_ID. Without them (e.g. a PR from a fork) the build
+# still runs and the deploy is skipped with a notice.
+
+name: Preview
+
+on:  # yamllint disable-line rule:truthy
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - 'rust/**'
+      - 'data/TC/openliero/**'
+      - 'web/**'
+      - '.github/workflows/preview.yml'
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PROJECT: openliero-preview
+  COMMENT_MARKER: '<!-- openliero-preview -->'
+
+jobs:
+  deploy:
+    name: Build and deploy
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          key: wasm-release
+
+      - name: Read the wasm-bindgen version from Cargo.lock
+        id: wb
+        run: |
+          v=$(awk '$0 == "name = \"wasm-bindgen\"" { getline; gsub(/[^0-9.]/, ""); print; exit }' rust/Cargo.lock)
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wb.outputs.version }}
+
+      - name: Build game.wasm (wasm-release)
+        run: cargo build --manifest-path rust/Cargo.toml -p game --profile wasm-release --target wasm32-unknown-unknown
+
+      - name: Bundle
+        run: |
+          wasm-bindgen --target web --out-dir site --out-name game \
+            --remove-name-section --remove-producers-section \
+            rust/target/wasm32-unknown-unknown/wasm-release/game.wasm
+          cp web/index.html site/
+          rm -f site/*.d.ts
+          ls -la site
+          # Cloudflare Pages refuses any file over 25 MiB.
+          big=$(find site -type f -size +25M)
+          if [ -n "$big" ]; then
+            echo "::error::over the 25 MiB Cloudflare Pages file limit: $big"
+            exit 1
+          fi
+          echo "wasm: $(du -h site/game_bg.wasm | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BRANCH: ${{ github.head_ref }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::Cloudflare secrets are not available here; skipping the deploy."
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # First run only: create the project (an error just means it exists).
+          npx --yes wrangler@4 pages project create "$PROJECT" --production-branch=master || true
+          npx --yes wrangler@4 pages deploy site --project-name="$PROJECT" \
+            --branch="$BRANCH" --commit-hash="$SHA" --commit-dirty=true | tee deploy.log
+          # Prefer the stable per-branch alias; fall back to this deployment's URL.
+          url=$(grep -oE 'Deployment alias URL: https://[^ ]+' deploy.log | awk '{print $4}' | tail -1)
+          if [ -z "$url" ]; then
+            url=$(grep -oE 'https://[a-z0-9.-]+\.pages\.dev' deploy.log | tail -1)
+          fi
+          test -n "$url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Preview: $url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment the link on the PR
+        if: steps.deploy.outputs.url != ''
+        uses: actions/github-script@v7
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const url = process.env.URL.replace(/\/$/, '');
+            const marker = process.env.COMMENT_MARKER;
+            const body = [
+              marker,
+              `### 🎮 Playable preview`,
+              ``,
+              `**[Play this PR in the browser](${url}/)**, built from ${process.env.SHA.slice(0, 7)}. It opens on the original's **main menu** (NEW GAME → weapon selection → play; Esc pauses to RESUME / NEW GAME; QUIT TO OS). NEW GAME starts like the original's: a generated level and a fresh seed.`,
+              ``,
+              `Examples:`,
+              `- [MISSILE, LASER, BIG NUKE, BOOBY TRAP, LARPA — skips weapon selection](${url}/?weapons=MISSILE,LASER,BIG%20NUKE,BOOBY%20TRAP,LARPA)`,
+              `- [Water level, seed 7](${url}/?level=water_stage&seed=7)`,
+              `- [Main menu with a water level](${url}/?level=water_stage&menu=1)`,
+              `- [The scripted demo](${url}/?demo)`,
+              ``,
+              `Main menu: up/down (or P1 aim) picks, Enter (or fire) selects, Esc (or jump) goes to QUIT TO OS.`,
+              `**MATCH SETUP (F7)**, or Enter on it, moves the cursor into the settings: left/right change a value, Enter on a number types a new one (digits, then Enter; Esc cancels), Esc goes back to the main menu. **WEAPON OPTIONS** there: left/right makes a weapon Menu / Bonus / Banned; at least one must stay in the menu. Edits reach a paused match at RESUME GAME. Settings are kept until you reload the page.`,
+              `A match opens on **weapon selection**: aim up/down picks a line, move left/right changes the weapon, fire on Randomize re-rolls all five, fire on DONE! when ready (both players). \`weapons=\` skips it.`,
+              `URL parameters (\`weapons\`, \`level\` and \`seed\` skip the menu): \`weapons\` (up to 5 names; skips weapon selection), \`level\` (a stock level instead of a generated one: render_stage, water_stage, see_shadow_test, physics_fall_test), \`seed\` (fixes the seed), \`menu\` (\`menu=1\` forces the main menu), \`demo\`.`,
+              `Keys: P1 R/F/D/G + Left Ctrl/Shift/Alt; P2 arrows + Right Ctrl/Alt/Shift; Esc pauses to the menu; F5 restarts a match (back to weapon selection). Click the game first.`,
+              `Weapon change in a match: hold Change (P1 Left Shift, P2 Right Alt) and tap left/right — one tap, one weapon. On a phone just tap WEAPON for the next weapon (holding WEAPON + the pad works too).`,
+              `On a phone or tablet: on-screen pad + FIRE/JUMP/WEAPON/DIG drive player 1 and the menus, MENU (top right) is Esc, and player 2 is a bot that is ready at once (\`?touch=1\` forces them on a desktop). A held pad up/down repeats in the menus. A number box opens the phone keyboard (on iPhone tap TAP TO TYPE); FIRE confirms and MENU cancels.`,
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const mine = comments.find((c) => c.body && c.body.startsWith(marker));
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  cleanup:
+    name: Remove the preview
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Delete this branch's deployments
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::Cloudflare secrets are not available here; nothing to clean up."
+            exit 0
+          fi
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT/deployments"
+          auth="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+          ids=""
+          for page in $(seq 1 20); do
+            resp=$(curl -fsS -H "$auth" "$api?env=preview&page=$page&per_page=25") || break
+            batch=$(echo "$resp" | jq -r --arg b "$BRANCH" \
+              '.result[] | select(.deployment_trigger.metadata.branch == $b) | .id')
+            ids="$ids $batch"
+            [ "$(echo "$resp" | jq '.result | length')" -lt 25 ] && break
+          done
+          for id in $ids; do
+            curl -fsS -X DELETE -H "$auth" "$api/$id?force=true" > /dev/null && echo "deleted $id"
+          done
+
+      - name: Mark the PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = process.env.COMMENT_MARKER;
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const mine = comments.find((c) => c.body && c.body.startsWith(marker));
+            if (mine) {
+              const body = `${marker}\n### 🎮 Playable preview\n\nRemoved: the PR is closed.`;
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            }

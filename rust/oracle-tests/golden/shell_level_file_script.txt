@@ -1,0 +1,6 @@
+# Step 4½d G2 case level_file (design §6.4; plan Task 9) — written by gen_slice4_5d.
+# Rust ledger: 40 frames, end `end 40 frames`, NEW GAME 0, RESUME 0, back-to-menu 0 (game over: false), black presents 0
+setup shell_level_file_setup.cfg
+boot_seed 13
+frames 40
+expect frames

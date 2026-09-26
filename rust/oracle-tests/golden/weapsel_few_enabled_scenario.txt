@@ -1,0 +1,18 @@
+# Step 4½ slice 4½c — weapon-selection case `few_enabled` (design §6.4): 3 enabled, enough = false: duplicates in the constructor loop and in RANDOMIZE.
+# Read by oracle_dump_weapsel (golden/weapsel_few_enabled.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 136, 13 frames, 132 draws in frames, final rng 480095c5
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 5
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_few_enabled_setup.cfg
+weapsel 0 16 0
+weapsel 2 2 0
+weapsel 4 8 0
+weapsel 6 4 0
+weapsel 8 1 1
+weapsel 10 1 16
+weapsel 12 16 0

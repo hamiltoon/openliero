@@ -1,0 +1,13 @@
+# Step 4½ slice 4½c — weapon-selection case `bot_keep` (design §6.4): a KEEP bot (select_bot_weapons 2) readies at once with its saved picks; its zero and its disabled pick still roll.
+# Read by oracle_dump_weapsel (golden/weapsel_bot_keep.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 2, 3 frames, 0 draws in frames, final rng 9b7ab8b0
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 13
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_bot_keep_setup.cfg
+weapsel 0 1 0
+weapsel 2 16 0

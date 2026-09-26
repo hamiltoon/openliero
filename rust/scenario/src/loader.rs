@@ -50,13 +50,24 @@ pub struct SceneData {
     pub font: Font,
     /// The three HUD text labels from the TC's `[texts]` (`Kills`/`Lives`/`Reloading`).
     pub labels: HudLabels,
+    /// Step 4½c: the weapon-selection screen's TC strings (`tc.cfg:245-250`).
+    pub weapsel_texts: render::weapsel::WeapselTexts,
+    /// C++ `Common::bonus_frames` (`common.hpp:176`): the small-sprite frame of each bonus
+    /// kind, from tc.cfg `[[constants.bonuses]]` `frame`. Step 4½c: a live match with
+    /// `max_bonuses > 0` (the NEW GAME start) spawns bonuses, and `viewport.cpp:279,405`
+    /// index this table — an empty table panicked the draw.
+    pub bonus_frames: Vec<i32>,
+    /// Step 4½e-1: `Common::text_sprites` — `sprites/text.tga`, 4×4, 26 frames (`A`..`Z`), the
+    /// bank of the three `DrawTextSmall` name labels. Loaded always; drawn only when a caller
+    /// sets `Scene::small_labels` (never on a golden path).
+    pub text_sprites: SpriteSet,
 }
 
 impl SceneData {
     /// Borrow the owned ingredients into a `render::frame::Scene` for one draw.
     /// `screen_flash`/`draw_shadow` are per-draw (since 4d T2 the `game` binary
     /// passes the live `sim.screen_flash`; `scenario.shadow()` for the shadow gate).
-    /// `draw_hud`/`map` default to `false` — the world-only path every existing
+    /// `draw_hud`/`map` default to `false` and `small_labels` to `None` — the world-only path every existing
     /// caller (shot, game, the 3b harness) drives, so 3a/3b frame hashes stay
     /// byte-identical. A HUD-enabling caller (3e T8) sets them on the returned
     /// `Scene`.
@@ -65,7 +76,7 @@ impl SceneData {
             origpal: &self.origpal,
             color_anim: &self.color_anim,
             fire_cone_sprites: &self.fire_cone,
-            bonus_frames: &[],
+            bonus_frames: &self.bonus_frames,
             nr_begin: self.nr_begin,
             nr_end: self.nr_end,
             laser_weapon: self.laser_weapon,
@@ -75,6 +86,7 @@ impl SceneData {
             labels: &self.labels,
             draw_hud: false,
             map: false,
+            small_labels: None,
         }
     }
 }
@@ -89,7 +101,7 @@ pub struct Loaded {
     pub scene: SceneData,
 }
 
-fn load_sprites(tc_root: &Path, file: &str, w: i32, h: i32, count: i32) -> SpriteSet {
+pub(crate) fn load_sprites(tc_root: &Path, file: &str, w: i32, h: i32, count: i32) -> SpriteSet {
     let bytes = crate::assets::read_asset(tc_root, &format!("sprites/{file}"));
     let tga = assets::sprite::Tga::load(&bytes).unwrap_or_else(|_| panic!("{file} parses"));
     SpriteSet::from_tga(&tga, w, h, count).unwrap_or_else(|_| panic!("{file} sprite bank"))
@@ -98,6 +110,11 @@ fn load_sprites(tc_root: &Path, file: &str, w: i32, h: i32, count: i32) -> Sprit
 /// Verbatim factor-out of `render_slice3b_common::build()`. `tc_root` is the TC
 /// directory (`data/TC/openliero`); `scenario` is the already-parsed scenario.
 pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
+    assert!(
+        scenario.settings.is_none(),
+        "scenario::load refuses a `settings` scenario: build it with \
+         scenario::build::build_match (design §7.1)"
+    );
     // Origpal = small.tga's embedded palette (C++ common.exepal), as in 3a.
     let small_bytes = crate::assets::read_asset(tc_root, "sprites/small.tga");
     let small_tga = assets::sprite::Tga::load(&small_bytes).expect("small.tga parses");
@@ -107,7 +124,6 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     let level = assets::level::load(&lev_bytes).expect("level loads");
     let tc_bytes = crate::assets::read_asset(tc_root, "tc.cfg");
     let tc = TcConfig::load(&tc_bytes).expect("tc.cfg parses");
-    let color_anim = tc.color_anim.clone();
     let objects = Objects::load(&tc.types, |sub, id| {
         Ok(crate::assets::read_asset(
             tc_root,
@@ -116,9 +132,9 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     })
     .expect("object configs load");
 
-    // weap_order: indices sorted by weapon name; id == index (Common::Precompute).
-    let mut weap_order: Vec<usize> = (0..objects.weapons.len()).collect();
-    weap_order.sort_by(|&a, &b| objects.weapons[a].name.cmp(&objects.weapons[b].name));
+    // weap_order: indices sorted by weapon name; id == index (Common::Precompute). The one shared
+    // copy since Step 4½c (design finding 12).
+    let weap_order = sim::weapsel::weap_order(&objects.weapons);
     let settings_weapons = [1u32; NUM_WEAPONS];
     let mut resolved = WormInit::resolve_weapons(&objects, &weap_order, &settings_weapons);
 
@@ -179,20 +195,44 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     state.worm_spawn_rect_h = tc.constants.WormSpawnRectH;
     state.worm_min_spawn_dist_last = tc.constants.WormMinSpawnDistLast;
     state.worm_min_spawn_dist_enemy = tc.constants.WormMinSpawnDistEnemy;
+    // Step 4½c-0 (design §4.9): the WObject::Process TC consts and `LC(LaserWeapon)` —
+    // both unhashed; no golden fires a trail weapon or holds the LASER.
+    state.wobject_consts = sim::weapon::WObjectConsts::from_tc(&tc);
+    state.laser_weapon = tc.constants.LaserWeapon;
     state.game_mode = scenario.game_mode as u32;
+    // Step 4½a-1 (live bug, design §8): the worm-hook sound indices. Left at
+    // `SoundHooks::default()` every hook played sample 0. Unhashed (sound never
+    // enters the hash), so every golden stays byte-identical.
+    state.sound_hooks = tc.sound_hooks.clone();
 
     // NOTE: killed_timer is left at its `WormInit` default (150) — the camera
     // stays pinned at (0,0). Resetting it would centre the viewport and diverge.
 
-    let fire_cone = build_fire_cone_sprites(&state.large_sprites);
+    let scene = scene_data(tc_root, &tc, origpal, &state.large_sprites);
+    Loaded {
+        state,
+        viewports: Viewport::player_layout(),
+        scene,
+    }
+}
 
+/// The owned Scene ingredients for a loaded TC — shared by [`load`] and
+/// `crate::build::build_match` (Step 4½a-1; a pure factor-out of the former `load` tail,
+/// gated by the render goldens). `origpal` is the palette the caller chose.
+pub(crate) fn scene_data(
+    tc_root: &Path,
+    tc: &TcConfig,
+    origpal: Palette,
+    large_sprites: &SpriteSet,
+) -> SceneData {
+    let fire_cone = build_fire_cone_sprites(large_sprites);
     // HUD font: `sprites/font.tga` is a plain uncompressed indexed TGA, so the
     // generic `Tga::load` parses it (7 × 250*8, de-flipped); `Font::load` runs the
-    // `common.cpp:414-433` per-glyph post-process. No new TGA parser (T0).
+    // `common.cpp:414-433` per-glyph post-process.
     let font_bytes = crate::assets::read_asset(tc_root, "sprites/font.tga");
     let font_tga = assets::sprite::Tga::load(&font_bytes).expect("font.tga parses");
     let font = Font::load(&font_tga);
-    // HUD labels carried verbatim from the TC's `[texts]` (already parsed by `assets::tc`).
+    // HUD labels carried verbatim from the TC's `[texts]`.
     let labels = HudLabels {
         kills: tc.texts.Kills.clone(),
         lives: tc.texts.Lives.clone(),
@@ -200,20 +240,19 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
         killed_msg: tc.texts.KilledMsg.clone(),
         committed_suicide_msg: tc.texts.CommittedSuicideMsg.clone(),
     };
-
-    Loaded {
-        state,
-        viewports: Viewport::player_layout(),
-        scene: SceneData {
-            origpal,
-            color_anim,
-            fire_cone,
-            nr_begin: tc.constants.NRColourBegin,
-            nr_end: tc.constants.NRColourEnd,
-            laser_weapon: tc.constants.LaserWeapon,
-            font,
-            labels,
-        },
+    SceneData {
+        origpal,
+        color_anim: tc.color_anim.clone(),
+        fire_cone,
+        nr_begin: tc.constants.NRColourBegin,
+        nr_end: tc.constants.NRColourEnd,
+        laser_weapon: tc.constants.LaserWeapon,
+        font,
+        labels,
+        weapsel_texts: render::weapsel::WeapselTexts::from_tc(&tc.texts),
+        bonus_frames: tc.bonuses.iter().map(|b| b.frame).collect(),
+        // After the existing loads (Step 4½e-1).
+        text_sprites: load_sprites(tc_root, "text.tga", 4, 4, 26),
     }
 }
 
@@ -236,6 +275,16 @@ weapon 0 DART
 ";
 
     #[test]
+    fn load_yields_the_weapsel_texts() {
+        let loaded = load(
+            Path::new(TC_ROOT),
+            &Scenario::parse(SAMPLE).expect("parses"),
+        );
+        assert_eq!(loaded.scene.weapsel_texts.sel_weap, "Select your weapons:");
+        assert_eq!(loaded.scene.weapsel_texts.done, "DONE!");
+    }
+
+    #[test]
     fn load_yields_font_and_labels() {
         let scenario = Scenario::parse(SAMPLE).expect("scenario parses");
         let loaded = load(Path::new(TC_ROOT), &scenario);
@@ -252,5 +301,58 @@ weapon 0 DART
         // Death-banner strings (Slice 4d T5): the KilledMsg prefix / suicide suffix.
         assert_eq!(loaded.scene.labels.killed_msg, "Killed ");
         assert_eq!(loaded.scene.labels.committed_suicide_msg, " committed suicide");
+    }
+
+    #[test]
+    fn load_yields_the_text_sprites_and_no_small_labels() {
+        // Step 4½e-1: text.tga is the 4x4, 26-frame DrawTextSmall bank; `as_scene` never turns
+        // the labels on (every golden path draws without them).
+        let loaded = load(
+            Path::new(TC_ROOT),
+            &Scenario::parse(SAMPLE).expect("parses"),
+        );
+        let t = &loaded.scene.text_sprites;
+        assert_eq!((t.width, t.height, t.count), (4, 4, 26));
+        assert!(t.data.iter().any(|&p| p != 0), "the real bank has letters");
+        assert!(loaded.scene.as_scene(0, false).small_labels.is_none());
+    }
+
+    #[test]
+    fn load_assigns_the_tc_sound_hooks() {
+        let scenario = Scenario::parse(SAMPLE).expect("scenario parses");
+        let loaded = load(Path::new(TC_ROOT), &scenario);
+        let tc_bytes = std::fs::read(format!("{TC_ROOT}/tc.cfg")).expect("read tc.cfg");
+        let tc = TcConfig::load(&tc_bytes).expect("tc.cfg parses");
+        assert_eq!(
+            loaded.state.sound_hooks, tc.sound_hooks,
+            "state.sound_hooks must be the TC's resolved hook indices"
+        );
+        // Non-vacuity: the all-zero default was the bug (every hook played sample 0,
+        // "shotgun"); the real TC's `bump` is sound index 14.
+        assert_ne!(loaded.state.sound_hooks.Bump, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "settings")]
+    fn load_refuses_a_settings_scenario() {
+        let s = Scenario::parse("seed 1\nlevel Levels/render_stage.lev\nticks 1\nsettings x.cfg\n")
+            .expect("parses");
+        let _ = load(Path::new(TC_ROOT), &s);
+    }
+
+    #[test]
+    fn load_assigns_the_wobject_consts_and_the_laser_weapon() {
+        // Step 4½c-0 T1 (design §4.9): the game/`shot` path gets the WObject::Process TC
+        // consts (a LARPA picked up live must not divide by zero) and `LC(LaserWeapon)`,
+        // so the LASER's sight walk (worm.cpp:1196) arms. Both unhashed.
+        let scenario = Scenario::parse(SAMPLE).expect("scenario parses");
+        let loaded = load(Path::new(TC_ROOT), &scenario);
+        let tc = TcConfig::load(&std::fs::read(format!("{TC_ROOT}/tc.cfg")).unwrap()).unwrap();
+        assert_eq!(
+            loaded.state.wobject_consts,
+            sim::weapon::WObjectConsts::from_tc(&tc)
+        );
+        assert_eq!(loaded.state.wobject_consts.splinter_larpa_vel_div, 3);
+        assert_eq!(loaded.state.laser_weapon, tc.constants.LaserWeapon);
     }
 }

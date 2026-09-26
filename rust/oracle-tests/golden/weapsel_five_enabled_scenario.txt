@@ -1,0 +1,14 @@
+# Step 4½ slice 4½c — weapon-selection case `five_enabled` (design §6.4): the >= 5 boundary: loops and RANDOMIZE yield permutations (long tails).
+# Read by oracle_dump_weapsel (golden/weapsel_five_enabled.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 157, 5 frames, 343 draws in frames, final rng 28384be5
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 6
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_five_enabled_setup.cfg
+weapsel 0 16 16
+weapsel 2 1 1
+weapsel 4 16 16

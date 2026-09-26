@@ -72,19 +72,24 @@ impl Viewport {
         }
     }
 
-    /// `viewport.cpp:22-57`. NB: the `steerable_count > 0` centering
-    /// (`viewport.cpp:31-32`) reads `steerable_sum_x/y`, which `WormState` does
-    /// not yet carry; 3a scenarios keep `steerable_count == 0`, so that arm is
-    /// asserted-unreachable and the pos-centering arm is used. Steerable
-    /// centering lands with the sprite pass in 3b.
+    /// `viewport.cpp:22-57`. An alive, visible worm that steered missiles this tick
+    /// (`steerable_count > 0`, set by the sim's `process_steerables`) is followed at the
+    /// missiles' pixel centroid (`viewport.cpp:30-32`, 4½c-0 T9); otherwise at its own
+    /// position.
     pub fn process(&mut self, worm: &WormState, level_w: i32, level_h: i32) {
         self.max_x = level_w - self.rect.width();
         self.max_y = level_h - self.rect.height();
 
         if worm.killed_timer <= 0 {
             if worm.visible {
-                debug_assert_eq!(worm.steerable_count, 0, "steerable centering deferred to 3b");
-                self.set_center(ftoi(worm.pos.x), ftoi(worm.pos.y));
+                if worm.steerable_count > 0 {
+                    self.set_center(
+                        worm.steerable_sum_x / worm.steerable_count,
+                        worm.steerable_sum_y / worm.steerable_count,
+                    );
+                } else {
+                    self.set_center(ftoi(worm.pos.x), ftoi(worm.pos.y));
+                }
             } else {
                 self.scroll_to(ftoi(worm.pos.x), ftoi(worm.pos.y), 4);
             }
@@ -148,6 +153,8 @@ mod tests {
             ready: true,
             make_sight_green: false,
             steerable_count: 0,
+            steerable_sum_x: 0,
+            steerable_sum_y: 0,
             current_frame: 0,
             animate: false,
             hotspot_x: 0,
@@ -177,6 +184,23 @@ mod tests {
         let before = vp.rand.draws();
         vp.process(&worm_at(100, 100), 200, 200);
         assert_eq!(vp.rand.draws(), before, "shake==0 -> no rand drawn");
+    }
+
+    #[test]
+    fn process_centres_on_the_steerable_centroid() {
+        // viewport.cpp:30-32: an alive, visible worm steering missiles is followed at the
+        // missiles' pixel centroid, not at the worm. C++ `int /` truncates like Rust's.
+        let mut vp = Viewport::new(Rect::new(0, 0, 158, 158), 0);
+        let mut w = worm_at(20, 20);
+        w.steerable_count = 2;
+        w.steerable_sum_x = 150 + 170; // x 150 and 170 -> 160
+        w.steerable_sum_y = 90 + 101; // y 90 and 101 -> 95 (truncating)
+        vp.process(&w, 400, 300);
+        assert_eq!((vp.x, vp.y), (160 - 79, 95 - 79), "SetCenter(sum / count)");
+        // Without steerables the same worm is centred on itself (clamped at 0).
+        w.steerable_count = 0;
+        vp.process(&w, 400, 300);
+        assert_eq!((vp.x, vp.y), (0, 0));
     }
 
     #[test]

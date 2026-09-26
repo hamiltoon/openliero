@@ -1,0 +1,24 @@
+# Step 4½d G1 time: TimeToString / TimeToStringFrames values, the Integer step and clamp,
+# TimeBehavior never allowing entry.
+menu 30 20 15 60 0
+item 1 48 7 1 1 TIME
+item 2 48 7 1 1 FRAMES
+item 3 48 7 1 1 ZONE
+bind 1 time 600 60 3600 10 0
+bind 2 time 4286 0 100000 70 1
+bind 3 time 3599 10 3600 10 0
+update_items
+first_visible
+cycles 0
+left
+right
+right
+enter
+move 1
+right
+left
+left
+move 1
+right
+right
+draw 0 -1 0

@@ -1,0 +1,17 @@
+# Step 4½ slice 4½c — weapon-selection case `one_enabled` (design §6.4): 1 enabled: ~40 draws per slot; a cycle is a full lap back to the same weapon.
+# Read by oracle_dump_weapsel (golden/weapsel_one_enabled.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 411, 11 frames, 0 draws in frames, final rng 499ed6cd
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 7
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_one_enabled_setup.cfg
+weapsel 0 2 0
+weapsel 2 4 0
+weapsel 4 8 0
+weapsel 6 1 1
+weapsel 8 1 16
+weapsel 10 16 0

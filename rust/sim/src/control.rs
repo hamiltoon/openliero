@@ -638,8 +638,9 @@ pub fn process_weapon_change(worm: &mut WormState, load_change: bool) {
 ///   `dig_pos = kDir*2 + pos`, then `-Itof(7)` per axis → first crater at
 ///   `Ftoi(dig_pos)`; `dig_pos += kDir*2` → second crater. Each `draw_dirt_effect`
 ///   consumes one `rand(rframe)` (texture 7 `rframe=2`), so the dig advances the
-///   RNG by exactly two draws. `CorrectShadow` is **OMITTED** (shadow=false,
-///   render-only). The `else` (not both held) re-arms `able_to_dig = true`.
+///   RNG by exactly two draws. `CorrectShadow` runs behind `SimState.shadow` (4½a-1;
+///   after each crater, draws no rand). The `else` (not both held) re-arms
+///   `able_to_dig = true`.
 /// * Walk sites set `animate = true` (`worm.cpp:870,886`); idle `animate = false`
 ///   (`worm.cpp:953-955`) — tracked, non-hashed (Slice 5' T1 promotion).
 ///
@@ -718,7 +719,7 @@ pub fn process_movement(
             dig_pos.y = dig_pos.y.wrapping_sub(itof(7));
 
             // worm.cpp:930-931 — first crater at Ftoi(dig_pos), texture 7.
-            // CorrectShadow (worm.cpp:932-935) OMITTED: shadow off, render-only.
+            // worm.cpp:932-935 CorrectShadow behind settings->shadow (Step 4½a-1).
             draw_dirt_effect(
                 level,
                 large_sprites,
@@ -728,11 +729,19 @@ pub fn process_movement(
                 ftoi(dig_pos.y),
                 rand,
             );
+            crate::shadow::correct_shadow_if_enabled(
+                level,
+                ftoi(dig_pos.x) - 3,
+                ftoi(dig_pos.y) - 3,
+                ftoi(dig_pos.x) + 18,
+                ftoi(dig_pos.y) + 18,
+            );
 
             // worm.cpp:937 — dig_pos += kDir*2 (the -Itof(7) stays applied).
             dig_pos = dig_pos.add(k_dir.mul(2));
 
-            // worm.cpp:940-941 — second crater at the advanced Ftoi(dig_pos).
+            // worm.cpp:940-941 — second crater at the advanced Ftoi(dig_pos);
+            // worm.cpp:942-945 its CorrectShadow behind settings->shadow (4½a-1).
             draw_dirt_effect(
                 level,
                 large_sprites,
@@ -741,6 +750,13 @@ pub fn process_movement(
                 ftoi(dig_pos.x),
                 ftoi(dig_pos.y),
                 rand,
+            );
+            crate::shadow::correct_shadow_if_enabled(
+                level,
+                ftoi(dig_pos.x) - 3,
+                ftoi(dig_pos.y) - 3,
+                ftoi(dig_pos.x) + 18,
+                ftoi(dig_pos.y) + 18,
             );
         }
     } else {

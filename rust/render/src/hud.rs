@@ -7,9 +7,9 @@
 //! blinking "Reloading" text, the always-drawn kills text, and the KillEmAll/
 //! Scales lives text. Every colour constant (`w/10+234`, `w/10+245`, 50, 10, 6)
 //! and every y offset is load-bearing (a stray pixel is a frame-hash miss);
-//! each carries its `viewport.cpp` line. The Holdazone/GameOfTag/replay arms are
-//! **tripwired** (`debug_assert!`) — unreachable in our scenarios, never silently
-//! dropped (spec §6).
+//! each carries its `viewport.cpp` line. The replay arm is **tripwired**
+//! (`debug_assert!`) — unreachable in our scenarios, never silently dropped (spec §6).
+//! The GameOfTag/Holdazone timer texts are ported (Step 4½d: the G2 boot cases).
 //!
 //! The HUD is a **pure consumer** of `SimState`: it reads `worm.health/kills/
 //! lives/killed_timer/visible/stats_x/weapons/current_weapon`, `state.cycles`,
@@ -20,7 +20,7 @@
 use crate::bitmap::{Bitmap, Pal32};
 use crate::blit::draw_bar;
 use crate::font::Font;
-use sim::state::{LevelSim, SimState};
+use sim::state::{LevelSim, SimState, WormState};
 use sim_core::fixed::ftoi;
 
 /// `Level::kHudMinimapW` (`level.hpp:30`): the minimap fits into 52 px wide.
@@ -68,6 +68,55 @@ fn computed_loading_time(settings_loading_time: i32, weapon_loading_time: i32) -
     } else {
         ret
     }
+}
+
+/// `kStateColours` (`viewport.cpp:146`), indexed `[not holder / not "it"][state]`.
+const STATE_COLOURS: [[i32; 2]; 2] = [[6, 10], [79, 4]];
+
+/// The timer arms' `state` (`viewport.cpp:156-162`, `:172-178`): 1 iff `cmp(other, own)`
+/// holds for any other worm's timer.
+fn timer_state(state: &SimState, worm_idx: usize, cmp: impl Fn(i32, i32) -> bool) -> usize {
+    let own = state.worms[worm_idx].timer;
+    let any = state
+        .worms
+        .iter()
+        .enumerate()
+        .any(|(i, w)| i != worm_idx && cmp(w.timer, own));
+    usize::from(any)
+}
+
+/// `TimeToString(sec)` (`text.cpp:5-16`): `M M : S S`, first digit `sec / 600`, each digit
+/// C++ `'0' + n` in a `char` (wrapping outside 0..=9).
+fn time_to_string(sec: i32) -> String {
+    let digit = |n: i32| (b'0' as i32 + n) as u8 as char;
+    [
+        digit(sec / 600),
+        digit((sec % 600) / 60),
+        ':',
+        digit((sec % 60) / 10),
+        digit(sec % 10),
+    ]
+    .iter()
+    .collect()
+}
+
+/// The timer text of both timer arms (`viewport.cpp:166-168`, `:182-184`): the
+/// `DrawString(bmp, char const*, len, x, y, colour)` overload with `len = 5 * kMultiplier`
+/// (all of `TimeToString`'s five characters at multiplier 1), at
+/// `x = 106 * m + 84 * index * m`, `y = render_res_y - 39`, size 1.
+fn draw_timer(
+    scr: &mut Bitmap,
+    pal: &Pal32,
+    font: &Font,
+    worm: &WormState,
+    render_res_y: i32,
+    multiplier: i32,
+    colour: i32,
+) {
+    let text = time_to_string(worm.timer);
+    let len = (5 * multiplier).clamp(0, text.len() as i32) as usize;
+    let x = 106 * multiplier + 84 * worm.index * multiplier;
+    font.draw_string(scr, pal, &text[..len], x, render_res_y - 39, colour, 1);
 }
 
 /// Draw the HUD pre-block for `worm_idx`'s worm (`viewport.cpp:84-189`, the
@@ -215,18 +264,24 @@ pub fn draw_hud(
             let lives_text = format!("{}{}", labels.lives, worm.lives);
             font.draw_string(scr, pal, &lives_text, stats_x, render_res_y - 22, 6, 1);
         }
-        // viewport.cpp:155-169 — kGmHoldazone timer text: TRIPWIRE (Holdazone deferred
-        // past Step 2; no scenario sets game_mode 2). Never silently dropped.
-        2 => debug_assert!(
-            false,
-            "Holdazone HUD timer (viewport.cpp:155-169) deferred past Step 2 (spec §6)"
-        ),
-        // viewport.cpp:171-185 — kGmGameOfTag timer text: TRIPWIRE (no render scenario
-        // sets game_mode 1).
-        1 => debug_assert!(
-            false,
-            "GameOfTag HUD timer (viewport.cpp:171-185) deferred (spec §6)"
-        ),
+        // viewport.cpp:155-169 — kGmHoldazone timer text. `state` = 1 iff another worm's
+        // timer is <= this one's. `game.holdazone.holder_idx` is not modelled: it is -1
+        // (game.hpp:36) until a zone capture, which only a processed Holdazone match makes,
+        // and the builder refuses those; only the never-processed 4½d boot game carries
+        // mode 2 (Step 4½d G2 `shell_holdazone_boot`).
+        2 => {
+            let holder_idx = -1;
+            let st = timer_state(state, worm_idx, |other, own| other <= own);
+            let colour = STATE_COLOURS[usize::from(holder_idx != worm.index)][st];
+            draw_timer(scr, pal, font, worm, render_res_y, multiplier, colour);
+        }
+        // viewport.cpp:171-185 — kGmGameOfTag timer text: `state` = 1 iff another worm's
+        // timer is >= this one's; the colour row is `game.last_killed_idx != worm.index`.
+        1 => {
+            let st = timer_state(state, worm_idx, |other, own| other >= own);
+            let colour = STATE_COLOURS[usize::from(state.last_killed_idx != worm.index)][st];
+            draw_timer(scr, pal, font, worm, render_res_y, multiplier, colour);
+        }
         // viewport.cpp:187 — default: break.
         _ => {}
     }
@@ -247,9 +302,8 @@ pub fn draw_hud(
 /// CALLER's responsibility (T5 `frame::draw` invokes this once per viewport);
 /// this function paints exactly one pass.
 ///
-/// The Holdazone minimap marker (`viewport.cpp:615-634`) is **tripwired** — no
-/// render scenario sets `game_mode == kGmHoldazone`, so it is deferred past
-/// Step 2, never silently dropped (spec §6).
+/// The Holdazone minimap marker (`viewport.cpp:615-634`) never draws: its
+/// `timeout_left > 0` gate is false for the only mode-2 game (see the body).
 pub fn draw_minimap(
     scr: &mut Bitmap,
     pal: &Pal32,
@@ -286,13 +340,11 @@ pub fn draw_minimap(
         }
     }
 
-    // viewport.cpp:615-634 — Holdazone minimap marker: TRIPWIRE. Deferred past
-    // Step 2; no render scenario sets game_mode == kGmHoldazone (2). Never
-    // silently dropped (spec §6).
-    debug_assert!(
-        state.game_mode != 2,
-        "Holdazone minimap marker (viewport.cpp:615-634) deferred past Step 2 (spec §6)"
-    );
+    // viewport.cpp:615-634 — the Holdazone minimap marker, gated on
+    // `game.holdazone.timeout_left > 0`. `timeout_left` is not modelled: it is 0
+    // (game.hpp:40) until `Game::StartGame` places the zone (game.cpp:493-501), and the
+    // builder refuses Holdazone matches, so the only mode-2 game — the never-started 4½d
+    // boot game (Step 4½d G2 `shell_holdazone_boot`) — draws no marker.
 }
 
 /// Port of `Level::DrawMiniature` (`level.cpp:489-507`): step the material grid

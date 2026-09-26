@@ -26,13 +26,13 @@
 
 use assets::object::{NObjectType, SObjectType, Weapon};
 use assets::sprite::SpriteSet;
-use assets::tc::Texture;
+use assets::tc::{TcConfig, Texture};
 use sim_core::fixed::{ftoi, itof};
 use sim_core::rng::Rand;
 use sim_core::vec::Vec2;
 
 use crate::blit::draw_dirt_effect;
-use crate::nobject::{check_for_spec_worm_hit, nobject_create2};
+use crate::nobject::{check_for_spec_worm_hit, nobject_create1, nobject_create2};
 use crate::pool::Pool;
 use crate::sobject::sobject_create;
 use crate::state::{do_damage, Bonus, ControlState, LevelSim, NObject, SObject, WObject, WormState};
@@ -44,6 +44,36 @@ const ST_TYPE1: i32 = 1;
 const ST_STEERABLE: i32 = 2;
 const ST_TYPE2: i32 = 3;
 const ST_LASER: i32 = 4;
+
+/// The TC constants/hacks `WObject::Process` reads beyond the weapon table (Step 4½c-0,
+/// design §4.4-§4.5): the RemExp hack and its object, and the two particle-trail velocity
+/// divisors. Not hashed. `Default` is inert — RemExp off, both divisors 0, which are read
+/// only when a `part_trail_obj >= 0` weapon flies — so a state that never assigns it (the
+/// older oracle harnesses) behaves exactly as before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WObjectConsts {
+    /// C++ `common.h[HRemExp]` (`weapon.cpp:138`; `tc.cfg [hacks] RemExp`).
+    pub h_rem_exp: bool,
+    /// C++ `LC(RemExpObject)` (`weapon.cpp:138`): the **1-based** weapon index of the
+    /// remote-explode object (35 = BOOBY TRAP in the openliero TC).
+    pub rem_exp_object: i32,
+    /// C++ `LC(SplinterLarpaVelDiv)` (`weapon.cpp:203`): the type-1 particle-trail divisor.
+    pub splinter_larpa_vel_div: i32,
+    /// C++ `LC(SplinterCracklerVelDiv)` (`weapon.cpp:208`): the other particle-trail divisor.
+    pub splinter_crackler_vel_div: i32,
+}
+
+impl WObjectConsts {
+    /// The values the loaded TC carries (`tc.cfg [constants]` / `[hacks]`).
+    pub fn from_tc(tc: &TcConfig) -> Self {
+        WObjectConsts {
+            h_rem_exp: tc.hacks.RemExp,
+            rem_exp_object: tc.constants.RemExpObject,
+            splinter_larpa_vel_div: tc.constants.SplinterLarpaVelDiv,
+            splinter_crackler_vel_div: tc.constants.SplinterCracklerVelDiv,
+        }
+    }
+}
 
 /// Port of `Weapon::Fire` (`weapon.cpp:16-76`): spawn one projectile.
 ///
@@ -241,13 +271,62 @@ pub fn worm_fire(
     worm.vel = worm.vel.sub(cossin[angle as usize].mul(recoil).div(100));
 }
 
+/// Port of `Worm::ProcessSteerables` (`worm.cpp:1214-1241`), called from the visible arm
+/// of `Worm::Process` right after the bonus pickup (`worm.cpp:324`).
+///
+/// Zeroes `steerable_count/sum_x/sum_y`, then — only when the worm's CURRENT weapon is
+/// `kStSteerable` (MISSILE) — walks the wobjects in slot order and, for each of that SAME
+/// weapon type (`i->type == ww.type`) owned by this worm (`owner_idx == index`): Left →
+/// `cur_frame -= (cycles & 1) + 1`, Right → `+=` (both when both are held), then
+/// `cur_frame &= 127` (the hashed wobject field), `movable = false`, and the centroid sums
+/// `+= Ftoi(pos)`, `++count`. `cycles` is the worm-loop value (post-`++cycles`). Draws no
+/// rand. An unresolved slot or a missing weapon definition is treated as non-steerable,
+/// like `current_weapon_loops` (`state.rs`).
+pub fn process_steerables(
+    worm: &mut WormState,
+    weapons: &[Weapon],
+    wobjects: &mut Pool<WObject>,
+    cycles: i32,
+) {
+    worm.steerable_count = 0;
+    worm.steerable_sum_x = 0;
+    worm.steerable_sum_y = 0;
+    let Some(ty) = worm.weapons[worm.current_weapon as usize].ty else {
+        return;
+    };
+    let steerable = weapons
+        .get(ty as usize)
+        .is_some_and(|w| w.shot_type == ST_STEERABLE);
+    if !steerable {
+        return;
+    }
+    let left = worm.control_states.get(ControlState::LEFT);
+    let right = worm.control_states.get(ControlState::RIGHT);
+    let step = (cycles & 1) + 1;
+    for i in wobjects.iter_mut() {
+        if i.ty == Some(ty) && i.owner_idx == worm.index {
+            if left {
+                i.cur_frame -= step;
+            }
+            if right {
+                i.cur_frame += step;
+            }
+            i.cur_frame &= 127;
+            worm.movable = false;
+            worm.steerable_sum_x += ftoi(i.pos.x);
+            worm.steerable_sum_y += ftoi(i.pos.y);
+            worm.steerable_count += 1;
+        }
+    }
+}
+
 /// The verdict a single [`wobject_process`] pass returns to the driver
 /// (Task 3), mirroring the `do_explode` / `do_remove` flags at the tail of C++
 /// `WObject::Process` (`weapon.cpp:328-335`):
 ///
 /// * [`Keep`](WObjectOutcome::Keep) — the projectile lives on (no flag set).
-/// * [`Explode`](WObjectOutcome::Explode) — `do_explode`: the driver calls
-///   [`blow_up`] then frees the slot.
+/// * [`Explode`](WObjectOutcome::Explode) — `do_explode`: the driver frees the
+///   slot, then calls [`blow_up`] (`weapon.cpp:87`; Step 4½c-0 T6).
 /// * [`Remove`](WObjectOutcome::Remove) — `do_remove`: the driver frees the
 ///   slot **without** exploding (the `worm_collide` path). Never produced for
 ///   fan in 4a — the worm-hit loop is deferred — but part of the contract Task
@@ -264,9 +343,105 @@ pub enum WObjectOutcome {
     Remove,
 }
 
-/// Port of the single non-laser pass of `WObject::Process` (`weapon.cpp:127-338`)
-/// for the **fan** (ST_NORMAL) and **dart** (ST_TYPE1) projectile shapes — the two
-/// share an identical per-tick flight (see the `shot_type` guard below).
+/// `weapon.cpp:336-337` `iter < 8`: a non-LASER `ST_LASER` wobject re-runs the Process
+/// body at most 8 times per tick.
+const LASER_MAX_ITERATIONS: i32 = 8;
+/// `weapon.cpp:337` `|| w.id == 28`: the original Liero LASER slot re-runs the body until it
+/// explodes or is removed. In the openliero TC weapon 28 IS the LASER (`tc.cfg [types]
+/// weapons`, `common.cpp:495` id = index; pinned by `weapon_branch_inventory.rs`).
+const LASER_UNBOUNDED_WEAPON_ID: i32 = 28;
+
+/// Port of `WObject::Process` (`weapon.cpp:127-338`): the once-per-call RemExp block
+/// (`:137-142`), then `do { ++iter; <body> } while (w.shot_type == kStLaser && used &&
+/// (iter < 8 || w.id == 28));` (`:144`, `:336-337`) around [`wobject_pass`], the body.
+///
+/// Every non-`ST_LASER` weapon runs the body once. An `ST_LASER` wobject (RIFLE,
+/// WINCHESTER, GAUSS GUN, LASER) runs the WHOLE body — move, clamp, ground test, gravity,
+/// timer, the in-flight worm-hit arm — up to 8 times per tick, the LASER (id 28) without
+/// limit, and stops on the step that explodes or removes it: C++ `break`s right after
+/// `BlowUpObject`/`Free` (`:328-335`), exactly where the body returns Explode/Remove. C++'s
+/// `used` is therefore always true at the loop check: nothing else in an `ST_LASER` body
+/// can free `this` (no `ST_LASER` weapon spawns a trail — `weapon_branch_inventory.rs`).
+/// No iteration cap, because C++ has none; the LASER (`speed 100`) always progresses
+/// toward an edge, where `!Inside` explodes it.
+#[allow(clippy::too_many_arguments)]
+pub fn wobject_process(
+    obj: &mut WObject,
+    level: &mut LevelSim,
+    weapon: &Weapon,
+    weapons: &[Weapon],
+    cycles: i32,
+    worms: &mut [WormState],
+    wobjects: &mut Pool<WObject>,
+    nobjects: &mut Pool<NObject>,
+    nobject_types: &[NObjectType],
+    sobjects: &mut Pool<SObject>,
+    sobject_types: &[SObjectType],
+    bonuses: &mut Pool<Bonus>,
+    worm_sprites: &SpriteSet,
+    large_sprites: &SpriteSet,
+    textures: &[Texture],
+    cossin: &[Vec2; 128],
+    blood: i32,
+    game_mode: u32,
+    settings_health: i32,
+    consts: WObjectConsts,
+    rand: &mut Rand,
+) -> WObjectOutcome {
+    // weapon.cpp:137-142 — the RemExp hack (4½c-0 T1), once per Process call, BEFORE the
+    // do-loop: with `h[HRemExp]` set, the `LC(RemExpObject)` weapon (1-based; 35 = BOOBY
+    // TRAP) explodes the tick its owner holds Change AND Fire, by zeroing `time_left` so
+    // the body's timeout fires. Off in the openliero TC. Reads the owner's control state
+    // as the object loop sees it (the top-of-tick input, design §4.3).
+    if consts.h_rem_exp && weapon.id == consts.rem_exp_object - 1 {
+        let owner = worms[obj.owner_idx as usize].control_states;
+        if owner.get(ControlState::CHANGE) && owner.get(ControlState::FIRE) {
+            obj.time_left = 0;
+        }
+    }
+
+    let mut iter = 0;
+    loop {
+        iter += 1;
+        let out = wobject_pass(
+            obj,
+            level,
+            weapon,
+            weapons,
+            cycles,
+            worms,
+            wobjects,
+            nobjects,
+            nobject_types,
+            sobjects,
+            sobject_types,
+            bonuses,
+            worm_sprites,
+            large_sprites,
+            textures,
+            cossin,
+            blood,
+            game_mode,
+            settings_health,
+            consts,
+            rand,
+        );
+        // weapon.cpp:328-335: BlowUpObject / Free, then `break`.
+        if out != WObjectOutcome::Keep {
+            return out;
+        }
+        // weapon.cpp:336-337.
+        if !(weapon.shot_type == ST_LASER
+            && (iter < LASER_MAX_ITERATIONS || weapon.id == LASER_UNBOUNDED_WEAPON_ID))
+        {
+            return WObjectOutcome::Keep;
+        }
+    }
+}
+
+/// One step of `WObject::Process` — the do-loop body (`weapon.cpp:145-335`).
+/// [`wobject_process`] runs it once per tick for every shot type but `ST_LASER`, which it
+/// repeats (4½c-0 T3). Written first for the **fan** (ST_NORMAL) and **dart** (ST_TYPE1).
 ///
 /// Advances one wobject by one tick: integrate `pos += vel`, clamp `pos` at the
 /// level edges, test the next-step cell for a ground collision, apply gravity in
@@ -292,13 +467,18 @@ pub enum WObjectOutcome {
 /// (`nobject.rs:300-324`) and the animation gates on the pre-`++cycles` snapshot
 /// `(cycles & 7) == 0` (the same threading the nobject animation uses).
 ///
-/// Deferred / inert branches (guarded by `debug_assert!` so a non-fan config
-/// trips loudly, or omitted because they need state the driver owns):
-/// steering (`shot_type` 2/3) and the laser do-loop, `mult_speed`, and
-/// object/particle trails are all `debug_assert`ed to their fan-shaped no-op
-/// values. The `collide_with_objects` impulse loop needs the wobject/nobject
-/// pools and draws no RNG under the single-shot scenarios (self-skip), so it is
-/// omitted here and lands with the driver.
+/// Steering (`shot_type` 2/3), `mult_speed` and both trails (the particle trail since
+/// 4½c-0 T2) are LIVE; the laser do-loop is [`wobject_process`] (4½c-0 T3).
+///
+/// **The `collide_with_objects` impulse loop (`weapon.cpp:212-232`) is now LIVE**
+/// (Slice-4½a-1 T8b): a constant `impulse = vel * blow_away / 100` is added to
+/// every wobject in the inclusive ±2 px box that does **not** match this
+/// wobject's type *and* owner, then to **every** nobject in that box (no
+/// type/owner skip). It draws no RNG. It was previously omitted as "inert +
+/// driver-owned", which was true only while no golden fired FAN (the one TC
+/// weapon with the flag) near a live object; the settings-matrix goldens do, and
+/// the omission was the `nobjects`-column divergence at scales t219 /
+/// killemall t338 / gametag t388.
 ///
 /// **The in-flight worm-hit arm (`weapon.cpp:287-326`) is now LIVE** (Slice-5′a
 /// T3, re-applying `fd33bbc`): after the timeout countdown a per-worm loop, gated
@@ -306,12 +486,11 @@ pub enum WObjectOutcome {
 /// `DoDamage` + **the blood fan BEFORE the hit-sound gate** (the load-bearing
 /// order — the OPPOSITE of the nobject arm) + the `worm_collide` explode/remove
 /// verdict. See the inline block for the exact RNG order. The `RemExp` early-explode block
-/// (`weapon.cpp:138-142`, gated on the `HRemExp` hack AND the weapon being the
-/// configurable `RemExpObject` LC slot) is likewise omitted: fan is not the
-/// `RemExpObject` weapon, so it is inert here (differential-proven over 93 ticks);
-/// port it when a slice exercises `RemExpObject`.
+/// (`weapon.cpp:137-142`) is LIVE since 4½c-0 T1 — in [`wobject_process`], once, before the
+/// loop — driven by [`WObjectConsts`]; the hack is off in the openliero TC, so it is
+/// unit-tested only (design §4.4).
 #[allow(clippy::too_many_arguments)]
-pub fn wobject_process(
+fn wobject_pass(
     obj: &mut WObject,
     level: &mut LevelSim,
     weapon: &Weapon,
@@ -331,28 +510,13 @@ pub fn wobject_process(
     blood: i32,
     game_mode: u32,
     settings_health: i32,
+    consts: WObjectConsts,
     rand: &mut Rand,
 ) -> WObjectOutcome {
-    // Deferred-branch guards. shot_type 0/1/2/3 are all ported now: ST_NORMAL/
-    // ST_TYPE1 share the plain flight; ST_STEERABLE (2) and ST_TYPE2 (3, e.g.
-    // BAZOOKA) run the steering block below. Only the laser do-loop (shot_type 4)
-    // stays deferred. `mult_speed` and the `obj_trail` spawn are LIVE (T7b); the
-    // particle-trail spawn stays deferred (no fired weapon in this TC uses it —
-    // bazooka's part_trail_obj = -1). A config that would take an un-ported branch
-    // fails loudly in debug builds.
-    debug_assert!(
-        weapon.shot_type != ST_LASER,
-        "laser do-loop Process branch deferred"
-    );
-    debug_assert!(
-        weapon.part_trail_obj < 0,
-        "particle-trail spawn deferred (no fired weapon uses it)"
-    );
-
     let mut do_explode = false;
 
-    // do { ... } while (shot_type == kStLaser && ...): fan is not a laser, so the
-    // body runs exactly once.
+    // ONE step of the C++ do-loop body (weapon.cpp:145-335); [`wobject_process`] owns the
+    // `while (shot_type == kStLaser && used && (iter < 8 || id == 28))` repeat.
 
     // pos += vel.
     obj.pos = obj.pos.add(obj.vel);
@@ -485,11 +649,97 @@ pub fn wobject_process(
         );
     }
 
-    // The particle-trail spawn (weapon.cpp:201-210) goes here in C++; deferred (no
-    // fired weapon in this TC has part_trail_obj >= 0 — bazooka = -1; guarded above).
-    // The collide_with_objects impulse loop (weapon.cpp:212-232) goes here in C++;
-    // omitted (driver-owned + inert for one shot; no RNG drawn under the scenario).
+    // Particle trail (weapon.cpp:201-210) — LIVE (4½c-0 T2): LARPA / BOUNCY LARPA
+    // (`part_trail_type == 1` -> Create1 of `vel / SplinterLarpaVelDiv`) and CRACKLER
+    // (else -> a `rand(128)` angle FIRST, then Create2 of `vel / SplinterCracklerVelDiv`).
+    // Same pre-`++cycles` gate as the obj trail; `vel` is the post-steering/bounce/
+    // mult_speed velocity, `pos` the FIXED post-move position (no Ftoi), colour 0, owner =
+    // this wobject's owner. The divisions truncate (`Vec2::div` == C++ `fixedvec / int`).
+    // `part_trail_delay > 0` for every trail weapon (`weapon_branch_inventory.rs`).
     // The worm-hit loop (weapon.cpp:287-326) is AFTER the timeout, below.
+    if weapon.part_trail_obj >= 0 && cycles % weapon.part_trail_delay == 0 {
+        let trail = &nobject_types[weapon.part_trail_obj as usize];
+        if weapon.part_trail_type == 1 {
+            nobject_create1(
+                trail,
+                obj.vel.div(consts.splinter_larpa_vel_div),
+                obj.pos,
+                0,
+                obj.owner_idx,
+                rand,
+                nobjects,
+            );
+        } else {
+            let angle = rand.bound(128) as i32;
+            nobject_create2(
+                trail,
+                angle,
+                obj.vel.div(consts.splinter_crackler_vel_div),
+                obj.pos,
+                0,
+                obj.owner_idx,
+                cossin,
+                rand,
+                nobjects,
+            );
+        }
+    }
+
+    // collide_with_objects impulse (weapon.cpp:212-232) — LIVE (T8b). FAN is the
+    // only TC weapon with the flag (`fan.cfg`, blowAway = 30). Draws NO rand.
+    // Runs AFTER mult_speed / the trails and BEFORE the boundary clamp, so the
+    // impulse reads the fully-updated `vel` and the box test reads the
+    // already-moved `pos`. Ordering that is load-bearing:
+    //   * `impulse = vel * blow_away / 100` (`:213`) is computed ONCE, from this
+    //     wobject's post-mult_speed vel, and is a CONSTANT for both loops —
+    //     truncating `/100` (`Vec2::div`), not a shift.
+    //   * wobjects first (`:215-223`), then nobjects (`:225-231`); each walks the
+    //     pool in slot order (`ExactObjectList::All()` == `Pool::iter_mut`).
+    //   * the wobject loop skips an object only when it matches BOTH the firing
+    //     weapon type and the owner (`:217` `i->type != type || i->owner_idx !=
+    //     owner_idx`). That is what excludes `this`: the driver
+    //     (`state.rs:1738-1799`) copied this wobject out by value, so its slot
+    //     still holds a STALE copy with the same type+owner. Do NOT "simplify"
+    //     this to a slot-index test — a mutation of that slot would be lost.
+    //     Earlier slots in the driver's walk are already written back (C++ sees
+    //     their post-Process values too); later slots are untouched. Both match.
+    //   * the nobject loop has NO type/owner skip (`:226`) — every nobject in the
+    //     box is kicked, including the firer's own debris.
+    //   * the box test (`:218-219`, `:227-228`) is INCLUSIVE on both ends:
+    //     `pos.x >= i->pos.x - Itof(2) && pos.x <= i->pos.x + Itof(2)` and the
+    //     same for y. `wrapping_*` mirrors C++'s two's-complement fixed math.
+    // Omitting this was the slice-4½a-1 divergence (scales t219 / killemall t338 /
+    // gametag t388, `nobjects` column only): no prior golden fired FAN with
+    // another object inside the 2 px box.
+    if weapon.collide_with_objects {
+        let impulse = obj.vel.mul(weapon.blow_away).div(100);
+        let two = itof(2);
+
+        // :215-223 — wobjects, skipping same type AND same owner (i.e. `this`).
+        for i in wobjects.iter_mut() {
+            if i.ty == obj.ty && i.owner_idx == obj.owner_idx {
+                continue;
+            }
+            if obj.pos.x >= i.pos.x.wrapping_sub(two)
+                && obj.pos.x <= i.pos.x.wrapping_add(two)
+                && obj.pos.y >= i.pos.y.wrapping_sub(two)
+                && obj.pos.y <= i.pos.y.wrapping_add(two)
+            {
+                i.vel = i.vel.add(impulse);
+            }
+        }
+
+        // :225-231 — nobjects, NO type/owner skip.
+        for i in nobjects.iter_mut() {
+            if obj.pos.x >= i.pos.x.wrapping_sub(two)
+                && obj.pos.x <= i.pos.x.wrapping_add(two)
+                && obj.pos.y >= i.pos.y.wrapping_sub(two)
+                && obj.pos.y <= i.pos.y.wrapping_add(two)
+            {
+                i.vel = i.vel.add(impulse);
+            }
+        }
+    }
 
     // Boundary clamp (weapon.cpp:234-247). inew = Ftoi(pos + vel), computed ONCE
     // and reused by the collision test; the clamp below mutates pos, not inew.
@@ -667,8 +917,8 @@ pub fn wobject_process(
 /// In C++ this frees the wobject, then (conditionally) spawns a `create_on_exp`
 /// sobject, plays the explosion sound, scatters `splinter_amount` nobjects, and
 /// applies a `dirt_effect` crater. The actual `Pool::free` is the driver's job
-/// (it frees the slot after this returns), and the sound is a render-only side
-/// effect with no sim/RNG impact, so it is omitted.
+/// (it frees the slot before calling this, like C++ — Step 4½c-0 T6), and the
+/// sound is a render-only side effect with no sim/RNG impact, so it is omitted.
 ///
 /// **`create_on_exp` is now live** (Slice-4c Task 4): when `create_on_exp >= 0`
 /// it calls [`sobject_create`] for `sobject_types[create_on_exp]` at
@@ -685,8 +935,8 @@ pub fn wobject_process(
 /// centred on the wobject, with the C++ `Ftoi(x) - 7, Ftoi(y) - 7` top-left
 /// offset ([`ftoi`] is the arithmetic `>> 16`). This is where greenball-style
 /// explosions (dirt_effect=6) destroy terrain and draw their `rand(rframe)`.
-/// **`CorrectShadow` is omitted (O4)** — the dumper sets `settings->shadow =
-/// false`, so it never runs.
+/// **`CorrectShadow` is live since 4½a-1 (behind `SimState.shadow`)** — the dumper's
+/// classic path sets `settings->shadow = false`, so it is inert for prior goldens.
 ///
 /// Branch behaviour by weapon:
 /// * **fan** (`create_on_exp = -1`, `dirt_effect = -1`) — both branches skipped:
@@ -704,10 +954,9 @@ pub fn wobject_process(
 /// **fixed** `pos` (`fixedvec(kX, kY)` — NO `Ftoi`) with zero velocity and colour
 /// `splinter_colour - kColorSub`. It runs **after** `create_on_exp` and **before**
 /// the dart's own `dirt_effect` — the C++ order is load-bearing because each
-/// `Create2` draws its RNG between the two. The `scatter != 0` sub-branch (the
-/// C++ `Create1` path) is **guarded** (O18): no weapon in this TC takes it (only
-/// `mini_nuke` has `scatter=1`, out of scope) and `blow_up` has no access to the
-/// wobject velocity `Create1` needs, so a config that would hit it trips loudly.
+/// `Create2` draws its RNG between the two. The `scatter != 0` sub-branch (the C++
+/// `Create1` path, MINI NUKE) is LIVE since 4½c-0 T4: it spawns `Create1` splinters with
+/// the exploding wobject's `vel` (the new parameter; the driver passes `obj.vel`).
 #[allow(clippy::too_many_arguments)]
 pub fn blow_up(
     weapon: &Weapon,
@@ -715,6 +964,7 @@ pub fn blow_up(
     large_sprites: &SpriteSet,
     textures: &[Texture],
     pos: Vec2,
+    vel: Vec2,
     owner_idx: i32,
     sobject_types: &[SObjectType],
     nobject_types: &[NObjectType],
@@ -789,15 +1039,23 @@ pub fn blow_up(
                 );
             }
         } else {
-            // :107-114 scatter != 0 -> the C++ Create1 splinter branch. GUARDED
-            // (O18): no weapon in this TC takes it (only mini_nuke has scatter=1,
-            // with the special small_nukes type, out of scope), AND blow_up has no
-            // access to the wobject velocity that C++ Create1 needs (`fixedvec(
-            // kVelX, kVelY)`). A config that would hit it trips loudly here.
-            debug_assert!(
-                false,
-                "splinter_scatter != 0 (Create1 branch) deferred (O18): needs wobject vel"
-            );
+            // :107-114 scatter != 0 (MINI NUKE) — LIVE (4½c-0 T4): per splinter
+            // rand(2) [kColorSub] THEN nobject_types[splinter_type].Create1 with the
+            // exploding wobject's OWN vel (`fixedvec(kVelX, kVelY)`, captured before the
+            // Free), the FIXED pos and colour `splinter_colour - kColorSub`. No angle
+            // draw; Create1's own scatter draws follow (`nobject.rs` nobject_create1).
+            for _ in 0..weapon.splinter_amount {
+                let color_sub = rand.bound(2) as i32;
+                nobject_create1(
+                    &nobject_types[weapon.splinter_type as usize],
+                    vel,
+                    pos,
+                    weapon.splinter_colour - color_sub,
+                    owner_idx,
+                    rand,
+                    nobjects,
+                );
+            }
         }
     }
 
@@ -811,6 +1069,9 @@ pub fn blow_up(
             ftoi(pos.y) - 7,
             rand,
         );
+        // weapon.cpp:121-123 CorrectShadow behind settings->shadow (Step 4½a-1).
+        let (ix, iy) = (ftoi(pos.x), ftoi(pos.y));
+        crate::shadow::correct_shadow_if_enabled(level, ix - 10, iy - 10, ix + 11, iy + 11);
     }
 }
 
@@ -1385,6 +1646,7 @@ mod tests {
             100,
             0,
             100,
+            WObjectConsts::default(),
             rand,
         )
     }
@@ -1432,6 +1694,7 @@ mod tests {
             blood,
             0,
             100,
+            WObjectConsts::default(),
             rand,
         )
     }
@@ -2158,6 +2421,7 @@ mod tests {
             &sprites,
             &textures,
             pos,
+            Vec2::zero(),
             0,
             &[],
             &[],
@@ -2234,6 +2498,7 @@ mod tests {
             &sprites,
             &textures,
             Vec2::new(itof(50), itof(50)),
+            Vec2::zero(),
             0,
             &[],
             &[],
@@ -2423,6 +2688,7 @@ mod tests {
             &sprites,
             &textures,
             pos,
+            Vec2::zero(),
             3, // owner_idx (= cause_idx / fired_by)
             &sobject_types,
             &nobject_types,
@@ -2517,6 +2783,7 @@ mod tests {
             &SpriteSet::default(),
             &[],
             Vec2::new(itof(50), itof(50)),
+            Vec2::zero(),
             2,
             &sobject_types,
             &nobject_types,
@@ -2605,6 +2872,7 @@ mod tests {
             &SpriteSet::default(),
             &[],
             pos,
+            Vec2::zero(),
             4, // owner_idx (= C++ cause_idx == fired_by)
             &[],
             &nobject_types,
@@ -2670,6 +2938,7 @@ mod tests {
             &SpriteSet::default(),
             &[],
             Vec2::new(itof(50), itof(50)),
+            Vec2::zero(),
             1,
             &[],
             &nobject_types,
@@ -2691,15 +2960,22 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Create1 branch")]
-    fn splinter_scatter_nonzero_trips_the_guarded_create1_branch() {
-        // scatter != 0 -> the C++ Create1 splinter branch. It is GUARDED (O18): no
-        // weapon in this TC takes it (only mini_nuke has scatter=1, out of scope),
-        // and blow_up has no access to the wobject velocity Create1 needs. A config
-        // that would hit it must trip loudly.
+    fn splinter_scatter_nonzero_spawns_create1_splinters_carrying_the_wobject_vel() {
+        // weapon.cpp:107-114 (MINI NUKE, scatter 1): per splinter rand(2) [kColorSub] THEN
+        // nobject_types[splinter_type].Create1(fixedvec(kVelX, kVelY), fixedvec(kX, kY),
+        // splinter_colour - kColorSub, cause) — the exploding wobject's OWN vel, no angle.
         let cossin = precompute_cossin();
         let weapon = splinter_weapon(2, 1);
         let nobject_types = vec![dirt_nobject()];
+        let pos = Vec2::new(itof(50), itof(60));
+        let vel = Vec2::new(itof(2), itof(-1));
+
+        let mut refr = seeded();
+        let mut want: Pool<NObject> = Pool::new(8);
+        for _ in 0..2 {
+            let sub = refr.bound(2) as i32;
+            nobject_create1(&nobject_types[0], vel, pos, 80 - sub, 1, &mut refr, &mut want);
+        }
 
         let mut rand = seeded();
         let mut level = air_level();
@@ -2707,13 +2983,13 @@ mod tests {
         let mut wobjects: Pool<WObject> = Pool::new(8);
         let mut nobjects: Pool<NObject> = Pool::new(8);
         let mut sobjects: Pool<SObject> = Pool::new(8);
-
         blow_up(
             &weapon,
             &mut level,
             &SpriteSet::default(),
             &[],
-            Vec2::new(itof(50), itof(50)),
+            pos,
+            vel,
             1,
             &[],
             &nobject_types,
@@ -2729,6 +3005,13 @@ mod tests {
             100,
             &mut rand,
         );
+
+        assert_eq!(
+            nobjects.iter().copied().collect::<Vec<_>>(),
+            want.iter().copied().collect::<Vec<_>>(),
+            "two Create1 splinters at the fixed pos with the wobject vel"
+        );
+        assert_eq!(rand.last(), refr.last(), "rand(2) then Create1's draws, per splinter");
     }
 
     // ====================================================================
@@ -3243,6 +3526,7 @@ mod tests {
             100,
             0,
             100,
+            WObjectConsts::default(),
             rand,
         )
     }
@@ -3323,5 +3607,745 @@ mod tests {
         assert_eq!(sobjects.len(), 0, "no trail spawn when cycles % delay != 0");
         // Steering still applied (independent of the trail gate).
         assert_ne!(obj.vel, Vec2::new(itof(2), itof(1)), "steering runs every flight tick");
+    }
+
+    // ---- T8b: collide_with_objects impulse loop (weapon.cpp:212-232) ---------
+
+    // The real FAN numbers from the slice-4½a-1 divergence diagnosis (scales
+    // t219): the flying FAN wobject and the constant impulse it hands out.
+    // `blowAway = 30` (data/TC/openliero/weapons/fan.cfg:10), so
+    // impulse = vel * 30 / 100 = (-35241, 1872) with C++ truncating division.
+    const FAN_POS: Vec2 = Vec2 {
+        x: 9_332_730,
+        y: 12_380_096,
+    };
+    const FAN_VEL: Vec2 = Vec2 {
+        x: -117_471,
+        y: 6_242,
+    };
+    const FAN_IMPULSE: Vec2 = Vec2 {
+        x: -35_241,
+        y: 1_872,
+    };
+
+    // A FAN-shaped weapon for the impulse block: shot_type normal, no bounce,
+    // mult_speed 100, no trails, no animation, no ground explode — so a flight
+    // tick reaches `collide_with_objects` with `vel` exactly as it was set.
+    fn impulse_weapon(collide_with_objects: bool, blow_away: i32) -> Weapon {
+        Weapon {
+            id: 24,
+            shot_type: ST_NORMAL,
+            bounce: 0,
+            mult_speed: 100,
+            gravity: 0,
+            expl_ground: false,
+            time_to_explo: 0,
+            num_frames: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            collide_with_objects,
+            blow_away,
+            ..Default::default()
+        }
+    }
+
+    // The flying wobject, positioned so that after the tick's `pos += vel` it sits
+    // exactly on FAN_POS (the impulse block runs AFTER the move).
+    fn impulse_shooter() -> WObject {
+        WObject {
+            pos: FAN_POS.sub(FAN_VEL),
+            vel: FAN_VEL,
+            cur_frame: 0,
+            time_left: 100, // far above 0 -> no timeout explode
+            ty: Some(24),
+            owner_idx: 0,
+        }
+    }
+
+    // Drive `wobject_process` with REAL wobject/nobject pools on an all-air level
+    // and no worms (the in-flight worm-hit arm is inert).
+    fn proc_impulse(
+        obj: &mut WObject,
+        weapon: &Weapon,
+        wobjects: &mut Pool<WObject>,
+        nobjects: &mut Pool<NObject>,
+        rand: &mut Rand,
+    ) -> WObjectOutcome {
+        let mut level = air_level();
+        let mut worms: [WormState; 0] = [];
+        let nobject_types: [NObjectType; 0] = [];
+        let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bonuses: Pool<Bonus> = Pool::new(1);
+        let worm_sprites = SpriteSet::default();
+        let large_sprites = SpriteSet::default();
+        let cossin = precompute_cossin();
+        wobject_process(
+            obj,
+            &mut level,
+            weapon,
+            &[],
+            0,
+            &mut worms,
+            wobjects,
+            nobjects,
+            &nobject_types,
+            &mut sobjects,
+            &[],
+            &mut bonuses,
+            &worm_sprites,
+            &large_sprites,
+            &[],
+            &cossin,
+            100,
+            0,
+            100,
+            WObjectConsts::default(),
+            rand,
+        )
+    }
+
+    fn dirt_particle(pos: Vec2, vel: Vec2) -> NObject {
+        NObject {
+            pos,
+            vel,
+            cur_frame: 0,
+            ty: Some(2),
+            owner_idx: 0,
+            time_left: 100,
+        }
+    }
+
+    #[test]
+    fn collide_with_objects_adds_vel_blow_away_over_100_to_a_nearby_nobject() {
+        // weapon.cpp:213 `impulse = vel * blowAway / 100` (truncating), :225-231
+        // adds it to EVERY nobject inside the inclusive ±Itof(2) box. The three
+        // slots below are the real scales-t219 s2/s4/s5 particles and their C++
+        // post-loop velocities (divergence-diagnosis.md §7).
+        let weapon = impulse_weapon(true, 30);
+        let mut obj = impulse_shooter();
+        let mut wobjects: Pool<WObject> = Pool::new(4);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        nobjects.spawn(dirt_particle(FAN_POS, Vec2::new(46_459, -1_124)));
+        nobjects.spawn(dirt_particle(FAN_POS, Vec2::new(22_945, 25_978)));
+        nobjects.spawn(dirt_particle(FAN_POS, Vec2::new(37_932, -10_221)));
+        let mut rand = seeded();
+
+        proc_impulse(&mut obj, &weapon, &mut wobjects, &mut nobjects, &mut rand);
+
+        let vels: Vec<Vec2> = nobjects.iter().map(|n| n.vel).collect();
+        assert_eq!(
+            vels,
+            vec![
+                Vec2::new(11_218, 748),
+                Vec2::new(-12_296, 27_850),
+                Vec2::new(2_691, -8_349),
+            ],
+            "each nobject got exactly vel*30/100 = {FAN_IMPULSE:?} added"
+        );
+    }
+
+    #[test]
+    fn collide_with_objects_box_is_inclusive_at_two_pixels_and_excludes_three() {
+        // weapon.cpp:227-228: `pos >= i->pos - Itof(2) && pos <= i->pos + Itof(2)`
+        // on BOTH axes — inclusive at exactly 2 px, excluded at 3 px.
+        let weapon = impulse_weapon(true, 30);
+        let mut obj = impulse_shooter();
+        let mut wobjects: Pool<WObject> = Pool::new(4);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        // s0: +2 px in x (inclusive edge). s1: -2 px in y (inclusive edge).
+        // s2: +3 px in x (outside). s3: -3 px in y (outside).
+        let base = Vec2::new(1_000, 2_000);
+        nobjects.spawn(dirt_particle(
+            Vec2::new(FAN_POS.x + itof(2), FAN_POS.y),
+            base,
+        ));
+        nobjects.spawn(dirt_particle(
+            Vec2::new(FAN_POS.x, FAN_POS.y - itof(2)),
+            base,
+        ));
+        nobjects.spawn(dirt_particle(
+            Vec2::new(FAN_POS.x + itof(3), FAN_POS.y),
+            base,
+        ));
+        nobjects.spawn(dirt_particle(
+            Vec2::new(FAN_POS.x, FAN_POS.y - itof(3)),
+            base,
+        ));
+        let mut rand = seeded();
+
+        proc_impulse(&mut obj, &weapon, &mut wobjects, &mut nobjects, &mut rand);
+
+        let kicked = base.add(FAN_IMPULSE);
+        let vels: Vec<Vec2> = nobjects.iter().map(|n| n.vel).collect();
+        assert_eq!(
+            vels,
+            vec![kicked, kicked, base, base],
+            "±2 px is inside the box, ±3 px is outside"
+        );
+    }
+
+    #[test]
+    fn collide_with_objects_off_leaves_every_pool_object_untouched() {
+        // The whole block is gated on `w.collide_with_objects` (weapon.cpp:212).
+        let weapon = impulse_weapon(false, 30);
+        let mut obj = impulse_shooter();
+        let mut wobjects: Pool<WObject> = Pool::new(4);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let base = Vec2::new(1_000, 2_000);
+        nobjects.spawn(dirt_particle(FAN_POS, base));
+        let mut other = impulse_shooter();
+        other.pos = FAN_POS;
+        other.owner_idx = 1;
+        other.vel = base;
+        wobjects.spawn(other);
+        let mut rand = seeded();
+
+        proc_impulse(&mut obj, &weapon, &mut wobjects, &mut nobjects, &mut rand);
+
+        assert_eq!(nobjects.iter().next().unwrap().vel, base, "flag off: nobject untouched");
+        assert_eq!(wobjects.iter().next().unwrap().vel, base, "flag off: wobject untouched");
+    }
+
+    #[test]
+    fn collide_with_objects_skips_same_type_and_owner_wobjects_only() {
+        // weapon.cpp:217 `if (i->type != type || i->owner_idx != owner_idx)` — a
+        // wobject is kicked unless it matches BOTH the firing weapon type and the
+        // owner. That is what skips `this` (the driver's pool still holds this
+        // wobject's stale slot), so it must stay a type+owner test, not a slot test.
+        let weapon = impulse_weapon(true, 30);
+        let mut obj = impulse_shooter();
+        let base = Vec2::new(1_000, 2_000);
+        let mut wobjects: Pool<WObject> = Pool::new(4);
+        // s0: same type AND same owner (the stale `this` slot) -> skipped.
+        let mut same = impulse_shooter();
+        same.pos = FAN_POS;
+        same.vel = base;
+        wobjects.spawn(same);
+        // s1: same type, OTHER owner -> kicked.
+        let mut other_owner = impulse_shooter();
+        other_owner.pos = FAN_POS;
+        other_owner.vel = base;
+        other_owner.owner_idx = 1;
+        wobjects.spawn(other_owner);
+        // s2: OTHER type, same owner -> kicked.
+        let mut other_ty = impulse_shooter();
+        other_ty.pos = FAN_POS;
+        other_ty.vel = base;
+        other_ty.ty = Some(10);
+        wobjects.spawn(other_ty);
+        // s3: other type + other owner but 3 px away -> outside the box.
+        let mut far = impulse_shooter();
+        far.pos = Vec2::new(FAN_POS.x + itof(3), FAN_POS.y);
+        far.vel = base;
+        far.ty = Some(10);
+        far.owner_idx = 1;
+        wobjects.spawn(far);
+        let mut nobjects: Pool<NObject> = Pool::new(1);
+        let mut rand = seeded();
+
+        proc_impulse(&mut obj, &weapon, &mut wobjects, &mut nobjects, &mut rand);
+
+        let kicked = base.add(FAN_IMPULSE);
+        let vels: Vec<Vec2> = wobjects.iter().map(|w| w.vel).collect();
+        assert_eq!(
+            vels,
+            vec![base, kicked, kicked, base],
+            "same type+owner skipped; differing type OR owner kicked when in the box"
+        );
+    }
+
+    #[test]
+    fn collide_with_objects_draws_no_rng() {
+        // weapon.cpp:212-232 contains no `game.rand` call — the impulse must not
+        // move the shared stream (the diagnosis proved `rand.last` unchanged across
+        // the whole C++ wobject sub-loop at scales t219).
+        let weapon = impulse_weapon(true, 30);
+        let mut obj = impulse_shooter();
+        let mut wobjects: Pool<WObject> = Pool::new(4);
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        nobjects.spawn(dirt_particle(FAN_POS, Vec2::new(46_459, -1_124)));
+        let mut other = impulse_shooter();
+        other.pos = FAN_POS;
+        other.owner_idx = 1;
+        wobjects.spawn(other);
+        let mut rand = Rand::new();
+        rand.seed(SEED);
+        let before = rand.last();
+
+        proc_impulse(&mut obj, &weapon, &mut wobjects, &mut nobjects, &mut rand);
+
+        assert_eq!(rand.last(), before, "the impulse loop draws no rand");
+    }
+
+    // ---- 4½c-0 T1: WObjectConsts + the RemExp hack (weapon.cpp:137-142) ----------
+
+    #[test]
+    fn wobject_consts_from_tc_reads_the_hack_and_the_three_constants() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
+        let tc = TcConfig::load(&std::fs::read(format!("{root}/tc.cfg")).unwrap()).unwrap();
+        assert_eq!(
+            WObjectConsts::from_tc(&tc),
+            WObjectConsts {
+                h_rem_exp: false,
+                rem_exp_object: 35,
+                splinter_larpa_vel_div: 3,
+                splinter_crackler_vel_div: 3,
+            }
+        );
+    }
+
+    // A BOOBY-TRAP-shaped timed weapon: flight knobs neutral, a long timer.
+    fn rem_exp_weapon(id: i32) -> Weapon {
+        Weapon {
+            id,
+            shot_type: ST_NORMAL,
+            mult_speed: 100,
+            gravity: 0,
+            expl_ground: false,
+            time_to_explo: 4000,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    // HRemExp on; LC(RemExpObject) = 35 -> weapon id 34 (the TC's BOOBY TRAP).
+    fn rem_exp_on() -> WObjectConsts {
+        WObjectConsts {
+            h_rem_exp: true,
+            rem_exp_object: 35,
+            ..WObjectConsts::default()
+        }
+    }
+
+    // One Process on an air level with ONE worm — the owner, slot 0 — holding `controls`.
+    fn proc_rem_exp(
+        weapon: &Weapon,
+        controls: u32,
+        consts: WObjectConsts,
+    ) -> (WObjectOutcome, WObject) {
+        let mut level = air_level();
+        let mut worms = [hit_worm(900, 900, Vec2::zero())];
+        worms[0].control_states = ControlState::unpack(controls);
+        let mut obj = WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::zero(),
+            time_left: 100,
+            ty: Some(weapon.id),
+            owner_idx: 0,
+            ..WObject::default()
+        };
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut nobjects: Pool<NObject> = Pool::new(1);
+        let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bonuses: Pool<Bonus> = Pool::new(1);
+        let cossin = precompute_cossin();
+        let mut rand = seeded();
+        let out = wobject_process(
+            &mut obj,
+            &mut level,
+            weapon,
+            &[],
+            0,
+            &mut worms,
+            &mut wobjects,
+            &mut nobjects,
+            &[],
+            &mut sobjects,
+            &[],
+            &mut bonuses,
+            &SpriteSet::default(),
+            &SpriteSet::default(),
+            &[],
+            &cossin,
+            100,
+            0,
+            100,
+            consts,
+            &mut rand,
+        );
+        (out, obj)
+    }
+
+    #[test]
+    fn rem_exp_zeroes_the_timer_when_the_owner_holds_change_and_fire() {
+        // Change (32) + Fire (16): time_left := 0, then the timeout (weapon.cpp:281-285)
+        // `--time_left < 0` explodes it THIS tick.
+        let (out, obj) = proc_rem_exp(&rem_exp_weapon(34), 32 | 16, rem_exp_on());
+        assert_eq!(out, WObjectOutcome::Explode, "Change+Fire detonates the RemExp object");
+        assert_eq!(obj.time_left, -1, "zeroed, then decremented past 0");
+    }
+
+    #[test]
+    fn rem_exp_needs_the_hack_the_slot_and_both_keys() {
+        // Fire alone, Change alone, the hack off, or another weapon: a plain countdown.
+        for (weapon_id, controls, consts) in [
+            (34, 16, rem_exp_on()),
+            (34, 32, rem_exp_on()),
+            (34, 32 | 16, WObjectConsts::default()),
+            (33, 32 | 16, rem_exp_on()),
+        ] {
+            let (out, obj) = proc_rem_exp(&rem_exp_weapon(weapon_id), controls, consts);
+            assert_eq!(out, WObjectOutcome::Keep, "weapon {weapon_id} controls {controls}");
+            assert_eq!(obj.time_left, 99, "weapon {weapon_id} controls {controls}: countdown");
+        }
+    }
+
+    // ---- 4½c-0 T2: the particle trail (weapon.cpp:201-210) --------------------------
+
+    // A LARPA/CRACKLER-shaped flight: ST_NORMAL, no bounce/gravity/timeout, a particle
+    // trail of nobject_types[0] every 4 cycles. part_trail_type 1 = LARPA (Create1),
+    // anything else = CRACKLER (rand(128) angle, then Create2).
+    fn part_trail_weapon(part_trail_type: i32) -> Weapon {
+        Weapon {
+            id: 11,
+            shot_type: ST_NORMAL,
+            mult_speed: 100,
+            gravity: 0,
+            expl_ground: false,
+            time_to_explo: 0,
+            obj_trail_type: -1,
+            part_trail_obj: 0,
+            part_trail_type,
+            part_trail_delay: 4,
+            ..Default::default()
+        }
+    }
+
+    // A splinter type whose Create1 and Create2 both draw: distribution 8 (two scatter
+    // draws), speed_v 50 (Create2's speed draw); start_frame 0 and time_to_explo_v 0, so
+    // Create itself draws nothing.
+    fn trail_particle() -> NObjectType {
+        NObjectType {
+            id: 0,
+            speed: 100,
+            speed_v: 50,
+            distribution: 8,
+            ..Default::default()
+        }
+    }
+
+    // Distinct divisors (the TC has 3/3), so a larpa<->crackler divisor swap is caught; 5
+    // also truncates the negative y toward zero (itof(-2) / 5 = -26214, not -26215).
+    fn trail_consts() -> WObjectConsts {
+        WObjectConsts {
+            splinter_larpa_vel_div: 3,
+            splinter_crackler_vel_div: 5,
+            ..WObjectConsts::default()
+        }
+    }
+
+    fn trail_shooter() -> WObject {
+        WObject {
+            pos: Vec2::new(itof(100), itof(200)),
+            vel: Vec2::new(itof(3), itof(-2)),
+            owner_idx: 1,
+            ty: Some(11),
+            ..WObject::default()
+        }
+    }
+
+    fn proc_part_trail(
+        obj: &mut WObject,
+        weapon: &Weapon,
+        cycles: i32,
+        nobjects: &mut Pool<NObject>,
+        rand: &mut Rand,
+    ) -> WObjectOutcome {
+        let mut level = air_level();
+        let mut worms: [WormState; 0] = [];
+        let mut wobjects: Pool<WObject> = Pool::new(1);
+        let mut sobjects: Pool<SObject> = Pool::new(1);
+        let mut bonuses: Pool<Bonus> = Pool::new(1);
+        let cossin = precompute_cossin();
+        wobject_process(
+            obj,
+            &mut level,
+            weapon,
+            &[],
+            cycles,
+            &mut worms,
+            &mut wobjects,
+            nobjects,
+            &[trail_particle()],
+            &mut sobjects,
+            &[],
+            &mut bonuses,
+            &SpriteSet::default(),
+            &SpriteSet::default(),
+            &[],
+            &cossin,
+            100,
+            0,
+            100,
+            trail_consts(),
+            rand,
+        )
+    }
+
+    #[test]
+    fn larpa_trail_is_create1_of_vel_over_the_larpa_divisor_at_the_moved_pos() {
+        // weapon.cpp:202-204: type 1 -> Create1(vel / SplinterLarpaVelDiv, pos, 0, owner)
+        // after the tick's `pos += vel` — no angle draw.
+        let mut obj = trail_shooter();
+        let (pos, vel) = (obj.pos.add(obj.vel), obj.vel);
+        let mut refr = seeded();
+        let mut want: Pool<NObject> = Pool::new(8);
+        nobject_create1(&trail_particle(), vel.div(3), pos, 0, 1, &mut refr, &mut want);
+
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+        let out = proc_part_trail(&mut obj, &part_trail_weapon(1), 8, &mut nobjects, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep);
+        assert_eq!(
+            nobjects.iter().copied().collect::<Vec<_>>(),
+            want.iter().copied().collect::<Vec<_>>(),
+            "one Create1 particle"
+        );
+        assert_eq!(rand.last(), refr.last(), "Create1's two scatter draws, nothing else");
+    }
+
+    #[test]
+    fn crackler_trail_draws_an_angle_then_create2_of_vel_over_the_crackler_divisor() {
+        // weapon.cpp:205-209: rand(128) FIRST, then Create2(angle, vel /
+        // SplinterCracklerVelDiv, pos, 0, owner).
+        let cossin = precompute_cossin();
+        let mut obj = trail_shooter();
+        let (pos, vel) = (obj.pos.add(obj.vel), obj.vel);
+        let mut refr = seeded();
+        let mut want: Pool<NObject> = Pool::new(8);
+        let angle = refr.bound(128) as i32;
+        nobject_create2(
+            &trail_particle(),
+            angle,
+            vel.div(5),
+            pos,
+            0,
+            1,
+            &cossin,
+            &mut refr,
+            &mut want,
+        );
+
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+        proc_part_trail(&mut obj, &part_trail_weapon(0), 8, &mut nobjects, &mut rand);
+        assert_eq!(
+            nobjects.iter().copied().collect::<Vec<_>>(),
+            want.iter().copied().collect::<Vec<_>>(),
+            "one Create2 particle"
+        );
+        assert_eq!(rand.last(), refr.last(), "rand(128), then Create2's three draws");
+    }
+
+    #[test]
+    fn particle_trail_waits_for_its_delay() {
+        let mut obj = trail_shooter();
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+        let before = rand.last();
+        proc_part_trail(&mut obj, &part_trail_weapon(0), 9, &mut nobjects, &mut rand);
+        assert!(nobjects.is_empty(), "9 % 4 != 0 -> no particle");
+        assert_eq!(rand.last(), before, "and no draw");
+    }
+
+    // ---- 4½c-0 T3: the ST_LASER do-loop (weapon.cpp:144, :336-337) ------------------
+
+    fn st_laser_weapon(id: i32, gravity: i32) -> Weapon {
+        Weapon {
+            id,
+            shot_type: ST_LASER,
+            bounce: 0,
+            mult_speed: 100,
+            gravity,
+            expl_ground: true,
+            time_to_explo: 0,
+            num_frames: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ..Default::default()
+        }
+    }
+
+    fn beam(id: i32, px: i32, py: i32) -> WObject {
+        WObject {
+            pos: Vec2::new(itof(px), itof(py)),
+            vel: Vec2::new(itof(1), 0),
+            owner_idx: 1,
+            ty: Some(id),
+            ..WObject::default()
+        }
+    }
+
+    #[test]
+    fn st_laser_steps_eight_times_per_tick() {
+        // The whole body re-runs until iter == 8. Free air + gravity 20: each step moves by
+        // the running vel, then adds 20 to vel.y -> after 8 steps x += 8 px, vel.y == 160,
+        // y += 20 * (0+1+..+7) = 560 (fixed units).
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = beam(2, 100, 500);
+        let out = proc_no_worms(&mut obj, &level, &st_laser_weapon(2, 20), 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Keep, "free air: survives the tick");
+        assert_eq!(obj.pos.x, itof(108), "8 one-pixel steps");
+        assert_eq!(obj.vel, Vec2::new(itof(1), 8 * 20), "8 air steps of gravity");
+        assert_eq!(obj.pos.y, itof(500) + 20 * 28, "the sum of the running vel.y");
+
+        // Contrast: the same flight as ST_NORMAL is ONE step.
+        let mut one = beam(2, 100, 500);
+        let normal = Weapon {
+            shot_type: ST_NORMAL,
+            ..st_laser_weapon(2, 20)
+        };
+        proc_no_worms(&mut one, &level, &normal, 0, &mut rand);
+        assert_eq!((one.pos.x, one.vel.y), (itof(101), 20));
+    }
+
+    #[test]
+    fn the_laser_slot_28_steps_until_it_explodes() {
+        // `|| w.id == 28`: the LASER does not stop after 8 steps. On the 1000-px air level
+        // it walks from x = 100 to the edge in ONE tick: at x = 999 the next cell is outside,
+        // the clamp pins x = 999 and `!Inside` explodes it (explGround).
+        let level = air_level();
+        let mut rand = seeded();
+        let mut obj = beam(28, 100, 500);
+        let out = proc_no_worms(&mut obj, &level, &st_laser_weapon(28, 0), 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Explode, "explodes at the level edge this tick");
+        assert_eq!(obj.pos.x, itof(999), "walked 899 steps, not 8");
+    }
+
+    #[test]
+    fn st_laser_explodes_on_the_step_that_meets_rock() {
+        // floor_level: rock at (10,10) only. Step 1: pos 7, next 8; step 2: pos 8, next 9;
+        // step 3: pos 9, next 10 = rock -> explode with pos 9 (the loop breaks there).
+        let level = floor_level();
+        let mut rand = seeded();
+        let mut obj = beam(2, 6, 10);
+        let out = proc_no_worms(&mut obj, &level, &st_laser_weapon(2, 0), 0, &mut rand);
+        assert_eq!(out, WObjectOutcome::Explode);
+        assert_eq!(obj.pos, Vec2::new(itof(9), itof(10)), "stopped on the third step");
+    }
+
+    #[test]
+    fn st_laser_hits_a_worm_on_a_later_step_and_is_removed() {
+        // The worm-hit arm (weapon.cpp:287-326) runs on EVERY step. The fixture's only solid
+        // worm pixel is sprite (8,8) -> world (51,53) for a worm at (50,50). From x = 47 the
+        // beam reaches x = 51 on step 4: hit -> DoDamage(1) -> worm_collide -> Remove; steps
+        // 5..8 never run.
+        let cossin = precompute_cossin();
+        let (worm_sprites, flags) = worm_hit_sprites();
+        let level = hit_level(flags);
+        let w = Weapon {
+            hit_damage: 1,
+            worm_collide: true,
+            detect_distance: 0,
+            ..st_laser_weapon(2, 0)
+        };
+        let nobject_types = blood_types();
+        let mut worms = [hit_worm(50, 50, Vec2::zero())];
+        let mut nobjects: Pool<NObject> = Pool::new(8);
+        let mut rand = seeded();
+        let mut obj = beam(2, 47, 53);
+        let out = proc_hit(
+            &mut obj,
+            &level,
+            &w,
+            &mut worms,
+            &mut nobjects,
+            &nobject_types,
+            &worm_sprites,
+            &cossin,
+            100,
+            &mut rand,
+        );
+        assert_eq!(out, WObjectOutcome::Remove, "worm_collide without worm_explode");
+        assert_eq!(obj.pos.x, itof(51), "removed on step 4");
+        assert_eq!(worms[0].health, 99, "one hit, not one per remaining step");
+    }
+
+    // ---- 4½c-0 T7: Worm::ProcessSteerables (worm.cpp:1214-1241) ---------------------
+
+    // weapons[0] steerable (MISSILE-shaped), weapons[1] ST_TYPE2 (BAZOOKA-shaped).
+    fn steer_weapons() -> Vec<Weapon> {
+        vec![
+            Weapon {
+                id: 0,
+                shot_type: ST_STEERABLE,
+                ..Default::default()
+            },
+            Weapon {
+                id: 1,
+                shot_type: ST_TYPE2,
+                ..Default::default()
+            },
+        ]
+    }
+
+    // Worm index 0 whose current slot (0) holds weapon `current_ty`, holding `controls`.
+    fn steer_worm(current_ty: i32, controls: u32) -> WormState {
+        let mut w = hit_worm(20, 20, Vec2::zero());
+        w.index = 0;
+        w.weapons[0].ty = Some(current_ty);
+        w.current_weapon = 0;
+        w.control_states = ControlState::unpack(controls);
+        w
+    }
+
+    fn missile(owner: i32, ty: i32, cur_frame: i32, px: i32, py: i32) -> WObject {
+        WObject {
+            pos: Vec2::new(itof(px), itof(py)),
+            ty: Some(ty),
+            owner_idx: owner,
+            cur_frame,
+            ..WObject::default()
+        }
+    }
+
+    #[test]
+    fn steerables_turn_the_owners_current_type_missiles_and_sum_their_pixels() {
+        // Left (4), cycles 1 -> step (1 & 1) + 1 = 2; `&= 127` wraps. Only wobjects of the
+        // CURRENT weapon's type AND this worm's index are steered; each clears `movable`
+        // and feeds the centroid sums.
+        let weapons = steer_weapons();
+        let mut w = steer_worm(0, 4);
+        let mut pool: Pool<WObject> = Pool::new(8);
+        pool.spawn(missile(0, 0, 32, 100, 50)); // steered: 32 - 2
+        pool.spawn(missile(0, 0, 1, 110, 70)); // steered, wraps: (1 - 2) & 127 = 127
+        pool.spawn(missile(1, 0, 40, 10, 10)); // another worm's: untouched
+        pool.spawn(missile(0, 1, 50, 10, 10)); // another weapon type: untouched
+        process_steerables(&mut w, &weapons, &mut pool, 1);
+        let frames: Vec<i32> = pool.iter().map(|o| o.cur_frame).collect();
+        assert_eq!(frames, vec![30, 127, 40, 50]);
+        assert_eq!(
+            (w.steerable_count, w.steerable_sum_x, w.steerable_sum_y),
+            (2, 210, 120)
+        );
+        assert!(!w.movable, "a steered missile freezes the worm (movable = false)");
+    }
+
+    #[test]
+    fn steerables_step_by_one_on_even_cycles_and_right_adds() {
+        let weapons = steer_weapons();
+        let mut w = steer_worm(0, 8); // Right
+        let mut pool: Pool<WObject> = Pool::new(2);
+        pool.spawn(missile(0, 0, 127, 5, 5));
+        process_steerables(&mut w, &weapons, &mut pool, 2); // (2 & 1) + 1 = 1
+        assert_eq!(pool.iter().next().unwrap().cur_frame, 0, "127 + 1 wraps to 0");
+        assert_eq!(w.steerable_count, 1);
+    }
+
+    #[test]
+    fn steerables_zero_the_sums_and_ignore_a_non_steerable_current_weapon() {
+        let weapons = steer_weapons();
+        let mut w = steer_worm(1, 4); // the current weapon is ST_TYPE2
+        w.steerable_count = 7;
+        w.steerable_sum_x = 7;
+        w.steerable_sum_y = 7;
+        let mut pool: Pool<WObject> = Pool::new(2);
+        pool.spawn(missile(0, 1, 32, 5, 5));
+        process_steerables(&mut w, &weapons, &mut pool, 1);
+        assert_eq!((w.steerable_count, w.steerable_sum_x, w.steerable_sum_y), (0, 0, 0));
+        assert_eq!(pool.iter().next().unwrap().cur_frame, 32, "not steerable: untouched");
+        assert!(w.movable);
     }
 }

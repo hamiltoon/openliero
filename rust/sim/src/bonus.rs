@@ -514,7 +514,8 @@ pub fn worm_pickup_bonuses(
                 let amount = (rand.bound(bonus_health_var as u32) as i32 + bonus_min_health)
                     * settings_health
                     / 100;
-                do_healing_direct(&mut worms[wi], amount, game_mode, settings_health);
+                // worm.cpp:295 calls Game::DoHealing (Scales redistributes, 4½a-1).
+                crate::state::do_healing(worms, wi, amount, game_mode, settings_health);
             }
             // health >= settings_health: no free, NO rand.
         } else if bonus.frame == 0 {

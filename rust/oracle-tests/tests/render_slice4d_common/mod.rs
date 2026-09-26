@@ -142,10 +142,12 @@ pub fn parse_frames(text: &str) -> (Vec<FrameLine>, u32, u64) {
 }
 
 pub fn read_golden(name: &str, suffix: &str) -> String {
-    let path = format!(
-        "{}/golden/render_slice4d_{name}{suffix}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    read_golden_stem(&format!("render_slice4d_{name}"), suffix)
+}
+
+/// `golden/<stem><suffix>` — the 4½c-0 steerable-camera golden reuses this harness.
+pub fn read_golden_stem(stem: &str, suffix: &str) -> String {
+    let path = format!("{}/golden/{stem}{suffix}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
@@ -164,10 +166,11 @@ struct Built {
     labels: HudLabels,
 }
 
-fn build(name: &str) -> Built {
-    let scenario_text = read_golden(name, "_scenario.txt");
+fn build(stem: &str) -> Built {
+    let scenario_text = read_golden_stem(stem, "_scenario.txt");
     let scenario = Scenario::parse(&scenario_text).expect("scenario parses");
-    assert_eq!(scenario.seed, 42, "4d scenario uses seed 42");
+    // The seed is the scenario's own: each gen script passes it to the dumper explicitly
+    // (4d: 42; the 4½c-0 steer golden: its scanned seed).
     assert!(
         scenario.live(),
         "4d scenario carries the `render_live` directive"
@@ -209,6 +212,7 @@ fn render_tick(b: &mut Built, tick: u32, screen_flash: i32) -> u64 {
         labels: &b.labels,
         draw_hud: false,
         map: false,
+        small_labels: None,
     };
     render::frame::draw(&mut b.bmp, &b.state, &mut b.viewports, &scene);
     let fade = if tick == 0 { 0 } else { 33 };
@@ -246,17 +250,22 @@ fn snap(vps: &[Viewport; 2]) -> [VpSnap; 2] {
 /// triple. Returns the per-tick frame hashes, viewport snapshots, and live
 /// `screen_flash` for the caller's non-vacuity proofs.
 pub fn run(name: &str) -> RunResult {
+    run_stem(&format!("render_slice4d_{name}"))
+}
+
+/// [`run`] for any golden file stem (`golden/<stem>{_scenario,_sim,}.txt`).
+pub fn run_stem(name: &str) -> RunResult {
     let mut b = build(name);
     let ticks = b.scenario.ticks;
 
-    let (frames, total_n, total_acc) = parse_frames(&read_golden(name, ".txt"));
+    let (frames, total_n, total_acc) = parse_frames(&read_golden_stem(name, ".txt"));
     assert_eq!(
         frames.len(),
         (ticks + 1) as usize,
         "{name}: one frame line per tick 0..=ticks"
     );
 
-    let sim_text = read_golden(name, "_sim.txt");
+    let sim_text = read_golden_stem(name, "_sim.txt");
     let sim_master: Vec<u32> = sim_text
         .lines()
         .filter(|l| {
@@ -357,6 +366,23 @@ pub fn run(name: &str) -> RunResult {
 /// positions. All prior ticks render with their real live values, so the state
 /// entering `target_tick` matches `run` bit-for-bit.
 pub fn modified(
+    name: &str,
+    target_tick: u32,
+    force_flash: Option<i32>,
+    suppress_shake: bool,
+    suppress_banner: bool,
+) -> (u64, [(i32, i32); 2]) {
+    modified_stem(
+        &format!("render_slice4d_{name}"),
+        target_tick,
+        force_flash,
+        suppress_shake,
+        suppress_banner,
+    )
+}
+
+/// [`modified`] for any golden file stem.
+pub fn modified_stem(
     name: &str,
     target_tick: u32,
     force_flash: Option<i32>,

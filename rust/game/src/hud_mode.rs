@@ -8,24 +8,8 @@
 //! frame-parity witness built on it — stays world-only. Until 4½d loads the setup (design
 //! §9.3.6) the binary passes `Settings::default().map`.
 
-use render::frame::Scene;
-
 use crate::input::Mode;
-
-/// The two HUD switches of a `render::frame::Scene`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HudFlags {
-    pub draw_hud: bool,
-    pub map: bool,
-}
-
-impl HudFlags {
-    /// Set `scene.draw_hud` and `scene.map`.
-    pub fn apply(self, scene: &mut Scene<'_>) {
-        scene.draw_hud = self.draw_hud;
-        scene.map = self.map;
-    }
-}
+pub use ui::shell::HudFlags;
 
 /// The HUD for `mode`: `Live`/`Replay` ⇒ drawn, minimap per `settings_map`; `Scripted` ⇒ the
 /// scenario's `render_hud` directive (`scenario_hud`) for both.

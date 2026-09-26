@@ -15,6 +15,8 @@ use bevy::prelude::Resource;
 use scenario::Scenario;
 use sim::state::ControlState;
 
+pub use ui::keys::ReleaseLatch;
+
 /// Number of worms sampled per tick — positional `[ControlState; N]`, the same
 /// index `process_frame` reads and `Viewport::worm_idx` maps (spec §4.2).
 pub const N_WORMS: usize = 2;
@@ -365,39 +367,6 @@ impl Recorder {
     /// caveat on *when* the buffer is written).
     pub fn clear(&mut self) {
         self.snapshots.clear();
-    }
-}
-
-/// Step 4½c (design §7.2, Q5): the release latch at both phase boundaries. C++ keys are EDGES:
-/// a key held when the controller starts never reaches the worm, and a key held when weapon
-/// selection ends (Fire from DONE) does nothing in the match until pressed again
-/// (`ReleaseControls`, `game.cpp:110-118`; SDL repeats are dropped, `gfx.cpp:608`). Rust samples
-/// LEVELS, so without this a held DONE would fire the first weapon on tick 0. Armed with the
-/// held words at a boundary; each tick it forgets released bits (`mask &= held`) and outputs
-/// `sampled & !mask`. It sits BEFORE the recorder tap; it is live-only, and only selection
-/// boundaries arm it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ReleaseLatch {
-    mask: [u32; N_WORMS],
-}
-
-impl ReleaseLatch {
-    /// Latch every bit held now.
-    pub fn arm(&mut self, held: &[ControlState; N_WORMS]) {
-        self.mask = held.map(|c| c.pack());
-    }
-
-    /// Mask this tick's sampled words in place.
-    pub fn apply(&mut self, inputs: &mut [ControlState; N_WORMS]) {
-        for (mask, input) in self.mask.iter_mut().zip(inputs.iter_mut()) {
-            *mask &= input.pack();
-            *input = ControlState::unpack(input.pack() & !*mask);
-        }
-    }
-
-    /// Whether any bit is still latched.
-    pub fn is_armed(&self) -> bool {
-        self.mask.iter().any(|&m| m != 0)
     }
 }
 
@@ -910,45 +879,5 @@ input 5 64 96
         // Dig explicitly unbound for both (§2).
         assert_eq!(map.players[0].dig, None);
         assert_eq!(map.players[1].dig, None);
-    }
-
-    // ---- Step 4½c: the release latch (design §7.2) -----------------------------------
-
-    fn cs(bits: u32) -> ControlState {
-        ControlState::unpack(bits)
-    }
-
-    #[test]
-    fn an_unarmed_latch_passes_everything() {
-        let mut l = ReleaseLatch::default();
-        let mut i = [cs(0x7f), cs(16)];
-        l.apply(&mut i);
-        assert_eq!((i[0].pack(), i[1].pack()), (0x7f, 16));
-        assert!(!l.is_armed());
-    }
-
-    #[test]
-    fn a_latched_key_does_nothing_until_released_then_a_repress_passes() {
-        let mut l = ReleaseLatch::default();
-        l.arm(&[cs(16), cs(0)]); // worm 0 held Fire at the boundary (the DONE press)
-        for _ in 0..5 {
-            let mut i = [cs(16 | 4), cs(16)];
-            l.apply(&mut i);
-            assert_eq!(
-                (i[0].pack(), i[1].pack()),
-                (4, 16),
-                "only worm 0's Fire is masked"
-            );
-        }
-        let mut i = [cs(0), cs(0)];
-        l.apply(&mut i); // released
-        assert!(!l.is_armed());
-        let mut i = [cs(16), cs(0)];
-        l.apply(&mut i);
-        assert_eq!(
-            i[0].pack(),
-            16,
-            "pressed again: it passes (gfx.cpp:608 + game.cpp:110-118)"
-        );
     }
 }

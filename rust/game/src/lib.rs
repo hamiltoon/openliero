@@ -15,13 +15,14 @@
 //! start (`new_game`: settings, level generation, seed, the level-reuse rule). All
 //! Bevy binary logic (the app, the CPU blit, the tick/render loop) stays in
 //! `main.rs`, which uses these modules
-//! via `game::input` / `game::viewport_step` / `game::match_flow`.
+//! via `game::input` / `game::viewport_step` / `game::match_flow`. Since Step 4½d the Bevy-free
+//! cores `match_flow`, `new_game`, `selection` and `viewport_step` live in `ui::shell`
+//! (re-exported here), next to the shell that drives them.
 pub mod audio;
 pub mod hud_mode;
 pub mod input;
-pub mod match_flow;
-pub mod new_game;
-pub mod selection;
 pub mod touch;
-pub mod viewport_step;
 pub mod web_params;
+
+/// Step 4½d: moved to the Bevy-free `ui` crate (the shell drives them headlessly); the paths stay.
+pub use ui::shell::{match_flow, new_game, selection, viewport_step};

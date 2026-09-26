@@ -2484,6 +2484,7 @@ dependencies = [
  "scenario",
  "sim",
  "sim-core",
+ "ui",
  "web-sys",
 ]
 

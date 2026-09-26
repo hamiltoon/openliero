@@ -1,5 +1,5 @@
-//! Step 4½c — the live weapon-selection phase (design §7), Bevy-free so the tick system's phase
-//! logic is headlessly testable (the `lib.rs` rule).
+//! Step 4½c — the live weapon-selection phase (design §7), Bevy-free (moved to `ui::shell` in
+//! Step 4½d).
 //!
 //! C++ runs the phase inside `LocalController` (`localController.cpp:112-152`, `:224-229`): a
 //! fresh controller constructs `WeaponSelection`, every `Process` runs the 12/3 key repeat and
@@ -216,7 +216,7 @@ mod tests {
 
     const FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/scenarios/default_match.txt"
+        "/../game/scenarios/default_match.txt"
     ));
 
     fn default_match() -> scenario::Loaded {

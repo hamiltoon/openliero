@@ -1,5 +1,5 @@
 //! Step 4½c (John's T9 ruling: the live game "works like the original openliero") — the C++
-//! NEW GAME start, Bevy-free so it is headlessly testable (the `lib.rs` rule).
+//! NEW GAME start, Bevy-free (moved to `ui::shell` in Step 4½d).
 //!
 //! C++ NEW GAME (`gfx.cpp:1507-1523`) makes a fresh `LocalController` over `settings`
 //! (`localController.cpp:30-54` → [`scenario::build::new_match`]) and gives it a level:
@@ -153,7 +153,7 @@ mod tests {
     use sim::state::ControlState;
 
     use super::*;
-    use crate::selection::{Selection, new_game_config};
+    use crate::shell::selection::{Selection, new_game_config};
 
     fn tc() -> &'static Path {
         Path::new(TC_ROOT)
@@ -319,7 +319,7 @@ mod play_tests {
     use sim::state::ControlState;
 
     use super::*;
-    use crate::selection::{Selection, new_game_config};
+    use crate::shell::selection::{Selection, new_game_config};
 
     /// The browser check found it: a NEW GAME has `max_bonuses = 4`, so bonuses spawn, and the
     /// draw indexes `Common::bonus_frames` (`SceneData::bonus_frames`, empty before 4½c).
@@ -346,7 +346,7 @@ mod play_tests {
             } else {
                 [cs(0), cs(0)]
             };
-            crate::viewport_step::tick_viewports(&mut vps, &mut st, &i);
+            crate::shell::viewport_step::tick_viewports(&mut vps, &mut st, &i);
             let mut s = scene.as_scene(st.screen_flash, true);
             s.draw_hud = true;
             s.map = true;

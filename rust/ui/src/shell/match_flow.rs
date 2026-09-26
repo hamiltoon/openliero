@@ -1,6 +1,6 @@
 //! The match lifecycle after weapon selection (Step 4½a-1, design §6): the tail of C++
 //! `LocalController::Process` (`localController.cpp:153-199`) and `ChangeState`
-//! (`:214-290`), Bevy-free so it is headlessly testable (the `lib.rs` rule).
+//! (`:214-290`), Bevy-free (moved to `ui::shell` in Step 4½d).
 //!
 //! Once `Game::IsGameOver` holds (`:177-179`) the state becomes `GameEnded` with
 //! `fade_value = 180` (`:277-282`); the sim KEEPS TICKING (the frame loop runs for

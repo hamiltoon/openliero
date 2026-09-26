@@ -2444,4 +2444,24 @@ mod tests {
             assert_eq!(top_box(&sh).text, want);
         }
     }
+
+    #[test]
+    fn a_shell_match_takes_its_keys_as_edges() {
+        // Held Change + one Right press steps one weapon, not one per tick (keys::KeyEdges).
+        let (mut sh, mut sim, _) = boot();
+        start_match(&mut sh, &mut sim);
+        for _ in 0..400 {
+            if sim.worms[0].visible {
+                break;
+            }
+            step(&mut sh, &mut sim, &[], [16, 0]);
+            step(&mut sh, &mut sim, &[], [0, 0]);
+        }
+        assert!(sim.worms[0].visible);
+        let before = sim.worms[0].current_weapon;
+        for w in [32, 32, 32, 40, 40, 40, 40, 40, 40, 40, 32, 0] {
+            step(&mut sh, &mut sim, &[], [w, 0]);
+        }
+        assert_eq!((sim.worms[0].current_weapon - before).rem_euclid(5), 1);
+    }
 }

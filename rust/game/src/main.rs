@@ -48,7 +48,7 @@ use sim::state::{ControlState, SimState};
 
 use game::audio::{AudioSink, Drainer, NullSink, RodioSink};
 use game::hud_mode::{HudFlags, hud_flags};
-use game::input::{InputSource, Mode, ParsedArgs, Recorder, ReleaseLatch};
+use game::input::{InputSource, KeyEdges, Mode, ParsedArgs, Recorder, ReleaseLatch};
 use game::match_flow::{FlowStep, MatchFlow};
 use game::selection::Selection;
 use game::web_params::MatchParams;
@@ -130,6 +130,9 @@ struct Demo {
     /// Step 4½c: the release latch at both phase boundaries (design §7.2). Only a selection
     /// boundary arms it, so a skipped selection never masks a key.
     latch: ReleaseLatch,
+    /// `Mode::Live` only: C++ `OnKey`'s edges over the sampled words (`ui::keys::apply_key_edges`),
+    /// so a bit the sim consumed stays clear while its key is held.
+    edges: KeyEdges,
     /// Whether the world draws shadows: the scenario's `render_shadow` directive. Fixed for
     /// the run.
     draw_shadow: bool,
@@ -644,6 +647,7 @@ fn setup(
         loadout,
         selection,
         latch: ReleaseLatch::default(),
+        edges: KeyEdges::default(),
         draw_shadow,
         level_file,
         #[cfg(debug_assertions)]
@@ -947,10 +951,16 @@ fn tick_and_render(
         // replays exactly. Only a selection boundary arms it, and a recorded run has none, so
         // recordings and the Scripted/Replay feeds are unchanged.
         demo.latch.apply(&mut inputs);
-        // 4b recorder seam (spec §4.1): tap the SAMPLED array here — after
-        // `sample` (so the Dig→Left+Right chord is already resolved into the
-        // words the sim sees) and before `process_frame`. Present only in
-        // Live + `--record`, so Scripted/Replay are untouched.
+        // Step 4½e-1: Live input is C++'s key EDGES (`LocalController::OnKey`), not levels — a
+        // bit the sim consumed (`PressedOnce`/`Release`) stays clear while its key is held.
+        // Scripted/Replay words already are what the sim saw, and keep the per-tick overwrite.
+        if *mode == Mode::Live {
+            inputs = demo.edges.apply(&inputs, &sim.0.worms);
+        }
+        // 4b recorder seam (spec §4.1): tap the words the sim sees here — after
+        // `sample` (so the Dig→Left+Right chord is already resolved) and the edges,
+        // and before `process_frame`, so a replay reproduces the live run. Present
+        // only in Live + `--record`, so Scripted/Replay are untouched.
         if let Some(recorder) = recorder.as_mut() {
             recorder.record(&inputs);
         }

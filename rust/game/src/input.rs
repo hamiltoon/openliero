@@ -16,7 +16,7 @@ use bevy::prelude::Resource;
 use scenario::Scenario;
 use sim::state::ControlState;
 
-pub use ui::keys::ReleaseLatch;
+pub use ui::keys::{KeyEdges, ReleaseLatch};
 use ui::keys::TypedKey;
 use ui::shell::InputEvent;
 

@@ -23,7 +23,7 @@ use super::loadout::apply_weapons;
 use super::match_flow::{FlowStep, MatchFlow};
 use super::selection::{Selection, new_game_config};
 use super::viewport_step::tick_viewports;
-use crate::keys::ReleaseLatch;
+use crate::keys::{KeyEdges, ReleaseLatch};
 
 /// How a match starts (design §7.5): `skip_selection` (`?weapons=`), the preview loadout,
 /// and the touch-only rule (4½c Q8).
@@ -132,6 +132,9 @@ pub struct Match {
     viewports: [Viewport; 2],
     scene: SceneData,
     latch: ReleaseLatch,
+    /// C++ `OnKey`'s edges over the sampled words (`keys::apply_key_edges`): a bit the sim
+    /// consumed stays clear while its key is held.
+    edges: KeyEdges,
     hud: HudFlags,
     /// The match's copy of the settings: the `kStateGame` lives and blood pool, the selection's
     /// level label, the draw's shadow gate and `names_on_bonuses`. RESUME refreshes it while
@@ -196,6 +199,7 @@ impl Match {
             viewports,
             scene,
             latch,
+            edges: KeyEdges::default(),
             hud,
             cfg,
             begin,
@@ -284,7 +288,8 @@ impl Match {
     /// `LocalController::Process` (`localController.cpp:122-200`) on this frame's sampled words:
     /// the latch, then the selection step (the frame the last player readies runs
     /// `ChangeState(kStateGame)`: Finalize, lives, `StartGame`'s blood pool and `SoundBegin`,
-    /// fade 33) or one match tick (`tick_viewports` + game over), then the shared tail. Returns
+    /// fade 33) or one match tick (`tick_viewports` + game over) on `OnKey`'s edges
+    /// ([`KeyEdges`]; the selection keeps its own 4½c key repeat), then the shared tail. Returns
     /// (keep running, the sim ticked).
     pub fn process(
         &mut self,
@@ -306,6 +311,7 @@ impl Match {
                 self.latch.arm(&sampled);
             }
         } else {
+            let inputs = self.edges.apply(&inputs, &sim.worms);
             tick_viewports(&mut self.viewports, sim, &inputs);
             self.flow.check_game_over(sim);
             ticked = true;

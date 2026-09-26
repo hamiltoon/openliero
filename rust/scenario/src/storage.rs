@@ -7,11 +7,16 @@
 //!
 //! A config path is a forward-slash name under the config root — `"Setups/liero.cfg"`,
 //! `"Profiles/AI (L).toml"` — the C++ `configNode / "Setups" / "liero.cfg"`.
+//!
+//! Step 4½e-1: a store lives inside the shell (a Bevy `Resource` in `game`), so
+//! [`ConfigStore`] is `Send + Sync` and [`MemoryStore`] guards its user layer with a
+//! `Mutex`; and every store names its root the way C++ prints it ([`ConfigStore::root_label`]),
+//! the prefix of a `levelFile` a C++ level selector saved (design finding 3).
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::settings::Settings;
 use crate::settings_toml::{settings_from_toml, settings_to_toml};
@@ -24,8 +29,9 @@ pub const TEST_USER_DIR_ENV: &str = "OPENLIERO_TEST_USER_DIR";
 pub const PREF_ORG: &str = "openliero";
 pub const PREF_APP: &str = "openliero";
 
-/// Where settings files are read from and written to.
-pub trait ConfigStore {
+/// Where settings files are read from and written to. `Send + Sync` (Step 4½e-1): the shell
+/// that owns one is a Bevy `Resource`.
+pub trait ConfigStore: Send + Sync {
     /// The file at `rel` through the merged view: the user layer, else the system layer.
     fn read(&self, rel: &str) -> Option<Vec<u8>>;
     /// Write `rel` into the user layer (never the system layer), creating parent directories.
@@ -33,6 +39,44 @@ pub trait ConfigStore {
     /// `paths::ShadowsSystem`: would saving `subdir/leaf` clobber a reserved name or hide a
     /// shipped file? (4½e's Save As dialogs refuse such names.)
     fn shadows_system(&self, subdir: &str, leaf: &str) -> bool;
+    /// The config root as C++ prints it: the user node's `FsNode::FullPath()` (Step 4½e-1).
+    /// A level picked through the C++ selector is saved as `root_label() + "/" + rel`
+    /// (T0 addendum, findings 3 and 12), which `ui::shell::level_path` strips back to `rel`.
+    fn root_label(&self) -> &str;
+}
+
+/// `FsNode(path).FullPath()` (`filesystem.cpp:596-650`, POSIX branch): split `path` on `/` and
+/// `\` (`IsDirSep`), start from `"/"` when the first part is empty (an absolute path) and from
+/// `"."` otherwise, and `Go` into each part with `JoinPath` (`:283-288`: a `/` only when the
+/// root does not already end in one). So a trailing separator is dropped (`/a/b/` → `/a/b`), a
+/// relative root gains `./` (`user` → `./user`), an absolute one is otherwise unchanged, and the
+/// empty path stays empty (T0 addendum). The Windows drive branch is not ported.
+pub fn fs_node_full_path(path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    let join = |root: &str, leaf: &str| -> String {
+        if !root.is_empty() && !root.ends_with('/') && !root.ends_with('\\') {
+            format!("{root}/{leaf}")
+        } else {
+            format!("{root}{leaf}")
+        }
+    };
+    let mut node: Option<String> = None;
+    let mut parts = path.split(['/', '\\']).peekable();
+    while let Some(part) = parts.next() {
+        let last = parts.peek().is_none();
+        if last && part.is_empty() {
+            break; // `if (beg != i)`: a trailing separator adds no part
+        }
+        node = Some(match node {
+            // The first part: `""` (a leading separator) is the root; anything else is `./part`.
+            None if part.is_empty() && !last => "/".to_string(),
+            None => join(".", part),
+            Some(n) => join(&n, part),
+        });
+    }
+    node.unwrap_or_default()
 }
 
 /// `ShadowsSystem`'s reserved names (`filesystem.cpp:740-747`): `Setups/liero.cfg`, the game's
@@ -147,15 +191,25 @@ pub fn pref_path(org: &str, app: &str) -> Option<PathBuf> {
 pub struct NativeStore {
     user_root: PathBuf,
     system_root: Option<PathBuf>,
+    root_label: String,
 }
 
 impl NativeStore {
-    /// Reads: `user_root`, then `system_root`. Writes: `user_root`.
+    /// Reads: `user_root`, then `system_root`. Writes: `user_root`. The root label defaults to
+    /// [`fs_node_full_path`] of `user_root` (what C++ prints for it).
     pub fn split(user_root: PathBuf, system_root: Option<PathBuf>) -> NativeStore {
+        let root_label = fs_node_full_path(&user_root.to_string_lossy());
         NativeStore {
             user_root,
             system_root,
+            root_label,
         }
+    }
+
+    /// Override [`ConfigStore::root_label`] — the `fs` fixture's `./user` (plan §Formats).
+    pub fn with_root_label(mut self, label: impl Into<String>) -> NativeStore {
+        self.root_label = label.into();
+        self
     }
 
     /// One directory for reads and writes — the `--config-root` / `portable.txt` layout
@@ -224,13 +278,32 @@ impl ConfigStore for NativeStore {
             _ => false,
         }
     }
+
+    fn root_label(&self) -> &str {
+        &self.root_label
+    }
 }
 
-/// An in-memory store: a writable user layer over a fixed system layer.
-#[derive(Debug, Default)]
+/// [`MemoryStore`]'s default root label: the browser store's root (plan D11).
+pub const MEMORY_ROOT_LABEL: &str = "/openliero";
+
+/// An in-memory store: a writable user layer over a fixed system layer. The user layer sits
+/// behind a `Mutex` so the store is `Sync` (Step 4½e-1).
+#[derive(Debug)]
 pub struct MemoryStore {
-    user: RefCell<BTreeMap<String, Vec<u8>>>,
+    user: Mutex<BTreeMap<String, Vec<u8>>>,
     system: BTreeMap<String, Vec<u8>>,
+    root_label: String,
+}
+
+impl Default for MemoryStore {
+    fn default() -> MemoryStore {
+        MemoryStore {
+            user: Mutex::default(),
+            system: BTreeMap::new(),
+            root_label: MEMORY_ROOT_LABEL.to_string(),
+        }
+    }
 }
 
 impl MemoryStore {
@@ -241,38 +314,51 @@ impl MemoryStore {
     /// A store whose read-only system layer holds `files`.
     pub fn with_system(files: &[(&str, &[u8])]) -> MemoryStore {
         MemoryStore {
-            user: RefCell::default(),
             system: files
                 .iter()
                 .map(|(rel, bytes)| (rel.to_string(), bytes.to_vec()))
                 .collect(),
+            ..MemoryStore::default()
         }
+    }
+
+    /// Override [`ConfigStore::root_label`] (default [`MEMORY_ROOT_LABEL`]).
+    pub fn with_root_label(mut self, label: impl Into<String>) -> MemoryStore {
+        self.root_label = label.into();
+        self
     }
 
     /// The user layer's copy of `rel` (what a write left there), for tests.
     pub fn user_file(&self, rel: &str) -> Option<Vec<u8>> {
-        self.user.borrow().get(rel).cloned()
+        self.user_layer().get(rel).cloned()
+    }
+
+    /// The user layer. A poisoned lock (a panic while it was held) still holds a whole map:
+    /// every write is one `insert`.
+    fn user_layer(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Vec<u8>>> {
+        self.user.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
 impl ConfigStore for MemoryStore {
     fn read(&self, rel: &str) -> Option<Vec<u8>> {
-        self.user
-            .borrow()
+        self.user_layer()
             .get(rel)
             .cloned()
             .or_else(|| self.system.get(rel).cloned())
     }
 
     fn write(&self, rel: &str, bytes: &[u8]) -> io::Result<()> {
-        self.user
-            .borrow_mut()
-            .insert(rel.to_string(), bytes.to_vec());
+        self.user_layer().insert(rel.to_string(), bytes.to_vec());
         Ok(())
     }
 
     fn shadows_system(&self, subdir: &str, leaf: &str) -> bool {
         is_reserved(subdir, leaf) || self.system.contains_key(&format!("{subdir}/{leaf}"))
+    }
+
+    fn root_label(&self) -> &str {
+        &self.root_label
     }
 }
 
@@ -559,6 +645,81 @@ mod tests {
         );
         assert!(store.shadows_system("Profiles", "Stock.toml"));
         assert!(!store.shadows_system("Profiles", "Mine.toml"));
+    }
+
+    // ---- Step 4½e-1: Send + Sync, root_label ----
+
+    const fn assert_send_sync<T: Send + Sync + ?Sized>() {}
+    const _: () = assert_send_sync::<MemoryStore>();
+    const _: () = assert_send_sync::<NativeStore>();
+    const _: () = assert_send_sync::<Box<dyn ConfigStore>>();
+
+    #[test]
+    fn a_boxed_store_crosses_threads() {
+        let store: Box<dyn ConfigStore> = Box::new(MemoryStore::new());
+        let store = std::thread::spawn(move || {
+            store.write(SETUP_REL, b"x").expect("write");
+            store
+        })
+        .join()
+        .expect("thread");
+        assert_eq!(store.read(SETUP_REL).as_deref(), Some(&b"x"[..]));
+    }
+
+    #[test]
+    fn fs_node_full_path_follows_the_cpp_fsnode_fold() {
+        // filesystem.cpp:596-650 + JoinPath (:283-288); the T0 addendum's observed strings.
+        for (given, want) in [
+            ("user", "./user"),
+            ("user/", "./user"),
+            ("a/b", "./a/b"),
+            ("/tmp/x/user", "/tmp/x/user"),
+            // SDL_GetPrefPath's trailing separator is dropped (T0 run D).
+            (
+                "/home/u/.local/share/openliero/openliero/",
+                "/home/u/.local/share/openliero/openliero",
+            ),
+            ("/", "/"),
+            ("", ""),
+            ("a\\b", "./a/b"),
+            // An inner empty part is `Go("")`: JoinPath appends one separator, then the next
+            // part joins without a second one.
+            ("a//b", "./a/b"),
+            ("./user", "././user"),
+        ] {
+            assert_eq!(fs_node_full_path(given), want, "{given:?}");
+        }
+    }
+
+    #[test]
+    fn every_store_names_its_root() {
+        assert_eq!(MemoryStore::new().root_label(), "/openliero");
+        assert_eq!(
+            MemoryStore::with_system(&[]).root_label(),
+            MEMORY_ROOT_LABEL
+        );
+        assert_eq!(MemoryStore::new().with_root_label("/x").root_label(), "/x");
+        let split = NativeStore::split(PathBuf::from("user"), Some(PathBuf::from("sys")));
+        assert_eq!(split.root_label(), "./user", "a relative root gains ./");
+        assert_eq!(
+            NativeStore::single_dir(PathBuf::from("/srv/liero/")).root_label(),
+            "/srv/liero",
+            "no trailing separator"
+        );
+        let over = env(&[("HOME", "/home/j")]);
+        let store = NativeStore::resolve_with(PrefOs::Unix, &over).expect("a store");
+        assert_eq!(
+            store.root_label(),
+            "/home/j/.local/share/openliero/openliero"
+        );
+        let fixture =
+            NativeStore::split(PathBuf::from("/tmp/f/user"), None).with_root_label("./user");
+        assert_eq!(fixture.root_label(), "./user");
+        assert_eq!(
+            fixture.user_root(),
+            Path::new("/tmp/f/user"),
+            "the label is only a name"
+        );
     }
 
     #[test]

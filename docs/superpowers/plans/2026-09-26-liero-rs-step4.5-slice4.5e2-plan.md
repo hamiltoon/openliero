@@ -995,3 +995,213 @@ Batch 1 also reports the addendum's verdicts. The final report (Batch 8) surface
 - the Xvfb PNG paths;
 - the audit sweep: 22 `A`, 0 `M`; the one dumper; `cargo tree` 0 bevy; reproducibility byte-identical;
 - any sim/render fix, with the case that proved it.
+
+## Addendum T0 (probe results)
+
+Run 2026-09-26 on `claude/cpp-oracle-vcpkg-assets-chcwcm` at `cc50554`, with the real `Gfx::RunOneFrame` in a temporarily patched `oracle_dump_shell`. **Directory:** every artefact is in `$S/t0e2b/`, not `$S/t0e2x/` (the orchestrator's name; `$S/t0e2/` holds e-1's T0). Nothing but this addendum is committed.
+
+**Verdict.**
+- P1–P9 are **confirmed**.
+- P10 is **partly contradicted**: C++ previews neither file, but a NEW GAME on the truncated-MODERNLV `trunc.lev` is **undefined behaviour in C++** (a heap overflow; it crashed every run). It does not fall back to random. The P10 rule fired and changes T5 (§"Changes to later tasks" below).
+- Two precisions change no rule but correct text:
+  - fact 24's example letters (`d` is bound);
+  - D1.3's control: a plain `[RANDOM]` pick does not regenerate the level.
+
+### Method
+
+- **The patch** is `$S/t0e2b/probe_patch.diff`. It lived in the working tree only.
+  - `TopOf` returns `L` for `LevelSelectorState` and `P` for `OptionsSelectorState` (with `#include "fileSelectorState.hpp"`).
+  - The `fs` boot `CheckLevelFile` is skipped. Intervention 6 stays once, at boot.
+  - A probe-only `x <frame>` line follows each `d` line. It holds:
+    - `pvf` and `pvb`: FNV-1a-64 of the preview rectangle (134..185 × 162..197) of `gfx.frozen_screen` and of this frame's `play_renderer.bmp`;
+    - `random_level`, `level_file` and `settings_node.FullPath()`;
+    - `lives`, `loading_time`, `max_bonuses`, `blood`, `game_mode` and `record_replays`;
+    - for a selector on top: the current folder's `full_path` and its menu as `sel[name:colour|…]`, plus the parent's.
+  - A `Peek : FileSelectorState` member-pointer accessor reads `selector_`. It reads `node->menu` directly and never calls `GetMenu`, so the probe has no side effects on the tree.
+- **Build:** `source $S/env.sh && cmake --build build/linux-x64 --config Release --target oracle_dump_shell`, and the same patch in `$S/build-chk` for the checked runs.
+- **Inputs.**
+  - `$S/t0e2b/mk.py` wrote `tiny.lev` (`OLLEVEL2`, 60×40, 2,413 bytes) and `trunc.lev` (`OLLEVEL2` 8×8 + `MODERNLV` + 10 zero bytes, 95 bytes).
+  - `$S/t0e2b/gen.py` wrote every script and manifest. Each manifest is §Formats' `Fs::install()` lines plus the probe's user lines.
+  - Every script has `setup default`, `boot_seed 7`, `detail` and `fs <s>_fs.txt`, and ends by QUIT. Taps are down at *t*, up at *t*+2, next key at *t*+3.
+- **Run:** `build/linux-x64/Release/oracle_dump_shell $S/t0e2b/<s>.txt $S/t0e2b/<s>.out --ppm-dir $S/t0e2b/ppm_<s>`.
+- **Analysis:** `$S/t0e2b/an.py <s>.out` prints each frame where `upd`, top, sounds, `d` or `x` changed. The PNG grids are `$S/t0e2b/{t_tree,o_open,s_save}_grid.png` and `q_weapsel.png`.
+- **Sound ids in `f` lines:** 25 = Down (C++ `MenuMoveUp`), 26 = Up and PgUp (`MenuMoveDown`), 27 = `MenuSelect`.
+
+### P1: listing, filter, sort, parent pane (`t_tree`): CONFIRMED
+
+The user layer adds `dir Replays` and, in `TC/openliero/Levels/`, `Zeta.lev` and `alpha.LEV` (water copies), `.hidden.lev` (a render_stage copy), `notes.txt` and `tiny.lev`.
+
+- **The root** (f 49, the Return frame: `upd M`, top `L`, sound 27) is `0[[RANDOM]:48|Profiles:47|Replays:47|Resources:47|Setups:47|TC:47]`. The cursor is on `[RANDOM]`, which is colour 48, like a file.
+  - The title reads `Select level: ./user` (`t_tree_grid.png`).
+  - `Replays` (user only) and `TC` (both layers, listed once) are merged.
+- **Profiles.**
+  - Down (f 58, sound 25), then Right (f 61, no sound): folder `./user/Profiles`, menu `0[]`.
+  - The parent pane shows the root with its cursor on Profiles (`pcur=1`). The titles are `Parent directory` and `Select level: ./user/Profiles`.
+  - Left (f 67, no sound): the root, with the cursor still on Profiles.
+- **Down ×4 to TC**, then **Right ×3** at f 85, 89 and 93:
+  - `./user/TC` = `[openliero:47]`;
+  - `./user/TC/openliero` = `[Levels|nobjects|sobjects|sounds|sprites|weapons]`, all 47, with the cursor on Levels;
+  - `./user/TC/openliero/Levels` = `0[.hidden|alpha|modern_test|physics_fall_test|render_stage|see_shadow_test|tiny|water_stage|Zeta]`, all 48.
+  - `notes.txt` is absent: the filter confirmed. Dotfiles are listed, and `alpha.LEV` shows as `alpha`.
+  - The Levels title `Select level: ./user/TC/openliero/Levels` is **clipped at x = 320** (the PNG shows `…/Level`). Rust must clip it the same way.
+- **PgUp** (f 127, sound 26) from row 8: row 1 (`MovementPage(-1)`, height 14).
+- **Left** (f 133): `openliero`, with the cursor on Levels and the parent pane on `TC`. **Right** (f 139): Levels, with the cursor kept on row 1.
+- **Search** (`contains`), keys at f 145, 148 and 151:
+  - `h`: the cursor stays on `alpha`, because it contains `h` and the search starts at the current row;
+  - `i`: `hi` moves it to `.hidden` (row 0);
+  - `d`: **P1's Left**. The folder became `./user/TC/openliero` (fact 24: `TestControlOnce` runs before `OnKeys`). The `d` search then ran on that menu and moved its cursor to `sounds` (row 3): `hid` missed, so the prefix restarted as `d`.
+- **Esc** (f 157): `upd L`, top `M`, no sound.
+
+### P3: the late preview (`t_tree`, `b_broken`): CONFIRMED
+
+- **One frame late, every time.** On each frame that lands on a new file, `pvf` (frozen) changes while `pvb` (this frame's surface) still holds the old preview. `pvb` catches up on the next frame.
+  - Frames: 93 (entering Levels onto `.hidden`), 100 `alpha`, 103 `modern_test`, 106 `physics_fall_test`, 109 `render_stage`, 112 `see_shadow_test`, 115 `tiny`, 118 `water_stage`, and 148 `.hidden` (by search).
+  - `Zeta` (f 121) and `water_stage` redraw identical pixels, so `pvf` does not change.
+- **No repaint.** `[RANDOM]`, Profiles and the folders never change `pvf` (`84d3a955…` from boot until f 93).
+- **The `tiny` footprint** (PPM f 116): 30×20 drawn at (134, 162). Everything else in the 50×35 box is black: the band x 164..183 and y 182..196 are all `(0,0,0)`. `water_stage` after it (f 119) repaints all 1,750 cells.
+- **The first 52×36 clear is not visible in this fixture.** Column x 184..185 and row y 197 are already black in the boot frozen screen (PPM f 92). Only T3's unit test can pin it, per the source.
+- **`pal32` is this frame's menu palette.** `modern_test` was previewed at f 146 and again at f 182 (`b_broken`). The two differ (`22dbf89e…` vs `31f013e1…`) in exactly 200 pixels, all in rows 193..196 and all one colour: (252,252,252) vs (188,188,188), a cycling entry. The frozen pixels are fixed ARGB between redraws.
+- **The preview persists** into the main menu after Esc: f 157–177 all show `pvb=0a5e9922…`, the `.hidden` preview.
+
+### P2: cursor restore (`t_restore`): CONFIRMED
+
+- Picking `water_stage` (f 91): `upd L`, top `M`, **one** sound 27.
+  - `level_file = './user/TC/openliero/Levels/water_stage.lev'` and `random_level` is 0. `cfg16` becomes `efe5c8ad…`, which equals the exit save's `file Setups/liero.cfg efe5c8ad5d5ce4b5`.
+- Return on LEVEL again (f 100, `upd M`, top `L`, sound 27): the first `L` frame is **inside Levels, with the cursor on `water_stage`** (row 4). The parent pane is `./user/TC/openliero`, with its cursor on Levels.
+- The reopen previews `water_stage` over identical frozen pixels, so its lateness is not visible there. P1 shows it.
+
+### P4: LOAD SETUP (`o_open`, user `Setups/mine.cfg` ← `orbmit.cfg`): CONFIRMED
+
+- **Opening** (f 85, Down ×14 to `ssel` 18, Return: `upd M`, top `P`, sound 27): folder `./user/Setups`, `0[liero:48|mine:48|orbmit:48]`, cursor on `liero`.
+  - The parent is `./user` with `2[Profiles|Resources|Setups|TC]`.
+  - The title reads `Select options: ./user/Setups`, and the parent pane is drawn (`o_open_grid.png`).
+- **Left** (f 92): the root, with the cursor on Setups (row 2); the title is `Select options: ./user`. **Right** (f 98): Setups, with the cursor on `liero`.
+- **Down ×2, Return on `orbmit`** (f 110): `upd P`, top `M`, one sound 27.
+  - `cfg16` goes `bc29c9d5…` → `ac0f00da…`, with lives 9, loading 20, `max_bonuses` 0 and blood 25.
+  - **`record_replays` becomes 1** (P7).
+  - `settings_node = './user/Setups/orbmit.cfg'`: the **config-node** path, although the file lives in `sys`. SAVE SETUP AS… reads `orbmit`.
+- The exit save (`file Setups/liero.cfg ac0f00dae90d61cd`) equals the loaded `cfg16`.
+
+### P5: the Save-As chain (`s_save`): CONFIRMED
+
+| Frame | Event | `upd` → top | Sounds |
+|---|---|---|---|
+| 82 | Return on SAVE SETUP AS… (`ssel` 17) | M → I (on `liero`) | 27 |
+| 88 | Return | **I → B** | 27 |
+| 94 | SPACE | **B → I** (on `liero`) | — |
+| 127 | Backspace ×5, `mine`, Return | I → M | **27,27** |
+| 134 | Return | M → I (on `mine`) | 27 |
+| 170 | Backspace ×4, `orbmit`, Return | I → B | 27 |
+| 176 | SPACE | B → I (on `orbmit`) | — |
+| 182 | ESC | I → M | **27,27** |
+
+- The box reads `NAME 'liero.cfg' IS RESERVED`, and later `NAME 'orbmit.cfg' IS RESERVED`, on a black screen (`s_save_grid.png`).
+- **Replacements are presented in the frame that schedules them.**
+  - f 88 (`upd I`) presents the box, and f 89 presents identical bytes.
+  - f 94 (`upd B`) presents the reopened input with `liero_`: bytes `c7696b39…`, identical to f 87's input frame.
+- After the save, `settings_node = './user/Setups/mine.cfg'` and the value reads `mine`. The cancel changes nothing.
+- The `file` lines are exactly `Setups/liero.cfg` and `Setups/mine.cfg`, both `bc29c9d5ce487a40` (the same settings).
+
+### P6: Q4 in the dumper (`q_sys`, `q_rand`, `q_both`; `match_seed 601`): CONFIRMED
+
+- All three share one key path:
+  - F7, Down ×12 (REGENERATE LEVEL), then Return (`q_rand` only) or a wait, then Up ×10 to LEVEL;
+  - Return, then the pick at f 154, Esc, and F1 (NEW GAME) at f 167. The router frame is f 200;
+  - R+UP and LCTRL+RCTRL (DONE), then 234 `state8` ticks, f 205–438.
+- **`q_sys` equals `q_rand` on 234/234 ticks and differs from `q_both` on 234/234.**
+  - `q_sys` has `water_stage` in `sys` only. `q_rand` picks `[RANDOM]` with REGENERATE LEVEL on. `q_both` has the user copy.
+  - `q_weapsel.png` (f 204): `q_sys` shows `Level: "water_stage"` over the same dirt level as `q_rand` (`Level: Random`). `q_both` shows the water stage.
+  - **Finding 2 is reproduced in the dumper layout, and D3's guard is needed.**
+- **A precision for D1.3's control.** A plain `[RANDOM]` pick is **not** a random regeneration. `q_rand0` (the same path without REGENERATE) differs from `q_sys` on 234/234 ticks.
+  - The NEW GAME router reuses the menu's current level when `regenerate_level` is off and `random_level`, `level_file` and the map sizes equal its `old_*` fields (`gfx.cpp:1512-1522`). `q_rand0` therefore played the boot level (boot seed).
+  - The documented comparison is therefore "`q_sys` = a `[RANDOM]` pick with REGENERATE LEVEL on, same seeds".
+
+### P7: replays after LOAD SETUP (`r_rec`): CONFIRMED
+
+LOAD SETUP → `orbmit` (f 95, `rr=1`), then NEW GAME, DONE and 60 ticks. The `file` lines are:
+```
+file Replays/2026-09-26 20.29.52 -.lrp 14650fb0739d0383
+file Setups/liero.cfg ac0f00dae90d61cd
+```
+- A wall-clock name. It also contains spaces, which would break the `file <rel> <fnv16>` shape.
+- **Intervention 6′ (D2) is needed** and stays.
+
+### P8: LOAD SETUP detaches (`l_ctl`, `l_load`; `match_seed 801`): CONFIRMED
+
+- The shared path: NEW GAME, DONE, 234 ticks, then Esc.
+- Then F7 at f 319, and one of:
+  - `l_load`: LOAD SETUP → `orbmit` at f 374;
+  - `l_ctl`: an equal idle.
+- Then Esc, F1 (RESUME) at f 387, 201 resumed frames, Esc, QUIT.
+- **Results:**
+  - Pre-pause `state8`: equal on 234/234.
+  - Resumed ticks f 420–620: `state8` equal on **201/201**, and the presented frames equal on 201/201.
+    - `orbmit`'s `maxBonuses = 0` changes the `rand` draws of a *shared* settings object on the first tick (e-1 Addendum T0 `p_bonus`), so the paused game kept its own settings.
+    - The router frame f 420 differs only in `bmp16`, because the menu under it differs.
+  - `cfg16` differs from f 374, the load frame, on (291 frames). The exit saves are `bc29c9d5…` and `ac0f00da…`.
+- **Finding 1's LOAD SETUP half stands.** T4's detach and D17 stay as planned.
+
+### P10: rejected files (`b_bad`, `b_broken`, `b_rand`): PARTLY CONTRADICTED
+
+User: `TC/openliero/Levels/{broken.lev ← data/README.md (302 bytes), trunc.lev}`. The Levels rows are `broken, modern_test, physics_fall_test, render_stage, see_shadow_test, trunc, water_stage`.
+
+- **Previews: confirmed.**
+  - Entering Levels onto `broken` (f 138) leaves `pvf` at the boot value. Landing on `trunc` (f 162) leaves `see_shadow_test`'s `e167d4c8…`. Returning onto `broken` (f 186) leaves `modern_test`'s.
+  - The preview's local `Level` is discarded after the exception, so hovering `trunc` is safe: the checked build ran `b_broken`, which hovers it, clean.
+- **`broken` at NEW GAME: random, confirmed.** `b_broken` picks `broken`, and `b_rand` picks `[RANDOM]` with REGENERATE on (same seeds, same frames). They are equal on **134/134** ticks (f 245–378), and the checked build is clean.
+  - The legacy material read throws after `Resize(504, 350)`, with the display arrays already cleared. `GenerateRandom` then rewrites every cell.
+- **`trunc` at NEW GAME: C++ UB. Contradiction.**
+  - `b_bad` dies on its NEW GAME router frame in every build:
+    - release, run 1: SIGSEGV;
+    - release, run 2: `free(): invalid pointer`;
+    - checked build: `stl_vector.h:1128 … Assertion '__n < this->size()' failed` in `Level::SetPixel` ← `GenerateDirtPattern` ← `GenerateRandom` ← `GenerateFromSettings` ← `Gfx::RunOneFrame` (gdb).
+  - **Cause** (`level.cpp:312-327`, `level.hpp:72-80`):
+    1. `load` resizes `display_data` and `display_valid` to w·h = 64 as soon as the `MODERNLV` magic matches;
+    2. the following `r.Get` throws;
+    3. `GenerateFromSettings` catches it and calls `GenerateRandom`, whose `Resize` resizes only `material_id` and `materials`;
+    4. every `SetPixel` then writes `display_valid[idx] = 0` past a 64-byte vector.
+  - Any file that passes the `MODERNLV` magic and then fails clause (e) of fact 11 does this. With w·h ≥ the random map's cells it would not overflow, but it would leave a stale, non-empty `display_valid`/`display_data` on the random level, which is a divergence as well.
+- **Fact 11's closing sentence is amended.**
+  - A C++ rejection under clauses (a)–(d), or a missing file, means a random level at NEW GAME (proven for (b) by `broken`) and no preview.
+  - A clause-(e) rejection means no preview (safe) and **UB at NEW GAME**.
+  - Rust's `cpp_accepts` → random fallback for (e) is therefore a documented divergence only where C++ is UB, like e-1 Addendum G3's safe edges. No gated case may reach it.
+
+### P9: the `--config-root` shadow check (real `openliero` under Xvfb): CONFIRMED
+
+- **Setup.** `Xvfb :99`. `$S/t0e2b/p9.sh <run>` copies `data/` to `$S/t0e2b/p9/<run>/root` and starts `openliero --config-root <root>`. It then sends F7, Down ×13, Return, Backspace ×5, `xdotool type` of `orbmit` one character at a time, and Return, and snaps.
+- **`env`** (`OPENLIERO_DATADIR=/home/user/openliero/data`): the black `NAME 'orbmit.cfg' IS RESERVED` box (`p9/env_3_after.png`). `root/Setups/orbmit.cfg` is unchanged (md5 `9a2e9c4a4069…` before and after).
+- **`noenv`** (unset): **saved**. The value reads `orbmit` (`p9/noenv_3_after.png`), and `root/Setups/orbmit.cfg` was rewritten (2,008 bytes, md5 `d6a26e1b9da1…`).
+  - The compiled-in `OPENLIERO_DATADIR` is `/home/user/openliero/install/linux-x64/share/openliero`, which does not exist. `SDL_GetBasePath()` (`build/linux-x64/Release/`) has no `Setups`.
+- D10 stands as written. Xvfb and the game were stopped afterwards.
+
+### Restore
+
+- `git checkout -- src/tools/oracle_dump/shell_dump.cpp` (the patch was re-applied once for `q_rand0` and restored again), then both builds were rebuilt. `git status --short src` is empty.
+- The restored binaries regenerate `shell_boot_idle.txt`, `shell_milestone.txt`, `shell_cfg_boot.txt` and `shell_match_setup.txt` byte-identically (`cmp`), under **both** the release build and `$S/build-chk`.
+- The stale fixture `/tmp/oracle_shell_fs_b_bad.txt`, left by the crashes, was removed.
+
+### Changes to later tasks (the contradiction rules applied; these supersede the task text above)
+
+1. **T5 Step 3, case 3 `level_missing`** (the P10 rule: never NEW GAME a clause-(e) level). The path becomes:
+   - boot: the random fallback, and LEVEL shows `"gone"`;
+   - NEW GAME → random. The router does not regenerate: the settings still equal the boot level's `old_*` fields, so it reuses the boot level, which is itself the random fallback. Then 150 ticks → Esc;
+   - LEVEL opens at the root on `[RANDOM]`;
+   - to Levels → the cursor on `broken` (no preview) → Down to `trunc` (no preview) → **Up back to `broken` → Enter**;
+   - NEW GAME → random (C++ rejects `broken` under clause (b)) → 150 ticks → Esc → QUIT.
+
+   The `level_missing` witness in T5 Step 4 becomes: the LEVEL value `"gone"`, then **`"broken"`**; no preview on `broken` or `trunc`; the boot and both NEW GAMEs random. `trunc.lev` stays in the corpus as a **preview-only** input.
+2. **T5 Step 2 gains a validator:** a NEW GAME (or a boot) whose `level_file` passes the `MODERNLV` magic but fails `cpp_accepts` is a violation (C++ UB, P10). Rust's random fallback there stays, is unit-tested in T3 Step 2, and is never gated.
+3. **T5 Step 3, case 1 `level_tree`:** the search letters are **`h`,`i`**, not `h`,`i`,`d`. `d` is P1's Left and leaves Levels (P1, f 151).
+   - Observed: `h` keeps the cursor on `alpha`, and `hi` moves it to `.hidden`.
+   - Any search-moved witness must start from a row that does not contain the first letter, or count the `hi` move.
+   - Fact 24 and pitfall 10 stand. Only the example was wrong.
+4. **Pitfall 20** now reads: `trunc.lev` is preview-only in both languages. Its NEW GAME is C++ UB, and no case may pick-and-play it.
+5. **D1.3 / T8's PROGRESS line for P6:** state it as "`q_sys` = a `[RANDOM]` pick with REGENERATE LEVEL on (same seeds), 234/234". A plain `[RANDOM]` pick reuses the menu's level (router reuse).
+6. **For T3's unit tests:**
+   - `[RANDOM]` is colour 48;
+   - the Levels title is clipped at x = 320;
+   - the replacement box and the reopened input each present on the frame that scheduled them (P5).
+
+   No task text changes for these: they are how C++ already behaves, and the G2 cases gate them.
+
+No rule fired for P1–P9. T1, T2, T4, T6, T7 and D1–D17 are otherwise unchanged. Intervention 6′ (P7) and the Q4 guard (P6) stay.

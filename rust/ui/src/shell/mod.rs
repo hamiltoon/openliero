@@ -355,6 +355,7 @@ impl Shell {
         };
         let seed = shell.new_game(&mut state, &input);
         shell.stack.push(Screen::Playing);
+        shell.sync_picks();
         out.routed = Some(Route::NewGame { seed });
         out.phase = shell.phase();
         (shell, state, out)
@@ -470,6 +471,7 @@ impl Shell {
             AfterUpdate::Popped { empty: true } => {
                 debug_assert!(pushes.is_empty(), "a screen that pushes keeps running");
                 self.route(sel, sim, input, &mut out);
+                self.sync_picks();
                 out.phase = self.phase();
                 return out;
             }
@@ -500,8 +502,28 @@ impl Shell {
         out.present = Some(Present::Frame {
             fade: self.world.fade,
         });
+        self.sync_picks();
         out.phase = self.phase();
         out
+    }
+
+    /// C++ `WeaponSelection` edits the shared `gfx.settings` worm settings in place (4½c finding
+    /// 4; `weapsel.cpp:66`, `:255-282`, `:327`): while the match holds the menu's settings
+    /// (`attached`, D7), the menu's picks are the selection's, every frame — the settings menu's
+    /// `cfg16` and the exit save see a cycled pick at once (found by G2e-1 `weapon_options`,
+    /// frame 376).
+    fn sync_picks(&mut self) {
+        let Some(picks) = self
+            .current
+            .as_ref()
+            .filter(|m| m.attached())
+            .and_then(Match::picks)
+        else {
+            return;
+        };
+        for (ws, p) in self.world.settings.worm_settings.iter_mut().zip(picks) {
+            ws.weapons = p;
+        }
     }
 
     /// The close half of an overlay's `Update` (`inputState.cpp:75-84`, `:186-198`), before its
@@ -2387,6 +2409,36 @@ mod tests {
                 "sync {sync}: the pick skips to the one Menu weapon"
             );
         }
+    }
+
+    #[test]
+    fn a_selection_edits_the_menus_picks_in_place() {
+        // weapsel.cpp:255-282 cycle `ws.weapons[j]` of the SHARED `gfx.settings` worm settings
+        // (4½c finding 4): the menu (cfg16, the exit save) sees a pick the frame it changes, not
+        // at the next NEW GAME (found by G2e-1 weapon_options, frame 376).
+        let (mut sh, mut sim, _) = boot();
+        idle(&mut sh, &mut sim, 40);
+        until_routed(&mut sh, &mut sim, DK_RETURN);
+        let before = sh.settings().worm_settings[0].weapons;
+        step(&mut sh, &mut sim, &[], [2, 0]); // P1 Down: the cursor onto weapon slot 1
+        step(&mut sh, &mut sim, &[], [0, 0]);
+        step(&mut sh, &mut sim, &[], [8, 0]); // P1 Right: slot 1's pick cycles
+        let after = sh.settings().worm_settings[0].weapons;
+        assert_ne!(after[0], before[0], "the pick cycled");
+        assert_eq!(after[1..], before[1..]);
+        let order = hooks().weap_order;
+        assert_eq!(
+            order[after[0] as usize - 1],
+            sim.worms[0].weapons[0].ty.unwrap() as usize,
+            "the menu's pick is the selection's"
+        );
+        sh.save_on_exit().unwrap();
+        let saved = sh.store().read("Setups/liero.cfg").expect("saved");
+        assert_eq!(
+            String::from_utf8(saved).unwrap(),
+            scenario::settings_toml::settings_to_toml(sh.settings()),
+            "the exit save writes the running pick"
+        );
     }
 
     #[test]

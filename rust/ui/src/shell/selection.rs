@@ -152,6 +152,16 @@ impl Selection {
         }
     }
 
+    /// The picks as C++'s shared `WormSettings::weapons` hold them now (finding 4; the cycles of
+    /// `weapsel.cpp:255-282` and RANDOMIZE edit them in place): the running selection's, else
+    /// the saved (finalized or abandoned) ones.
+    pub fn picks(&self) -> [[u32; NUM_WEAPONS]; 2] {
+        match &self.active {
+            Some(ws) => [ws.player(0).picks, ws.player(1).picks],
+            None => [self.cfg.players[0].weapons, self.cfg.players[1].weapons],
+        }
+    }
+
     fn write_back(&mut self, picks: [[u32; NUM_WEAPONS]; 2]) {
         for (p, picks) in self.cfg.players.iter_mut().zip(picks) {
             p.weapons = picks;

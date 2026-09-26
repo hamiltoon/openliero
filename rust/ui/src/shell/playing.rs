@@ -16,7 +16,7 @@ use render::viewport::Viewport;
 use scenario::build::{BuildError, build_match, enter_game, new_match, validate_for_selection};
 use scenario::settings::{GM_HOLDAZONE, GM_KILL_EM_ALL, MatchConfig, Settings, WEAP_TABLE_LEN};
 use scenario::{Loaded, SceneData};
-use sim::state::{ControlState, SimState};
+use sim::state::{ControlState, NUM_WEAPONS, SimState};
 
 use super::HudFlags;
 use super::loadout::apply_weapons;
@@ -251,6 +251,12 @@ impl Match {
         if let Some(sel) = self.selection.as_mut() {
             sel.set_weap_table(s.weap_table);
         }
+    }
+
+    /// The selection's picks as the shared C++ `WormSettings::weapons` hold them now
+    /// ([`Selection::picks`]); `None` when selection was skipped.
+    pub fn picks(&self) -> Option<[[u32; NUM_WEAPONS]; 2]> {
+        self.selection.as_ref().map(Selection::picks)
     }
 
     /// The HUD switches the match draws with.

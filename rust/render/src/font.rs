@@ -101,8 +101,9 @@ impl Font {
     ///
     /// CAUTION for direct callers: `c == 250` or `251` passes the verbatim guard
     /// but indexes past `chars` (len 250) — a panic here, latent UB in C++.
-    /// `draw_string` can never produce those values (ASCII decode caps at 125
-    /// after the decrement); mask on the call side like `cossin[128]`.
+    /// `draw_string` can never produce those values (the CP437 decode yields at most
+    /// 0xFF, which the `< 252` gate drops before the decrement); mask on the call side
+    /// like `cossin[128]`.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_char(
         &self,
@@ -182,8 +183,7 @@ impl Font {
 
     /// Draw `s` starting at `(x, y)` in `pal[color]`, scaled by `size`. Port of
     /// `font.cpp:58-80`. Each codepoint is decoded to a CP437 byte via
-    /// [`ascii_to_font_byte`] (ASCII-only: `< 0x80` identity, else skip — the full
-    /// CP437 high-half table is deferred, spec §7 Q2); a codepoint of `0` is the
+    /// [`codepoint_to_font_byte`] (the CP437 table, Step 4½d); a codepoint of `0` is the
     /// line-break (`x` resets to the start column, `y += 8 * size`); every other
     /// byte passes the `c >= 2 && c < 252` gate, is decremented by 2, drawn, and
     /// advances `x` by `chars[c].width * size`.
@@ -210,7 +210,7 @@ impl Font {
                 y += 8 * size;
                 continue;
             }
-            let c = ascii_to_font_byte(cp); // font.cpp:71
+            let c = codepoint_to_font_byte(cp); // font.cpp:71
             if (2..252).contains(&c) {
                 // font.cpp:72
                 let c = c - 2; // font.cpp:73
@@ -233,7 +233,7 @@ impl Font {
                 width = 0;
                 continue;
             }
-            let c = ascii_to_font_byte(cp);
+            let c = codepoint_to_font_byte(cp);
             if (2..252).contains(&c) {
                 width += self.chars[(c - 2) as usize].width;
             }
@@ -242,21 +242,38 @@ impl Font {
     }
 }
 
-/// `font.cpp:51-54` `CodepointToFontByte` restricted to ASCII (spec §7 Q2). C++
-/// calls `cp437::UnicodeToByte`, which is **pure identity for every `cp < 0x80`**
-/// (`cp437.cpp:177-180`) — so this matches C++ bit-for-bit over the whole ASCII
-/// half (0x00..0x7f), which is all the reachable HUD labels/digits ever contain.
-/// A codepoint `>= 0x80` has no low-half CP437 identity and its high-half lookup
-/// is deferred, so it returns `1` (the `CodepointToFontByte` "skip-no-draw"
-/// sentinel — byte 1 fails the `>= 2` gate). NB the plan's "identity 0x20..0x7f"
-/// is narrower than C++'s actual `< 0x80`; they agree on all printable ASCII, and
-/// `< 0x80` is the faithful port.
-fn ascii_to_font_byte(cp: char) -> u8 {
+/// `cp437.cpp:11-44` `kHighHalf`: the Unicode codepoint of each CP437 byte 0x80..=0xFF.
+#[rustfmt::skip]
+const HIGH_HALF: [u32; 128] = [
+    0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7,
+    0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
+    0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9,
+    0x00FF, 0x00D6, 0x00DC, 0x00A2, 0x00A3, 0x00A5, 0x20A7, 0x0192,
+    0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA,
+    0x00BF, 0x2310, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB,
+    0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556,
+    0x2555, 0x2563, 0x2551, 0x2557, 0x255D, 0x255C, 0x255B, 0x2510,
+    0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x255E, 0x255F,
+    0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x2567,
+    0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256B,
+    0x256A, 0x2518, 0x250C, 0x2588, 0x2584, 0x258C, 0x2590, 0x2580,
+    0x03B1, 0x00DF, 0x0393, 0x03C0, 0x03A3, 0x03C3, 0x00B5, 0x03C4,
+    0x03A6, 0x0398, 0x03A9, 0x03B4, 0x221E, 0x03C6, 0x03B5, 0x2229,
+    0x2261, 0x00B1, 0x2265, 0x2264, 0x2320, 0x2321, 0x00F7, 0x2248,
+    0x00B0, 0x2219, 0x00B7, 0x221A, 0x207F, 0x00B2, 0x25A0, 0x00A0,
+];
+
+/// `font.cpp:51-54` `CodepointToFontByte` over `cp437::UnicodeToByte` (`cp437.cpp:177-187`):
+/// identity below 0x80, else the first `HIGH_HALF` index + 0x80, else `1` (the skip-no-draw
+/// sentinel that fails the `>= 2` gate). Step 4½d (design finding 4): the copyright bar's `ä`.
+fn codepoint_to_font_byte(cp: char) -> u8 {
     let u = cp as u32;
     if u < 0x80 {
-        u as u8
-    } else {
-        1 // skip-no-draw; high-half CP437 table deferred
+        return u as u8;
+    }
+    match HIGH_HALF.iter().position(|&h| h == u) {
+        Some(i) => 0x80 + i as u8,
+        None => 1,
     }
 }
 
@@ -285,11 +302,11 @@ mod tests {
         assert!(w('A') > 0, "non-vacuous");
         assert_eq!(font.get_dims("DONE!"), "DONE!".chars().map(w).sum::<i32>());
         assert_eq!(font.get_dims("AB\0A"), w('A') + w('B'), "the widest line");
-        assert_eq!(
-            font.get_dims("A\u{1}\u{e9}"),
-            w('A'),
-            "skipped exactly as draw_string skips"
-        );
+        // cp437::UnicodeToByte (cp437.cpp:177-187): U+00E9 is CP437 0x82 and is DRAWN (Step
+        // 4½d); U+0001 fails the 2..252 gate; U+20AC (€) has no CP437 byte and is skipped.
+        let hi = |b: u8| font.chars[b as usize - 2].width;
+        assert_eq!(font.get_dims("A\u{1}\u{e9}"), w('A') + hi(0x82));
+        assert_eq!(font.get_dims("A\u{20ac}"), w('A'), "no CP437 byte: skipped");
     }
 
     #[test]
@@ -520,5 +537,31 @@ mod tests {
         // < 0x80, so the ASCII decode is bit-exact and the full CP437 table stays
         // deferred. If a label ever became non-ASCII this would fail, forcing it.
         assert!("Kills: Lives: Reloading...".bytes().all(|b| b < 0x80));
+    }
+
+    #[test]
+    fn codepoints_map_through_the_cp437_table() {
+        // cp437.cpp:11-44 (kHighHalf) + :177-187 (UnicodeToByte) + font.cpp:51-54 (1 = skip).
+        assert_eq!(codepoint_to_font_byte('A'), b'A');
+        assert_eq!(codepoint_to_font_byte('\u{7f}'), 0x7f);
+        assert_eq!(codepoint_to_font_byte('\u{c7}'), 0x80, "Ç");
+        assert_eq!(
+            codepoint_to_font_byte('\u{e4}'),
+            0x84,
+            "ä (tc.cfg Copyright2)"
+        );
+        assert_eq!(codepoint_to_font_byte('\u{e9}'), 0x82, "é");
+        assert_eq!(codepoint_to_font_byte('\u{2591}'), 0xb0, "░");
+        assert_eq!(codepoint_to_font_byte('\u{a0}'), 0xff, "the last entry");
+        assert_eq!(codepoint_to_font_byte('\u{20ac}'), 1, "no CP437 byte");
+        assert_eq!(HIGH_HALF.len(), 128);
+    }
+
+    #[test]
+    fn the_copyright_string_measures_its_umlauts() {
+        let font = real_font();
+        let w = |b: u8| font.chars[b as usize - 2].width;
+        let want: i32 = "Mets".bytes().map(w).sum::<i32>() + w(0x84) + w(b'n');
+        assert_eq!(font.get_dims("Mets\u{e4}n"), want);
     }
 }

@@ -20,10 +20,15 @@
 //! Step 4½e-1 (design §7.4, plan D9 and T10 step 5): [`TouchKeys`] adds the menu auto-repeat of a
 //! held pad Up/Down and FIRE-as-Return while a text box is up, and [`page_text_events`] turns the
 //! phone text field's entries (`window.lieroText`) into input events.
+//!
+//! Step 4½e-2 (plan D11, D12): the level and setup selectors need no new mapping (pad Up/Down are
+//! P1's controls and repeat in phase `menu`, Left/Right open and leave folders, FIRE picks, JUMP
+//! or MENU leave); the text field's keyboard is chosen per box from [`Hooks::text_mode`], and
+//! [`hooks`] is everything the page and the headless walk read back.
 
 use sim::state::ControlState;
 use ui::keys::{DK_BACKSPACE, DK_RETURN, TypedKey};
-use ui::shell::{InputEvent, KeyEvent, Phase};
+use ui::shell::{CurMenu, InputEvent, KeyEvent, Phase, Shell, TextMode};
 
 /// The page's bit layout (`TOUCH` in `web/index.html` must match).
 pub const TOUCH_UP: u32 = 1 << 0;
@@ -255,6 +260,52 @@ pub fn page_text_events(entries: &[PageEntry]) -> Vec<InputEvent> {
         }
     }
     out
+}
+
+/// The page's read-only view of the shell after a frame (`window.liero*`; Step 4½e-1, 4½e-2 plan
+/// D11): what the page needs (the text field's keyboard) and what the headless walk checks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hooks {
+    /// `window.lieroTop`: `Shell::top_char` (`M`, `O`, `I`, `B`, `G`, `L`, `P`, `-`).
+    pub top: char,
+    /// `window.lieroSel`: the focused menu and its cursor — `L<n>` / `P<n>` for the level /
+    /// setup selector's current folder, else `M<n>` (the main menu) or `S<n>` (the settings).
+    pub sel: String,
+    /// `window.lieroFolder`: the selector's current folder (`full_path`, e.g. `/openliero` or
+    /// `/openliero/TC/openliero/Levels`); empty outside a selector.
+    pub folder: String,
+    /// `window.lieroSetup`: the setup name SAVE SETUP AS… shows (`liero`, `orbmit`, …).
+    pub setup: String,
+    /// `window.lieroLevel`: the settings' `level_file`.
+    pub level: String,
+    /// `window.lieroMode`: the settings' GAME MODE (0 Kill'em All … 3 Scales of Justice).
+    pub mode: u32,
+    /// `window.lieroTextMode`: the text box's keyboard — `numeric` (number entry) or `text`
+    /// (SAVE SETUP AS…); empty when no text box is up (Q5).
+    pub text_mode: &'static str,
+}
+
+/// The [`Hooks`] of `shell` as it stands.
+pub fn hooks(shell: &Shell) -> Hooks {
+    let view = shell.selector_view();
+    let sel = match (&view, shell.cur_menu()) {
+        (Some(v), _) => format!("{}{}", v.top, v.selection),
+        (None, CurMenu::Main) => format!("M{}", shell.main_selection()),
+        (None, CurMenu::Settings) => format!("S{}", shell.settings_menu().selection()),
+    };
+    Hooks {
+        top: shell.top_char(),
+        sel,
+        folder: view.map(|v| v.folder).unwrap_or_default(),
+        setup: shell.setup_name().to_string(),
+        level: shell.settings().level_file.clone(),
+        mode: shell.settings().game_mode,
+        text_mode: match shell.text_mode() {
+            Some(TextMode::Numeric) => "numeric",
+            Some(TextMode::Text) => "text",
+            None => "",
+        },
+    }
 }
 
 #[cfg(test)]
@@ -574,5 +625,116 @@ mod tests {
                 assert_eq!(tap.apply(m, phase), m, "{phase:?} passes the mask through");
             }
         }
+    }
+
+    /// One shell frame over `events` (the hooks test).
+    fn shell_step(sh: &mut Shell, sim: &mut sim::state::SimState, events: &[InputEvent]) {
+        sh.frame(
+            sim,
+            &ui::shell::ShellInput {
+                events,
+                ..ui::shell::ShellInput::idle()
+            },
+        );
+    }
+
+    /// A key press on one frame and its release on the next.
+    fn shell_tap(sh: &mut Shell, sim: &mut sim::state::SimState, dos: u32) {
+        for down in [true, false] {
+            let ev = InputEvent::Key(KeyEvent {
+                dos,
+                down,
+                repeat: false,
+                typed: TypedKey::Sym(0),
+            });
+            shell_step(sh, sim, &[ev]);
+        }
+    }
+
+    #[test]
+    fn the_hooks_follow_each_top() {
+        use ui::keys::{DK_DOWN, DK_ESCAPE, DK_F7};
+        use ui::shell::level_slot::SeedSource;
+        use ui::shell::playing::StartOptions;
+        use ui::shell::settings_menu::{LOAD_OPTIONS, SAVE_OPTIONS, SI_LEVEL, SI_LIVES};
+
+        let store = crate::config::browser_store();
+        let settings = crate::config::load_settings(&store);
+        let level = settings.level_file.clone();
+        let (mut sh, mut sim, _) = Shell::boot(
+            std::path::Path::new(scenario::paths::TC_ROOT),
+            settings,
+            Box::new(store),
+            SeedSource::Fixed(5),
+            0,
+            StartOptions::default(),
+        );
+        let sim = &mut sim;
+        for _ in 0..40 {
+            shell_step(&mut sh, sim, &[]);
+        }
+        let h = hooks(&sh);
+        assert_eq!(
+            h,
+            Hooks {
+                top: 'M',
+                sel: format!("M{}", sh.main_selection()),
+                folder: String::new(),
+                setup: "liero".into(),
+                level,
+                mode: 0,
+                text_mode: "",
+            }
+        );
+        shell_tap(&mut sh, sim, DK_F7);
+        assert_eq!(hooks(&sh).sel, "S0");
+        let enter_on = |sh: &mut Shell, sim: &mut sim::state::SimState, id| {
+            sh.settings_menu_mut().move_to_id(id);
+            shell_tap(sh, sim, DK_RETURN);
+        };
+
+        // LEVEL: the tree's root, `[RANDOM]` first.
+        enter_on(&mut sh, sim, SI_LEVEL);
+        let h = hooks(&sh);
+        assert_eq!(
+            (h.top, h.sel.as_str(), h.folder.as_str(), h.text_mode),
+            ('L', "L0", "/openliero", "")
+        );
+        shell_tap(&mut sh, sim, DK_ESCAPE);
+        assert_eq!((hooks(&sh).top, hooks(&sh).folder.as_str()), ('M', ""));
+
+        // LOAD SETUP: inside Setups; Down to orbmit, Enter loads it.
+        enter_on(&mut sh, sim, LOAD_OPTIONS);
+        let h = hooks(&sh);
+        assert_eq!(
+            (h.top, h.sel.as_str(), h.folder.as_str()),
+            ('P', "P0", "/openliero/Setups")
+        );
+        shell_tap(&mut sh, sim, DK_DOWN);
+        assert_eq!(hooks(&sh).sel, "P1");
+        shell_tap(&mut sh, sim, DK_RETURN);
+        let h = hooks(&sh);
+        assert_eq!((h.top, h.setup.as_str()), ('M', "orbmit"));
+
+        // A number box raises the numeric keyboard, SAVE SETUP AS… the text one.
+        enter_on(&mut sh, sim, SI_LIVES);
+        assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('I', "numeric"));
+        shell_tap(&mut sh, sim, DK_ESCAPE);
+        assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('M', ""));
+        enter_on(&mut sh, sim, SAVE_OPTIONS);
+        assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('I', "text"));
+        // The reserved name: the black box (no keyboard), then the entry again.
+        for _ in 0.."orbmit".len() {
+            shell_tap(&mut sh, sim, DK_BACKSPACE);
+        }
+        let typed: Vec<InputEvent> = "liero"
+            .chars()
+            .map(|c| InputEvent::Text(c.to_string()))
+            .collect();
+        shell_step(&mut sh, sim, &typed);
+        shell_tap(&mut sh, sim, DK_RETURN);
+        assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('B', ""));
+        shell_tap(&mut sh, sim, DK_ESCAPE);
+        assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('I', "text"));
     }
 }

@@ -531,7 +531,7 @@ fn setup(
         // preview's `?level=` on that in-memory copy.
         let store = shell_store(&config_root);
         let mut settings = game::config::load_settings(&*store);
-        preview.0.apply_level(&mut settings);
+        preview.0.apply_level(&mut settings, store.root_label());
         let seeds = preview.0.seed.map_or(SeedSource::Fresh, SeedSource::Fixed);
         let options = StartOptions {
             skip_selection: preview.0.skips_weapon_selection(),
@@ -1262,6 +1262,11 @@ fn tick_shell(
         restart,
     };
     let out = sh.shell.frame(sim, &input);
+    // Step 4½e-2: what the frame could not do (a failed SAVE SETUP AS… write, a LOAD SETUP file
+    // that does not parse; plan D7, D8) — the console on wasm, stderr natively.
+    for note in &out.notes {
+        game::config::warn(note);
+    }
     present(&sh.shell, out.present, images, handle);
     if !out.menu_sounds.is_empty() {
         let events: Vec<SoundEvent> = out
@@ -1487,25 +1492,28 @@ fn publish_weapon(slot: i32) {
 
 /// Step 4½e-1: read-only hooks for the headless browser check, like `window.lieroPhase`:
 /// `window.lieroTop` is the top screen (`Shell::top_char`: `M` menu, `O` WEAPON OPTIONS, `I` a
-/// text box, `B` an info box, `G` play, `-` none), which `lieroPhase` (`menu` for `M`, `O` and
-/// `B`) cannot tell apart; `window.lieroSel` the focused menu and its cursor (`M<n>` the main
-/// menu's item index, `S<n>` the settings menu's), so a walk can check each move it makes;
-/// `window.lieroMode` the settings' GAME MODE (0 Kill'em All … 3 Scales of Justice).
+/// text box, `B` an info box, `G` play, `L` / `P` the level / setup selector, `-` none), which
+/// `lieroPhase` (`menu` for `M`, `O`, `B`, `L` and `P`) cannot tell apart; `window.lieroSel` the
+/// focused menu and its cursor (`M<n>` the main menu's item index, `S<n>` the settings menu's,
+/// `L<n>` / `P<n>` a selector's), so a walk can check each move it makes; `window.lieroMode` the
+/// settings' GAME MODE (0 Kill'em All … 3 Scales of Justice). Step 4½e-2 (plan D11):
+/// `window.lieroFolder` (a selector's folder), `window.lieroSetup`, `window.lieroLevel`, and
+/// `window.lieroTextMode` (`numeric` / `text`), from which the page picks the phone keyboard
+/// (`game::touch::hooks` has them all).
 #[cfg(target_arch = "wasm32")]
 fn publish_top(shell: &Shell) {
-    let sel = match shell.cur_menu() {
-        ui::shell::CurMenu::Main => format!("M{}", shell.main_selection()),
-        ui::shell::CurMenu::Settings => format!("S{}", shell.settings_menu().selection()),
-    };
+    let h = game::touch::hooks(shell);
     let global = js_sys::global();
-    let _ = js_sys::Reflect::set(
-        &global,
-        &"lieroTop".into(),
-        &shell.top_char().to_string().into(),
-    );
-    let _ = js_sys::Reflect::set(&global, &"lieroSel".into(), &sel.into());
-    let mode = shell.settings().game_mode;
-    let _ = js_sys::Reflect::set(&global, &"lieroMode".into(), &mode.into());
+    let set = |key: &str, value: js_sys::wasm_bindgen::JsValue| {
+        let _ = js_sys::Reflect::set(&global, &key.into(), &value);
+    };
+    set("lieroTop", h.top.to_string().into());
+    set("lieroSel", h.sel.into());
+    set("lieroMode", h.mode.into());
+    set("lieroFolder", h.folder.into());
+    set("lieroSetup", h.setup.into());
+    set("lieroLevel", h.level.into());
+    set("lieroTextMode", h.text_mode.into());
 }
 
 /// Publish the live phase as `window.lieroPhase` (`"menu"` / `"text"` (Step 4½e-1: a number box,

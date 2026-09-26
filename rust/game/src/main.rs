@@ -660,8 +660,9 @@ fn setup(
         (Vec::new(), Vec::new())
     };
 
-    // Step 4½a-2: the binary loads no setup yet (design §9.3.6), so the minimap follows the
-    // C++ default (`map = true`); 4½e passes the loaded setup's `map` here.
+    // Step 4½a-2: these non-shell paths load no setup (design §9.3.6; since 4½e-1 only the
+    // shell path loads `Setups/liero.cfg`, and its `Match` draws that setup's `map`), so the
+    // minimap follows the C++ default (`map = true`).
     let hud = hud_flags(*mode, scenario.hud(), Settings::default().map);
     let draw_shadow = scenario.shadow();
     let level_file = scenario.level.clone();

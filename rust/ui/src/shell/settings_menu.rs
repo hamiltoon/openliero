@@ -64,7 +64,7 @@ pub fn settings_menu() -> Menu {
 }
 
 /// `SettingsMenu`'s virtuals over the live `Settings` (C++ `gfx.settings`). `setup_name` is
-/// `GetBasename(GetLeaf(gfx.settings_node.FullPath()))`: `"liero"` until 4½e loads setups.
+/// `GetBasename(GetLeaf(gfx.settings_node.FullPath()))`: `"liero"` until 4½e-2's LOAD SETUP.
 pub struct SettingsModel<'a> {
     pub settings: &'a mut Settings,
     pub tc: &'a UiTc,
@@ -173,7 +173,8 @@ impl MenuModel for SettingsModel<'_> {
             },
             SAVE_OPTIONS => Behavior::Custom(Box::new(OptionsSave { name: setup_name })),
             LOAD_CHANGE => Behavior::Bool(&mut s.load_change),
-            // WEAPON OPTIONS, LOAD SETUP: behaviors with no display (their pushes are 4½e's).
+            // WEAPON OPTIONS, LOAD SETUP: behaviors with no display (`MainMenuState::update` pushes
+            // WEAPON OPTIONS since 4½e-1; LOAD SETUP is 4½e-2's).
             _ => Behavior::Plain,
         }
     }

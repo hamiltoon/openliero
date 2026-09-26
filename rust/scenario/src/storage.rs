@@ -37,7 +37,7 @@ pub trait ConfigStore: Send + Sync {
     /// Write `rel` into the user layer (never the system layer), creating parent directories.
     fn write(&self, rel: &str, bytes: &[u8]) -> io::Result<()>;
     /// `paths::ShadowsSystem`: would saving `subdir/leaf` clobber a reserved name or hide a
-    /// shipped file? (4½e's Save As dialogs refuse such names.)
+    /// shipped file? (4½e-2's Save As dialogs refuse such names.)
     fn shadows_system(&self, subdir: &str, leaf: &str) -> bool;
     /// The config root as C++ prints it: the user node's `FsNode::FullPath()` (Step 4½e-1).
     /// A level picked through the C++ selector is saved as `root_label() + "/" + rel`

@@ -1,5 +1,7 @@
-//! The C++ NEW GAME start's level generation (Step 4½c; moved to `ui::shell` in Step 4½d): the
-//! settings a live match starts from and `Level::GenerateFromSettings` over the match seed. The
+//! The C++ NEW GAME start's level generation (Step 4½c; moved to `ui::shell` in Step 4½d):
+//! `Level::GenerateFromSettings` over the match seed. Since 4½e-1 a live match starts from the
+//! loaded `Setups/liero.cfg` (`game::config`), with the preview's `?level=` applied by
+//! `game::web_params::MatchParams::apply_level`. The
 //! NEW GAME loop — the seed policy, level reuse, the controller — is `ui::shell` (`LevelSlot`,
 //! `SeedSource`, `Match`) since 4½d.
 //!
@@ -19,17 +21,6 @@ use scenario::assets::read_asset;
 use scenario::settings::Settings;
 use sim::levelgen::{LevelGenAssets, LevelGenParams, generate_from_settings};
 use sim_core::rng::Rand;
-
-/// The settings a live match starts from until 4½d loads a setup: `Settings::default()`, with a
-/// stock level file (`?level=`, TC-relative) replacing the generated level when given.
-pub fn start_settings(level_file: Option<String>) -> Settings {
-    let mut s = Settings::default();
-    if let Some(file) = level_file {
-        s.random_level = false;
-        s.level_file = file;
-    }
-    s
-}
 
 /// `Level::GenerateFromSettings(common, settings, rand)` (`level.cpp:397-429`) with the level
 /// `Rand` seeded from the match seed (LD 6; 4½b design §2): a random level of
@@ -116,8 +107,11 @@ mod tests {
 
     #[test]
     fn a_stock_level_file_is_loaded_not_generated() {
-        let s = start_settings(Some("Levels/water_stage.lev".into()));
-        assert!(!s.random_level);
+        let s = Settings {
+            random_level: false,
+            level_file: "Levels/water_stage.lev".into(),
+            ..Settings::default()
+        };
         let store = scenario::storage::MemoryStore::new();
         let file = crate::shell::level_path::read_level(&store, tc(), &s.level_file);
         let level = generate_level(tc(), &s, file, 5);

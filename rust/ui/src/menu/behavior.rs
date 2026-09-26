@@ -7,7 +7,8 @@ use super::{Menu, MenuCx};
 use crate::text::{ONOFF, time_to_string, time_to_string_frames};
 
 /// `OnEnter`'s `int` (`-1`: nothing chosen), or the `InputStringState` an `IntegerBehavior`
-/// pushes (`integerBehavior.cpp:36-80`) as a request 4½e's overlay consumes.
+/// pushes (`integerBehavior.cpp:36-80`) as a request the shell turns into an
+/// `InputStringState` (`shell::overlay`, Step 4½e-1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Enter {
     Result(i32),

@@ -640,7 +640,7 @@ impl Shell {
                     m.focus(&input.sampled);
                     out.routed = Some(Route::Resume);
                 }
-                other => unreachable!("main-menu item {other} never selects in 4½d (§5)"),
+                other => unreachable!("main-menu item {other} never selects (4½d §5, 4½e-1)"),
             }
             self.stack.push(Screen::Playing);
         } else {
@@ -889,7 +889,7 @@ impl Shell {
         &self.world.main_menu
     }
 
-    /// For tests and 4½e's settings focus.
+    /// For tests (to place the main menu's cursor).
     pub fn main_menu_mut(&mut self) -> &mut Menu {
         &mut self.world.main_menu
     }
@@ -898,7 +898,7 @@ impl Shell {
         &self.world.settings
     }
 
-    /// For tests and 4½e (MATCH SETUP edits the settings).
+    /// For tests (MATCH SETUP edits the settings through the settings focus).
     pub fn settings_mut(&mut self) -> &mut Settings {
         &mut self.world.settings
     }

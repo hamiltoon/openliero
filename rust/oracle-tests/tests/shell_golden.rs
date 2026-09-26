@@ -12,13 +12,21 @@
 //! Step 4½e-1 (plan Task 9): the G2e-1 cases (`shell_e1_cases`) add a `d` line after every `f`
 //! line (`cur`, `ssel`, `cfg16`, `state8`) and, for the `fs` cases, the `file` lines after the
 //! `end` line (the exit save and the boot-time defaults save); both are compared field by field.
+//!
+//! Step 4½e-2 (plan Task 6): the G2e-2 cases (`shell_e2_cases`: the level selector, SAVE SETUP
+//! AS… and LOAD SETUP), the 🎯 e-2 milestone `setups_and_levels`, and the Q4 twin (plan D1.2):
+//! the cases that play a picked level, re-driven with the level only in the system layer (the
+//! default-install layout, where C++ plays random), must still equal the committed C++ golden of
+//! the both-layers run — Rust plays exactly what C++ plays when it can open the file.
 
 mod shell_common;
 mod shell_e1_cases;
+mod shell_e2_cases;
 
 use render::present::fade_argb;
 use shell_common as sc;
 use shell_e1_cases as e1;
+use shell_e2_cases as e2;
 
 const FIELDS: [&str; 11] = [
     "f",
@@ -266,13 +274,125 @@ fn the_committed_scripts_are_the_generators() {
             );
         }
     }
+    // Step 4½e-2: the e-2 6 against gen_slice4_5e2_shell, with their inputs.
+    for c in e2::cases() {
+        assert_eq!(
+            sc::read_script(c.name),
+            c.script,
+            "{}: regenerate with gen_slice4_5e2_shell",
+            c.name
+        );
+        for (file, bytes) in &c.files {
+            assert_eq!(
+                std::fs::read(format!("{}/{file}", sc::GOLDEN)).unwrap(),
+                *bytes,
+                "{}: {file} — regenerate with gen_slice4_5e2_shell",
+                c.name
+            );
+        }
+    }
     let mut want: Vec<String> = sc::CASES_NAMES
         .iter()
         .chain(e1::NAMES.iter())
+        .chain(e2::NAMES.iter())
         .map(|s| s.to_string())
         .collect();
     want.sort();
     assert_eq!(on_disk, want);
+}
+
+#[test]
+fn the_e2_milestone_is_bit_exact() {
+    // 🎯 e-2 (done-when 7): LEVEL → TC/openliero/Levels → water_stage → NEW GAME (the file is
+    // played) → Esc → LEVEL reopens on water_stage → SAVE SETUP AS… (liero refused: the box;
+    // reopened; `mine` saved) → LOAD SETUP → orbmit → NEW GAME → Esc → QUIT → the exit save.
+    let run = sc::drive(&sc::read_script("setups_and_levels"), None);
+    let l = &run.ledger;
+    assert_eq!(
+        (
+            l.new_games,
+            l.level_from_file.clone(),
+            l.reserved_boxes,
+            l.saves.clone(),
+            l.loads.iter().map(|x| x.1.clone()).collect::<Vec<_>>(),
+            l.quit,
+            run.files.len()
+        ),
+        (
+            2,
+            vec![true, false],
+            1,
+            vec!["mine".to_string()],
+            vec!["orbmit".to_string()],
+            true,
+            3
+        ),
+        "the milestone path"
+    );
+    check("setups_and_levels");
+}
+
+#[test]
+fn every_g2e2_case_is_bit_exact() {
+    for name in e2::NAMES.iter().filter(|n| **n != "setups_and_levels") {
+        check(name);
+    }
+}
+
+/// The Q4 twin of `name` (plan D1.2): the case re-driven with `twin`'s fixture drops. Every `f`
+/// and `d` line must equal the committed C++ golden of the both-layers run, the `file` lines the
+/// golden's minus the dropped copies, and the Q4 validator must have fired.
+fn q4_twin(name: &str, twin: sc::Twin) {
+    let script = sc::read_script(name);
+    let mut want = golden(name);
+    let run = sc::drive_with(
+        &script,
+        None,
+        sc::Opts {
+            q4_twin: twin,
+            ..sc::Opts::default()
+        },
+    );
+    assert_eq!(
+        run.dropped,
+        ["TC/openliero/Levels/water_stage.lev"],
+        "{name}: the twin drops the user copy"
+    );
+    want.files.retain(|l| {
+        !run.dropped
+            .iter()
+            .any(|d| l.split_whitespace().nth(1) == Some(d))
+    });
+    if let Err((_, msg)) = compare(name, &want, &run) {
+        panic!("{msg}");
+    }
+    assert!(
+        run.ledger.violations.is_empty(),
+        "{name}: {:?}",
+        run.ledger.violations
+    );
+    assert!(
+        run.ledger.q4_hits >= 1,
+        "{name}: the Q4 validator never fired in the twin"
+    );
+}
+
+#[test]
+fn the_q4_fix_plays_a_system_only_level() {
+    // John's Q4: a picked shipped level is played even when only the system layer has it. The
+    // C++ side of this layout (a default install) plays random — T0 P6: equal to a [RANDOM] pick
+    // with REGENERATE LEVEL on — and is documented, never gated (plan D1.3).
+    for name in ["level_pick", "setups_and_levels"] {
+        q4_twin(name, sc::Twin::UserCopies);
+    }
+}
+
+#[test]
+#[should_panic(expected = "G2 line")]
+fn the_q4_twin_sees_a_missing_level() {
+    // The twin is not vacuous: with the system copy dropped too, the level is gone (the Levels
+    // listing loses its row, and the match cannot play it), and the run no longer matches.
+    q4_twin("level_pick", sc::Twin::Both);
 }
 
 #[test]

@@ -1,0 +1,54 @@
+# Step 4½d G2 case milestone (design §6.4; plan Task 9) — written by gen_slice4_5d.
+# Rust ledger: 600 frames, end `end 599 quit`, NEW GAME 2, RESUME 1, back-to-menu 3 (game over: false), black presents 3
+setup default
+boot_seed 1
+match_seed 101
+match_seed 102
+frames 609
+expect quit
+key 40 down DOWN
+key 42 up DOWN
+key 43 down UP
+key 45 up UP
+key 46 down RETURN
+key 48 up RETURN
+key 80 down R
+key 80 down UP
+key 82 up R
+key 82 up UP
+key 83 down LCTRL
+key 83 down RCTRL
+key 85 up LCTRL
+key 85 up RCTRL
+key 86 down G
+key 96 down LCTRL
+key 98 up LCTRL
+key 111 down LCTRL
+key 113 up LCTRL
+key 126 up G
+key 131 down LEFT
+key 136 down RCTRL
+key 138 up RCTRL
+key 166 up LEFT
+key 176 down F
+key 196 up F
+key 199 down LCTRL
+key 201 up LCTRL
+key 236 down ESC
+key 238 up ESC
+key 308 down RETURN
+key 310 up RETURN
+key 352 down RCTRL
+key 354 up RCTRL
+key 402 down ESC
+key 404 up ESC
+key 454 down DOWN
+key 456 up DOWN
+key 457 down RETURN
+key 459 up RETURN
+key 506 down ESC
+key 508 up ESC
+key 558 down ESC
+key 560 up ESC
+key 566 down RETURN
+key 568 up RETURN

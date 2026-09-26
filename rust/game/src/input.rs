@@ -6,6 +6,7 @@
 //! and so it runs in the fast CI test set. `game` instantiates it with Bevy's
 //! `KeyCode` via [`default_bindings`]. See spec §4.1.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use bevy::input::ButtonInput;
@@ -14,6 +15,10 @@ use bevy::prelude::Resource;
 
 use scenario::Scenario;
 use sim::state::ControlState;
+
+pub use ui::keys::ReleaseLatch;
+use ui::keys::TypedKey;
+use ui::shell::KeyEvent;
 
 /// Number of worms sampled per tick — positional `[ControlState; N]`, the same
 /// index `process_frame` reads and `Viewport::worm_idx` maps (spec §4.2).
@@ -368,39 +373,6 @@ impl Recorder {
     }
 }
 
-/// Step 4½c (design §7.2, Q5): the release latch at both phase boundaries. C++ keys are EDGES:
-/// a key held when the controller starts never reaches the worm, and a key held when weapon
-/// selection ends (Fire from DONE) does nothing in the match until pressed again
-/// (`ReleaseControls`, `game.cpp:110-118`; SDL repeats are dropped, `gfx.cpp:608`). Rust samples
-/// LEVELS, so without this a held DONE would fire the first weapon on tick 0. Armed with the
-/// held words at a boundary; each tick it forgets released bits (`mask &= held`) and outputs
-/// `sampled & !mask`. It sits BEFORE the recorder tap; it is live-only, and only selection
-/// boundaries arm it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ReleaseLatch {
-    mask: [u32; N_WORMS],
-}
-
-impl ReleaseLatch {
-    /// Latch every bit held now.
-    pub fn arm(&mut self, held: &[ControlState; N_WORMS]) {
-        self.mask = held.map(|c| c.pack());
-    }
-
-    /// Mask this tick's sampled words in place.
-    pub fn apply(&mut self, inputs: &mut [ControlState; N_WORMS]) {
-        for (mask, input) in self.mask.iter_mut().zip(inputs.iter_mut()) {
-            *mask &= input.pack();
-            *input = ControlState::unpack(input.pack() & !*mask);
-        }
-    }
-
-    /// Whether any bit is still latched.
-    pub fn is_armed(&self) -> bool {
-        self.mask.iter().any(|&m| m != 0)
-    }
-}
-
 /// Headless per-tick `hash_game_state` time series for `scenario`, driven
 /// entirely through `InputSource::Scripted` (spec §5, 4b T2) — the
 /// library-testable twin of `tests/passthrough.rs`'s harness and the building
@@ -424,6 +396,200 @@ pub fn replay_state_series(tc_root: &Path, scenario: &Scenario) -> Vec<u32> {
         series.push(sim::hash::hash_game_state(&state));
     }
     series
+}
+
+/// `SDLToDOSKey` (`keys.cpp:9-75`) over Bevy's physical `KeyCode`: the index of the key in C++'s
+/// `liero_to_sdl_keys`; a key C++ does not know is 89 (Step 4½d, design §4.1).
+pub fn dos_of_keycode(k: KeyCode) -> u32 {
+    use KeyCode::*;
+    match k {
+        Escape => 1,
+        Digit1 => 2,
+        Digit2 => 3,
+        Digit3 => 4,
+        Digit4 => 5,
+        Digit5 => 6,
+        Digit6 => 7,
+        Digit7 => 8,
+        Digit8 => 9,
+        Digit9 => 10,
+        Digit0 => 11,
+        Minus => 12,
+        Equal => 13,
+        Backspace => 14,
+        Tab => 15,
+        KeyQ => 16,
+        KeyW => 17,
+        KeyE => 18,
+        KeyR => 19,
+        KeyT => 20,
+        KeyY => 21,
+        KeyU => 22,
+        KeyI => 23,
+        KeyO => 24,
+        KeyP => 25,
+        BracketLeft => 26,
+        BracketRight => 27,
+        Enter => 28,
+        ControlLeft => 29,
+        KeyA => 30,
+        KeyS => 31,
+        KeyD => 32,
+        KeyF => 33,
+        KeyG => 34,
+        KeyH => 35,
+        KeyJ => 36,
+        KeyK => 37,
+        KeyL => 38,
+        Semicolon => 39,
+        Quote => 40,
+        Backquote => 41,
+        ShiftLeft => 42,
+        Backslash => 43,
+        KeyZ => 44,
+        KeyX => 45,
+        KeyC => 46,
+        KeyV => 47,
+        KeyB => 48,
+        KeyN => 49,
+        KeyM => 50,
+        Comma => 51,
+        Period => 52,
+        Slash => 53,
+        ShiftRight => 54,
+        NumpadMultiply => 55,
+        AltLeft => 56,
+        Space => 57,
+        CapsLock => 58,
+        F1 => 59,
+        F2 => 60,
+        F3 => 61,
+        F4 => 62,
+        F5 => 63,
+        F6 => 64,
+        F7 => 65,
+        F8 => 66,
+        F9 => 67,
+        F10 => 68,
+        NumLock => 69,
+        ScrollLock => 70,
+        Numpad7 => 71,
+        Numpad8 => 72,
+        Numpad9 => 73,
+        NumpadSubtract => 74,
+        Numpad4 => 75,
+        Numpad5 => 76,
+        Numpad6 => 77,
+        NumpadAdd => 78,
+        Numpad1 => 79,
+        Numpad2 => 80,
+        Numpad3 => 81,
+        Numpad0 => 82,
+        NumpadDecimal => 83,
+        IntlBackslash => 86,
+        F11 => 87,
+        F12 => 88,
+        NumpadEnter => 116,
+        ControlRight => 117,
+        NumpadDivide => 141,
+        PrintScreen => 143,
+        AltRight => 144,
+        Home => 159,
+        ArrowUp => 160,
+        PageUp => 161,
+        ArrowLeft => 163,
+        ArrowRight => 165,
+        End => 167,
+        ArrowDown => 168,
+        PageDown => 169,
+        Insert => 170,
+        Delete => 171,
+        _ => ui::keys::DK_UNKNOWN,
+    }
+}
+
+/// The key's `key_buf` symbol: `SDL_GetKeyFromScancode(sc, SDL_KMOD_NONE)` on a US layout —
+/// the unshifted ASCII of printable keys, Tab, and 0 (ignored by `Menu::on_keys`) for the rest.
+/// A physical US table rather than Bevy's logical key: layout-independent and deterministic.
+pub fn typed_of_keycode(k: KeyCode) -> TypedKey {
+    use KeyCode::*;
+    let c = match k {
+        Tab => return TypedKey::Tab,
+        KeyA => 'a',
+        KeyB => 'b',
+        KeyC => 'c',
+        KeyD => 'd',
+        KeyE => 'e',
+        KeyF => 'f',
+        KeyG => 'g',
+        KeyH => 'h',
+        KeyI => 'i',
+        KeyJ => 'j',
+        KeyK => 'k',
+        KeyL => 'l',
+        KeyM => 'm',
+        KeyN => 'n',
+        KeyO => 'o',
+        KeyP => 'p',
+        KeyQ => 'q',
+        KeyR => 'r',
+        KeyS => 's',
+        KeyT => 't',
+        KeyU => 'u',
+        KeyV => 'v',
+        KeyW => 'w',
+        KeyX => 'x',
+        KeyY => 'y',
+        KeyZ => 'z',
+        Digit0 => '0',
+        Digit1 => '1',
+        Digit2 => '2',
+        Digit3 => '3',
+        Digit4 => '4',
+        Digit5 => '5',
+        Digit6 => '6',
+        Digit7 => '7',
+        Digit8 => '8',
+        Digit9 => '9',
+        Space => ' ',
+        Minus => '-',
+        Equal => '=',
+        BracketLeft => '[',
+        BracketRight => ']',
+        Semicolon => ';',
+        Quote => '\'',
+        Backquote => '`',
+        Backslash => '\\',
+        Comma => ',',
+        Period => '.',
+        Slash => '/',
+        _ => return TypedKey::Sym(0),
+    };
+    TypedKey::Sym(c as u32)
+}
+
+/// The keyboard events waiting for the next fixed tick (design §7.1). C++ polls every pending
+/// event at the top of a frame; a tick takes the queue in order, except that a key's second
+/// event waits for the next tick (plan-time fact 19: a tap inside one slow browser frame would
+/// otherwise set and clear the menu flag before `Update` runs).
+#[derive(Resource, Default, Debug)]
+pub struct KeyQueue(VecDeque<KeyEvent>);
+
+impl KeyQueue {
+    pub fn push(&mut self, ev: KeyEvent) {
+        self.0.push_back(ev);
+    }
+
+    pub fn take_tick(&mut self) -> Vec<KeyEvent> {
+        let mut out: Vec<KeyEvent> = Vec::new();
+        while let Some(ev) = self.0.front() {
+            if out.iter().any(|e| e.dos == ev.dos) {
+                break;
+            }
+            out.push(self.0.pop_front().expect("front exists"));
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -912,43 +1078,101 @@ input 5 64 96
         assert_eq!(map.players[1].dig, None);
     }
 
-    // ---- Step 4½c: the release latch (design §7.2) -----------------------------------
-
-    fn cs(bits: u32) -> ControlState {
-        ControlState::unpack(bits)
-    }
-
     #[test]
-    fn an_unarmed_latch_passes_everything() {
-        let mut l = ReleaseLatch::default();
-        let mut i = [cs(0x7f), cs(16)];
-        l.apply(&mut i);
-        assert_eq!((i[0].pack(), i[1].pack()), (0x7f, 16));
-        assert!(!l.is_armed());
-    }
-
-    #[test]
-    fn a_latched_key_does_nothing_until_released_then_a_repress_passes() {
-        let mut l = ReleaseLatch::default();
-        l.arm(&[cs(16), cs(0)]); // worm 0 held Fire at the boundary (the DONE press)
-        for _ in 0..5 {
-            let mut i = [cs(16 | 4), cs(16)];
-            l.apply(&mut i);
-            assert_eq!(
-                (i[0].pack(), i[1].pack()),
-                (4, 16),
-                "only worm 0's Fire is masked"
-            );
+    fn dos_of_keycode_is_the_keys_cpp_table() {
+        // keys.cpp:9-75 (the index of each SDL scancode; unknown -> 89; PRINTSCREEN's second
+        // entry wins in sdl_to_dos_scan_codes).
+        for (k, dos) in [
+            (KeyCode::Escape, 1),
+            (KeyCode::Digit1, 2),
+            (KeyCode::Digit0, 11),
+            (KeyCode::KeyR, 19),
+            (KeyCode::Enter, 28),
+            (KeyCode::ControlLeft, 29),
+            (KeyCode::KeyF, 33),
+            (KeyCode::ShiftLeft, 42),
+            (KeyCode::ShiftRight, 54),
+            (KeyCode::AltLeft, 56),
+            (KeyCode::Space, 57),
+            (KeyCode::F1, 59),
+            (KeyCode::F10, 68),
+            (KeyCode::F11, 87),
+            (KeyCode::NumpadEnter, 116),
+            (KeyCode::ControlRight, 117),
+            (KeyCode::PrintScreen, 143),
+            (KeyCode::AltRight, 144),
+            (KeyCode::ArrowUp, 160),
+            (KeyCode::PageUp, 161),
+            (KeyCode::ArrowLeft, 163),
+            (KeyCode::ArrowRight, 165),
+            (KeyCode::ArrowDown, 168),
+            (KeyCode::PageDown, 169),
+            (KeyCode::Delete, 171),
+            (KeyCode::SuperLeft, 89),
+        ] {
+            assert_eq!(dos_of_keycode(k), dos, "{k:?}");
         }
-        let mut i = [cs(0), cs(0)];
-        l.apply(&mut i); // released
-        assert!(!l.is_armed());
-        let mut i = [cs(16), cs(0)];
-        l.apply(&mut i);
+    }
+
+    #[test]
+    fn the_default_bindings_are_the_settings_dos_keys() {
+        // The sim samples KeyCodes, the menus test DOS keys (design §4.6): they must agree.
+        let s = scenario::settings::Settings::default();
+        for (p, b) in default_bindings().players.iter().enumerate() {
+            let keys = [b.up, b.down, b.left, b.right, b.fire, b.change, b.jump];
+            for (c, k) in keys.iter().enumerate() {
+                assert_eq!(
+                    dos_of_keycode(*k),
+                    s.worm_settings[p].controls_ex[c],
+                    "player {p} control {c}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_keys_are_the_unshifted_us_symbols() {
+        use ui::keys::TypedKey;
+        assert_eq!(typed_of_keycode(KeyCode::KeyA), TypedKey::Sym(b'a' as u32));
         assert_eq!(
-            i[0].pack(),
-            16,
-            "pressed again: it passes (gfx.cpp:608 + game.cpp:110-118)"
+            typed_of_keycode(KeyCode::Digit7),
+            TypedKey::Sym(b'7' as u32)
         );
+        assert_eq!(typed_of_keycode(KeyCode::Space), TypedKey::Sym(32));
+        assert_eq!(typed_of_keycode(KeyCode::Minus), TypedKey::Sym(b'-' as u32));
+        assert_eq!(typed_of_keycode(KeyCode::Tab), TypedKey::Tab);
+        assert_eq!(
+            typed_of_keycode(KeyCode::ArrowUp),
+            TypedKey::Sym(0),
+            "not 32..=127: ignored"
+        );
+    }
+
+    #[test]
+    fn a_tick_takes_the_queue_but_defers_a_keys_second_event() {
+        use ui::shell::KeyEvent;
+        let e = |dos, down| KeyEvent {
+            dos,
+            down,
+            repeat: false,
+            typed: ui::keys::TypedKey::Sym(0),
+        };
+        let mut q = KeyQueue::default();
+        for ev in [
+            e(28, true),
+            e(160, true),
+            e(28, false),
+            e(160, false),
+            e(1, true),
+        ] {
+            q.push(ev);
+        }
+        assert_eq!(
+            q.take_tick(),
+            vec![e(28, true), e(160, true)],
+            "RETURN's up waits (plan-time fact 19)"
+        );
+        assert_eq!(q.take_tick(), vec![e(28, false), e(160, false), e(1, true)]);
+        assert!(q.take_tick().is_empty());
     }
 }

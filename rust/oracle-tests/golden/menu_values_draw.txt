@@ -1,0 +1,12 @@
+# oracle_dump_menu rust/oracle-tests/golden/menu_values_draw_script.txt — the REAL C++ Menu / behaviors / SettingsMenu (Step 4½d design §6.1)
+# <n> <op> <sel> <top> <bottom> <vis> <shown> <prefix> <vals> <bound> <sounds> <ret> <push> <hash>
+0 update_items 0 0 0 3 111 - 42%|ON|. 42,1 - - 0 -
+1 first_visible 0 0 3 3 111 - 42%|ON|. 42,1 - - 0 -
+2 draw 0 0 3 3 111 - 42%|ON|. 42,1 - - 0 29968723bde55d63
+3 draw 0 0 3 3 111 - 42%|ON|. 42,1 - - 0 5998343132c08b33
+4 draw 0 0 3 3 111 - 42%|ON|. 42,1 - - 0 5998343132c08b33
+5 draw 0 0 3 3 111 - 42%|ON|. 42,1 - - 0 30ff9912f07b5e43
+6 move 1 0 3 3 111 - 42%|ON|. 42,1 - - 0 -
+7 draw 1 0 3 3 111 - 42%|ON|. 42,1 - - 0 9c5ba623b62b605f
+8 move 2 0 3 3 111 - 42%|ON|. 42,1 - - 0 -
+9 draw 2 0 3 3 111 - 42%|ON|. 42,1 - - 0 0b0b67148d22251b

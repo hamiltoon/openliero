@@ -1,36 +1,23 @@
-//! Step 4½c (John's T9 ruling: the live game "works like the original openliero") — the C++
-//! NEW GAME start, Bevy-free so it is headlessly testable (the `lib.rs` rule).
-//!
-//! C++ NEW GAME (`gfx.cpp:1507-1523`) makes a fresh `LocalController` over `settings`
-//! (`localController.cpp:30-54` → [`scenario::build::new_match`]) and gives it a level:
-//! `Level::GenerateFromSettings` (`level.cpp:397-429`) the first time, and afterwards the
-//! PREVIOUS controller's level — as that match left it — unless `regenerate_level` is set or the
-//! level settings changed (`random_level`, `level_file`, the map size). The controller then
-//! runs weapon selection (`game::selection`) and `ChangeState(kStateGame)`
-//! ([`scenario::build::enter_game`]).
+//! The C++ NEW GAME start's level generation (Step 4½c; moved to `ui::shell` in Step 4½d): the
+//! settings a live match starts from and `Level::GenerateFromSettings` over the match seed. The
+//! NEW GAME loop — the seed policy, level reuse, the controller — is `ui::shell` (`LevelSlot`,
+//! `SeedSource`, `Match`) since 4½d.
 //!
 //! Seeds. C++ single-player seeds the sim RNG from the wall clock (`Game::Game`,
 //! `game.cpp:42`) and generates from the wall-clock `gfx.rand` (`gameEntry.cpp:23`). Rust takes
 //! the overview's LD 6 / 4½b design §2 shape: one match seed per NEW GAME (fresh from the clock
-//! in `main.rs`, or fixed by `?seed=`); `SimState::new` seeds the sim RNG with it and a
+//! in `game`'s `main.rs`, or fixed by `?seed=`); `SimState::new` seeds the sim RNG with it and a
 //! dedicated `Rand` seeded with it generates the level. The seed is only the initial value:
 //! within a match everything stays deterministic.
-//!
-//! 4½d replaces the fixed `Settings` with the loaded setup and the menu, and with them the full
-//! reuse test (the `old_*` provenance): here the settings never change, so only
-//! `regenerate_level` decides.
 
 use std::path::Path;
 
 use assets::level::LevelData;
 use assets::sprite::{SpriteSet, Tga};
 use assets::tc::TcConfig;
-use scenario::Loaded;
 use scenario::assets::read_asset;
-use scenario::build::{BuildError, build_match, new_match};
-use scenario::settings::{MatchConfig, Settings};
+use scenario::settings::Settings;
 use sim::levelgen::{LevelGenAssets, LevelGenParams, generate_from_settings, level_file_name};
-use sim::state::{LevelSim, SimState};
 use sim_core::rng::Rand;
 
 /// The settings a live match starts from until 4½d loads a setup: `Settings::default()`, with a
@@ -75,85 +62,15 @@ pub fn generate_level(tc_root: &Path, settings: &Settings, seed: u32) -> LevelDa
     generate_from_settings(&assets, &params, file, &mut rand)
 }
 
-/// The NEW GAME loop's state: the settings, this match's seed, the seed policy, and the level
-/// the next match starts on (C++: the current controller's level).
-pub struct NewGame {
-    cfg: MatchConfig,
-    fixed_seed: Option<u32>,
-    level: LevelData,
-}
-
-impl NewGame {
-    /// The first NEW GAME: the seed is `fixed_seed` (`?seed=`) or `fresh`, and the level is
-    /// generated from it (`gfx.cpp:1519-1522`).
-    pub fn new(tc_root: &Path, settings: Settings, fixed_seed: Option<u32>, fresh: u32) -> Self {
-        let seed = fixed_seed.unwrap_or(fresh);
-        let level = generate_level(tc_root, &settings, seed);
-        NewGame {
-            cfg: MatchConfig { settings, seed },
-            fixed_seed,
-            level,
-        }
-    }
-
-    /// The settings and this match's seed.
-    pub fn config(&self) -> &MatchConfig {
-        &self.cfg
-    }
-
-    pub fn seed(&self) -> u32 {
-        self.cfg.seed
-    }
-
-    /// The level the next start uses.
-    pub fn level(&self) -> &LevelData {
-        &self.level
-    }
-
-    /// The fresh `LocalController` (`localController.cpp:30-54`) on the level, before weapon
-    /// selection: invisible worms, lives 0, empty weapon slots.
-    pub fn start(&self, tc_root: &Path) -> Result<Loaded, BuildError> {
-        new_match(tc_root, &self.cfg, &self.level)
-    }
-
-    /// The start with weapon selection skipped (`?weapons=`; the C++ skip path,
-    /// `rollbackController.cpp:384-395`): `InitWeapons` from the saved picks, no draws, then
-    /// `enter_game`.
-    pub fn start_without_selection(&self, tc_root: &Path) -> Result<Loaded, BuildError> {
-        build_match(tc_root, &self.cfg, &self.level)
-    }
-
-    /// `ChangeState(kStateGame)` after selection: lives + the blood pool (`enter_game`).
-    pub fn enter_game(&self, state: &mut SimState) {
-        scenario::build::enter_game(state, &self.cfg);
-    }
-
-    /// The next NEW GAME (F5, or the post-match restart): a new seed (`fixed_seed` or `fresh`;
-    /// C++ seeds every new `Game` from the clock) and the level rule of `gfx.cpp:1507-1523` —
-    /// `regenerate_level` generates a new level from the new seed; otherwise (the C++ default,
-    /// `settings.hpp:77`) the next match plays on `played`, the level the last match left
-    /// (`SwapLevel(*old_level)`: craters and all).
-    pub fn next(&mut self, tc_root: &Path, played: &LevelSim, fresh: u32) {
-        self.cfg.seed = self.fixed_seed.unwrap_or(fresh);
-        if self.cfg.settings.regenerate_level {
-            self.level = generate_level(tc_root, &self.cfg.settings, self.cfg.seed);
-        } else {
-            debug_assert_eq!(
-                (played.width, played.height),
-                (self.level.width, self.level.height)
-            );
-            self.level.material_id.clone_from(&played.material_id);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use scenario::build::{build_match, enter_game, new_match};
     use scenario::paths::TC_ROOT;
-    use sim::state::ControlState;
+    use scenario::settings::MatchConfig;
+    use sim::state::{ControlState, LevelSim};
 
     use super::*;
-    use crate::selection::{Selection, new_game_config};
+    use crate::shell::selection::{Selection, new_game_config};
 
     fn tc() -> &'static Path {
         Path::new(TC_ROOT)
@@ -165,15 +82,20 @@ mod tests {
         r
     }
 
+    /// The default settings with `seed`, and the level generated from it.
+    fn start(seed: u32) -> (MatchConfig, LevelData) {
+        let settings = Settings::default();
+        let level = generate_level(tc(), &settings, seed);
+        (MatchConfig { settings, seed }, level)
+    }
+
     #[test]
     fn the_default_level_is_generated_from_a_rand_seeded_with_the_match_seed() {
-        let ng = NewGame::new(tc(), Settings::default(), None, 7);
-        assert_eq!(ng.seed(), 7);
-        let lv = ng.level();
+        let lv = generate_level(tc(), &Settings::default(), 7);
         assert_eq!((lv.width, lv.height), (504, 350), "Settings(): 504x350");
         assert!(lv.palette.is_none(), "a generated level has the TC palette");
         // Same seed, same level; another seed, another level (LD 6: level seed = match seed).
-        assert_eq!(generate_level(tc(), &Settings::default(), 7), *lv);
+        assert_eq!(generate_level(tc(), &Settings::default(), 7), lv);
         assert_ne!(
             generate_level(tc(), &Settings::default(), 8).material_id,
             lv.material_id
@@ -189,22 +111,14 @@ mod tests {
         };
         let direct =
             generate_from_settings(&assets, &LevelGenParams::default(), None, &mut seeded(7));
-        assert_eq!(direct, *lv);
-    }
-
-    #[test]
-    fn a_fixed_seed_wins_over_the_fresh_one() {
-        let a = NewGame::new(tc(), Settings::default(), Some(3), 100);
-        let b = NewGame::new(tc(), Settings::default(), Some(3), 200);
-        assert_eq!((a.seed(), b.seed()), (3, 3));
-        assert_eq!(a.level(), b.level());
+        assert_eq!(direct, lv);
     }
 
     #[test]
     fn a_stock_level_file_is_loaded_not_generated() {
         let s = start_settings(Some("Levels/water_stage.lev".into()));
         assert!(!s.random_level);
-        let ng = NewGame::new(tc(), s, None, 5);
+        let level = generate_level(tc(), &s, 5);
         let mut want = assets::level::load(&read_asset(tc(), "Levels/water_stage.lev")).unwrap();
         let mut lv = LevelSim {
             width: want.width,
@@ -216,13 +130,13 @@ mod tests {
         };
         sim::levelgen::make_shadow(&mut lv); // settings.shadow (level.cpp:426-428)
         want.material_id = lv.material_id;
-        assert_eq!(*ng.level(), want);
+        assert_eq!(level, want);
     }
 
     #[test]
     fn the_start_is_the_cpp_local_controller() {
-        let ng = NewGame::new(tc(), Settings::default(), None, 11);
-        let st = ng.start(tc()).unwrap().state;
+        let (cfg, level) = start(11);
+        let st = new_match(tc(), &cfg, &level).unwrap().state;
         for w in &st.worms {
             assert!(!w.visible, "worm.hpp: not visible until the first spawn");
             assert_eq!(w.lives, 0, "lives are set at kStateGame");
@@ -232,14 +146,14 @@ mod tests {
             );
         }
         assert_eq!(st.rand.draws(), 0);
-        assert_eq!(st.level.material_id, ng.level().material_id);
+        assert_eq!(st.level.material_id, level.material_id);
     }
 
     #[test]
     fn new_match_then_selection_then_enter_game() {
-        let ng = NewGame::new(tc(), Settings::default(), None, 11);
-        let mut st = ng.start(tc()).unwrap().state;
-        let mut sel = Selection::new(new_game_config(&ng.config().settings, false));
+        let (cfg, level) = start(11);
+        let mut st = new_match(tc(), &cfg, &level).unwrap().state;
+        let mut sel = Selection::new(new_game_config(&cfg.settings, false));
         sel.begin(&mut st).unwrap();
         assert_eq!(
             sel.active().unwrap().player(0).picks,
@@ -253,17 +167,17 @@ mod tests {
             assert!(!sel.step(&mut st, &[cs(w), cs(w)], &mut sounds));
         }
         assert!(sel.step(&mut st, &[cs(16), cs(16)], &mut sounds));
-        ng.enter_game(&mut st);
-        let lives = ng.config().settings.lives;
+        enter_game(&mut st, &cfg);
+        let lives = cfg.settings.lives;
         assert!(st.worms.iter().all(|w| w.lives == lives));
         assert!(st.worms.iter().all(|w| w.weapons[0].ty.is_some()));
     }
 
     #[test]
     fn skipping_selection_loads_the_saved_picks_and_enters_the_game() {
-        let ng = NewGame::new(tc(), Settings::default(), None, 11);
-        let st = ng.start_without_selection(tc()).unwrap().state;
-        let lives = ng.config().settings.lives;
+        let (cfg, level) = start(11);
+        let st = build_match(tc(), &cfg, &level).unwrap().state;
+        let lives = cfg.settings.lives;
         assert!(st.worms.iter().all(|w| w.lives == lives));
         assert!(
             st.worms
@@ -272,64 +186,31 @@ mod tests {
         );
         assert_eq!(st.rand.draws(), 0, "the skip path draws nothing");
     }
-
-    #[test]
-    fn the_next_new_game_reuses_the_played_level_with_a_new_seed() {
-        let mut ng = NewGame::new(tc(), Settings::default(), None, 11);
-        let mut played = ng.start(tc()).unwrap().state.level;
-        played.material_id[1234] ^= 0xff; // a crater
-        ng.next(tc(), &played, 99);
-        assert_eq!(ng.seed(), 99, "a fresh seed per NEW GAME");
-        assert_eq!(
-            ng.level().material_id,
-            played.material_id,
-            "gfx.cpp:1512-1518: SwapLevel(*old_level)"
-        );
-        assert_eq!(
-            ng.start(tc()).unwrap().state.level.material_id,
-            played.material_id
-        );
-    }
-
-    #[test]
-    fn regenerate_level_makes_a_new_level_from_the_new_seed() {
-        let s = Settings {
-            regenerate_level: true,
-            ..Settings::default()
-        };
-        let mut ng = NewGame::new(tc(), s.clone(), None, 11);
-        let played = ng.start(tc()).unwrap().state.level;
-        ng.next(tc(), &played, 12);
-        assert_eq!(*ng.level(), generate_level(tc(), &s, 12));
-    }
-
-    #[test]
-    fn a_fixed_seed_is_kept_across_new_games() {
-        let mut ng = NewGame::new(tc(), Settings::default(), Some(4), 11);
-        let played = ng.start(tc()).unwrap().state.level;
-        ng.next(tc(), &played, 12);
-        assert_eq!(ng.seed(), 4);
-    }
 }
 
 #[cfg(test)]
 mod play_tests {
     use render::bitmap::Bitmap;
+    use scenario::build::{enter_game, new_match};
     use scenario::paths::TC_ROOT;
+    use scenario::settings::MatchConfig;
     use sim::state::ControlState;
 
     use super::*;
-    use crate::selection::{Selection, new_game_config};
+    use crate::shell::selection::{Selection, new_game_config};
 
     /// The browser check found it: a NEW GAME has `max_bonuses = 4`, so bonuses spawn, and the
     /// draw indexes `Common::bonus_frames` (`SceneData::bonus_frames`, empty before 4½c).
     #[test]
     fn a_new_game_plays_and_draws_its_bonuses() {
         let tc = Path::new(TC_ROOT);
-        let ng = NewGame::new(tc, Settings::default(), Some(3488140121), 0);
-        let loaded = ng.start(tc).unwrap();
+        let settings = Settings::default();
+        let seed = 3488140121;
+        let level = generate_level(tc, &settings, seed);
+        let cfg = MatchConfig { settings, seed };
+        let loaded = new_match(tc, &cfg, &level).unwrap();
         let (mut st, mut vps, scene) = (loaded.state, loaded.viewports, loaded.scene);
-        let mut sel = Selection::new(new_game_config(&ng.config().settings, false));
+        let mut sel = Selection::new(new_game_config(&cfg.settings, false));
         sel.begin(&mut st).unwrap();
         let cs = ControlState::unpack;
         let mut sounds = Vec::new();
@@ -337,7 +218,7 @@ mod play_tests {
             sel.step(&mut st, &[cs(w), cs(w)], &mut sounds);
         }
         assert!(sel.step(&mut st, &[cs(16), cs(16)], &mut sounds));
-        ng.enter_game(&mut st);
+        enter_game(&mut st, &cfg);
         let mut bmp = Bitmap::new(320, 200);
         let mut saw_bonus = false;
         for t in 0..1500u32 {
@@ -346,7 +227,7 @@ mod play_tests {
             } else {
                 [cs(0), cs(0)]
             };
-            crate::viewport_step::tick_viewports(&mut vps, &mut st, &i);
+            crate::shell::viewport_step::tick_viewports(&mut vps, &mut st, &i);
             let mut s = scene.as_scene(st.screen_flash, true);
             s.draw_hud = true;
             s.map = true;

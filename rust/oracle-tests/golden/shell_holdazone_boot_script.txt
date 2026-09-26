@@ -1,0 +1,8 @@
+# Step 4½d G2 case holdazone_boot (design §6.4; plan Task 9) — written by gen_slice4_5d.
+# Rust ledger: 53 frames, end `end 53 frames`, NEW GAME 0, RESUME 0, back-to-menu 0 (game over: false), black presents 0
+setup shell_holdazone_boot_setup.cfg
+boot_seed 15
+frames 53
+expect frames
+key 40 down DOWN
+key 42 up DOWN

@@ -116,7 +116,9 @@ The **menu-selection dispatch** (`gfx.cpp:1493-1593`) is the real "screen router
 - `Draw()` (`:614`): `DrawBasicMenu()` (frozen screen + main menu), `DrawSpectatorInfo()`, then `cur_menu->Draw` — settings menu is drawn *disabled* when main menu has focus (`:621-625`).
 
 `Gfx::DrawBasicMenu` — `gfx.cpp:1699`. `Gfx::DrawSpectatorInfo` (level name, "P1 vs P2" + colour
-swatches, "PAUSED"/"SETUP") — `gfx.cpp:1739`.
+swatches, "PAUSED"/"SETUP") — `gfx.cpp:1739`. (**4½d:** `DrawSpectatorInfo` and
+`MainMenuState::Enter`'s minimap touch only `single_screen_renderer` and the spectator viewport's
+own `rand`, never `game.rand` or `play_renderer`, so the port does not need them; plan fact 21.)
 
 ---
 
@@ -206,7 +208,7 @@ MAP WIDTH/HEIGHT only when `random_level`.
 - `HEALTH`: `IntegerBehavior(1..10000, %)`, `scroll_interval=4`.
 - `Red/Green/Blue`: classic mode → `0..252 step 4`, `display_div=4`, `scroll_interval=4` (reproduces the VGA 0..63 picker); modern → `0..255 step 1` (`gfx.cpp:1376-1388`).
 - `PlayerMenu::DrawItemOverlay` (`gfx.cpp:1343-1360`) draws the colour bar: `DrawRoundedBox(x+24, y, selected?168:0, 7, rgb>>2 - 1)` + `FillRect(x+25,y+1, barWidth, 5, ws->color)`.
-- `INPUT` → `InputDeviceBehavior`; `AIM UP..JUMP` and `DIG` → `KeyBehavior`; `CONTROLLER` → `ArrayEnumBehavior(ws->controller, texts.controllers)` (Human / DumbAI / FollowAI).
+- `INPUT` → `InputDeviceBehavior`; `AIM UP..JUMP` and `DIG` → `KeyBehavior`; `CONTROLLER` → `ArrayEnumBehavior(ws->controller, texts.controllers)` ("Human" / "CPU" / "AI" — hard-coded in `Texts::Texts()`, `common.cpp:215-217`; `tc.cfg` has no controller texts).
 - `NAME` → `InputStringState` (20 chars); empty name → `Settings::GenerateName` (`mainMenuState.cpp:323-347`).
 - `WEAPON n` → `InputStringState` (10 chars) then **Levenshtein fuzzy-match** against weapon names, normalised by name length (`mainMenuState.cpp:390-423`, `Levenshtein` at `:28`).
 - Key items → `WaitForKeyState`; gamepad presses write `gamepad_controls[i]`, keyboard writes `controls[i]` (only if not extended) and `controls_ex[i]` (`mainMenuState.cpp:367-389`).

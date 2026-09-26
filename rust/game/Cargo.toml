@@ -9,6 +9,7 @@ sim      = { path = "../sim" }
 assets   = { path = "../assets" }
 sim-core = { path = "../sim-core" }
 scenario = { path = "../scenario" }
+ui       = { path = "../ui" }
 
 # --- Base Bevy features (shared native + wasm): the 3c draw set --------------------
 # In Bevy 0.19 the render stack is split OUT of `bevy_sprite`: the plain

@@ -1,0 +1,30 @@
+# Step 4½d G1 settings_interact: GAME MODE cycling (UpdateItems re-running the visibility),
+# the Integer/Time/Bool behaviors of the real SettingsMenu, Enter on each kind, the menu_cycles gate.
+settings default
+update_items
+first_visible
+cycles 0
+right
+right
+right
+right
+left
+move 1
+right
+enter
+move_to_id 11
+enter
+move_to_id 10
+right
+enter
+move_to_id 9
+enter
+left
+move_to_id 17
+enter
+cycles 3
+move_to_id 6
+right
+cycles 5
+right
+draw 0 -1 0

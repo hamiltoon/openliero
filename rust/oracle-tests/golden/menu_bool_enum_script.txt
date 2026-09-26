@@ -1,0 +1,38 @@
+# Step 4½d G1 bool_enum: BooleanSwitch left/right/enter sounds; Enum u32 wrap both ways and
+# UpdateItems; broken left/right; ArrayEnum over game_modes and onoff.
+menu 30 20 15 80 0
+item 1 48 7 1 1 SWITCH
+item 2 48 7 1 1 ENUM
+item 3 48 7 1 1 BROKEN
+item 4 48 7 1 1 MODE
+item 5 48 7 1 1 ONOFF
+bind 1 bool 0
+bind 2 enum 0 0 3 0
+bind 3 enum 2 1 3 1
+bind 4 array 3 gamemodes 0
+bind 5 array 0 onoff 1
+update_items
+first_visible
+right
+left
+enter
+move 1
+left
+left
+right
+enter
+enter
+enter
+move 1
+left
+right
+enter
+move 1
+right
+right
+left
+enter
+move 1
+left
+enter
+draw 0 -1 0

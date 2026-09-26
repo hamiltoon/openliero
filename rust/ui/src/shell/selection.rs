@@ -1,11 +1,13 @@
-//! Step 4½c — the live weapon-selection phase (design §7), Bevy-free so the tick system's phase
-//! logic is headlessly testable (the `lib.rs` rule).
+//! Step 4½c — the live weapon-selection phase (design §7), Bevy-free (moved to `ui::shell` in
+//! Step 4½d).
 //!
 //! C++ runs the phase inside `LocalController` (`localController.cpp:112-152`, `:224-229`): a
 //! fresh controller constructs `WeaponSelection`, every `Process` runs the 12/3 key repeat and
 //! `ProcessFrame`, and the frame the last player readies calls `Finalize` and enters the game.
-//! [`Selection`] owns the running `sim::weapsel::WeaponSelection`, the in-memory picks it starts
-//! from and writes back to, and the frozen screen. The picks stand in for the C++
+//! [`Selection`] owns the running `sim::weapsel::WeaponSelection` and the in-memory picks it
+//! starts from and writes back to. Since 4½d the frozen screen and `menu_cycles` come from the
+//! shell (design §4.7, §4.11): the frozen background is drawn into the shell's shared frozen
+//! screen, and the palette rotates by the shell's `menu_cycles`. The picks stand in for the C++
 //! `WormSettings` a `shared_ptr` shares with the worms (finding 4): every NEW GAME — here F5 and
 //! the post-match restart — starts from them. Loading a setup is 4½d's.
 //!
@@ -13,7 +15,7 @@
 //! `Settings` picks, as C++ does) and [`live_config`] (a native `--live <scenario>` match: the
 //! scenario's launched loadout as the saved picks, design §7.3 / Q7).
 
-use render::bitmap::Bitmap;
+use render::bitmap::{Bitmap, Pal32, Rect};
 use render::frame::Scene;
 use render::weapsel::{self as screen, WeapselTexts};
 use scenario::build::weapsel_config;
@@ -71,22 +73,17 @@ fn apply_touch_rule(cfg: &mut WeapselConfig, touch_only: bool) {
     }
 }
 
-/// The presentation state (design §5): the frozen frame, built on the first render of a phase,
-/// and `Gfx::menu_cycles`, from 0 per phase (C++ inherits the main menu's; 4½d threads it),
-/// incremented once per rendered frame after the draw (`gfx.cpp:1646`).
-#[derive(Default)]
-struct WeapselScreen {
-    frozen: Option<Bitmap>,
-    menu_cycles: u32,
-}
-
 /// The live phase and the in-memory picks (see the module doc).
 pub struct Selection {
     cfg: WeapselConfig,
     /// `WormSettings::name` of players 0/1: `Settings::default()`'s (empty) until 4½f.
     names: [String; 2],
     active: Option<WeaponSelection>,
-    screen: WeapselScreen,
+    /// `WeaponSelection::cached_background` (`weapsel.hpp:27`): the frozen background has been
+    /// drawn into the shell's shared frozen screen.
+    cached_background: bool,
+    /// `WeaponSelection::focused` (`weapsel.hpp:28`).
+    focused: bool,
 }
 
 impl Selection {
@@ -95,7 +92,8 @@ impl Selection {
             cfg,
             names: Default::default(),
             active: None,
-            screen: WeapselScreen::default(),
+            cached_background: false,
+            focused: true,
         }
     }
 
@@ -113,11 +111,12 @@ impl Selection {
     }
 
     /// `ChangeState(kStateWeaponSelection)` on a freshly built tick-0 `state`: a new
-    /// `WeaponSelection` from the saved picks (it draws `state.rand`), a new frozen frame, and
-    /// `menu_cycles` back to 0.
+    /// `WeaponSelection` from the saved picks (it draws `state.rand`), focused, with its frozen
+    /// background still to draw (`weapsel.hpp:27-28`).
     pub fn begin(&mut self, state: &mut SimState) -> Result<(), WeapselError> {
         self.active = Some(WeaponSelection::new(state, &self.cfg)?);
-        self.screen = WeapselScreen::default();
+        self.cached_background = false;
+        self.focused = true;
         Ok(())
     }
 
@@ -159,48 +158,58 @@ impl Selection {
         }
     }
 
-    /// Draw the selection screen into `surface` (`weapsel.cpp:160-209`): build the frozen frame
-    /// on the first call of a phase (`scene` carries the live HUD flags, as `game.Draw` would),
-    /// draw the menus with the weapsel palette, then count `menu_cycles`. `level_file` is
-    /// `settings.level_file` (empty = the random-level label).
+    /// `WeaponSelection::DrawNormalViewports` (`weapsel.cpp:160-209`) into `surface`: the weapsel
+    /// palette at the shell's `menu_cycles`, then, on the first draw of this selection, the frozen
+    /// background INTO THE SHELL'S shared frozen screen (`gfx.frozen_screen`, which the main
+    /// menu's `Enter` also writes — finding 11), then the frozen copy and, while focused, the
+    /// header, names and menus. Returns the palette the draw leaves behind.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         surface: &mut Bitmap,
+        frozen: &mut Bitmap,
         state: &SimState,
         scene: &Scene,
         texts: &WeapselTexts,
         level_file: &str,
-    ) {
+        menu_cycles: u32,
+    ) -> Pal32 {
         let ws = self
             .active
             .as_ref()
             .expect("render needs an active selection");
-        let cycles = self.screen.menu_cycles;
-        let frozen = self.screen.frozen.get_or_insert_with(|| {
-            screen::build_frozen(
-                state,
-                scene,
-                &screen::level_label(texts, level_file),
-                cycles,
-            )
-        });
-        let pal = screen::weapsel_palette(scene.origpal, cycles);
-        let names = [self.names[0].as_str(), self.names[1].as_str()];
-        screen::draw_screen(
-            surface,
-            frozen,
-            &pal,
-            scene.font,
-            texts,
-            ws,
-            &state.weapons,
-            names,
-        );
-        self.screen.menu_cycles = cycles.wrapping_add(1);
+        let pal = screen::weapsel_palette(scene.origpal, menu_cycles);
+        if !self.cached_background {
+            let label = screen::level_label(texts, level_file);
+            *frozen = screen::build_frozen(state, scene, &label, menu_cycles);
+            self.cached_background = true;
+        }
+        if self.focused {
+            let names = [self.names[0].as_str(), self.names[1].as_str()];
+            screen::draw_screen(
+                surface,
+                frozen,
+                &pal,
+                scene.font,
+                texts,
+                ws,
+                &state.weapons,
+                names,
+            );
+        } else {
+            surface.pixels.copy_from_slice(&frozen.pixels);
+            surface.clip = Rect::new(0, 0, surface.w, surface.h);
+        }
+        pal
     }
 
-    pub fn menu_cycles(&self) -> u32 {
-        self.screen.menu_cycles
+    /// `WeaponSelection::Focus` / `Unfocus` (`weapsel.cpp:363-365`).
+    pub fn focus(&mut self) {
+        self.focused = true;
+    }
+
+    pub fn unfocus(&mut self) {
+        self.focused = false;
     }
 }
 
@@ -216,7 +225,7 @@ mod tests {
 
     const FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/scenarios/default_match.txt"
+        "/../game/scenarios/default_match.txt"
     ));
 
     fn default_match() -> scenario::Loaded {
@@ -357,31 +366,74 @@ mod tests {
     }
 
     #[test]
-    fn render_freezes_once_and_counts_menu_cycles_after_the_draw() {
+    fn render_builds_the_shared_frozen_screen_once_and_reads_the_callers_menu_cycles() {
+        // weapsel.cpp:160-186 + finding 11: the pixels live in the SHELL's frozen screen.
         let scenario::Loaded {
             mut state, scene, ..
         } = default_match();
         let mut sel = Selection::new(live_config(&state, false));
         sel.begin(&mut state).unwrap();
         let s = scene.as_scene(0, false);
-        let mut surface = Bitmap::new(320, 200);
-        sel.render(
+        let (mut surface, mut frozen) = (Bitmap::new(320, 200), Bitmap::new(320, 200));
+        let lf = "Levels/render_stage.lev";
+        let pal = sel.render(
             &mut surface,
+            &mut frozen,
             &state,
             &s,
             &scene.weapsel_texts,
-            "Levels/render_stage.lev",
+            lf,
+            5,
         );
-        assert_eq!(sel.menu_cycles(), 1, "gfx.cpp:1646: after the draw");
-        let first = surface.clone();
+        assert_eq!(
+            pal,
+            render::weapsel::weapsel_palette(&scene.origpal, 5),
+            "UpdateWeapselPalette"
+        );
+        let (first_surface, first_frozen) = (surface.clone(), frozen.clone());
         sel.render(
             &mut surface,
+            &mut frozen,
             &state,
             &s,
             &scene.weapsel_texts,
-            "Levels/render_stage.lev",
+            lf,
+            6,
         );
-        assert_eq!(sel.menu_cycles(), 2);
-        assert_ne!(first, surface, "the selected item's colour 168 rotates");
+        assert_eq!(frozen, first_frozen, "cached_background: built once");
+        assert_ne!(
+            surface, first_surface,
+            "the selected item's colour 168 rotates"
+        );
+        sel.unfocus();
+        sel.render(
+            &mut surface,
+            &mut frozen,
+            &state,
+            &s,
+            &scene.weapsel_texts,
+            lf,
+            7,
+        );
+        assert_eq!(
+            surface.pixels, frozen.pixels,
+            "unfocused: the frozen copy only (:184-186)"
+        );
+        frozen.pixels.fill(0xFF12_3456); // the main menu's Enter overwrote the shared screen
+        sel.focus();
+        sel.render(
+            &mut surface,
+            &mut frozen,
+            &state,
+            &s,
+            &scene.weapsel_texts,
+            lf,
+            8,
+        );
+        assert_eq!(
+            surface.get_pixel(0, 199),
+            0xFF12_3456,
+            "RESUME redraws over the menu's frozen screen"
+        );
     }
 }

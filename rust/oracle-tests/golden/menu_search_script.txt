@@ -1,0 +1,38 @@
+# Step 4½d G1 search: prefix, continuation, the 1500 ms timeout, the single-character retry,
+# invisible items skipped, an unselectable match moving forward, Tab, contains (and its
+# empty-needle quirk), a non-ASCII key ignored.
+menu 40 20 15 0 0
+item 1 48 7 1 1 APPLE
+item 2 48 7 1 1 APRICOT
+item 3 48 7 1 1 BANANA
+item 4 48 7 0 1 BLUEBERRY
+item 5 48 7 1 0 CHERRY GREY
+item 6 48 7 1 1 COCONUT
+item 7 48 7 1 1 DATE
+item 8 48 7 1 1 ""
+item 9 48 7 1 1 apricot jam
+space
+first_visible
+keys a p
+keys r
+sleep_ms 1000
+keys i
+sleep_ms 1600
+keys b
+keys l
+keys c
+keys h
+sleep_ms 1600
+keys TAB
+keys TAB TAB
+keys SPACE
+keys UP
+keys_contains j a m
+sleep_ms 1600
+keys_contains TAB
+move_to 6
+keys_contains TAB
+move_to 6
+keys TAB
+keys 0 MINUS
+draw 0 -1 0

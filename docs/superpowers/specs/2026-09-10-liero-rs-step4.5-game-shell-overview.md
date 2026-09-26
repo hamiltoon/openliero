@@ -1,6 +1,6 @@
 # Step 4½ — Game shell: overview / altitude decisions
 
-Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, **4½c LANDED**, 4½d–4½h planned
+Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, **4½c LANDED**, **4½d LANDED (the Step 4½ milestone)**, 4½e–4½h planned
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 4½ — Game shell" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++ map, cited as **cpp-map §N**)
@@ -47,9 +47,11 @@ The pieces Step 4½ builds the shell out of are all in place and Bevy-free:
   (`audio.rs:37-51`); live viewport shake/flash/banners; `.lrp` phase-1 reading.
 - **`assets`** — `TcConfig` already parses **every menu string** the C++ shell shows
   (`assets/src/tc.rs:206-246`: `SelWeap`, `SelLevel`, `LevelRandom`, `Randomize`, `Done`, `Weapon`,
-  `Availability`, `NoWeaps`, `PressAnyKey`, `Copyright`, plus `onoff`, `game_modes`, `weap_states`,
-  `controllers`, `key_names`) and `aiparams`, DumbLieroAI's `k[state][control]` table (rust-map §6).
-  A Rust menu is string-faithful and AI-parameter-faithful for free.
+  `Availability`, `NoWeaps`, `PressAnyKey`, `Copyright`) and `aiparams`, DumbLieroAI's
+  `k[state][control]` table (rust-map §6). **Correction (4½d design finding 3):** `onoff`,
+  `game_modes`, `weap_states`, `controllers`, `input_devices` and `key_names` are hard-coded in C++
+  (`common.cpp`), not `tc.cfg` texts, and `Texts` carries none of them; 4½d's `ui::text` carries
+  `onoff` and `game_modes` as constants.
 - **Harness** — the C++ dumper directive pattern with "absent ⇒ old behaviour" defaults
   (`sim_physics_dump.cpp:42-74`), ~50 golden tests, the `shot` CLI and the `liero-shot` run-skill.
 
@@ -321,6 +323,23 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   (`gfx.cpp:1739`). **Milestone:** bare run → main menu → NEW GAME → weapon selection → play → Esc →
   menu (RESUME / NEW GAME) → QUIT. **Gate:** menu frame-hash self-goldens + the standing re-diff.
   Depends on a, b, c.
+  **Landed** (design `specs/2026-09-25-liero-rs-step4.5-slice4.5d-menu-framework-design.md`, plan
+  `plans/2026-09-26-liero-rs-step4.5-slice4.5d-plan.md`). The code lives in the new Bevy-free
+  `rust/ui` crate (Q1). The gate became stronger than planned: G1 (15 widget scripts vs the real
+  C++ `Menu`, behaviors and `SettingsMenu`) and G2 (11 shell cases, every presented frame
+  bit-exact vs the real `Gfx::RunOneFrame` run headlessly), not self-goldens; the
+  `DrawSpectatorInfo` equivalent is not needed (it draws only into the spectator renderer).
+  Corrections from the plan's source check:
+  (1) the menu boots for a bare run and a bare preview only; `--live [<scenario>]` keeps the 4½c
+  path;
+  (2) C++ acts on every placeholder item and on F2/F3/F5/F6/F7/F9, so Rust's inert items are
+  unit-tested, never gated; HOST LAN goes through `default:` and plays one `MenuSelect`;
+  (3) C++ reads `level_file` relative to the process CWD;
+  (4) the menu palette is the rotation plus `SetWormColours` (not the weapsel palette);
+  (5) `StartGame` plays `SoundBegin`, which Rust now ports.
+  **Step 5 note:** netplay's rollback runs `Match` only; the menus never run inside a rollback
+  frame. The shell's `Route` is the seam where 4½g's stats screen and Step 5's network screens
+  push states.
 - **4½e — Settings menu, weapon options, level selector.** All `SettingsMenu` items with their
   behaviors and ranges (`gfx.cpp:485-503`, `:1262-1312`) and the per-game-mode visibility rules
   (`gfx.cpp:1314-1341`: LIVES for KillEmAll/Scales, TIME TO LOSE for GameOfTag, TIME TO WIN + ZONE

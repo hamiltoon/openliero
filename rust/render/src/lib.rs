@@ -8,6 +8,7 @@
 //! arm, the two-viewport 320x200 player layout, and the frame hash. Shadows,
 //! sprites, HUD, minimap arrive in 3b/3e. Step 4½c adds the menu-item recipe
 //! (menu) and the weapon-selection screen (weapsel), pulled forward from 4½d.
+//! Step 4½d adds the value arm and the scrollbar (menu) and the composition fade (present).
 pub mod bitmap;
 pub mod blit;
 pub mod fire_cone;
@@ -19,6 +20,7 @@ pub mod level_draw;
 pub mod menu;
 pub mod object_draw;
 pub mod palette;
+pub mod present;
 pub mod shadow_query;
 pub mod viewport;
 pub mod weapsel;

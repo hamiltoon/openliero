@@ -8,7 +8,53 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-09-25 · **🗡️ 4½c (the weapon selection phase) LANDED — every live
+> **Last updated:** 2026-09-26 · **🗡️ 4½d (the menu framework, `ScreenStack` and the main
+> menu — THE STEP 4½ MILESTONE) LANDED. 🎯 Rust boots like C++: main menu → NEW GAME → weapon
+> selection → play → Esc → menu (RESUME / NEW GAME) → QUIT, every presented frame bit-exact
+> against the REAL C++ `Gfx::RunOneFrame`.** A new Bevy-free crate `rust/ui` (Q1) sits between
+> `scenario` and `game`: `ui::menu` (a line-for-line port of `Menu`/`MenuItem`, the
+> Integer/Time/BooleanSwitch/Enum/ArrayEnum behaviors and type-to-search, with the C++ quirks —
+> `OnEnter` 0 on no selection, any negative `x`, `AddItem(pos)` returning the old size, search
+> testing `visible`, the empty-needle `contains`), `ui::keys` (`KeyLatch` = `dos_keys` +
+> `key_buf`; `ReleaseLatch` moved in), `ui::text` (`game_modes`, `onoff`, `TimeToString`,
+> `UiTc`) and `ui::shell` (`Shell` = `Gfx::RunOneFrame`, `ScreenStack`, `MainMenuState` with all
+> 15 items (Q2; the unported ones inert, Rust-only), the display-only settings menu drawn
+> disabled beside it (finding 1), the router with `LevelSlot` + `SeedSource` (the C++
+> level-reuse test, map size included), `Match` = LocalController with the Esc fade, the shared
+> tail and the shared frozen screen; the 4½c `new_game`/`selection`/`match_flow`/`viewport_step`
+> moved in and re-exported by `game`; 4½c's `NewGame` retired). `render` gained the CP437 high
+> half (hash-neutral: every golden is ASCII; one `font.rs` test updated), the `MenuItem` value
+> arm, the scrollbar, `menu_palette` (rotation + `SetWormColours`, not the weapsel palette) and
+> `present::fade_argb`. **G1:** the new `oracle_dump_menu` drives the real C++ `Menu`, behaviors
+> and `SettingsMenu`; 15 hand-written scripts (300 golden lines, 67 draws) match line for line.
+> **🎯 G2:** the new `oracle_dump_shell` runs the real `Gfx::RunOneFrame` headless (a software
+> SDL renderer, eight documented interventions — seeds, no stats screen, pacing, no replays,
+> recorded sounds, CWD = the TC — and it refuses what it cannot run faithfully: the time-seed
+> probe proves the selection constructor drew nothing, and a setup's level file must open);
+> 11 generator-validated cases, 2,988 frames, **all 2,981 presents bit-exact** (presented and
+> back-buffer hashes, fade, `menu_cycles`, top screen, cursor, menu/selection sounds), including
+> `shell_milestone` (600 frames: boot → menu → NEW GAME → selection → play → Esc → menu → RESUME
+> / NEW GAME → QUIT). The corpus found one port bug on frame 0, fixed: Tag/Holdazone setups
+> boot with the HUD timer arms (`viewport.cpp:155-185`) now ported. C++ `StartGame`'s
+> `SoundBegin` is now played (the live game plays the "begin" sample at match start). **The
+> live game** (`game` is glue): key events with `KeyCode → DOS` and typed symbols (OS repeat
+> counts, as C++), a per-tick key queue that defers a key's second event (fact 19), touch edges
+> plus a MENU (Esc) button (Q8), the faded present, QUIT (Q3: `AppExit` natively; in the browser
+> a black frame and a "Play again" overlay), the Q4 routes (`?weapons=`/`?level=`/`?seed=` skip
+> the menu, `?menu=1` forces it), F5 as a Rust-only restart in play and selection (Q5), and
+> `shot --menu [--frames N] [--seed S]`. `--live [<scenario>]` and `--live --record` keep the
+> 4½c paths (no menu); `Demo::frozen` / `weapsel_cycles` remain only for `--live <scenario>`.
+> **The C++ comparison ran in this cloud session:** both headless dumpers, and the real C++
+> `openliero` under Xvfb + xdotool for C++ | Rust side-by-side PNGs of the milestone path
+> (identical except the level/seed and the intended browser-QUIT behaviour; not committed).
+> Headless Chromium (desktop + emulated phone) walked the shell flow: 28/28 ok (T11's own
+> check 75/75). Audit: 61 `A` golden lines, 0 `M` (no existing golden changed; every 4½d golden
+> regenerates byte-identically); `src/` changes are only the two new dumpers + 4
+> `CMakeLists.txt` lines; `sim`, `sim-core` and the scenario grammar are untouched; `ui` and
+> `render` have no Bevy. Step 4½ now: **4½a ✅ + 4½b ✅ + 4½c-0 ✅ + 4½c ✅ + 4½d ✅ — the Step 4½
+> milestone reached**; 4½e…4½h are planned.
+>
+> Prior (2026-09-25): **🗡️ 4½c (the weapon selection phase) LANDED — every live
 > match now opens on the C++ weapon-selection screen, its RNG stream and its pixels bit-exact vs
 > C++.** `sim::weapsel` ports the constructor (finding 1: the rejection loop runs only for a
 > DISABLED pick, and checks uniqueness only inside it), `process_frame` with LocalController's
@@ -477,8 +523,11 @@ select/generation, settings/profiles, DumbLieroAI and the stats screen are the r
 single-player surface. **4½a** (4½a-1: settings → sim, bit-exact incl. `IsGameOver`; 4½a-2:
 settings persistence, byte-identical to C++'s saves) and **4½b** (random level generation,
 bit-exact), **4½c-0** (the unported weapon branches, bit-exact) and **4½c** (the weapon selection
-phase: RNG stream and screen bit-exact vs C++; the live game starts like C++ NEW GAME) are done;
-4½d…4½h are planned. Step 5 (netplay) is not started.
+phase: RNG stream and screen bit-exact vs C++; the live game starts like C++ NEW GAME) and
+**4½d** (the menu framework, `ScreenStack` and the main menu — **the Step 4½ milestone**: bare
+run → main menu → NEW GAME → weapon selection → play → Esc → menu → QUIT, every presented frame
+bit-exact vs the real C++ `Gfx::RunOneFrame`) are done; 4½e…4½h are planned. Step 5 (netplay)
+is not started.
 
 The % was re-based on 2026-09-10: the denominator is now **steps 0–5 plus Step 4½** (~10 k C++
 LOC of shell, ~1.5 k of it sim-affecting), so the same finished work (steps 0–4) reads ~70%
@@ -492,7 +541,7 @@ REWRITE (steg 0–5, incl. 4½)                                ~70%
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
 ├─ ✅ Step 3  Bevy rendering / window (reproduce the SDL3 view) DONE — 3a–3f shipped (PR #4)
 ├─ ✅ Step 4  input + replay (.lrp) + audio                     COMPLETE — 4a–4g shipped (4e-phase2 bounded follow-on)
-├─ 🟡 Step 4½ game shell (menus, weapsel, level select/gen,     4½a ✅ 4½b ✅ 4½c-0 ✅ 4½c ✅, rest planned  ◀── YOU ARE HERE
+├─ 🟡 Step 4½ game shell (menus, weapsel, level select/gen,     4½a ✅ 4½b ✅ 4½c-0 ✅ 4½c ✅ 4½d ✅ (milestone), rest planned  ◀── YOU ARE HERE
 │             settings/profiles, DumbLieroAI, match end + stats)
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
@@ -819,14 +868,16 @@ TWO input formats by design (Rust-native round-trip artifact ≠ foreign `.lrp`)
 
 ---
 
-### Step 4½ — Game shell (🟡 IN PROGRESS — 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅ · branch `liero-rs-step-4-5`, PR #7)
+### Step 4½ — Game shell (🟡 IN PROGRESS — 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅ — the Step 4½ milestone reached · branch `liero-rs-step-4-5`, PR #7)
 
 Turn "plays a hard-coded match" into a complete game, close to or exactly like openliero: bare
 `cargo run -p game` opens the main menu over a generated level; a match is configured, weapon-
 selected, played (vs a human or DumbLieroAI), ended and summarised on a stats screen using only
 the menus; C++-saved `liero.cfg`/profiles round-trip byte-identical; the same shell runs on wasm.
 Sim-affecting parts are C++-golden-gated; menus get Rust-only frame-hash self-goldens + PNG
-eyeballing vs the C++ build. Overview: `specs/2026-09-10-liero-rs-step4.5-game-shell-overview.md`;
+eyeballing vs the C++ build (superseded since 4½c: the screens are gated bit-exact against the
+real C++ draw run headlessly — 4½c's `WeaponSelection::Draw`, 4½d's `Menu` and
+`Gfx::RunOneFrame`). Overview: `specs/2026-09-10-liero-rs-step4.5-game-shell-overview.md`;
 fact maps: `specs/2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++) and
 `specs/2026-09-10-liero-rs-step4.5-rust-baseline-map.md` (Rust).
 
@@ -864,11 +915,11 @@ fact maps: `specs/2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++) and
 │          of the REAL C++ WeaponSelection::Draw (headless, Addendum A); live game starts like C++
 │          NEW GAME (generated level, fresh seed, level reused on restart) + latch +
 │          ?weapons=/--record skip + touch-only P2 bot                                   COMPLETE
-├─ ⬜ 4½d  menu framework (Menu/MenuItem/behaviors, scrollbar, type-to-search, fades; the
-│          DrawRoundedBox/GetDims/text arm, 168..174 rotation and menu sounds landed in 4½c)
-│          + ScreenStack + main menu
-│          🎯 MILESTONE: bare run → main menu → NEW GAME → weapsel → play → Esc → menu
-│          (RESUME/NEW) → QUIT. Gate: menu self-goldens + full re-diff             not started
+├─ ✅ 4½d  menu framework + ScreenStack + main menu — THE MILESTONE. Bevy-free rust/ui: Menu/MenuItem/
+│          behaviors/type-to-search, KeyLatch, Shell (= Gfx::RunOneFrame), MainMenuState, router,
+│          Match (Esc fade, tail); render CP437/value arm/scrollbar/menu_palette/fade; 🎯 G1 15 widget
+│          scripts vs real C++ Menu + G2 11 shell cases bit-exact vs the real headless RunOneFrame;
+│          live: key events, touch MENU, QUIT (native exit / web Play again), ?menu=1, F5 COMPLETE
 ├─ ⬜ 4½e  settings menu (per-game-mode visibility) + weapon availability + level selector (file
 │          picker, RANDOM node, minimap preview) + save/load setups + InputString/InfoBox
 │          overlays; move settings/settings_toml/toml_fmt/storage into rust/settings (design
@@ -911,11 +962,40 @@ Also open for John (4½c):
 - the eyeball of the C++ | Rust side-by-sides. The screen itself is gated bit-exact against the
   REAL C++ `WeaponSelection::Draw` (headless `Draw` in this cloud session, per John's ruling; 361
   frames), and the real C++ game ran under Xvfb for side-by-side PNGs (not committed). What the
-  live screen still differs in, by design: no render fade (4½d; the gate hashes at fade 33),
-  `menu_cycles` starts at 0 instead of inheriting the main menu's (4½d), and C++'s default
-  `random_name` gives the players random names where Rust shows none (4½f).
+  live screen still differs in, by design: C++'s default `random_name` gives the players random
+  names where Rust shows none (4½f). (The render fade and `menu_cycles` inheriting the main
+  menu's count landed in 4½d and are gated by G2.)
 - 4½c ports LocalController's key repeat; C++ netplay's RollbackController repeats differently
   (finding 5, `repeat_edge` pins the choice). Step 5 runs Rust on both peers.
+Also open for John (4½d):
+- **The design facts that turned out wrong against the source** (plan-time facts 1, 2, 3, 5, 6,
+  9, 10, 14, 18; the source won): `--live` alone is not the default match, so only a bare run and
+  a bare preview boot the menu; C++ acts on the placeholder Enters and on F2/F3/F5/F6/F7/F9, so
+  "inert" is Rust-only and is unit-tested, not gated; only JOIN LAN / HOST ONLINE / JOIN ONLINE
+  play a second `MenuSelect` (HOST LAN goes through `default:` and plays one); a file level
+  resolves against the process CWD in C++ (`oracle_dump_shell` intervention 8); `menu_palette` ≠
+  `weapsel_palette` (`UpdateMenuPalettes` adds `SetWormColours`); the copyright reads
+  "MetsänElämet" (two `ä`); C++ `StartGame` plays `SoundBegin` (now ported, so the live game
+  plays the begin sample); the G2 format gained the `upd` column and a richer `boot` line; more
+  modules moved into `ui` (`viewport_step`, `HudFlags`, `apply_weapons`); exactly one test saw
+  the CP437 change. Also: the controller names are hard-coded in `common.cpp` as "Human", "CPU",
+  "AI" — `tc.cfg` has no `controllers` text (the cpp-map is corrected).
+- **Known live divergences** (not gated): a worm key held through Esc and released in the menu
+  stays pressed in C++ and not in Rust (fact 12; the G2 corpus refuses it); a looping sound
+  across NEW GAME is stopped by Rust's first audio reap of the new match, while C++ leaves it to
+  the mixer; at a low frame rate a tap's second event waits a tick (fact 19, presentation only),
+  and at ~10 fps (headless Chromium under SwiftShader) a press spanning two browser frames
+  outlasts 12 ticks and trips weapon selection's key repeat — real browsers run fast enough; at
+  small window heights the page's help text squeezes the canvas.
+- **Unported:** Tag's own-worm "YoureIt" banner (`viewport.cpp:249-254`) and the Holdazone zone
+  box (the sim's Holdazone arm is unported: a Holdazone setup boots as a never-processed game,
+  and only the HUD timer arms are drawn).
+- **Still absent:** the C++ random player names (4½f); recording a menu-driven match (Q6,
+  postponed); `liero.cfg` load/save (Q7, 4½e). `--live [<scenario>]` keeps the 4½c
+  scenario-live semantics (selection, F5, Esc quits), with no menu.
+- The native `cargo run -p game` smoke cannot run in this cloud container (no GPU adapter:
+  Bevy panics "Unable to find a GPU" under Xvfb); the G2 gate, the Xvfb side-by-sides and
+  the headless-Chromium walk cover the live path.
 
 ---
 

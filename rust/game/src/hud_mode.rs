@@ -5,27 +5,11 @@
 //! minimap on `settings->map` (`viewport.cpp:593`). A played match (`Live`) and a replay of
 //! one (`Replay`) therefore draw `(true, settings.map)`. The `Scripted` demo keeps its
 //! scenario's `render_hud` directive for both flags, so the `blood` demo — and the wasm
-//! frame-parity witness built on it — stays world-only. Until 4½d loads the setup (design
+//! frame-parity witness built on it — stays world-only. Until 4½e loads the setup (design
 //! §9.3.6) the binary passes `Settings::default().map`.
 
-use render::frame::Scene;
-
 use crate::input::Mode;
-
-/// The two HUD switches of a `render::frame::Scene`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HudFlags {
-    pub draw_hud: bool,
-    pub map: bool,
-}
-
-impl HudFlags {
-    /// Set `scene.draw_hud` and `scene.map`.
-    pub fn apply(self, scene: &mut Scene<'_>) {
-        scene.draw_hud = self.draw_hud;
-        scene.map = self.map;
-    }
-}
+pub use ui::shell::HudFlags;
 
 /// The HUD for `mode`: `Live`/`Replay` ⇒ drawn, minimap per `settings_map`; `Scripted` ⇒ the
 /// scenario's `render_hud` directive (`scenario_hud`) for both.
@@ -48,11 +32,12 @@ mod tests {
 
     use render::bitmap::Bitmap;
     use render::viewport::Viewport;
+    use scenario::build::build_match;
     use scenario::paths::TC_ROOT;
-    use scenario::settings::Settings;
+    use scenario::settings::{MatchConfig, Settings};
 
     use super::*;
-    use crate::new_game::NewGame;
+    use crate::new_game::generate_level;
 
     #[test]
     fn a_played_match_draws_the_hud_and_follows_the_map_setting() {
@@ -106,13 +91,13 @@ mod tests {
 
     #[test]
     fn the_flags_reach_the_frame_of_the_live_default_match() {
-        // Step 4½c: the live default match is the NEW GAME start (`game::new_game`), here in
-        // play (selection skipped: the saved picks, lives, the pool).
+        // Step 4½c: the live default match is the NEW GAME start (`ui::shell`), here in play
+        // (selection skipped: the saved picks, lives, the pool).
+        let tc = Path::new(TC_ROOT);
         let settings = Settings::default();
         let shadow = settings.shadow;
-        let ng = NewGame::new(Path::new(TC_ROOT), settings, Some(42), 0);
-        let loaded = ng
-            .start_without_selection(Path::new(TC_ROOT))
+        let level = generate_level(tc, &settings, 42);
+        let loaded = build_match(tc, &MatchConfig { settings, seed: 42 }, &level)
             .expect("the default settings build");
         let frame = |flags: HudFlags| -> Vec<u32> {
             let mut scene = loaded.scene.as_scene(0, shadow);

@@ -1,0 +1,18 @@
+# Step 4½d G1 values_draw: a centred menu with the value arm — selected (two boxes), unselected
+# (shadows), disabled with and without show_disabled_selection, an x override — and CP437 text.
+menu 160 30 15 50 1
+item 1 10 9 1 1 FIRST
+item 2 48 7 1 1 SECOND LONGER
+item 3 6 6 1 1 Metsän Elämet
+bind 1 integer 42 0 99 1 1 5 1 1
+bind 2 bool 1
+update_items
+first_visible
+draw 0 -1 0
+draw 1 -1 1
+draw 1 -1 0
+draw 0 100 0
+move 1
+draw 0 -1 0
+move 1
+draw 0 -1 0

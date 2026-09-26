@@ -1,0 +1,72 @@
+# Step 4½d G1 scrollbar_positions: the scrollbar tab at every selection of a 23-item menu
+# (height 15), scrolling one row at a time through EnsureInView.
+menu 60 12 15 0 0
+item 0 48 7 1 1 LINE 0
+item 1 48 7 1 1 LINE 1
+item 2 48 7 1 1 LINE 2
+item 3 48 7 1 1 LINE 3
+item 4 48 7 1 1 LINE 4
+item 5 48 7 1 1 LINE 5
+item 6 48 7 1 1 LINE 6
+item 7 48 7 1 1 LINE 7
+item 8 48 7 1 1 LINE 8
+item 9 48 7 1 1 LINE 9
+item 10 48 7 1 1 LINE 10
+item 11 48 7 1 1 LINE 11
+item 12 48 7 1 1 LINE 12
+item 13 48 7 1 1 LINE 13
+item 14 48 7 1 1 LINE 14
+item 15 48 7 1 1 LINE 15
+item 16 48 7 1 1 LINE 16
+item 17 48 7 1 1 LINE 17
+item 18 48 7 1 1 LINE 18
+item 19 48 7 1 1 LINE 19
+item 20 48 7 1 1 LINE 20
+item 21 48 7 1 1 LINE 21
+item 22 48 7 1 1 LINE 22
+move_to 0
+draw 0 -1 0
+move_to 1
+draw 0 -1 0
+move_to 2
+draw 0 -1 0
+move_to 3
+draw 0 -1 0
+move_to 4
+draw 0 -1 0
+move_to 5
+draw 0 -1 0
+move_to 6
+draw 0 -1 0
+move_to 7
+draw 0 -1 0
+move_to 8
+draw 0 -1 0
+move_to 9
+draw 0 -1 0
+move_to 10
+draw 0 -1 0
+move_to 11
+draw 0 -1 0
+move_to 12
+draw 0 -1 0
+move_to 13
+draw 0 -1 0
+move_to 14
+draw 0 -1 0
+move_to 15
+draw 0 -1 0
+move_to 16
+draw 0 -1 0
+move_to 17
+draw 0 -1 0
+move_to 18
+draw 0 -1 0
+move_to 19
+draw 0 -1 0
+move_to 20
+draw 0 -1 0
+move_to 21
+draw 0 -1 0
+move_to 22
+draw 0 -1 0

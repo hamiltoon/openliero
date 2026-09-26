@@ -1,0 +1,28 @@
+# Step 4½d G1 settings_killemall: the REAL SettingsMenu over the default setup — a draw before
+# UpdateItems (19 visible, no values, bottom_item 0), the Kill'em All visibility, paging, and
+# a full walk to the last item.
+settings default
+draw 1 -1 0
+update_items
+draw 1 -1 0
+first_visible
+draw 1 -1 0
+page 1
+draw 0 -1 0
+move 1
+move 1
+move 1
+move 1
+move 1
+move 1
+move 1
+move 1
+move 1
+move 1
+move 1
+move 1
+move 1
+move 1
+move 1
+move 1
+draw 0 -1 0

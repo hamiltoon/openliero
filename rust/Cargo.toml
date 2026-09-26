@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["sim-core", "assets", "sim", "render", "scenario", "game", "oracle-tests", "shot", "replay"]
+members = ["sim-core", "assets", "sim", "render", "scenario", "ui", "game", "oracle-tests", "shot", "replay"]
 
 # The browser build a PR preview deploys (`.github/workflows/preview.yml`): release
 # semantics, tuned for download size — Cloudflare Pages caps a single file at 25 MiB,

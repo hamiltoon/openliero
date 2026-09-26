@@ -1,0 +1,22 @@
+# Step 4½d G2 case regenerate (design §6.4; plan Task 9) — written by gen_slice4_5d.
+# Rust ledger: 247 frames, end `end 246 quit`, NEW GAME 2, RESUME 0, back-to-menu 2 (game over: false), black presents 2
+setup shell_regenerate_setup.cfg
+boot_seed 4
+match_seed 301
+match_seed 302
+frames 256
+expect quit
+key 40 down RETURN
+key 42 up RETURN
+key 84 down ESC
+key 86 up ESC
+key 126 down DOWN
+key 128 up DOWN
+key 129 down RETURN
+key 131 up RETURN
+key 173 down ESC
+key 175 up ESC
+key 205 down ESC
+key 207 up ESC
+key 213 down RETURN
+key 215 up RETURN

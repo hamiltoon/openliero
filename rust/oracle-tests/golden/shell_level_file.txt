@@ -1,0 +1,45 @@
+# oracle_dump_shell rust/oracle-tests/golden/shell_level_file_script.txt — the REAL C++ Gfx frame loop, headless (Step 4½d design §6.2)
+# boot <presents> <presented16> <bmp16> <fade> <menu_cycles> <top> <sel>
+# f <frame> <upd> <presents> <presented16> <bmp16> <fade> <menu_cycles> <top> <sel> <sounds>
+boot 1 f36cbe2231ce2b83 705296cf5ea8e593 0 0 M 1
+f 0 M 1 4e63ae2ad19d9dba 79dccce307535717 1 1 M 1 -
+f 1 M 1 e83b9f4bc790b531 c574b1a7142aee97 2 2 M 1 -
+f 2 M 1 04ada0aa0cb249c0 4132922dc4aa6a97 3 3 M 1 -
+f 3 M 1 8209535a4bc6f4cc c574b1a7142aee97 4 4 M 1 -
+f 4 M 1 4e8189e72b213e8c 79dccce307535717 5 5 M 1 -
+f 5 M 1 b63412005288c85d 62f8a5c4ccfaa117 6 6 M 1 -
+f 6 M 1 43197bf36f101c6a c78743f2b269cb97 7 7 M 1 -
+f 7 M 1 0e7bc055cc3a82aa 79dccce307535717 8 8 M 1 -
+f 8 M 1 4fb4a0052b6ffc95 c574b1a7142aee97 9 9 M 1 -
+f 9 M 1 3b096a22ac74afda 4132922dc4aa6a97 10 10 M 1 -
+f 10 M 1 cd254b054cb26a73 c574b1a7142aee97 11 11 M 1 -
+f 11 M 1 a39333e5c952845f 79dccce307535717 12 12 M 1 -
+f 12 M 1 535b4ce72bb2148f 62f8a5c4ccfaa117 13 13 M 1 -
+f 13 M 1 424206268510f30a c78743f2b269cb97 14 14 M 1 -
+f 14 M 1 f2885d9a72fce889 79dccce307535717 15 15 M 1 -
+f 15 M 1 98dd36142411f0b5 c574b1a7142aee97 16 16 M 1 -
+f 16 M 1 303835535163162c 4132922dc4aa6a97 17 17 M 1 -
+f 17 M 1 de0a9b8b87b36c3b c574b1a7142aee97 18 18 M 1 -
+f 18 M 1 197e93b6d03f34f2 79dccce307535717 19 19 M 1 -
+f 19 M 1 8f0c2e3ed92bebe6 62f8a5c4ccfaa117 20 20 M 1 -
+f 20 M 1 259f787e1925602a c78743f2b269cb97 21 21 M 1 -
+f 21 M 1 bf57382eb6773083 79dccce307535717 22 22 M 1 -
+f 22 M 1 a9542c2c20a95528 c574b1a7142aee97 23 23 M 1 -
+f 23 M 1 cf43cd7b62c0f36c 4132922dc4aa6a97 24 24 M 1 -
+f 24 M 1 e0c4089f81d994d3 c574b1a7142aee97 25 25 M 1 -
+f 25 M 1 b338685a3783097c 79dccce307535717 26 26 M 1 -
+f 26 M 1 4d99f0645a3562fd 62f8a5c4ccfaa117 27 27 M 1 -
+f 27 M 1 96b8f095fc55db71 c78743f2b269cb97 28 28 M 1 -
+f 28 M 1 eb4a3e516bcb1115 79dccce307535717 29 29 M 1 -
+f 29 M 1 f5d00a2ea33d61e8 c574b1a7142aee97 30 30 M 1 -
+f 30 M 1 ae320f123b92d6b7 4132922dc4aa6a97 31 31 M 1 -
+f 31 M 1 c574b1a7142aee97 c574b1a7142aee97 32 32 M 1 -
+f 32 M 1 79dccce307535717 79dccce307535717 32 33 M 1 -
+f 33 M 1 62f8a5c4ccfaa117 62f8a5c4ccfaa117 32 34 M 1 -
+f 34 M 1 c78743f2b269cb97 c78743f2b269cb97 32 35 M 1 -
+f 35 M 1 79dccce307535717 79dccce307535717 32 36 M 1 -
+f 36 M 1 c574b1a7142aee97 c574b1a7142aee97 32 37 M 1 -
+f 37 M 1 4132922dc4aa6a97 4132922dc4aa6a97 32 38 M 1 -
+f 38 M 1 c574b1a7142aee97 c574b1a7142aee97 32 39 M 1 -
+f 39 M 1 79dccce307535717 79dccce307535717 32 40 M 1 -
+end 40 frames

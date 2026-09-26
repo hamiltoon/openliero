@@ -397,6 +397,8 @@ if(OPENLIERO_BUILD_ORACLE_DUMP)
   target_link_libraries(oracle_dump_weapsel PRIVATE game)
   add_executable(oracle_dump_menu src/tools/oracle_dump/menu_dump.cpp)
   target_link_libraries(oracle_dump_menu PRIVATE game)
+  add_executable(oracle_dump_shell src/tools/oracle_dump/shell_dump.cpp)
+  target_link_libraries(oracle_dump_shell PRIVATE game)
 endif()
 
 # binaries

@@ -1,0 +1,12 @@
+# Step 4½e-1 G2e-1 case cfg_default (plan Task 8) — written by gen_slice4_5e1_shell.
+# Rust ledger: 82 frames, end `end 81 quit`, NEW GAME 0, RESUME 0, back-to-menu 0, tops -M, entries 0, weapon boxes 0, file lines 1
+setup default
+boot_seed 29
+frames 91
+expect quit
+detail
+fs shell_cfg_default_fs.txt
+key 40 down ESC
+key 42 up ESC
+key 48 down RETURN
+key 50 up RETURN

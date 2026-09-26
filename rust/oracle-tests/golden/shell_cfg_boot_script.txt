@@ -1,0 +1,28 @@
+# Step 4½e-1 G2e-1 case cfg_boot (plan Task 8) — written by gen_slice4_5e1_shell.
+# Rust ledger: 133 frames, end `end 132 quit`, NEW GAME 0, RESUME 0, back-to-menu 0, tops -M, entries 0, weapon boxes 0, file lines 1
+setup default
+boot_seed 28
+frames 142
+expect quit
+detail
+fs shell_cfg_boot_fs.txt
+key 40 down F7
+key 42 up F7
+key 46 down DOWN
+key 48 up DOWN
+key 49 down DOWN
+key 51 up DOWN
+key 52 down DOWN
+key 54 up DOWN
+key 55 down DOWN
+key 57 up DOWN
+key 58 down DOWN
+key 60 up DOWN
+key 61 down RIGHT
+key 81 up RIGHT
+key 85 down ESC
+key 87 up ESC
+key 91 down ESC
+key 93 up ESC
+key 99 down RETURN
+key 101 up RETURN

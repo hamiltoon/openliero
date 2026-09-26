@@ -1,0 +1,6 @@
+# Step 4½e-1 G2e-1 cfg_boot: the shipped setup in the system layer, the user's own
+# liero.cfg (Game of Tag, timeToLose 120, 400x300, namesOnBonuses) over it.
+dir sys Profiles
+dir sys Resources
+file sys Setups/liero.cfg data/Setups/liero.cfg
+file user Setups/liero.cfg rust/oracle-tests/golden/shell_cfg_boot_user_liero.cfg

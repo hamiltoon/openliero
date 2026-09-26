@@ -4,21 +4,26 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use render::bitmap::Bitmap;
-use render::hash::hash_frame;
+use render::hash::{hash_frame, FNV_OFFSET, FNV_PRIME};
 use scenario::settings::{Settings, GM_HOLDAZONE};
-use scenario::settings_toml::settings_from_toml;
-use sim::state::ControlState;
+use scenario::settings_toml::{settings_from_toml, settings_to_toml};
+use scenario::storage::{load_setup, ConfigStore, MemoryStore, NativeStore};
+use sim::hash::hash_game_state;
+use sim::state::{ControlState, SimState};
 use ui::keys::TypedKey;
 use ui::shell::level_slot::SeedSource;
 use ui::shell::playing::StartOptions;
-use ui::shell::{InputEvent, KeyEvent, Phase, Present, Route, Shell, ShellInput};
+use ui::shell::settings_menu::{LOAD_OPTIONS, SAVE_OPTIONS, SI_LEVEL};
+use ui::shell::{CurMenu, InputEvent, KeyEvent, Phase, Present, Route, Shell, ShellInput};
 use ui::text::UiTc;
 
 pub const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
 pub const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/golden");
+/// The repo root: an `fs` manifest's `<source>` paths are relative to it (plan §Formats).
+pub const REPO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 pub const CASES_NAMES: [&str; 11] = [
     "boot_idle",
@@ -34,11 +39,66 @@ pub const CASES_NAMES: [&str; 11] = [
     "f1_quit",
 ];
 
-/// The keys a case may press: nothing the C++ menu would act on where the Rust 4½d menu is inert
-/// (plan-time fact 2 — no F-key but F1). R/F/D/G are P1's up/down/left/right.
-pub const ALLOWED: [&str; 20] = [
-    "ESC", "RETURN", "KP_ENTER", "UP", "DOWN", "LEFT", "RIGHT", "PAGEUP", "PAGEDOWN", "LCTRL",
-    "RCTRL", "LALT", "RALT", "LSHIFT", "RSHIFT", "R", "F", "D", "G", "F1",
+/// The keys a case may press: nothing the C++ menu would act on where the Rust menu is inert
+/// (4½d plan-time fact 2; 4½e-1 T8: F2, F3, F5, F6, F8, F9, F10 and F11 stay refused). R/F/D/G
+/// are P1's up/down/left/right. Step 4½e-1 adds F7 (MATCH SETUP), BACKSPACE, SPACE and the
+/// explicit letters and digits (number entry, WEAPON OPTIONS' search, any key for a box).
+pub const ALLOWED: &[&str] = &[
+    "ESC",
+    "RETURN",
+    "KP_ENTER",
+    "UP",
+    "DOWN",
+    "LEFT",
+    "RIGHT",
+    "PAGEUP",
+    "PAGEDOWN",
+    "LCTRL",
+    "RCTRL",
+    "LALT",
+    "RALT",
+    "LSHIFT",
+    "RSHIFT",
+    "R",
+    "F",
+    "D",
+    "G",
+    "F1",
+    "F7",
+    "BACKSPACE",
+    "SPACE",
+    "A",
+    "B",
+    "C",
+    "E",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
 ];
 
 /// DOS index of each letter (`keys.cpp:9-35`).
@@ -77,6 +137,9 @@ pub fn key_of(name: &str) -> (u32, TypedKey) {
     let none = TypedKey::Sym(0);
     match name {
         "ESC" => (1, none),
+        // Step 4½e-1: SDL_SCANCODE_BACKSPACE, DOS 14, key_buf symbol 8 (outside the search's
+        // 32..127, plan §Formats).
+        "BACKSPACE" => (14, TypedKey::Sym(8)),
         "RETURN" => (28, none),
         "KP_ENTER" => (116, none),
         "UP" => (160, none),
@@ -125,7 +188,25 @@ pub struct KeyLine {
     pub name: String,
 }
 
-/// A `shell_<case>_script.txt` (format: plan Task 8).
+/// One script event (Step 4½e-1): a key line, or a `text <frame> <hex>` line — one
+/// `SDL_EVENT_TEXT_INPUT` whose string is `bytes` (plan §Formats).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Event {
+    Key(KeyLine),
+    Text { frame: u32, bytes: Vec<u8> },
+}
+
+impl Event {
+    pub fn frame(&self) -> u32 {
+        match self {
+            Event::Key(k) => k.frame,
+            Event::Text { frame, .. } => *frame,
+        }
+    }
+}
+
+/// A `shell_<case>_script.txt` (format: 4½d plan Task 8; 4½e-1 §Formats adds `detail`, `fs` and
+/// `text`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShellScript {
     /// The setup sidecar's file name, `None` = `default`.
@@ -134,7 +215,34 @@ pub struct ShellScript {
     pub match_seeds: Vec<u32>,
     pub frames: u32,
     pub expect_quit: bool,
-    pub keys: Vec<KeyLine>,
+    /// A `d` line after every `f` line.
+    pub detail: bool,
+    /// The `fs` manifest's file name (golden-dir-relative).
+    pub fs: Option<String>,
+    /// Key and text events, stably ordered by frame: within a frame the file order is the SDL
+    /// event order.
+    pub events: Vec<Event>,
+}
+
+fn decode_hex(hex: &str) -> Vec<u8> {
+    assert!(
+        (2..=8).contains(&hex.len()) && hex.len() % 2 == 0,
+        "bad text hex {hex}"
+    );
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| {
+            let b = &hex[i..i + 2];
+            assert!(
+                b.bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+                "bad text hex {hex}"
+            );
+            let v = u8::from_str_radix(b, 16).unwrap();
+            assert!(v != 0, "a NUL byte in text {hex}");
+            v
+        })
+        .collect()
 }
 
 impl ShellScript {
@@ -150,7 +258,15 @@ impl ShellScript {
                 ["match_seed", v] => s.match_seeds.push(v.parse().unwrap()),
                 ["frames", v] => s.frames = v.parse().unwrap(),
                 ["expect", v] => s.expect_quit = *v == "quit",
-                ["key", f, k, n] => s.keys.push(KeyLine {
+                ["detail"] => {
+                    assert!(!s.detail, "two detail lines");
+                    s.detail = true;
+                }
+                ["fs", m] => {
+                    assert!(s.fs.is_none(), "two fs lines");
+                    s.fs = Some(m.to_string());
+                }
+                ["key", f, k, n] => s.events.push(Event::Key(KeyLine {
                     frame: f.parse().unwrap(),
                     kind: match *k {
                         "down" => Kind::Down,
@@ -159,11 +275,19 @@ impl ShellScript {
                         other => panic!("bad key kind {other}"),
                     },
                     name: n.to_string(),
+                })),
+                ["text", f, hex] => s.events.push(Event::Text {
+                    frame: f.parse().unwrap(),
+                    bytes: decode_hex(hex),
                 }),
                 other => panic!("bad script line {other:?}"),
             }
         }
-        s.keys.sort_by_key(|k| k.frame); // stable: the file order within a frame, as the dumper
+        assert!(
+            s.fs.is_none() || s.setup.is_none(),
+            "fs needs setup default"
+        );
+        s.events.sort_by_key(Event::frame); // stable: the file order within a frame, as the dumper
         s
     }
 
@@ -179,13 +303,27 @@ impl ShellScript {
             self.frames,
             if self.expect_quit { "quit" } else { "frames" }
         );
-        for k in &self.keys {
-            let kind = match k.kind {
-                Kind::Down => "down",
-                Kind::Up => "up",
-                Kind::Repeat => "repeat",
-            };
-            out += &format!("key {} {kind} {}\n", k.frame, k.name);
+        if self.detail {
+            out += "detail\n";
+        }
+        if let Some(m) = &self.fs {
+            out += &format!("fs {m}\n");
+        }
+        for e in &self.events {
+            match e {
+                Event::Key(k) => {
+                    let kind = match k.kind {
+                        Kind::Down => "down",
+                        Kind::Up => "up",
+                        Kind::Repeat => "repeat",
+                    };
+                    out += &format!("key {} {kind} {}\n", k.frame, k.name);
+                }
+                Event::Text { frame, bytes } => {
+                    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    out += &format!("text {frame} {hex}\n");
+                }
+            }
         }
         out
     }
@@ -209,13 +347,55 @@ impl B {
         }
     }
 
+    /// The frame cursor.
+    pub fn now(&self) -> u32 {
+        self.t
+    }
+
+    /// Step 4½e-1: a `d` line after every `f` line.
+    pub fn detail(mut self) -> B {
+        self.s.detail = true;
+        self
+    }
+
+    /// Step 4½e-1: the `fs` fixture manifest (golden-dir-relative); needs `setup default`.
+    pub fn fs(mut self, manifest: &str) -> B {
+        assert!(self.s.setup.is_none(), "fs needs setup default");
+        self.s.fs = Some(manifest.to_string());
+        self
+    }
+
     pub fn at(mut self, dt: u32, kind: Kind, name: &str) -> B {
-        self.s.keys.push(KeyLine {
+        self.s.events.push(Event::Key(KeyLine {
             frame: self.t + dt,
             kind,
             name: name.to_string(),
+        }));
+        self
+    }
+
+    /// One `SDL_EVENT_TEXT_INPUT` of `bytes` on the cursor frame (the cursor does not move).
+    pub fn text(mut self, bytes: &[u8]) -> B {
+        self.s.events.push(Event::Text {
+            frame: self.t,
+            bytes: bytes.to_vec(),
         });
         self
+    }
+
+    /// Type `s` one char per event (plan fact 7): per char, `key down <c>` and `text <c>` on one
+    /// frame, `key up` two frames later; the cursor moves 3 per char.
+    pub fn type_digits(self, s: &str) -> B {
+        let mut b = self;
+        for c in s.chars() {
+            let name = c.to_ascii_uppercase().to_string();
+            b = b
+                .at(0, Kind::Down, &name)
+                .text(&[c as u8])
+                .at(2, Kind::Up, &name)
+                .idle(3);
+        }
+        b
     }
 
     pub fn idle(mut self, n: u32) -> B {
@@ -226,6 +406,11 @@ impl B {
     /// Down now, up two frames later; the cursor moves 3.
     pub fn tap(self, name: &str) -> B {
         self.at(0, Kind::Down, name).at(2, Kind::Up, name).idle(3)
+    }
+
+    /// `n` taps of `name`.
+    pub fn taps_n(self, name: &str, n: u32) -> B {
+        (0..n).fold(self, |b, _| b.tap(name))
     }
 
     /// Several keys down on the same frame (Up + R; both players' DONE).
@@ -270,9 +455,9 @@ impl B {
         self.idle(29)
     }
 
-    /// The script, its keys stably sorted by frame (the order `parse` and the dumper see).
+    /// The script, its events stably sorted by frame (the order `parse` and the dumper see).
     pub fn end(mut self, extra: u32, quit: bool) -> ShellScript {
-        self.s.keys.sort_by_key(|k| k.frame);
+        self.s.events.sort_by_key(Event::frame);
         self.s.frames = self.t + extra;
         self.s.expect_quit = quit;
         self.s
@@ -300,13 +485,13 @@ fn setup_name(case: &str) -> String {
 }
 
 /// Both players Up (RANDOMIZE -> DONE!), then both Fire: the selection ends on the Fire frame.
-fn both_done(b: B) -> B {
+pub fn both_done(b: B) -> B {
     b.taps(&["R", "UP"]).taps(&["LCTRL", "RCTRL"])
 }
 
 /// Movement and fire for `n` match frames (P1 right + fire, P2 left + fire), all keys released
 /// by the end.
-fn play(b: B, n: u32) -> B {
+pub fn play(b: B, n: u32) -> B {
     assert!(n >= 120);
     b.at(0, Kind::Down, "G")
         .at(10, Kind::Down, "LCTRL")
@@ -536,6 +721,127 @@ pub fn settings_for(script: &ShellScript) -> Settings {
     }
 }
 
+/// FNV-1a-64 over `bytes` with the frames' constants (the `d` line's `cfg16`, the `file` line's
+/// `fnv16`; plan §Formats).
+pub fn fnv64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(FNV_OFFSET, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(FNV_PRIME)
+    })
+}
+
+/// A manifest `<rel>`: non-empty, forward slashes, no absolute path, no `\`, no `.`/`..`/empty
+/// part (plan §Formats; the dumper's `ValidRel`).
+fn valid_rel(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.starts_with('/')
+        && !rel.contains('\\')
+        && rel
+            .split('/')
+            .all(|p| !p.is_empty() && p != "." && p != "..")
+}
+
+/// The `fs` fixture (plan §Formats): `root/{user,sys}`, filled from `manifest` with copies.
+/// Any other line is refused, as the dumper refuses it.
+pub fn make_fixture(manifest: &Path, root: &Path) {
+    let _ = std::fs::remove_dir_all(root);
+    std::fs::create_dir_all(root.join("user")).unwrap();
+    std::fs::create_dir_all(root.join("sys")).unwrap();
+    for line in std::fs::read_to_string(manifest).unwrap().lines() {
+        let t: Vec<&str> = line
+            .split_whitespace()
+            .take_while(|t| !t.starts_with('#'))
+            .collect();
+        match t.as_slice() {
+            [] => {}
+            ["dir", layer @ ("user" | "sys"), rel] if valid_rel(rel) => {
+                std::fs::create_dir_all(root.join(layer).join(rel)).unwrap();
+            }
+            ["file", layer @ ("user" | "sys"), rel, src] if valid_rel(rel) => {
+                let dest = root.join(layer).join(rel);
+                assert!(!dest.exists(), "fs manifest: {layer}/{rel} given twice");
+                std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+                std::fs::copy(Path::new(REPO).join(src), &dest)
+                    .unwrap_or_else(|e| panic!("fs manifest source {src}: {e}"));
+            }
+            _ => panic!("bad fs manifest line: {line}"),
+        }
+    }
+}
+
+/// `file <rel> <fnv16>` for every regular file under `user`, `rel` sorted bytewise.
+pub fn file_lines(user: &Path) -> Vec<String> {
+    fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, u64)>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let ft = std::fs::symlink_metadata(&p).unwrap().file_type();
+            if ft.is_dir() {
+                walk(&p, base, out);
+            } else if ft.is_file() {
+                let rel = p
+                    .strip_prefix(base)
+                    .unwrap()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push((rel, fnv64(&std::fs::read(&p).unwrap())));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(user, user, &mut files);
+    files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    files
+        .into_iter()
+        .map(|(rel, h)| format!("file {rel} {h:016x}"))
+        .collect()
+}
+
+/// Harness switches: T8's counterfactual witnesses flip one of them (`Shell::debug_mut`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Opts {
+    pub resume_sync: bool,
+    pub small_labels: bool,
+}
+
+impl Default for Opts {
+    fn default() -> Self {
+        Opts {
+            resume_sync: true,
+            small_labels: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryOutcome {
+    Accepted,
+    Cancelled,
+    /// Return on an empty buffer: the value is kept (`integerBehavior.cpp:58`).
+    Empty,
+}
+
+/// One number entry, as the harness saw it close: its item, how it closed, the item's value
+/// after the close.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub frame: u32,
+    pub item: String,
+    pub outcome: EntryOutcome,
+    pub value: String,
+}
+
+/// Worm facts after a match frame (the key-edge witnesses).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WormSnap {
+    pub visible: bool,
+    pub ready: bool,
+    pub health: i32,
+    pub control_states: u32,
+    pub current_weapon: i32,
+    pub rope_out: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Ledger {
     pub new_games: u32,
@@ -546,26 +852,42 @@ pub struct Ledger {
     pub black: u32,
     pub pops: u32,
     pub violations: Vec<String>,
+    /// Step 4½e-1: every top seen after a frame.
+    pub tops: BTreeSet<char>,
+    /// `InfoBoxState`s WEAPON OPTIONS pushed (its close refusal).
+    pub weapon_boxes: u32,
+    pub entries: Vec<Entry>,
+    /// (frame, weapon index, old, new) for every `weap_table` change.
+    pub weap_changes: Vec<(u32, usize, u32, u32)>,
+    /// The level size of every NEW GAME.
+    pub level_sizes: Vec<(i32, i32)>,
+    /// The frames of the RESUME routes.
+    pub resume_frames: Vec<u32>,
+    /// Match frames with a weapon bonus (`frame == 0`) while `names_on_bonuses`.
+    pub bonus_labels: u32,
+    /// Match frames with a booby-trap wobject at `cur_frame == 0` while `names_on_bonuses`.
+    pub booby_labels: u32,
+    /// Match frames per player with a visible worm holding Change.
+    pub change_labels: [u32; 2],
 }
 
 pub struct Run {
     pub boot: String,
     pub lines: Vec<String>,
+    /// Step 4½e-1: the `d` lines (with `detail`), one per `f` line.
+    pub details: Vec<String>,
     pub end: String,
+    /// Step 4½e-1: the `file` lines (with `fs`).
+    pub files: Vec<String>,
     pub ledger: Ledger,
     /// (frame, the surface, its presented fade) for frames in `keep`.
     pub shots: Vec<(u32, Bitmap, i32)>,
-}
-
-fn upd_char(p: Phase) -> char {
-    match p {
-        Phase::Menu => 'M',
-        // Step 4½e-1: only an `InputStringState` is `Phase::Text`; T8 derives O/B from the top.
-        Phase::Text => 'I',
-        Phase::Weapsel => 'W',
-        Phase::Game => 'G',
-        Phase::Quit => '-',
-    }
+    /// Per frame: both worms after it, on match frames (top `G`, not in selection).
+    pub worms: Vec<Option<[WormSnap; 2]>>,
+    /// P1's five weapon types after the run.
+    pub p1_weapons: Vec<Option<i32>>,
+    /// The menu's settings after the run.
+    pub settings: Settings,
 }
 
 fn present_fields(sh: &Shell, p: Option<Present>) -> (String, Option<i32>) {
@@ -611,8 +933,53 @@ fn words(held: &BTreeSet<u32>, s: &Settings) -> [ControlState; 2] {
 /// Drive `script` through `ui::shell::Shell`: the golden-format lines, the ledger and the
 /// validators' findings (plan Task 9). `keep` = an inclusive frame range whose surfaces to keep.
 pub fn drive(script: &ShellScript, keep: Option<(u32, u32)>) -> Run {
-    let settings = settings_for(script);
-    let select = UiTc::load(Path::new(TC_ROOT)).hooks.select;
+    drive_with(script, keep, Opts::default())
+}
+
+/// A fresh fixture directory per drive (tests drive the same case in parallel).
+static FIXTURES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The worms after a frame.
+fn snaps(sim: &SimState) -> [WormSnap; 2] {
+    [0, 1].map(|i| {
+        let w = &sim.worms[i];
+        WormSnap {
+            visible: w.visible,
+            ready: w.ready,
+            health: w.health,
+            control_states: w.control_states.pack(),
+            current_weapon: w.current_weapon,
+            rope_out: w.ninjarope.out,
+        }
+    })
+}
+
+/// [`drive`] with the harness switches (T8's counterfactual witnesses). Step 4½e-1: the events
+/// in order (key and text), the `fs` store (plan §Formats), `record_replays = false` after the
+/// boot load (intervention 6's mirror), `upd` from the top before the frame, the `d` and `file`
+/// lines and the e-1 validators (plan T8 Step 2).
+pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) -> Run {
+    let mut fixture: Option<PathBuf> = None;
+    let (mut settings, store): (Settings, Box<dyn ConfigStore>) = match &script.fs {
+        None => (settings_for(script), Box::new(MemoryStore::new())),
+        Some(m) => {
+            let stem = m.trim_start_matches("shell_").trim_end_matches("_fs.txt");
+            let n = FIXTURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "liero_rs_shell_fs_{stem}_{}_{n}",
+                std::process::id()
+            ));
+            make_fixture(&Path::new(GOLDEN).join(m), &root);
+            let store = NativeStore::split(root.join("user"), Some(root.join("sys")))
+                .with_root_label("./user");
+            let s = load_setup(&store).expect("the boot load (gameEntry.cpp:55-58)");
+            fixture = Some(root);
+            (s, Box::new(store))
+        }
+    };
+    settings.record_replays = false; // intervention 6's mirror
+    let tc = UiTc::load(Path::new(TC_ROOT));
+    let select = tc.hooks.select;
     let seeds = SeedSource::Scripted {
         boot: script.boot_seed,
         matches: script.match_seeds.iter().copied().collect(),
@@ -620,27 +987,74 @@ pub fn drive(script: &ShellScript, keep: Option<(u32, u32)>) -> Run {
     let (mut sh, mut sim, out) = Shell::boot(
         Path::new(TC_ROOT),
         settings.clone(),
-        Box::new(scenario::storage::MemoryStore::new()),
+        store,
         seeds,
         0,
         StartOptions::default(),
     );
+    sh.debug_mut().resume_sync = opts.resume_sync;
+    sh.debug_mut().small_labels = opts.small_labels;
     let (p, _) = present_fields(&sh, out.present);
     let mut run = Run {
         boot: format!("boot {p} {}", tail(&sh)),
         lines: Vec::new(),
+        details: Vec::new(),
         end: String::new(),
+        files: Vec::new(),
         ledger: Ledger::default(),
         shots: Vec::new(),
+        worms: Vec::new(),
+        p1_weapons: Vec::new(),
+        settings: Settings::default(),
     };
     let mut held: BTreeSet<u32> = BTreeSet::new();
     let v = |run: &mut Run, frame: u32, what: String| {
         run.ledger.violations.push(format!("frame {frame}: {what}"))
     };
+    // Every keyboard player's bound DOS keys (a letter typed in WEAPON OPTIONS moves a worm's
+    // cursor there too, known pitfall 10).
+    let controls: BTreeSet<u32> = settings.worm_settings[..2]
+        .iter()
+        .flat_map(|w| w.controls_ex.iter().copied())
+        .filter(|&k| k != 0)
+        .collect();
+    // The open number entry: the harness's mirror of its buffer, and whether Esc closed it.
+    let mut entry: Option<(Vec<u8>, Option<bool>)> = None;
     for frame in 0..script.frames {
+        let top0 = sh.top_char();
+        let upd = if top0 == 'G' && sh.phase() == Phase::Weapsel {
+            'W'
+        } else {
+            top0
+        };
+        let cur0 = sh.cur_menu();
+        let weap0 = sh.settings().weap_table;
         let mut seen = BTreeSet::new();
         let mut events = Vec::new();
-        for k in script.keys.iter().filter(|k| k.frame == frame) {
+        let mut downs = 0;
+        for e in script.events.iter().filter(|e| e.frame() == frame) {
+            let k = match e {
+                Event::Text { bytes, .. } => {
+                    if top0 != 'I' {
+                        v(
+                            &mut run,
+                            frame,
+                            format!("a text event while the top is {top0}"),
+                        );
+                    }
+                    if let Some((buf, _)) = entry.as_mut() {
+                        if bytes.len() == 1 && bytes[0].is_ascii_digit() {
+                            buf.push(bytes[0]);
+                        }
+                    }
+                    downs += 1;
+                    events.push(InputEvent::Text(
+                        String::from_utf8(bytes.clone()).expect("UTF-8 text"),
+                    ));
+                    continue;
+                }
+                Event::Key(k) => k,
+            };
             if !ALLOWED.contains(&k.name.as_str()) {
                 v(
                     &mut run,
@@ -668,6 +1082,30 @@ pub fn drive(script: &ShellScript, keep: Option<(u32, u32)>) -> Run {
                 }
                 _ => {}
             }
+            if k.kind != Kind::Up {
+                downs += 1;
+                if top0 == 'O' && k.name.len() == 1 && controls.contains(&dos) {
+                    v(
+                        &mut run,
+                        frame,
+                        format!("{} typed in WEAPON OPTIONS is a player's control", k.name),
+                    );
+                }
+                if let Some((buf, closed)) = entry.as_mut().filter(|_| top0 == 'I') {
+                    match k.name.as_str() {
+                        "BACKSPACE" => {
+                            buf.pop();
+                        }
+                        "RETURN" | "KP_ENTER" => {
+                            closed.get_or_insert(true);
+                        }
+                        "ESC" => {
+                            closed.get_or_insert(false);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             events.push(InputEvent::Key(KeyEvent {
                 dos,
                 down: k.kind != Kind::Up,
@@ -676,16 +1114,24 @@ pub fn drive(script: &ShellScript, keep: Option<(u32, u32)>) -> Run {
             }));
         }
         let sampled = words(&held, &settings);
+        // Plan D4: `now_ms = 0`, so the search never times out (the dumper's gap check keeps C++
+        // inside its 1500 ms too).
         let input = ShellInput {
             events: &events,
             sampled,
             fresh_seed: 0,
-            now_ms: u64::from(frame) * 14,
+            now_ms: 0,
             restart: false,
         };
         let out = sh.frame(&mut sim, &input);
-        if out.upd == Phase::Menu
-            && out.menu_sounds.contains(&select)
+        let top1 = sh.top_char();
+        run.ledger.tops.insert(top1);
+        let selected = out.menu_sounds.contains(&select);
+        if upd == 'M'
+            && cur0 == CurMenu::Main
+            && sh.cur_menu() == CurMenu::Main
+            && top1 == 'M'
+            && selected
             && !sh.menu_fading()
             && out.routed.is_none()
         {
@@ -695,10 +1141,68 @@ pub fn drive(script: &ShellScript, keep: Option<(u32, u32)>) -> Run {
                 "a placeholder was selected (the C++ menu acts on it)".into(),
             );
         }
+        if upd == 'M'
+            && cur0 == CurMenu::Settings
+            && sh.cur_menu() == CurMenu::Settings
+            && top1 == 'M'
+            && selected
+            && [SI_LEVEL, LOAD_OPTIONS, SAVE_OPTIONS].contains(&sh.settings_menu().selected_id())
+        {
+            v(
+                &mut run,
+                frame,
+                "Enter on LEVEL / LOAD SETUP / SAVE SETUP AS... (C++ pushes a selector, D6)".into(),
+            );
+        }
+        if upd == 'M' && top1 == 'B' {
+            v(
+                &mut run,
+                frame,
+                "Rust refused a NEW GAME or RESUME that C++ plays (plan D5)".into(),
+            );
+        }
+        if matches!(top0, 'M' | 'O') && matches!(top1, 'O' | 'I' | 'B') && top1 != top0 {
+            if downs > 1 {
+                v(
+                    &mut run,
+                    frame,
+                    format!("another event in the frame that pushed {top1} (plan fact 4)"),
+                );
+            }
+            if top0 == 'O' {
+                run.ledger.weapon_boxes += 1;
+            }
+        }
+        if top0 != 'I' && top1 == 'I' {
+            let item = sh.settings_menu().selected().expect("the entry's item");
+            entry = Some((item.value.trim_end_matches('%').as_bytes().to_vec(), None));
+        } else if top0 == 'I' && top1 != 'I' {
+            let (buf, closed) = entry.take().expect("an open entry");
+            let item = sh.settings_menu().selected().expect("the entry's item");
+            run.ledger.entries.push(Entry {
+                frame,
+                item: item.string.clone(),
+                outcome: match closed {
+                    Some(false) => EntryOutcome::Cancelled,
+                    _ if buf.is_empty() => EntryOutcome::Empty,
+                    _ => EntryOutcome::Accepted,
+                },
+                value: item.value.clone(),
+            });
+        }
+        let weap1 = sh.settings().weap_table;
+        for (i, (a, b)) in weap0.iter().zip(weap1.iter()).enumerate() {
+            if a != b {
+                run.ledger.weap_changes.push((frame, i, *a, *b));
+            }
+        }
         match out.routed {
             Some(Route::NewGame { .. }) => {
                 run.ledger.new_games += 1;
                 run.ledger.pops += 1;
+                run.ledger
+                    .level_sizes
+                    .push((sim.level.width, sim.level.height));
                 if sim.rand.draws() != 0 {
                     v(
                         &mut run,
@@ -706,13 +1210,14 @@ pub fn drive(script: &ShellScript, keep: Option<(u32, u32)>) -> Run {
                         "the selection constructor drew the RNG (intervention 3)".into(),
                     );
                 }
-                if settings.game_mode == GM_HOLDAZONE {
+                if sh.settings().game_mode == GM_HOLDAZONE {
                     v(&mut run, frame, "a Holdazone match (unported)".into());
                 }
             }
             Some(Route::Resume) => {
                 run.ledger.resumes += 1;
                 run.ledger.pops += 1;
+                run.ledger.resume_frames.push(frame);
             }
             Some(Route::Menu) => {
                 run.ledger.menus += 1;
@@ -741,19 +1246,56 @@ pub fn drive(script: &ShellScript, keep: Option<(u32, u32)>) -> Run {
         } else {
             sounds.join(",")
         };
-        run.lines.push(format!(
-            "f {frame} {} {p} {} {sounds}",
-            upd_char(out.upd),
-            tail(&sh)
-        ));
+        run.lines
+            .push(format!("f {frame} {upd} {p} {} {sounds}", tail(&sh)));
+        let in_match = top1 == 'G' && sh.phase() == Phase::Game;
+        if script.detail {
+            let cur = match sh.cur_menu() {
+                CurMenu::Main => 'M',
+                CurMenu::Settings => 'S',
+            };
+            let state = if in_match {
+                format!("{:08x}", hash_game_state(&sim))
+            } else {
+                "-".to_string()
+            };
+            run.details.push(format!(
+                "d {frame} {cur} {} {:016x} {state}",
+                sh.settings_menu().selection(),
+                fnv64(settings_to_toml(sh.settings()).as_bytes())
+            ));
+        }
+        if in_match {
+            let names = sh.current().expect("a match").settings().names_on_bonuses;
+            if names && sim.bonuses.iter().any(|b| b.frame == 0) {
+                run.ledger.bonus_labels += 1;
+            }
+            if names
+                && !sim.wobject_consts.h_rem_exp
+                && sim
+                    .wobjects
+                    .iter()
+                    .any(|w| w.ty == Some(34) && w.cur_frame == 0)
+            {
+                run.ledger.booby_labels += 1;
+            }
+            for (i, w) in sim.worms.iter().enumerate().take(2) {
+                if w.visible && w.control_states.get(ControlState::CHANGE) {
+                    run.ledger.change_labels[i] += 1;
+                }
+            }
+            run.worms.push(Some(snaps(&sim)));
+        } else {
+            run.worms.push(None);
+        }
         if let (Some((a, b)), Some(f)) = (keep, fade) {
             if (a..=b).contains(&frame) {
                 run.shots.push((frame, sh.surface().clone(), f));
             }
         }
         if out.quit {
-            if script.keys.iter().any(|k| k.frame > frame) {
-                v(&mut run, frame, "key events after the quit".into());
+            if script.events.iter().any(|e| e.frame() > frame) {
+                v(&mut run, frame, "events after the quit".into());
             }
             run.end = format!("end {frame} quit");
             break;
@@ -776,6 +1318,16 @@ pub fn drive(script: &ShellScript, keep: Option<(u32, u32)>) -> Run {
             script.frames,
             "the expect line disagrees with the run".into(),
         );
+    }
+    run.p1_weapons = sim.worms[0].weapons.iter().map(|w| w.ty).collect();
+    run.settings = sh.settings().clone();
+    if let Some(root) = fixture {
+        if run.ledger.quit {
+            sh.save_on_exit()
+                .expect("the exit save (gameEntry.cpp:78, intervention 9)");
+        }
+        run.files = file_lines(&root.join("user"));
+        let _ = std::fs::remove_dir_all(&root);
     }
     run
 }

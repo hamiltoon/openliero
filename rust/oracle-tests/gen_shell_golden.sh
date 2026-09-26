@@ -11,8 +11,8 @@
 # after every f line, a script with `fs` ends with `file` lines after the end line (formats:
 # docs/superpowers/plans/2026-09-26-liero-rs-step4.5-slice4.5e1-plan.md, §Formats pinned). The
 # e-1 scripts come from `--example gen_slice4_5e1_shell -- write <golden dir>`.
-# EXPECTED_SHELL_CASES (default 21: the 4½d 11 + the e-1 10) is a temporary override for the
-# window before the e-1 scripts are committed (EXPECTED_SHELL_CASES=11).
+# EXPECTED_SHELL_CASES (default 22: the 4½d 11 + the e-1 11, i.e. the plan's 10 and Batch 5's
+# key_edges) overrides the expected script count.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PRESET="${PRESET:-macos-arm64}"
@@ -86,5 +86,5 @@ for scn in rust/oracle-tests/golden/shell_*_script.txt; do
   echo "wrote $out"
   n=$((n + 1))
 done
-want="${EXPECTED_SHELL_CASES:-21}"
+want="${EXPECTED_SHELL_CASES:-22}"
 test "$n" -eq "$want" || { echo "FAIL: $n shell scripts (want $want)"; exit 1; }

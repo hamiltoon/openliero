@@ -8,10 +8,17 @@
 //! presented frames around a mismatch as `<dir>/shell_<case>/f_NNNN.ppm` (the dumper's
 //! --ppm-dir names).
 
+//!
+//! Step 4½e-1 (plan Task 9): the G2e-1 cases (`shell_e1_cases`) add a `d` line after every `f`
+//! line (`cur`, `ssel`, `cfg16`, `state8`) and, for the `fs` cases, the `file` lines after the
+//! `end` line (the exit save and the boot-time defaults save); both are compared field by field.
+
 mod shell_common;
+mod shell_e1_cases;
 
 use render::present::fade_argb;
 use shell_common as sc;
+use shell_e1_cases as e1;
 
 const FIELDS: [&str; 11] = [
     "f",
@@ -27,10 +34,17 @@ const FIELDS: [&str; 11] = [
     "sounds",
 ];
 
+/// The `d` line's fields (plan D1).
+const D_FIELDS: [&str; 6] = ["d", "frame", "cur", "ssel", "cfg16", "state8"];
+/// The `file` line's fields (plan §Formats).
+const FILE_FIELDS: [&str; 3] = ["file", "rel", "fnv16"];
+
 struct Golden {
     boot: String,
     frames: Vec<String>,
+    details: Vec<String>,
     end: String,
+    files: Vec<String>,
 }
 
 fn golden(name: &str) -> Golden {
@@ -38,7 +52,9 @@ fn golden(name: &str) -> Golden {
     let mut g = Golden {
         boot: String::new(),
         frames: Vec::new(),
+        details: Vec::new(),
         end: String::new(),
+        files: Vec::new(),
     };
     for l in text
         .lines()
@@ -47,11 +63,27 @@ fn golden(name: &str) -> Golden {
         match l.split_whitespace().next() {
             Some("boot") => g.boot = l.to_string(),
             Some("f") => g.frames.push(l.to_string()),
+            Some("d") => g.details.push(l.to_string()),
             Some("end") => g.end = l.to_string(),
+            Some("file") => g.files.push(l.to_string()),
             _ => panic!("{name}: unexpected golden line {l}"),
         }
     }
     g
+}
+
+/// The first field of `fields` where two lines differ.
+fn first_diff<'a>(fields: &[&'a str], a: &str, b: &str) -> Option<&'a str> {
+    let (x, y): (Vec<&str>, Vec<&str>) = (
+        a.split_whitespace().collect(),
+        b.split_whitespace().collect(),
+    );
+    fields
+        .iter()
+        .enumerate()
+        .find(|(k, _)| x.get(*k) != y.get(*k))
+        .map(|(_, f)| *f)
+        .or((x.len() != y.len()).then_some("(extra fields)"))
 }
 
 /// `Err((frame, message))` at the first difference.
@@ -81,6 +113,24 @@ fn compare(name: &str, want: &Golden, run: &sc::Run) -> Result<(), (u32, String)
                 ));
             }
         }
+        // Step 4½e-1: the frame's `d` line, field by field (plan D1).
+        match (run.details.get(i), want.details.get(i)) {
+            (None, None) => {}
+            (Some(g), Some(w)) => {
+                if let Some(field) = first_diff(&D_FIELDS, g, w) {
+                    return Err((
+                        i as u32,
+                        format!("{name}: G2 d line of frame {}, column `{field}` differs\n  C++:  {w}\n  Rust: {g}", wf[1]),
+                    ));
+                }
+            }
+            (g, w) => {
+                return Err((
+                    i as u32,
+                    format!("{name}: G2 d line of frame {} present on one side only\n  C++:  {w:?}\n  Rust: {g:?}", wf[1]),
+                ))
+            }
+        }
     }
     if run.lines.len() != want.frames.len() || run.end != want.end {
         let n = run.lines.len().min(want.frames.len()) as u32;
@@ -94,6 +144,36 @@ fn compare(name: &str, want: &Golden, run: &sc::Run) -> Result<(), (u32, String)
                 run.end
             ),
         ));
+    }
+    if run.details.len() != want.details.len() {
+        return Err((
+            run.lines.len() as u32,
+            format!(
+                "{name}: G2 d line count: C++ {}, Rust {}",
+                want.details.len(),
+                run.details.len()
+            ),
+        ));
+    }
+    if run.files.len() != want.files.len() {
+        return Err((
+            run.lines.len() as u32,
+            format!(
+                "{name}: G2 file line count: C++ {} {:?}, Rust {} {:?}",
+                want.files.len(),
+                want.files,
+                run.files.len(),
+                run.files
+            ),
+        ));
+    }
+    for (g, w) in run.files.iter().zip(&want.files) {
+        if let Some(field) = first_diff(&FILE_FIELDS, g, w) {
+            return Err((
+                run.lines.len() as u32,
+                format!("{name}: G2 file line, column `{field}` differs\n  C++:  {w}\n  Rust: {g}"),
+            ));
+        }
     }
     Ok(())
 }
@@ -168,9 +248,88 @@ fn the_committed_scripts_are_the_generators() {
         })
         .collect();
     on_disk.sort();
-    let mut want: Vec<String> = sc::CASES_NAMES.iter().map(|s| s.to_string()).collect();
+    // The union: the 4½d 11 and the e-1 11, each against its own generator.
+    let labels_seed = sc::read_script("labels").match_seeds[0];
+    for c in e1::cases(labels_seed) {
+        assert_eq!(
+            sc::read_script(c.name),
+            c.script,
+            "{}: regenerate with gen_slice4_5e1_shell",
+            c.name
+        );
+        for (file, text) in &c.files {
+            assert_eq!(
+                std::fs::read_to_string(format!("{}/{file}", sc::GOLDEN)).unwrap(),
+                *text,
+                "{}: {file} — regenerate with gen_slice4_5e1_shell",
+                c.name
+            );
+        }
+    }
+    let mut want: Vec<String> = sc::CASES_NAMES
+        .iter()
+        .chain(e1::NAMES.iter())
+        .map(|s| s.to_string())
+        .collect();
     want.sort();
     assert_eq!(on_disk, want);
+}
+
+#[test]
+fn the_e1_milestone_is_bit_exact() {
+    // 🎯 e-1 (done-when 2): F7 → GAME MODE ×3 → LIVES typed → LOADING TIMES held → MAP WIDTH /
+    // HEIGHT typed → WEAPON OPTIONS (ban, the box, re-enable) → NEW GAME → selection → play →
+    // Esc → AMOUNT OF BLOOD held, MAX BONUSES typed → RESUME → play → Esc → QUIT → the exit save.
+    let run = sc::drive(&sc::read_script("match_setup"), None);
+    let l = &run.ledger;
+    assert_eq!(
+        (
+            l.new_games,
+            l.resumes,
+            l.quit,
+            l.weapon_boxes > 0,
+            run.files.len()
+        ),
+        (1, 1, true, true, 1),
+        "the milestone path"
+    );
+    check("match_setup");
+}
+
+#[test]
+fn every_g2e1_case_is_bit_exact() {
+    for name in e1::NAMES.iter().filter(|n| **n != "match_setup") {
+        check(name);
+    }
+}
+
+/// `golden(name)` with one bit of the 64-bit hex field `k` of `line` flipped.
+fn flip(line: &str, k: usize) -> String {
+    let mut f: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    f[k] = format!("{:016x}", u64::from_str_radix(&f[k], 16).unwrap() ^ 1);
+    f.join(" ")
+}
+
+#[test]
+#[should_panic(expected = "G2 d line")]
+fn the_gate_sees_a_d_line_change() {
+    let mut want = golden("cfg_default");
+    want.details[10] = flip(&want.details[10], 4);
+    let run = sc::drive(&sc::read_script("cfg_default"), None);
+    if let Err((_, msg)) = compare("cfg_default", &want, &run) {
+        panic!("{msg}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "G2 file line")]
+fn the_gate_sees_a_saved_byte_change() {
+    let mut want = golden("cfg_default");
+    want.files[0] = flip(&want.files[0], 2);
+    let run = sc::drive(&sc::read_script("cfg_default"), None);
+    if let Err((_, msg)) = compare("cfg_default", &want, &run) {
+        panic!("{msg}");
+    }
 }
 
 #[test]

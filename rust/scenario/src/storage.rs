@@ -12,8 +12,14 @@
 //! [`ConfigStore`] is `Send + Sync` and [`MemoryStore`] guards its user layer with a
 //! `Mutex`; and every store names its root the way C++ prints it ([`ConfigStore::root_label`]),
 //! the prefix of a `levelFile` a C++ level selector saved (design finding 3).
+//!
+//! Step 4½e-2: every store lists a directory the way C++ `DirectoryListing` does over the
+//! merged layers ([`ConfigStore::list`], the level and options selectors' tree); the
+//! [`MemoryStore`] gains directories and a single-layer mode (the C++ web build's
+//! `--config-root /openliero`); the [`NativeStore`] names the root its `ShadowsSystem` consults
+//! ([`NativeStore::with_shadow_root`]); and [`placeable_leaf`] is the SAVE SETUP AS… name rule.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -43,6 +49,59 @@ pub trait ConfigStore: Send + Sync {
     /// A level picked through the C++ selector is saved as `root_label() + "/" + rel`
     /// (T0 addendum, findings 3 and 12), which `ui::shell::level_path` strips back to `rel`.
     fn root_label(&self) -> &str;
+    /// C++ `DirectoryListing` over the config node (`filesystem.cpp:294-340`; Step 4½e-2): the
+    /// entries of the directory `rel` (`""` is the root) in both layers, sorted bytewise by
+    /// name and de-duplicated by name, the user layer's entry kept (plan D14). Dotfiles are
+    /// listed. A missing directory lists nothing.
+    fn list(&self, rel: &str) -> Vec<DirEntry>;
+}
+
+/// One entry of a [`ConfigStore::list`]: C++ `DirectoryListing`'s `NodeName`
+/// (`filesystem.hpp:47-53`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+impl DirEntry {
+    pub fn new(name: impl Into<String>, is_dir: bool) -> DirEntry {
+        DirEntry {
+            name: name.into(),
+            is_dir,
+        }
+    }
+}
+
+/// `DirectoryListing::Sort` (`filesystem.cpp:335-340`) over the user entries followed by the
+/// system ones: bytewise by name, then one entry per name. The sort is stable, so the first
+/// equal entry — the user layer's — is the one kept (plan D14; C++'s unstable sort leaves that
+/// unspecified).
+fn merge_listing(mut entries: Vec<DirEntry>) -> Vec<DirEntry> {
+    entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    entries.dedup_by(|b, a| a.name == b.name);
+    entries
+}
+
+/// `DirectoryListing::DirectoryListing` (`filesystem.cpp:294-327`) on one directory, appended
+/// to `out`: every entry but `.`/`..`; `stat` follows symlinks and an entry it fails on (a
+/// broken link) is dropped; a name ending in `.zip` (case-sensitive) is a folder named without
+/// it (plan D13). Names go through `to_string_lossy` (D14). An unreadable directory adds
+/// nothing.
+fn list_dir(dir: &Path, out: &mut Vec<DirEntry>) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let Ok(meta) = std::fs::metadata(entry.path()) else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        out.push(match name.strip_suffix(".zip") {
+            Some(stem) => DirEntry::new(stem, true),
+            None => DirEntry::new(name, meta.is_dir()),
+        });
+    }
 }
 
 /// `FsNode(path).FullPath()` (`filesystem.cpp:596-650`, POSIX branch): split `path` on `/` and
@@ -83,6 +142,17 @@ pub fn fs_node_full_path(path: &str) -> String {
 /// own auto-write target — the subdir compared exactly, the leaf case-insensitively.
 pub fn is_reserved(subdir: &str, leaf: &str) -> bool {
     subdir == "Setups" && leaf.eq_ignore_ascii_case("liero.cfg")
+}
+
+/// SAVE SETUP AS…'s name rule (Step 4½e-2, plan D7): a leaf the store can place as
+/// `Setups/<leaf>` — non-empty, without `/`, `\` or `:`, without a control byte (`< 0x20` or
+/// `0x7f`), and accepted by the config-root guard. C++ would create sub-directories or leave
+/// the root for the refused names; the dialog shows them the `RESERVED` box instead.
+pub fn placeable_leaf(leaf: &str) -> bool {
+    !leaf.is_empty()
+        && !leaf.contains(['/', '\\', ':'])
+        && !leaf.bytes().any(|b| b < 0x20 || b == 0x7f)
+        && under(Path::new(""), &format!("Setups/{leaf}")).is_some()
 }
 
 /// `rel` under `root`, or `None` for a path that is empty, absolute, drive-qualified,
@@ -191,19 +261,31 @@ pub fn pref_path(org: &str, app: &str) -> Option<PathBuf> {
 pub struct NativeStore {
     user_root: PathBuf,
     system_root: Option<PathBuf>,
+    /// The directory `ShadowsSystem` consults: C++ `SystemDataRoot()` (Step 4½e-2, plan D10).
+    shadow_root: Option<PathBuf>,
     root_label: String,
 }
 
 impl NativeStore {
     /// Reads: `user_root`, then `system_root`. Writes: `user_root`. The root label defaults to
-    /// [`fs_node_full_path`] of `user_root` (what C++ prints for it).
+    /// [`fs_node_full_path`] of `user_root` (what C++ prints for it), and the shadow root to
+    /// `system_root`.
     pub fn split(user_root: PathBuf, system_root: Option<PathBuf>) -> NativeStore {
         let root_label = fs_node_full_path(&user_root.to_string_lossy());
         NativeStore {
             user_root,
+            shadow_root: system_root.clone(),
             system_root,
             root_label,
         }
+    }
+
+    /// Override the root [`ConfigStore::shadows_system`] consults (Step 4½e-2, plan D10). C++
+    /// `ShadowsSystem` calls `SystemDataRoot()` afresh (`filesystem.cpp:749`), not the resolved
+    /// layers, so a `--config-root` store still refuses the install's shipped names.
+    pub fn with_shadow_root(mut self, shadow_root: Option<PathBuf>) -> NativeStore {
+        self.shadow_root = shadow_root;
+        self
     }
 
     /// Override [`ConfigStore::root_label`] — the `fs` fixture's `./user` (plan §Formats).
@@ -213,7 +295,8 @@ impl NativeStore {
     }
 
     /// One directory for reads and writes — the `--config-root` / `portable.txt` layout
-    /// (`filesystem.cpp:811-816`, `:827-831`; both still deferred, design §9.3.7).
+    /// (`filesystem.cpp:811-816`, `:827-831`; both still deferred, design §9.3.7). No shadow
+    /// root until [`NativeStore::with_shadow_root`] gives it one.
     pub fn single_dir(root: PathBuf) -> NativeStore {
         NativeStore::split(root, None)
     }
@@ -244,6 +327,10 @@ impl NativeStore {
     pub fn system_root(&self) -> Option<&Path> {
         self.system_root.as_deref()
     }
+
+    pub fn shadow_root(&self) -> Option<&Path> {
+        self.shadow_root.as_deref()
+    }
 }
 
 impl ConfigStore for NativeStore {
@@ -265,22 +352,43 @@ impl ConfigStore for NativeStore {
         std::fs::write(path, bytes)
     }
 
-    /// `paths::ShadowsSystem` (`filesystem.cpp:736-763`).
+    /// `paths::ShadowsSystem` (`filesystem.cpp:736-763`): reserved; else no shadow root →
+    /// `false`; else a user root that IS the system root (`FullPath`s equal) has no separate
+    /// layer to shadow (`:754-759`); else the shadow root has `subdir/leaf`.
     fn shadows_system(&self, subdir: &str, leaf: &str) -> bool {
         if is_reserved(subdir, leaf) {
             return true;
         }
-        match &self.system_root {
-            // Single-directory layouts have no separate layer to shadow (`:754-759`).
-            Some(system) if *system != self.user_root => {
-                under(system, &format!("{subdir}/{leaf}")).is_some_and(|p| p.exists())
-            }
-            _ => false,
+        let Some(shadow) = &self.shadow_root else {
+            return false;
+        };
+        if fs_node_full_path(&self.user_root.to_string_lossy())
+            == fs_node_full_path(&shadow.to_string_lossy())
+        {
+            return false;
         }
+        under(shadow, &format!("{subdir}/{leaf}")).is_some_and(|p| p.exists())
     }
 
     fn root_label(&self) -> &str {
         &self.root_label
+    }
+
+    /// `FsNodeJoin::Iter` (`filesystem.cpp:363`): the user directory's listing, then the
+    /// system one's, merged. `rel` must pass the config-root guard (the root is `""`).
+    fn list(&self, rel: &str) -> Vec<DirEntry> {
+        let mut out = Vec::new();
+        for root in std::iter::once(&self.user_root).chain(&self.system_root) {
+            let dir = if rel.is_empty() {
+                Some(root.clone())
+            } else {
+                under(root, rel)
+            };
+            if let Some(dir) = dir {
+                list_dir(&dir, &mut out);
+            }
+        }
+        merge_listing(out)
     }
 }
 
@@ -289,10 +397,18 @@ pub const MEMORY_ROOT_LABEL: &str = "/openliero";
 
 /// An in-memory store: a writable user layer over a fixed system layer. The user layer sits
 /// behind a `Mutex` so the store is `Sync` (Step 4½e-1).
+///
+/// Step 4½e-2: a directory is any proper key prefix, or one of the explicit (possibly empty)
+/// directories [`MemoryStore::with_dirs`] adds. [`MemoryStore::single_layer`] is the C++ web
+/// build's one directory: the preloaded files are no separate layer to shadow.
 #[derive(Debug)]
 pub struct MemoryStore {
     user: Mutex<BTreeMap<String, Vec<u8>>>,
     system: BTreeMap<String, Vec<u8>>,
+    dirs: BTreeSet<String>,
+    /// Whether [`ConfigStore::shadows_system`] refuses the preloaded `system` keys
+    /// ([`MemoryStore::with_system`]) or only the reserved name ([`MemoryStore::single_layer`]).
+    shadows_preloaded: bool,
     root_label: String,
 }
 
@@ -301,6 +417,8 @@ impl Default for MemoryStore {
         MemoryStore {
             user: Mutex::default(),
             system: BTreeMap::new(),
+            dirs: BTreeSet::new(),
+            shadows_preloaded: true,
             root_label: MEMORY_ROOT_LABEL.to_string(),
         }
     }
@@ -320,6 +438,31 @@ impl MemoryStore {
                 .collect(),
             ..MemoryStore::default()
         }
+    }
+
+    /// One layer, the C++ web build's `--config-root /openliero` (Step 4½e-2, plan D9): `files`
+    /// are preloaded read-only, writes shadow them, and [`ConfigStore::shadows_system`] refuses
+    /// only the reserved name — its `SystemDataRoot()` (`/`) has no `Setups` (fact 14).
+    pub fn single_layer<K, V>(files: impl IntoIterator<Item = (K, V)>) -> MemoryStore
+    where
+        K: Into<String>,
+        V: Into<Vec<u8>>,
+    {
+        MemoryStore {
+            system: files
+                .into_iter()
+                .map(|(rel, bytes)| (rel.into(), bytes.into()))
+                .collect(),
+            shadows_preloaded: false,
+            ..MemoryStore::default()
+        }
+    }
+
+    /// Add explicit directories (config paths, e.g. `"Profiles"`, `"TC/openliero/sounds"`), so
+    /// an empty one is listed too (Step 4½e-2).
+    pub fn with_dirs(mut self, dirs: &[&str]) -> MemoryStore {
+        self.dirs.extend(dirs.iter().map(|d| d.to_string()));
+        self
     }
 
     /// Override [`ConfigStore::root_label`] (default [`MEMORY_ROOT_LABEL`]).
@@ -354,11 +497,36 @@ impl ConfigStore for MemoryStore {
     }
 
     fn shadows_system(&self, subdir: &str, leaf: &str) -> bool {
-        is_reserved(subdir, leaf) || self.system.contains_key(&format!("{subdir}/{leaf}"))
+        is_reserved(subdir, leaf)
+            || (self.shadows_preloaded && self.system.contains_key(&format!("{subdir}/{leaf}")))
     }
 
     fn root_label(&self) -> &str {
         &self.root_label
+    }
+
+    /// The direct children of `rel` among the user keys, then the system keys, then the
+    /// explicit directories, merged like the native listing. A key `a/b/c` makes `a` a
+    /// directory of `""` and `b` one of `a`.
+    fn list(&self, rel: &str) -> Vec<DirEntry> {
+        let prefix = if rel.is_empty() {
+            String::new()
+        } else {
+            format!("{rel}/")
+        };
+        let child = |path: &str, is_dir: bool| -> Option<DirEntry> {
+            let rest = path.strip_prefix(&prefix)?;
+            match rest.split_once('/') {
+                Some((name, _)) => Some(DirEntry::new(name, true)),
+                None if rest.is_empty() => None,
+                None => Some(DirEntry::new(rest, is_dir)),
+            }
+        };
+        let user = self.user_layer();
+        let files = user.keys().chain(self.system.keys());
+        let mut out: Vec<DirEntry> = files.filter_map(|k| child(k, false)).collect();
+        out.extend(self.dirs.iter().filter_map(|d| child(d, true)));
+        merge_listing(out)
     }
 }
 
@@ -738,5 +906,257 @@ mod tests {
             settings_to_toml(&Settings::default()).into_bytes()
         );
         std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    // ---- Step 4½e-2: list, directories, the single layer, the shadow root, placeable_leaf ----
+
+    fn names(list: &[DirEntry]) -> Vec<(&str, bool)> {
+        list.iter().map(|e| (e.name.as_str(), e.is_dir)).collect()
+    }
+
+    #[test]
+    fn native_list_merges_and_dedupes_the_two_layers() {
+        let root = scratch("list_merge");
+        let (user, system) = (root.join("user"), root.join("system"));
+        put(&system, "Setups/liero.cfg", b"s");
+        put(&system, "Setups/mine.cfg", b"s");
+        put(&system, "TC/openliero/tc.cfg", b"s");
+        put(&system, "x/inner", b"s");
+        put(&user, "Setups/mine.cfg", b"u");
+        put(&user, "x", b"a user file shadows the system folder's entry");
+        std::fs::create_dir_all(user.join("Replays")).expect("mkdir");
+        let store = NativeStore::split(user, Some(system));
+        assert_eq!(
+            names(&store.list("")),
+            [
+                ("Replays", true),
+                ("Setups", true),
+                ("TC", true),
+                ("x", false)
+            ],
+            "user-only Replays and both-layer Setups merged; the user's `x` kept"
+        );
+        assert_eq!(
+            names(&store.list("Setups")),
+            [("liero.cfg", false), ("mine.cfg", false)]
+        );
+        assert_eq!(names(&store.list("TC")), [("openliero", true)]);
+        assert_eq!(names(&store.list("TC/openliero")), [("tc.cfg", false)]);
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_list_is_bytewise_and_lists_dotfiles() {
+        let root = scratch("list_order");
+        for name in ["a.lev", "B.lev", ".hidden.lev", "Zeta.lev", "notes.txt"] {
+            put(&root, &format!("Levels/{name}"), b"x");
+        }
+        let store = NativeStore::single_dir(root.clone());
+        assert_eq!(
+            names(&store.list("Levels")),
+            [
+                (".hidden.lev", false),
+                ("B.lev", false),
+                ("Zeta.lev", false),
+                ("a.lev", false),
+                ("notes.txt", false),
+            ],
+            "the listing filters nothing; `B` < `Z` < `a` bytewise"
+        );
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_list_follows_symlinks_and_drops_broken_ones() {
+        let root = scratch("list_links");
+        put(&root, "d/real.lev", b"x");
+        std::fs::create_dir_all(root.join("d/sub")).expect("mkdir");
+        std::os::unix::fs::symlink(root.join("d/nowhere"), root.join("d/broken.lev"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(root.join("d/sub"), root.join("d/linked")).expect("symlink");
+        let store = NativeStore::single_dir(root.clone());
+        assert_eq!(
+            names(&store.list("d")),
+            [("linked", true), ("real.lev", false), ("sub", true)],
+            "stat follows the link to a folder; the broken link is dropped"
+        );
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_list_turns_a_zip_into_a_folder_case_sensitively() {
+        let root = scratch("list_zip");
+        put(&root, "TC/x.zip", b"PK");
+        put(&root, "TC/y.ZIP", b"PK");
+        let store = NativeStore::single_dir(root.clone());
+        assert_eq!(
+            names(&store.list("TC")),
+            [("x", true), ("y.ZIP", false)],
+            "filesystem.cpp:314-318: only a `.zip` suffix, as a folder without it"
+        );
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_list_of_a_missing_or_refused_directory_is_empty() {
+        let root = scratch("list_missing");
+        put(&root, "Setups/liero.cfg", b"x");
+        let store = NativeStore::split(root.join("nouser"), Some(root.clone()));
+        assert_eq!(names(&store.list("")), [("Setups", true)]);
+        assert_eq!(store.list("Profiles"), []);
+        assert_eq!(store.list("Setups/liero.cfg"), [], "a file is no directory");
+        for bad in ["..", "../x", "/etc", "Setups/../..", "a\\b"] {
+            assert_eq!(store.list(bad), [], "{bad:?}");
+        }
+        let nothing = NativeStore::split(root.join("u"), Some(root.join("s")));
+        assert_eq!(nothing.list(""), []);
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn memory_list_finds_directories_in_keys_and_explicit_dirs() {
+        assert_eq!(
+            MemoryStore::new().list(""),
+            [],
+            "a fresh store lists nothing"
+        );
+        let store = MemoryStore::with_system(&[
+            ("Setups/liero.cfg", &b"s"[..]),
+            ("TC/openliero/Levels/a.lev", &b"s"[..]),
+            ("TC/openliero/tc.cfg", &b"s"[..]),
+        ])
+        .with_dirs(&["Profiles", "TC/openliero/sounds", "Setups"]);
+        store.write("Setups/mine.cfg", b"u").expect("write");
+        store.write("Setups/liero.cfg", b"u").expect("write");
+        store.write("Replays/r.lrp", b"u").expect("write");
+        assert_eq!(
+            names(&store.list("")),
+            [
+                ("Profiles", true),
+                ("Replays", true),
+                ("Setups", true),
+                ("TC", true),
+            ]
+        );
+        assert_eq!(
+            names(&store.list("Setups")),
+            [("liero.cfg", false), ("mine.cfg", false)],
+            "a written file shadowing a system one is listed once"
+        );
+        assert_eq!(names(&store.list("TC")), [("openliero", true)]);
+        assert_eq!(
+            names(&store.list("TC/openliero")),
+            [("Levels", true), ("sounds", true), ("tc.cfg", false)]
+        );
+        assert_eq!(store.list("Profiles"), [], "an explicit empty directory");
+        assert_eq!(store.list("TC/open"), [], "a key prefix is no directory");
+        assert_eq!(store.list("Nowhere"), []);
+    }
+
+    #[test]
+    fn the_single_layer_refuses_only_the_reserved_name() {
+        let files = [
+            ("Setups/liero.cfg", &b"sys liero"[..]),
+            ("Setups/orbmit.cfg", &b"sys orbmit"[..]),
+        ];
+        let layered = MemoryStore::with_system(&files);
+        let single = MemoryStore::single_layer(files);
+        for (store, orbmit) in [(&layered, true), (&single, false)] {
+            assert!(store.shadows_system("Setups", "liero.cfg"), "reserved");
+            assert_eq!(store.shadows_system("Setups", "orbmit.cfg"), orbmit);
+            assert!(!store.shadows_system("Setups", "mine.cfg"));
+            assert_eq!(
+                store.read("Setups/orbmit.cfg").as_deref(),
+                Some(&b"sys orbmit"[..])
+            );
+            store.write("Setups/orbmit.cfg", b"mine").expect("write");
+            assert_eq!(
+                store.read("Setups/orbmit.cfg").as_deref(),
+                Some(&b"mine"[..]),
+                "a write shadows the preloaded file"
+            );
+            assert_eq!(
+                names(&store.list("Setups")),
+                [("liero.cfg", false), ("orbmit.cfg", false)]
+            );
+            assert_eq!(store.root_label(), MEMORY_ROOT_LABEL);
+        }
+        let owned = MemoryStore::single_layer(vec![("a/b.cfg".to_string(), vec![1u8])]);
+        assert_eq!(owned.read("a/b.cfg").as_deref(), Some(&[1u8][..]));
+    }
+
+    #[test]
+    fn the_shadow_root_is_what_shadows_system_consults() {
+        let root = scratch("shadow_root");
+        let (copy, install) = (root.join("copy"), root.join("install"));
+        put(&install, "Setups/orbmit.cfg", b"x");
+        put(&copy, "Setups/orbmit.cfg", b"x");
+        let bare = NativeStore::single_dir(copy.clone());
+        assert_eq!(bare.shadow_root(), None);
+        assert!(bare.shadows_system("Setups", "liero.cfg"), "reserved");
+        assert!(
+            !bare.shadows_system("Setups", "orbmit.cfg"),
+            "no SystemDataRoot: only the reserved name (P9 `noenv`)"
+        );
+        let shadowed =
+            NativeStore::single_dir(copy.clone()).with_shadow_root(Some(install.clone()));
+        assert_eq!(shadowed.shadow_root(), Some(install.as_path()));
+        assert!(
+            shadowed.shadows_system("Setups", "orbmit.cfg"),
+            "--config-root <copy> still refuses the install's names (P9 `env`)"
+        );
+        assert!(!shadowed.shadows_system("Setups", "mine.cfg"));
+        assert!(
+            shadowed.read("Setups/liero.cfg").is_none(),
+            "the shadow root is no read layer"
+        );
+        let mut slash = install.clone().into_os_string();
+        slash.push("/");
+        let same = NativeStore::single_dir(install.clone()).with_shadow_root(Some(slash.into()));
+        assert!(
+            !same.shadows_system("Setups", "orbmit.cfg"),
+            "equal FullPaths: one directory, nothing to shadow (filesystem.cpp:754-759)"
+        );
+        let split = NativeStore::split(copy, Some(install.clone()));
+        assert_eq!(
+            split.shadow_root(),
+            Some(install.as_path()),
+            "split defaults it"
+        );
+        assert!(split.shadows_system("Setups", "orbmit.cfg"));
+        assert!(
+            !split
+                .with_shadow_root(None)
+                .shadows_system("Setups", "orbmit.cfg"),
+            "overridable"
+        );
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn placeable_leaf_is_the_save_as_name_rule() {
+        for good in [
+            "mine.cfg",
+            "a b.cfg",
+            "x.cfg.cfg",
+            "..cfg",
+            "\u{e9}t\u{e9}.cfg",
+        ] {
+            assert!(placeable_leaf(good), "{good:?}");
+        }
+        for bad in [
+            "",
+            "a/b.cfg",
+            "a\\b.cfg",
+            "c:.cfg",
+            "\t.cfg",
+            "\u{7f}.cfg",
+            ".",
+            "..",
+            "/x.cfg",
+        ] {
+            assert!(!placeable_leaf(bad), "{bad:?}");
+        }
     }
 }

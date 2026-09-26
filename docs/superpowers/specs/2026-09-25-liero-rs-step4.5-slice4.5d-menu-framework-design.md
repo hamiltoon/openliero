@@ -1,6 +1,6 @@
 # Step 4½, Slice 4½d — the menu framework, `ScreenStack` and the main menu (THE MILESTONE): design
 
-Status: **DESIGN** · 2026-09-25 · branch `claude/cpp-oracle-vcpkg-assets-chcwcm` (PR #14 into `liero-rs-step-4-5`; 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅ landed)
+Status: **LANDED** · 2026-09-26 · plan: `plans/2026-09-26-liero-rs-step4.5-slice4.5d-plan.md` · designed 2026-09-25 · branch `claude/cpp-oracle-vcpkg-assets-chcwcm` (PR #14 into `liero-rs-step-4-5`; 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅ landed)
 Part of: `2026-09-10-liero-rs-step4.5-game-shell-overview.md` (the 4½d bullet, LD 1–3, §Oracle, done-when 1–2; cited **overview**)
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` §0–§2, §8 (cited **cpp-map**) and
 `2026-09-10-liero-rs-step4.5-rust-baseline-map.md` §1–§3, §7–§9 (cited **rust-map**)
@@ -8,7 +8,7 @@ Precedents: `2026-09-25-liero-rs-step4.5-slice4.5c-weapon-selection-design.md` (
 `plans/2026-09-25-liero-rs-step4.5-slice4.5c-plan.md`, **Addendum A** (the real C++ draw run headlessly as the pixel
 oracle; cited **4½c A1/A2**); `2026-09-10-liero-rs-step4.5-slice4.5a-match-config-and-settings-design.md` §4.4, §9.3.6
 (cited **4½a design**)
-Next artifact: `plans/2026-09-25-liero-rs-step4.5-slice4.5d-plan.md`
+Next artifact: `plans/2026-09-26-liero-rs-step4.5-slice4.5d-plan.md`
 
 Today the Rust game boots straight into weapon selection. C++ boots into a main menu drawn over a generated level.
 From the menu, NEW GAME starts weapon selection, Esc during play fades back to the menu with RESUME GAME shown,

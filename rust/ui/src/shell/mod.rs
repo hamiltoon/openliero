@@ -3,16 +3,23 @@
 //! two concrete menus; T6 moves the 4½c live modules here; T7 adds the stack, the screens and
 //! `Shell`. T6 moved the 4½c live modules here from `game` (`new_game`, `selection`,
 //! `match_flow`, `viewport_step`, `loadout`), unchanged; `game` re-exports them.
+//!
+//! Step 4½e-1 (T3): the ordered `InputEvent` stream (keys and text), the settings menu's
+//! sub-screens (`overlay`, `weapon_options`) on the stack, `cur_menu` in `MenuWorld`,
+//! `level_path`, and the `ConfigStore` the shell owns.
+pub mod level_path;
 pub mod level_slot;
 pub mod loadout;
 pub mod main_menu;
 pub mod match_flow;
 pub mod new_game;
+pub mod overlay;
 pub mod playing;
 pub mod selection;
 pub mod settings_menu;
 pub mod stack;
 pub mod viewport_step;
+pub mod weapon_options;
 
 use std::path::{Path, PathBuf};
 
@@ -22,6 +29,7 @@ use render::frame::Scene;
 use render::menu::menu_palette;
 use scenario::SceneData;
 use scenario::settings::Settings;
+use scenario::storage::ConfigStore;
 use sim::state::{ControlState, SimState};
 
 use crate::keys::{DK_ESCAPE, KeyLatch, TypedKey};
@@ -29,6 +37,7 @@ use crate::menu::Menu;
 use crate::text::UiTc;
 use level_slot::{LevelSlot, SeedSource};
 use main_menu::{MA_NEW_GAME, MA_QUIT, MA_RESUME_GAME, MainMenuState, MenuCtx, main_menu};
+use overlay::{InfoPurpose, InputPurpose};
 use playing::{Match, StartOptions};
 use settings_menu::settings_menu;
 use stack::{AfterUpdate, Screen, ScreenStack};
@@ -62,12 +71,20 @@ pub struct KeyEvent {
     pub typed: TypedKey,
 }
 
+/// One SDL event of a frame, in SDL's order (Step 4½e-1): a key event, or one
+/// `SDL_EVENT_TEXT_INPUT` string (`Utf8ToDos` makes it one byte, plan fact 7).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InputEvent {
+    Key(KeyEvent),
+    Text(String),
+}
+
 /// One frame's input: its events in order, the sim's sampled control words (the 4½c sampler plus
 /// touch — C++ key events reach the worms at the frame boundary, the 4½c equivalence), a fresh
 /// seed for `SeedSource::Fresh`, the type-to-search clock, and the Rust-only F5 restart (Q5).
 #[derive(Clone, Copy, Debug)]
 pub struct ShellInput<'a> {
-    pub events: &'a [KeyEvent],
+    pub events: &'a [InputEvent],
     pub sampled: [ControlState; 2],
     pub fresh_seed: u32,
     pub now_ms: u64,
@@ -99,6 +116,8 @@ pub enum Present {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Menu,
+    /// Step 4½e-1: an `InputStringState` is on top (the phone page shows its text field, D9).
+    Text,
     Weapsel,
     Game,
     Quit,
@@ -108,6 +127,7 @@ impl Phase {
     pub fn as_str(self) -> &'static str {
         match self {
             Phase::Menu => "menu",
+            Phase::Text => "text",
             Phase::Weapsel => "weapsel",
             Phase::Game => "game",
             Phase::Quit => "quit",
@@ -153,12 +173,27 @@ impl FrameOut {
     }
 }
 
-/// Everything `MainMenuState` touches — C++ `Gfx` members: the menus, `settings`,
+/// `Gfx::cur_menu` (`gfx.hpp:321`; plan fact 1): which menu has focus. 4½f adds the player
+/// menu, 4½g the hidden one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurMenu {
+    Main,
+    Settings,
+}
+
+/// An overlay whose `Update` found it done this frame (`Shell::close`).
+enum Closing {
+    Input(InputPurpose, bool, Vec<u8>),
+    Info(InfoPurpose, bool),
+}
+
+/// Everything `MainMenuState` touches — C++ `Gfx` members: the menus, `cur_menu`, `settings`,
 /// `settings_node`'s name, `dos_keys`, the play renderer's `fade_value`, `bmp`, `pal32` and
 /// `Origpal()`, `frozen_screen`, `menu_cycles`. No `SimState`.
 pub struct MenuWorld {
     pub main_menu: Menu,
     pub settings_menu: Menu,
+    pub cur_menu: CurMenu,
     pub settings: Settings,
     pub tc: UiTc,
     pub setup_name: String,
@@ -175,6 +210,8 @@ pub struct MenuWorld {
 /// `Gfx::RunOneFrame` (`gfx.cpp:1467-1652`).
 pub struct Shell {
     tc_root: PathBuf,
+    /// Where `liero.cfg` and the level files live (Step 4½e-1; C++ `gfx`'s config nodes).
+    store: Box<dyn ConfigStore>,
     world: MenuWorld,
     /// The boot game's scene: the font every screen draws with, and the boot palette.
     boot_scene: SceneData,
@@ -190,17 +227,19 @@ impl Shell {
     fn new(
         tc_root: &Path,
         settings: Settings,
+        store: Box<dyn ConfigStore>,
         seeds: SeedSource,
         fresh: u32,
         options: StartOptions,
     ) -> (Shell, SimState) {
         let tc = UiTc::load(tc_root);
         let boot_seed = seeds.boot(fresh);
-        let level = LevelSlot::generate(tc_root, &settings, boot_seed);
+        let level = LevelSlot::generate(tc_root, &settings, &*store, boot_seed);
         let boot = playing::boot_state(tc_root, &settings, &level.level, boot_seed);
         let world = MenuWorld {
             main_menu: main_menu(),
             settings_menu: settings_menu(),
+            cur_menu: CurMenu::Main,
             origpal: boot.scene.origpal.clone(),
             settings,
             tc,
@@ -214,6 +253,7 @@ impl Shell {
         };
         let shell = Shell {
             tc_root: tc_root.to_path_buf(),
+            store,
             world,
             boot_scene: boot.scene,
             stack: ScreenStack::default(),
@@ -228,14 +268,16 @@ impl Shell {
     /// `InitFrameStepping` (`gfx.cpp:1439-1465`): the boot level (the boot seed), the unstarted
     /// boot game drawn once, then the main menu, whose `Enter` presents the black frame. Returns
     /// the shell, the boot state (the `Sim` until the first NEW GAME), and the boot frame.
+    /// `store` holds the config root (`liero.cfg`, the level files; Step 4½e-1).
     pub fn boot(
         tc_root: &Path,
         settings: Settings,
+        store: Box<dyn ConfigStore>,
         seeds: SeedSource,
         fresh: u32,
         options: StartOptions,
     ) -> (Shell, SimState, FrameOut) {
-        let (mut shell, state) = Shell::new(tc_root, settings, seeds, fresh, options);
+        let (mut shell, state) = Shell::new(tc_root, settings, store, seeds, fresh, options);
         let mut out = FrameOut::new(Phase::Menu);
         shell.world.pal32 = playing::draw_boot(
             &mut shell.world.surface,
@@ -255,11 +297,12 @@ impl Shell {
     pub fn boot_playing(
         tc_root: &Path,
         settings: Settings,
+        store: Box<dyn ConfigStore>,
         seeds: SeedSource,
         fresh: u32,
         options: StartOptions,
     ) -> (Shell, SimState, FrameOut) {
-        let (mut shell, mut state) = Shell::new(tc_root, settings, seeds, fresh, options);
+        let (mut shell, mut state) = Shell::new(tc_root, settings, store, seeds, fresh, options);
         let mut out = FrameOut::new(Phase::Game);
         let input = ShellInput {
             fresh_seed: fresh,
@@ -283,50 +326,107 @@ impl Shell {
             let seed = self.new_game(sim, input);
             out.routed = Some(Route::NewGame { seed });
         }
-        // :1473-1485 — every event reaches ProcessEvent (dos_keys, key_buf); while Playing a
-        // non-repeat key-down or any key-up also reaches LocalController::OnKey, whose only
-        // non-worm effect is Esc (finding 9). Worm keys reach the sim as `sampled`.
+        // :1473-1485 — every event, in order, reaches the top's `HandleEvent`: `ProcessEvent`
+        // (dos_keys, key_buf; it ignores text) for every screen; while Playing a non-repeat
+        // key-down or any key-up also reaches LocalController::OnKey, whose only non-worm effect
+        // is Esc (finding 9) — worm keys reach the sim as `sampled`; then the overlays' own arms
+        // (`inputState.cpp:27-72`, `:177-183`).
         self.world.keys.begin_frame();
         let playing = matches!(self.stack.top(), Some(Screen::Playing));
         for ev in input.events {
-            if ev.down {
-                self.world.keys.key_down(ev.dos, ev.typed);
-            } else {
-                self.world.keys.key_up(ev.dos);
-            }
-            if playing && ev.dos == DK_ESCAPE && (!ev.down || !ev.repeat) {
-                self.current.as_mut().expect("Playing has a match").esc();
+            match ev {
+                InputEvent::Key(ev) => {
+                    if ev.down {
+                        self.world.keys.key_down(ev.dos, ev.typed);
+                    } else {
+                        self.world.keys.key_up(ev.dos);
+                    }
+                    if playing && ev.dos == DK_ESCAPE && (!ev.down || !ev.repeat) {
+                        self.current.as_mut().expect("Playing has a match").esc();
+                    }
+                    match self.stack.top_mut() {
+                        Some(Screen::InputString(s)) => s.handle_key(ev),
+                        Some(Screen::InfoBox(b)) => b.handle_key(ev),
+                        _ => {}
+                    }
+                }
+                InputEvent::Text(t) => {
+                    if let Some(Screen::InputString(s)) = self.stack.top_mut() {
+                        s.handle_text(t);
+                    }
+                }
             }
         }
-        // :1487-1489, captured BEFORE Update: the menu state is on the stack only while it is the
-        // top (finding 7), and C++ clears menuStatePtr_ at its dispatch.
-        let (sel, fading) = match self.stack.top() {
-            Some(Screen::MainMenu(s)) => (s.selection(), s.is_fading_out()),
-            _ => (-1, false),
-        };
+        // :1487-1489, captured BEFORE Update. `menuStatePtr_` points at the MainMenuState wherever
+        // it sits — under WEAPON OPTIONS, an entry or a box too (plan fact 3) — and C++ clears it
+        // at its dispatch.
+        let (sel, fading) = self
+            .main_menu_state()
+            .map_or((-1, false), |s| (s.selection(), s.is_fading_out()));
         let running = self.current.as_ref().is_some_and(Match::running);
+        let mut push = None;
+        let mut closing = None;
         let keep = match self.stack.top_mut().expect("non-empty") {
-            Screen::MainMenu(s) => s.update(&mut MenuCtx {
-                w: &mut self.world,
-                font: &self.boot_scene.font,
-                running,
-                sounds: &mut out.menu_sounds,
-            }),
+            Screen::MainMenu(s) => {
+                let mut cx = MenuCtx {
+                    w: &mut self.world,
+                    font: &self.boot_scene.font,
+                    running,
+                    sounds: &mut out.menu_sounds,
+                    push: None,
+                };
+                let keep = s.update(&mut cx);
+                push = cx.push.take();
+                keep
+            }
             Screen::Playing => {
                 let m = self.current.as_mut().expect("Playing has a match");
                 let (keep, ticked) = m.process(sim, input.sampled, &mut out.menu_sounds);
                 out.sim_ticked = ticked;
                 keep
             }
+            // T4 ports `WeaponMenuState::Update`; nothing pushes the screen before it.
+            Screen::WeaponOptions(_) => true,
+            Screen::InputString(s) => match s.is_done() {
+                None => true,
+                Some((accepted, buffer)) => {
+                    closing = Some(Closing::Input(s.purpose.clone(), accepted, buffer));
+                    false
+                }
+            },
+            Screen::InfoBox(b) => {
+                if b.done {
+                    closing = Some(Closing::Info(b.purpose.clone(), b.clear_screen));
+                }
+                !b.done
+            }
         };
+        // An overlay's close runs inside its `Update`, before the stack's pop test
+        // (`inputState.cpp:75-84`, `:186-198`): a continuation may schedule a replacement.
+        if let Some(c) = closing {
+            self.close(c, &mut out);
+        }
         match self.stack.finish_update(keep) {
             AfterUpdate::Popped { empty: true } => {
+                debug_assert!(push.is_none(), "a screen that pushes keeps running");
                 self.route(sel, sim, input, &mut out);
                 out.phase = self.phase();
                 return out;
             }
-            AfterUpdate::Replaced => unreachable!("no 4½d screen schedules a replacement"),
+            // `state.hpp:101-105`: the replacement's `Push` runs its `Enter` (plan fact 5).
+            AfterUpdate::Replaced => {
+                let mut top = self.stack.pop().expect("the replacement");
+                self.enter(&mut top, &mut out);
+                self.stack.push(top);
+            }
+            // A pop that leaves a screen continues to the draw with the new top (plan fact 5).
             AfterUpdate::Popped { empty: false } | AfterUpdate::Running => {}
+        }
+        // Plan fact 4: C++ pushes inside `Update` (`Push` runs `Enter` at once); Rust pushes after.
+        if let Some(mut screen) = push {
+            debug_assert!(keep, "a screen that pushes keeps running");
+            self.enter(&mut screen, &mut out);
+            self.stack.push(screen);
         }
         // :1631-1647.
         let menu_flip = self.stack.top().expect("non-empty").wants_menu_flip();
@@ -342,6 +442,61 @@ impl Shell {
         });
         out.phase = self.phase();
         out
+    }
+
+    /// The close half of an overlay's `Update` (`inputState.cpp:75-84`, `:186-198`), before its
+    /// pop. `InputStringState`: `MenuSelect`, `ClearKeys`, the continuation. `InfoBoxState`:
+    /// `ClearKeys`, the optional `Fill(bmp, 0)`, `on_dismiss` (none in e-1).
+    fn close(&mut self, c: Closing, out: &mut FrameOut) {
+        match c {
+            Closing::Input(purpose, accepted, buffer) => {
+                let select = self.world.tc.hooks.select;
+                if select >= 0 {
+                    out.menu_sounds.push(select);
+                }
+                self.world.keys.clear();
+                self.input_done(purpose, accepted, &buffer);
+            }
+            Closing::Info(purpose, clear_screen) => {
+                self.world.keys.clear();
+                if clear_screen {
+                    self.world.surface.fill(0, &self.world.pal32);
+                }
+                match purpose {
+                    InfoPurpose::NoWeapons | InfoPurpose::Refused(_) => {}
+                }
+            }
+        }
+    }
+
+    /// An `InputStringState`'s callback (`callback_(accepted_, buffer_)`).
+    fn input_done(&mut self, purpose: InputPurpose, _accepted: bool, _buffer: &[u8]) {
+        match purpose {
+            // T4: `integerBehavior.cpp:56-76`, the value write-back (plan fact 13).
+            InputPurpose::IntegerEntry(_) => {}
+        }
+    }
+
+    /// `StateStack::Push`'s `Enter` (`state.hpp:50-54`) of a screen about to go on the stack.
+    fn enter(&mut self, screen: &mut Screen, out: &mut FrameOut) {
+        match screen {
+            Screen::MainMenu(s) => {
+                out.present = Some(Present::Black);
+                let running = self.current.as_ref().is_some_and(Match::running);
+                s.enter(&mut MenuCtx {
+                    w: &mut self.world,
+                    font: &self.boot_scene.font,
+                    running,
+                    sounds: &mut out.menu_sounds,
+                    push: None,
+                });
+            }
+            Screen::Playing => unreachable!("only the router pushes Playing"),
+            // T4 ports `WeaponMenuState::Enter`. `InputStringState::Enter` is
+            // `SDL_StartTextInput` (the page's text field keys on `Phase::Text`, D9);
+            // `InfoBoxState::Enter` is empty.
+            Screen::WeaponOptions(_) | Screen::InputString(_) | Screen::InfoBox(_) => {}
+        }
     }
 
     /// The router (`gfx.cpp:1491-1625`), on the frame the top popped and left the stack empty.
@@ -401,7 +556,8 @@ impl Shell {
         if self.level.reusable(&self.world.settings) {
             self.level.take_played(&sim.level);
         } else {
-            self.level = LevelSlot::generate(&self.tc_root, &self.world.settings, seed);
+            self.level =
+                LevelSlot::generate(&self.tc_root, &self.world.settings, &*self.store, seed);
         }
         let (m, state) = Match::start(
             &self.tc_root,
@@ -420,16 +576,9 @@ impl Shell {
 
     /// `Push(MainMenuState)`: its `Enter` (with the black present) then the push.
     fn push_main_menu(&mut self, out: &mut FrameOut) {
-        let mut s = MainMenuState::new();
-        out.present = Some(Present::Black);
-        let running = self.current.as_ref().is_some_and(Match::running);
-        s.enter(&mut MenuCtx {
-            w: &mut self.world,
-            font: &self.boot_scene.font,
-            running,
-            sounds: &mut out.menu_sounds,
-        });
-        self.stack.push(Screen::MainMenu(s));
+        let mut s = Screen::MainMenu(MainMenuState::new());
+        self.enter(&mut s, out);
+        self.stack.push(s);
     }
 
     /// `Gfx::UpdateMenuPalettes(quitting)` (`gfx.cpp:978-1005`) for the play renderer.
@@ -458,6 +607,7 @@ impl Shell {
                         font: &self.boot_scene.font,
                         running,
                         sounds: &mut sounds,
+                        push: None,
                     });
                 }
                 Screen::Playing => {
@@ -470,14 +620,39 @@ impl Shell {
                     );
                     self.world.fade = m.fade();
                 }
+                // T4 ports `WeaponMenuState::Draw`.
+                Screen::WeaponOptions(_) => {}
+                Screen::InputString(s) => s.draw(
+                    &mut self.world.surface,
+                    &self.world.frozen,
+                    &self.world.pal32,
+                    &self.boot_scene.font,
+                ),
+                Screen::InfoBox(b) => b.draw(
+                    &mut self.world.surface,
+                    &mut self.world.pal32,
+                    &self.world.tc.exepal,
+                    &self.boot_scene.font,
+                ),
             }
         }
+    }
+
+    /// The stack's `MainMenuState`, wherever it sits (C++ `menuStatePtr_`, plan fact 3).
+    fn main_menu_state(&self) -> Option<&MainMenuState> {
+        self.stack.screens().iter().rev().find_map(|s| match s {
+            Screen::MainMenu(m) => Some(m),
+            _ => None,
+        })
     }
 
     pub fn phase(&self) -> Phase {
         match self.stack.top() {
             None => Phase::Quit,
-            Some(Screen::MainMenu(_)) => Phase::Menu,
+            Some(Screen::MainMenu(_) | Screen::WeaponOptions(_) | Screen::InfoBox(_)) => {
+                Phase::Menu
+            }
+            Some(Screen::InputString(_)) => Phase::Text,
             Some(Screen::Playing) => {
                 if self.current.as_ref().is_some_and(Match::in_selection) {
                     Phase::Weapsel
@@ -488,12 +663,16 @@ impl Shell {
         }
     }
 
-    /// `M` / `G` / `-` (the G2 golden's `<top>`).
+    /// `M` / `G` / `O` / `I` / `B` / `-` (the G2 golden's `<top>`; `O`, `I`, `B` are WEAPON
+    /// OPTIONS, an `InputStringState` and an `InfoBoxState`, Step 4½e-1).
     pub fn top_char(&self) -> char {
         match self.stack.top() {
             None => '-',
             Some(Screen::MainMenu(_)) => 'M',
             Some(Screen::Playing) => 'G',
+            Some(Screen::WeaponOptions(_)) => 'O',
+            Some(Screen::InputString(_)) => 'I',
+            Some(Screen::InfoBox(_)) => 'B',
         }
     }
 
@@ -525,7 +704,18 @@ impl Shell {
 
     /// Whether the main menu is fading out after a selection (the G2 generator's placeholder check).
     pub fn menu_fading(&self) -> bool {
-        matches!(self.stack.top(), Some(Screen::MainMenu(s)) if s.is_fading_out())
+        self.main_menu_state()
+            .is_some_and(MainMenuState::is_fading_out)
+    }
+
+    /// `gfx.cur_menu` (Step 4½e-1): which menu has focus.
+    pub fn cur_menu(&self) -> CurMenu {
+        self.world.cur_menu
+    }
+
+    /// The config store (Step 4½e-1).
+    pub fn store(&self) -> &dyn ConfigStore {
+        &*self.store
     }
 
     pub fn main_menu(&self) -> &Menu {
@@ -556,6 +746,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use scenario::paths::TC_ROOT;
+    use scenario::storage::MemoryStore;
 
     use super::*;
     use crate::keys::{
@@ -578,7 +769,14 @@ mod tests {
             boot: 11,
             matches: VecDeque::from([21, 22, 23]),
         };
-        Shell::boot(tc(), Settings::default(), seeds, 0, StartOptions::default())
+        Shell::boot(
+            tc(),
+            Settings::default(),
+            Box::new(MemoryStore::new()),
+            seeds,
+            0,
+            StartOptions::default(),
+        )
     }
 
     fn ev(dos: u32, down: bool) -> KeyEvent {
@@ -591,6 +789,16 @@ mod tests {
     }
 
     fn step(sh: &mut Shell, sim: &mut SimState, events: &[KeyEvent], words: [u32; 2]) -> FrameOut {
+        let events: Vec<InputEvent> = events.iter().copied().map(InputEvent::Key).collect();
+        step_ev(sh, sim, &events, words)
+    }
+
+    fn step_ev(
+        sh: &mut Shell,
+        sim: &mut SimState,
+        events: &[InputEvent],
+        words: [u32; 2],
+    ) -> FrameOut {
         let input = ShellInput {
             events,
             sampled: words.map(ControlState::unpack),
@@ -936,7 +1144,7 @@ mod tests {
         let (mut sh, mut sim, _) = boot();
         sh.settings_mut().random_map_width = 512;
         until_routed(&mut sh, &mut sim, DK_RETURN);
-        let want = generate_level(tc(), sh.settings(), 21);
+        let want = generate_level(tc(), sh.settings(), None, 21);
         assert_eq!(
             (sim.level.width, &sim.level.material_id),
             (512, &want.material_id)
@@ -1062,13 +1270,19 @@ mod tests {
             loadout: vec!["BAZOOKA".into()],
             touch_only: false,
         };
-        let (sh, sim, out) =
-            Shell::boot_playing(tc(), Settings::default(), SeedSource::Fixed(7), 0, opts);
+        let (sh, sim, out) = Shell::boot_playing(
+            tc(),
+            Settings::default(),
+            Box::new(MemoryStore::new()),
+            SeedSource::Fixed(7),
+            0,
+            opts,
+        );
         assert_eq!(
             (out.phase, out.routed, sh.top_char()),
             (Phase::Game, Some(Route::NewGame { seed: 7 }), 'G')
         );
-        let want = generate_level(tc(), &Settings::default(), 7);
+        let want = generate_level(tc(), &Settings::default(), None, 7);
         assert_eq!(
             sim.level.material_id, want.material_id,
             "?seed=7: 4½c's first match"
@@ -1076,10 +1290,289 @@ mod tests {
         let (_, _, sel) = Shell::boot_playing(
             tc(),
             Settings::default(),
+            Box::new(MemoryStore::new()),
             SeedSource::Fixed(7),
             0,
             StartOptions::default(),
         );
         assert_eq!(sel.phase, Phase::Weapsel, "?level= / ?seed= keep selection");
+    }
+
+    // Step 4½e-1 (T3): the sub-screen stack.
+
+    fn entry_screen(initial: &str) -> Screen {
+        Screen::InputString(overlay::InputStringState::new(
+            initial.as_bytes(),
+            3,
+            120,
+            60,
+            Some(overlay::filter_digits),
+            "",
+            false,
+            InputPurpose::IntegerEntry(crate::menu::ValueEntry {
+                item_id: 0,
+                initial: initial.into(),
+                digits: 3,
+                x: 120,
+                y: 60,
+                min: 0,
+                max: 999,
+                div: 1,
+                percentage: false,
+            }),
+        ))
+    }
+
+    const BOX_TEXT: &str = "AT LEAST\0ONE WEAPON";
+
+    fn info_screen(clear_screen: bool) -> Screen {
+        Screen::InfoBox(overlay::InfoBoxState::new(
+            BOX_TEXT,
+            160,
+            100,
+            clear_screen,
+            InfoPurpose::NoWeapons,
+        ))
+    }
+
+    fn key(dos: u32, down: bool) -> InputEvent {
+        InputEvent::Key(ev(dos, down))
+    }
+
+    #[test]
+    fn the_new_screens_name_their_phase_and_top() {
+        let (mut sh, mut sim, _) = boot();
+        assert_eq!(sh.cur_menu(), CurMenu::Main);
+        for (screen, top, phase) in [
+            (
+                Screen::WeaponOptions(weapon_options::WeaponMenuState::default()),
+                'O',
+                Phase::Menu,
+            ),
+            (entry_screen(""), 'I', Phase::Text),
+            (info_screen(false), 'B', Phase::Menu),
+        ] {
+            sh.stack.push(screen);
+            let o = step(&mut sh, &mut sim, &[], [0, 0]);
+            assert_eq!(
+                (sh.top_char(), sh.phase(), o.upd, o.phase),
+                (top, phase, phase, phase)
+            );
+            sh.stack.pop();
+        }
+        assert_eq!(Phase::Text.as_str(), "text");
+    }
+
+    #[test]
+    fn an_entry_draws_over_the_main_menu_then_closes_with_select_and_clear_keys() {
+        let (mut a, mut sim_a, _) = boot();
+        let (mut b, mut sim_b, _) = boot();
+        idle(&mut a, &mut sim_a, 40);
+        idle(&mut b, &mut sim_b, 40);
+        a.stack.push(entry_screen("15"));
+        let (oa, ob) = (
+            step(&mut a, &mut sim_a, &[], [0, 0]),
+            step(&mut b, &mut sim_b, &[], [0, 0]),
+        );
+        assert_eq!(
+            (oa.present, a.menu_cycles()),
+            (ob.present, b.menu_cycles()),
+            "WantsMenuFlip"
+        );
+        for y in (0..200).filter(|y| !(60..68).contains(y)) {
+            for x in 0..320 {
+                assert_eq!(
+                    a.surface().get_pixel(x, y),
+                    b.surface().get_pixel(x, y),
+                    "({x},{y}): the menu below the overlay, drawn as without it"
+                );
+            }
+        }
+        assert_eq!(
+            a.surface().get_pixel(118, 61),
+            a.pal32()[0],
+            "the field's box"
+        );
+        assert_ne!(a.surface(), b.surface());
+        // A menu key typed during entry reaches dos_keys (ProcessEvent) but not the menu below.
+        let select = hooks().hooks.select;
+        let sel = a.main_selection();
+        step_ev(&mut a, &mut sim_a, &[key(DK_DOWN, true)], [0, 0]);
+        assert!(a.world.keys.test(DK_DOWN));
+        let o = step_ev(
+            &mut a,
+            &mut sim_a,
+            &[key(DK_RETURN, true), InputEvent::Text("4".into())],
+            [0, 0],
+        );
+        assert_eq!(
+            (o.menu_sounds, o.upd, o.phase, a.top_char()),
+            (vec![select], Phase::Text, Phase::Menu, 'M'),
+            "MenuSelect, pop, and the main menu drawn on the same frame"
+        );
+        assert_eq!(o.present, Some(Present::Frame { fade: 32 }));
+        assert!(
+            !a.world.keys.test(DK_DOWN) && !a.world.keys.test(DK_RETURN),
+            "ClearKeys on close"
+        );
+        let o = step(
+            &mut a,
+            &mut sim_a,
+            &[ev(DK_DOWN, false), ev(DK_RETURN, false)],
+            [0, 0],
+        );
+        assert!(o.menu_sounds.is_empty());
+        assert_eq!((a.main_selection(), a.menu_fading()), (sel, false));
+    }
+
+    #[test]
+    fn an_info_box_draws_alone_on_the_stale_surface_until_a_key_down() {
+        let (mut sh, mut sim, _) = boot();
+        idle(&mut sh, &mut sim, 40);
+        let stale = sh.surface().clone();
+        sh.stack.push(info_screen(false));
+        step(&mut sh, &mut sim, &[], [0, 0]);
+        let (w, h) = sh.boot_scene.font.get_dims_h(BOX_TEXT);
+        let (cx, cy) = (160 - w / 2 - 2, 100 - h / 2 - 2);
+        let in_box =
+            |x: i32, y: i32| (cx..cx + w + 4).contains(&x) && (cy..cy + h + 1).contains(&y);
+        for y in 0..200 {
+            for x in (0..320).filter(|&x| !in_box(x, y)) {
+                assert_eq!(
+                    sh.surface().get_pixel(x, y),
+                    stale.get_pixel(x, y),
+                    "({x},{y})"
+                );
+            }
+        }
+        assert_eq!(sh.surface().get_pixel(cx + 1, cy), sh.pal32()[0]);
+        let colour6 = (cy..cy + h + 1)
+            .flat_map(|y| (cx..cx + w + 4).map(move |x| (x, y)))
+            .filter(|&(x, y)| sh.surface().get_pixel(x, y) == sh.pal32()[6])
+            .count();
+        assert!(colour6 > 0, "the text in colour 6");
+        step(&mut sh, &mut sim, &[ev(57, false)], [0, 0]);
+        assert_eq!(sh.top_char(), 'B', "a key-up never dismisses");
+        let rep = KeyEvent {
+            dos: 57,
+            down: true,
+            repeat: true,
+            typed: TypedKey::Sym(0),
+        };
+        let o = step(&mut sh, &mut sim, &[rep], [0, 0]);
+        assert_eq!(
+            (sh.top_char(), o.phase, o.menu_sounds.len()),
+            ('M', Phase::Menu, 0),
+            "an OS repeat dismisses; the box plays nothing"
+        );
+        assert!(!sh.world.keys.test(57), "ClearKeys");
+    }
+
+    #[test]
+    fn a_clearing_box_swaps_the_palette_for_its_frames_only() {
+        let (mut sh, mut sim, _) = boot();
+        idle(&mut sh, &mut sim, 40);
+        sh.stack.push(info_screen(true));
+        step(&mut sh, &mut sim, &[], [0, 0]);
+        let exe = render::palette::pack_pal32(&hooks().exepal);
+        assert_eq!(*sh.pal32(), exe, "pal = exepal, UpdatePal32");
+        assert_eq!(sh.surface().get_pixel(0, 0), exe[0], "Fill(bmp, 0)");
+        step(&mut sh, &mut sim, &[ev(57, true)], [0, 0]);
+        assert_eq!(sh.top_char(), 'M');
+        let w = &sh.world;
+        let rgb = [
+            w.settings.worm_settings[0].rgb,
+            w.settings.worm_settings[1].rgb,
+        ];
+        assert_eq!(
+            *sh.pal32(),
+            menu_palette(&w.origpal, w.menu_cycles, rgb),
+            "the next menu frame's UpdateMenuPalettes restores the rotation"
+        );
+    }
+
+    #[test]
+    fn a_scheduled_replacement_runs_its_enter() {
+        let (mut sh, mut sim, _) = boot();
+        idle(&mut sh, &mut sim, 40);
+        sh.world.cur_menu = CurMenu::Settings;
+        let mut done = info_screen(false);
+        if let Screen::InfoBox(b) = &mut done {
+            b.done = true;
+        }
+        sh.stack.push(done);
+        sh.stack
+            .schedule_replace_top(Screen::MainMenu(MainMenuState::new()));
+        let o = step(&mut sh, &mut sim, &[], [0, 0]);
+        assert_eq!(
+            (sh.stack.len(), sh.top_char(), o.phase),
+            (2, 'M', Phase::Menu)
+        );
+        assert_eq!(
+            (sh.cur_menu(), sh.menu_cycles()),
+            (CurMenu::Main, 1),
+            "MainMenuState::Enter ran (cur_menu, menu_cycles = 0), then the frame's draw"
+        );
+    }
+
+    #[test]
+    fn selection_and_fading_come_from_the_buried_main_menu() {
+        let (mut sh, mut sim, _) = boot();
+        idle(&mut sh, &mut sim, 40);
+        tap(&mut sh, &mut sim, DK_RETURN); // NEW GAME: fade 32, then 31
+        let fade = sh.fade();
+        sh.stack.push(info_screen(false));
+        step(&mut sh, &mut sim, &[], [0, 0]);
+        assert_eq!(
+            sh.fade(),
+            fade,
+            "UpdateMenuPalettes(kMenuFadingOut) from menuStatePtr_ (plan fact 3): no fade-in"
+        );
+        assert!(sh.menu_fading());
+        assert_eq!(
+            sh.main_menu_state().map(MainMenuState::selection),
+            Some(MA_NEW_GAME)
+        );
+        step(&mut sh, &mut sim, &[ev(57, true)], [0, 0]);
+        let outs = until_routed(&mut sh, &mut sim, 57);
+        assert_eq!(
+            outs.last().unwrap().routed,
+            Some(Route::NewGame { seed: 21 })
+        );
+    }
+
+    #[test]
+    fn cur_menu_moves_the_focus_in_the_draw() {
+        let (mut sh, mut sim, _) = boot();
+        idle(&mut sh, &mut sim, 40);
+        sh.world.cur_menu = CurMenu::Settings;
+        step(&mut sh, &mut sim, &[], [0, 0]);
+        assert_eq!(sh.cur_menu(), CurMenu::Settings);
+        let w = &sh.world;
+        let font = &sh.boot_scene.font;
+        let mut want = w.frozen.clone();
+        w.main_menu.draw(
+            &crate::menu::PlainModel,
+            &mut want,
+            &w.pal32,
+            font,
+            true,
+            -1,
+            true,
+        );
+        w.settings_menu.draw(
+            &crate::menu::PlainModel,
+            &mut want,
+            &w.pal32,
+            font,
+            false,
+            -1,
+            false,
+        );
+        assert_eq!(
+            *sh.surface(),
+            want,
+            "DrawBasicMenu disables the main menu; the settings menu is drawn enabled"
+        );
     }
 }

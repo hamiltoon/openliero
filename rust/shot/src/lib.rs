@@ -539,6 +539,7 @@ pub fn render_menu(tc_root: &Path, frames: u32, seed: u32, scale: u32) -> Vec<u8
     let (mut sh, mut sim, _) = Shell::boot(
         tc_root,
         settings,
+        Box::new(scenario::storage::MemoryStore::new()),
         SeedSource::Fixed(seed),
         0,
         StartOptions::default(),

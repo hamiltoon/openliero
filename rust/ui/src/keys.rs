@@ -12,6 +12,8 @@ use sim::state::ControlState;
 pub const MAX_DOS_KEY: u32 = 177;
 /// DOS scancodes the menus test (`keys.cpp:9-60`: the `liero_to_sdl_keys` index of each key).
 pub const DK_ESCAPE: u32 = 1;
+/// Step 4½e-1: `InputStringState`'s Backspace (SDL `SDL_SCANCODE_BACKSPACE`, `keys.cpp`).
+pub const DK_BACKSPACE: u32 = 14;
 pub const DK_RETURN: u32 = 28;
 pub const DK_LCTRL: u32 = 29;
 pub const DK_F1: u32 = 59;

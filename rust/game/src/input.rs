@@ -18,7 +18,7 @@ use sim::state::ControlState;
 
 pub use ui::keys::ReleaseLatch;
 use ui::keys::TypedKey;
-use ui::shell::KeyEvent;
+use ui::shell::InputEvent;
 
 /// Number of worms sampled per tick — positional `[ControlState; N]`, the same
 /// index `process_frame` reads and `Viewport::worm_idx` maps (spec §4.2).
@@ -571,19 +571,24 @@ pub fn typed_of_keycode(k: KeyCode) -> TypedKey {
 /// The keyboard events waiting for the next fixed tick (design §7.1). C++ polls every pending
 /// event at the top of a frame; a tick takes the queue in order, except that a key's second
 /// event waits for the next tick (plan-time fact 19: a tap inside one slow browser frame would
-/// otherwise set and clear the menu flag before `Update` runs).
+/// otherwise set and clear the menu flag before `Update` runs). Step 4½e-1: the queue holds
+/// `InputEvent`s; a text event never defers, but waits behind a deferred key (FIFO).
 #[derive(Resource, Default, Debug)]
-pub struct KeyQueue(VecDeque<KeyEvent>);
+pub struct KeyQueue(VecDeque<InputEvent>);
 
 impl KeyQueue {
-    pub fn push(&mut self, ev: KeyEvent) {
+    pub fn push(&mut self, ev: InputEvent) {
         self.0.push_back(ev);
     }
 
-    pub fn take_tick(&mut self) -> Vec<KeyEvent> {
-        let mut out: Vec<KeyEvent> = Vec::new();
+    pub fn take_tick(&mut self) -> Vec<InputEvent> {
+        let mut out: Vec<InputEvent> = Vec::new();
         while let Some(ev) = self.0.front() {
-            if out.iter().any(|e| e.dos == ev.dos) {
+            if let InputEvent::Key(k) = ev
+                && out
+                    .iter()
+                    .any(|e| matches!(e, InputEvent::Key(o) if o.dos == k.dos))
+            {
                 break;
             }
             out.push(self.0.pop_front().expect("front exists"));
@@ -1151,11 +1156,13 @@ input 5 64 96
     #[test]
     fn a_tick_takes_the_queue_but_defers_a_keys_second_event() {
         use ui::shell::KeyEvent;
-        let e = |dos, down| KeyEvent {
-            dos,
-            down,
-            repeat: false,
-            typed: ui::keys::TypedKey::Sym(0),
+        let e = |dos, down| {
+            InputEvent::Key(KeyEvent {
+                dos,
+                down,
+                repeat: false,
+                typed: ui::keys::TypedKey::Sym(0),
+            })
         };
         let mut q = KeyQueue::default();
         for ev in [
@@ -1174,5 +1181,15 @@ input 5 64 96
         );
         assert_eq!(q.take_tick(), vec![e(28, false), e(160, false), e(1, true)]);
         assert!(q.take_tick().is_empty());
+        let t = |s: &str| InputEvent::Text(s.into());
+        for ev in [e(4, true), t("3"), e(4, false), t("4"), t("4")] {
+            q.push(ev);
+        }
+        assert_eq!(
+            q.take_tick(),
+            vec![e(4, true), t("3")],
+            "text never defers, but keeps its place behind a deferred key"
+        );
+        assert_eq!(q.take_tick(), vec![e(4, false), t("4"), t("4")]);
     }
 }

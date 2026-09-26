@@ -4,8 +4,9 @@
 use render::bitmap::Rect;
 use render::font::Font;
 
-use super::MenuWorld;
 use super::settings_menu::SettingsModel;
+use super::stack::Screen;
+use super::{CurMenu, MenuWorld};
 use crate::keys::{
     DK_DOWN, DK_ESCAPE, DK_F1, DK_F2, DK_F3, DK_F5, DK_F6, DK_F7, DK_F8, DK_F9, DK_KP_ENTER,
     DK_LEFT, DK_PGDN, DK_PGUP, DK_RETURN, DK_RIGHT, DK_UP, K_DOWN, K_FIRE, K_JUMP, K_LEFT, K_RIGHT,
@@ -66,11 +67,39 @@ pub type MainModel = PlainModel;
 
 /// What `MainMenuState` may touch: the menu world (C++ `Gfx` members), the font, whether the
 /// current controller `Running()`, and this frame's sound log. No path to the sim (LD 3, §4.9).
+/// Step 4½e-1: `push` is the one screen an update may push (C++ `state_stack.Push` inside
+/// `Update`, plan fact 4); the shell runs its `enter` and pushes it after the update.
 pub struct MenuCtx<'a> {
     pub w: &'a mut MenuWorld,
     pub font: &'a Font,
     pub running: bool,
     pub sounds: &'a mut Vec<i32>,
+    pub push: Option<Screen>,
+}
+
+impl MenuCtx<'_> {
+    /// Request `screen`'s push after this update (plan fact 4). One per update.
+    pub fn push(&mut self, screen: Screen) {
+        debug_assert!(self.push.is_none(), "one push per update");
+        self.push = Some(screen);
+    }
+}
+
+/// `Gfx::DrawBasicMenu` (`gfx.cpp:1699-1704`): the frozen screen, then the main menu — disabled
+/// whenever another menu has focus (`cur_menu != &main_menu`, plan fact 1) — its selection shown.
+/// `MainMenuState::Draw` and (4½e-1 T4) `WeaponMenuState::Draw` call it.
+pub fn draw_basic_menu(w: &mut MenuWorld, font: &Font) {
+    w.surface.pixels.copy_from_slice(&w.frozen.pixels);
+    w.surface.clip = Rect::new(0, 0, w.surface.w, w.surface.h);
+    w.main_menu.draw(
+        &PlainModel,
+        &mut w.surface,
+        &w.pal32,
+        font,
+        w.cur_menu != CurMenu::Main,
+        -1,
+        true,
+    );
 }
 
 fn play(sounds: &mut Vec<i32>, hook: i32) {
@@ -148,6 +177,7 @@ impl MainMenuState {
             setup_name: &w.setup_name,
         });
         w.fade = 0;
+        w.cur_menu = CurMenu::Main; // :129
         w.frozen.pixels.copy_from_slice(&w.surface.pixels);
         w.menu_cycles = 0;
         self.selected = -1;
@@ -236,28 +266,18 @@ impl MainMenuState {
         true
     }
 
-    /// `Draw` (`mainMenuState.cpp:614-626`): `DrawBasicMenu` (`gfx.cpp:1699-1704`), then — the main
-    /// menu having focus — the settings menu, disabled. `DrawSpectatorInfo` draws into the
-    /// spectator renderer only (finding 2).
+    /// `Draw` (`mainMenuState.cpp:614-626`): `DrawBasicMenu`, then the settings menu — disabled
+    /// while the main menu has focus, else enabled as `cur_menu` (plan fact 1; 4½f/4½g add the
+    /// other menus). `DrawSpectatorInfo` draws into the spectator renderer only (finding 2).
     pub fn draw(&self, cx: &mut MenuCtx) {
         let w = &mut *cx.w;
-        w.surface.pixels.copy_from_slice(&w.frozen.pixels);
-        w.surface.clip = Rect::new(0, 0, w.surface.w, w.surface.h);
-        w.main_menu.draw(
-            &PlainModel,
-            &mut w.surface,
-            &w.pal32,
-            cx.font,
-            false,
-            -1,
-            true,
-        );
+        draw_basic_menu(w, cx.font);
         w.settings_menu.draw(
             &PlainModel,
             &mut w.surface,
             &w.pal32,
             cx.font,
-            true,
+            w.cur_menu == CurMenu::Main,
             -1,
             false,
         );

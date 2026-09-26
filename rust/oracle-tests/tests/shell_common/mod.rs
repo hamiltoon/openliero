@@ -14,7 +14,7 @@ use sim::state::ControlState;
 use ui::keys::TypedKey;
 use ui::shell::level_slot::SeedSource;
 use ui::shell::playing::StartOptions;
-use ui::shell::{KeyEvent, Phase, Present, Route, Shell, ShellInput};
+use ui::shell::{InputEvent, KeyEvent, Phase, Present, Route, Shell, ShellInput};
 use ui::text::UiTc;
 
 pub const TC_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/TC/openliero");
@@ -560,6 +560,8 @@ pub struct Run {
 fn upd_char(p: Phase) -> char {
     match p {
         Phase::Menu => 'M',
+        // Step 4½e-1: only an `InputStringState` is `Phase::Text`; T8 derives O/B from the top.
+        Phase::Text => 'I',
         Phase::Weapsel => 'W',
         Phase::Game => 'G',
         Phase::Quit => '-',
@@ -618,6 +620,7 @@ pub fn drive(script: &ShellScript, keep: Option<(u32, u32)>) -> Run {
     let (mut sh, mut sim, out) = Shell::boot(
         Path::new(TC_ROOT),
         settings.clone(),
+        Box::new(scenario::storage::MemoryStore::new()),
         seeds,
         0,
         StartOptions::default(),
@@ -665,12 +668,12 @@ pub fn drive(script: &ShellScript, keep: Option<(u32, u32)>) -> Run {
                 }
                 _ => {}
             }
-            events.push(KeyEvent {
+            events.push(InputEvent::Key(KeyEvent {
                 dos,
                 down: k.kind != Kind::Up,
                 repeat: k.kind == Kind::Repeat,
                 typed,
-            });
+            }));
         }
         let sampled = words(&held, &settings);
         let input = ShellInput {

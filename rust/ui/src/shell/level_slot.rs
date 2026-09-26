@@ -9,8 +9,10 @@ use std::path::Path;
 
 use assets::level::LevelData;
 use scenario::settings::Settings;
+use scenario::storage::ConfigStore;
 use sim::state::LevelSim;
 
+use super::level_path::read_level;
 use super::new_game::generate_level;
 
 /// `Level::old_random_level / old_level_file / old_random_map_width / old_random_map_height`.
@@ -42,10 +44,22 @@ pub struct LevelSlot {
 impl LevelSlot {
     /// `Level::GenerateFromSettings(common, settings, rand)` with the level `Rand` seeded from
     /// `seed` (4½b; `new_game::generate_level`), recording the provenance (`level.cpp:421-424`) —
-    /// also when a file level failed to load and fell back to random (finding 16).
-    pub fn generate(tc_root: &Path, settings: &Settings, seed: u32) -> LevelSlot {
+    /// also when a file level failed to load and fell back to random (finding 16). Step 4½e-1:
+    /// the file is resolved through `store` (`level_path::read_level`), only when
+    /// `!random_level`, as C++ opens it only then.
+    pub fn generate(
+        tc_root: &Path,
+        settings: &Settings,
+        store: &dyn ConfigStore,
+        seed: u32,
+    ) -> LevelSlot {
+        let file = if settings.random_level {
+            None
+        } else {
+            read_level(store, tc_root, &settings.level_file)
+        };
         LevelSlot {
-            level: generate_level(tc_root, settings, seed),
+            level: generate_level(tc_root, settings, file, seed),
             provenance: LevelProvenance::of(settings),
         }
     }
@@ -101,6 +115,7 @@ impl SeedSource {
 mod tests {
     use super::*;
     use scenario::paths::TC_ROOT;
+    use scenario::storage::MemoryStore;
 
     fn tc() -> &'static Path {
         Path::new(TC_ROOT)
@@ -109,15 +124,15 @@ mod tests {
     #[test]
     fn a_slot_records_the_settings_it_was_generated_from() {
         let s = Settings::default();
-        let slot = LevelSlot::generate(tc(), &s, 7);
-        assert_eq!(slot.level, generate_level(tc(), &s, 7));
+        let slot = LevelSlot::generate(tc(), &s, &MemoryStore::new(), 7);
+        assert_eq!(slot.level, generate_level(tc(), &s, None, 7));
         assert!(slot.reusable(&s));
     }
 
     #[test]
     fn each_of_the_five_fields_forces_a_new_level() {
         let s = Settings::default();
-        let slot = LevelSlot::generate(tc(), &s, 7);
+        let slot = LevelSlot::generate(tc(), &s, &MemoryStore::new(), 7);
         for changed in [
             Settings {
                 regenerate_level: true,
@@ -152,7 +167,7 @@ mod tests {
             level_file: "Levels/water_stage.lev".into(),
             ..Settings::default()
         };
-        let slot = LevelSlot::generate(tc(), &s, 1);
+        let slot = LevelSlot::generate(tc(), &s, &MemoryStore::new(), 1);
         assert!(slot.reusable(&s));
         assert!(!slot.reusable(&Settings {
             random_map_width: 600,
@@ -163,7 +178,7 @@ mod tests {
     #[test]
     fn take_played_keeps_the_craters() {
         let s = Settings::default();
-        let mut slot = LevelSlot::generate(tc(), &s, 7);
+        let mut slot = LevelSlot::generate(tc(), &s, &MemoryStore::new(), 7);
         let mut played = LevelSim {
             width: slot.level.width,
             height: slot.level.height,

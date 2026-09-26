@@ -498,7 +498,17 @@ fn setup(
         } else {
             Shell::boot
         };
-        let (shell, state, out) = boot(Path::new(TC_ROOT), settings, seeds, fresh_seed(), options);
+        // Step 4½e-1 T3: an empty in-memory store, so nothing changes until T10 wires the real
+        // config root.
+        let store = Box::new(scenario::storage::MemoryStore::new());
+        let (shell, state, out) = boot(
+            Path::new(TC_ROOT),
+            settings,
+            store,
+            seeds,
+            fresh_seed(),
+            options,
+        );
         // `Match::start` applies the loadout silently on every NEW GAME: report unknown names once
         // (the boot state carries the same TC weapon table).
         let unknown: Vec<String> = preview
@@ -1128,12 +1138,12 @@ fn collect_keys(
     mut queue: ResMut<game::input::KeyQueue>,
 ) {
     for ev in reader.read() {
-        queue.push(ui::shell::KeyEvent {
+        queue.push(ui::shell::InputEvent::Key(ui::shell::KeyEvent {
             dos: game::input::dos_of_keycode(ev.key_code),
             down: ev.state == ButtonState::Pressed,
             repeat: ev.repeat,
             typed: game::input::typed_of_keycode(ev.key_code),
-        });
+        }));
     }
 }
 
@@ -1162,13 +1172,18 @@ fn tick_shell(
     {
         let mask = touch_mask();
         let ex = sh.shell.settings().worm_settings[0].controls_ex;
-        events.extend(game::touch::touch_key_events(sh.touch_prev, mask, &ex));
+        events.extend(
+            game::touch::touch_key_events(sh.touch_prev, mask, &ex)
+                .into_iter()
+                .map(ui::shell::InputEvent::Key),
+        );
         sh.touch_prev = mask;
     }
     // Q5: F5 restarts during play and selection (Rust only; inert in the menu until 4½f).
-    let restart = events
-        .iter()
-        .any(|e| e.dos == ui::keys::DK_F5 && e.down && !e.repeat);
+    let restart = events.iter().any(|e| {
+        matches!(e, ui::shell::InputEvent::Key(k)
+            if k.dos == ui::keys::DK_F5 && k.down && !k.repeat)
+    });
     let input = ShellInput {
         events: &events,
         sampled: sample_inputs(source, 0, keys, Mode::Live),

@@ -17,7 +17,7 @@ use assets::sprite::{SpriteSet, Tga};
 use assets::tc::TcConfig;
 use scenario::assets::read_asset;
 use scenario::settings::Settings;
-use sim::levelgen::{LevelGenAssets, LevelGenParams, generate_from_settings, level_file_name};
+use sim::levelgen::{LevelGenAssets, LevelGenParams, generate_from_settings};
 use sim_core::rng::Rand;
 
 /// The settings a live match starts from until 4½d loads a setup: `Settings::default()`, with a
@@ -33,10 +33,16 @@ pub fn start_settings(level_file: Option<String>) -> Settings {
 
 /// `Level::GenerateFromSettings(common, settings, rand)` (`level.cpp:397-429`) with the level
 /// `Rand` seeded from the match seed (LD 6; 4½b design §2): a random level of
-/// `random_map_width x random_map_height`, or the `level_file` when `random_level` is off (a
-/// file that does not parse falls back to a random level, as C++ does), then `MakeShadow` when
-/// `shadow` is on. A missing file panics in `read_asset`: the preview only names embedded levels.
-pub fn generate_level(tc_root: &Path, settings: &Settings, seed: u32) -> LevelData {
+/// `random_map_width x random_map_height`, or `file` when `random_level` is off (`None` — the
+/// file was missing or did not parse — falls back to a random level, as C++ does), then
+/// `MakeShadow` when `shadow` is on. Step 4½e-1: the caller resolves the file
+/// (`level_path::read_level`); this never reads one.
+pub fn generate_level(
+    tc_root: &Path,
+    settings: &Settings,
+    file: Option<LevelData>,
+    seed: u32,
+) -> LevelData {
     let tc = TcConfig::load(&read_asset(tc_root, "tc.cfg")).expect("tc.cfg parses");
     let tga = Tga::load(&read_asset(tc_root, "sprites/large.tga")).expect("large.tga parses");
     let large = SpriteSet::from_tga(&tga, 16, 16, 110).expect("large sprite bank");
@@ -50,12 +56,6 @@ pub fn generate_level(tc_root: &Path, settings: &Settings, seed: u32) -> LevelDa
         random_map_width: settings.random_map_width,
         random_map_height: settings.random_map_height,
         shadow: settings.shadow,
-    };
-    let file = if settings.random_level {
-        None
-    } else {
-        let bytes = read_asset(tc_root, &level_file_name(&settings.level_file));
-        assets::level::load(&bytes).ok()
     };
     let mut rand = Rand::new();
     rand.seed(seed);
@@ -85,19 +85,19 @@ mod tests {
     /// The default settings with `seed`, and the level generated from it.
     fn start(seed: u32) -> (MatchConfig, LevelData) {
         let settings = Settings::default();
-        let level = generate_level(tc(), &settings, seed);
+        let level = generate_level(tc(), &settings, None, seed);
         (MatchConfig { settings, seed }, level)
     }
 
     #[test]
     fn the_default_level_is_generated_from_a_rand_seeded_with_the_match_seed() {
-        let lv = generate_level(tc(), &Settings::default(), 7);
+        let lv = generate_level(tc(), &Settings::default(), None, 7);
         assert_eq!((lv.width, lv.height), (504, 350), "Settings(): 504x350");
         assert!(lv.palette.is_none(), "a generated level has the TC palette");
         // Same seed, same level; another seed, another level (LD 6: level seed = match seed).
-        assert_eq!(generate_level(tc(), &Settings::default(), 7), lv);
+        assert_eq!(generate_level(tc(), &Settings::default(), None, 7), lv);
         assert_ne!(
-            generate_level(tc(), &Settings::default(), 8).material_id,
+            generate_level(tc(), &Settings::default(), None, 8).material_id,
             lv.material_id
         );
         // generate_level is GenerateFromSettings over a Rand seeded with the seed (4½b §2).
@@ -118,7 +118,9 @@ mod tests {
     fn a_stock_level_file_is_loaded_not_generated() {
         let s = start_settings(Some("Levels/water_stage.lev".into()));
         assert!(!s.random_level);
-        let level = generate_level(tc(), &s, 5);
+        let store = scenario::storage::MemoryStore::new();
+        let file = crate::shell::level_path::read_level(&store, tc(), &s.level_file);
+        let level = generate_level(tc(), &s, file, 5);
         let mut want = assets::level::load(&read_asset(tc(), "Levels/water_stage.lev")).unwrap();
         let mut lv = LevelSim {
             width: want.width,
@@ -206,7 +208,7 @@ mod play_tests {
         let tc = Path::new(TC_ROOT);
         let settings = Settings::default();
         let seed = 3488140121;
-        let level = generate_level(tc, &settings, seed);
+        let level = generate_level(tc, &settings, None, seed);
         let cfg = MatchConfig { settings, seed };
         let loaded = new_match(tc, &cfg, &level).unwrap();
         let (mut st, mut vps, scene) = (loaded.state, loaded.viewports, loaded.scene);

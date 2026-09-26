@@ -96,7 +96,7 @@ mod tests {
         let tc = Path::new(TC_ROOT);
         let settings = Settings::default();
         let shadow = settings.shadow;
-        let level = generate_level(tc, &settings, 42);
+        let level = generate_level(tc, &settings, None, 42);
         let loaded = build_match(tc, &MatchConfig { settings, seed: 42 }, &level)
             .expect("the default settings build");
         let frame = |flags: HudFlags| -> Vec<u32> {

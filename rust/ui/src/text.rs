@@ -3,6 +3,9 @@
 
 use std::path::Path;
 
+use assets::object::{Objects, Weapon};
+use assets::palette::Palette;
+use assets::sprite::Tga;
 use assets::tc::TcConfig;
 
 use crate::menu::MenuHooks;
@@ -16,6 +19,36 @@ pub const GAME_MODES: [&str; 4] = [
 ];
 /// `Texts::onoff` (`common.cpp:211-212`).
 pub const ONOFF: [&str; 2] = ["OFF", "ON"];
+/// `Texts::weap_states` (`common.cpp:222-224`), indexed by a `Settings::weap_table` entry: the
+/// WEAPON OPTIONS values (Step 4½e-1).
+pub const WEAP_STATES: [&str; 3] = ["Menu", "Bonus", "Banned"];
+
+/// `Utf8ToDos` (`text.cpp:99-118`; plan fact 7): ONE whole `SDL_EVENT_TEXT_INPUT` string to one
+/// byte. A 1-byte string is that byte; the six two-byte sequences å ä ö Å Ä Ö are CP437
+/// 0x86 0x84 0x94 0x8f 0x8e 0x99; anything else — a multi-character string included — is `'?'`
+/// (C++ matches the table on the first two bytes only). SDL never sends an empty string; Rust
+/// gives it 0, which `InputStringState` ignores.
+pub fn utf8_to_dos(s: &str) -> u8 {
+    let b = s.as_bytes();
+    match b.len() {
+        0 => 0,
+        1 => b[0],
+        _ => {
+            const TABLE: [[u8; 3]; 6] = [
+                [0xc3, 0xa5, 0x86], // å
+                [0xc3, 0xa4, 0x84], // ä
+                [0xc3, 0xb6, 0x94], // ö
+                [0xc3, 0x85, 0x8f], // Å
+                [0xc3, 0x84, 0x8e], // Ä
+                [0xc3, 0x96, 0x99], // Ö
+            ];
+            TABLE
+                .iter()
+                .find(|t| t[0] == b[0] && t[1] == b[1])
+                .map_or(b'?', |t| t[2])
+        }
+    }
+}
 
 /// C++ `'0' + n` stored into a `char` (`text.cpp`): the digit for 0..=9, and the same byte
 /// arithmetic (wrapping) outside it.
@@ -86,11 +119,33 @@ pub struct UiTc {
     pub hooks: MenuHooks,
     /// `SoundBegin` (`game.cpp:500-503`, played by `StartGame`).
     pub begin: i32,
+    /// Step 4½e-1: `LS(Weapon)`, `LS(Availability)` (WEAPON OPTIONS' headers) and `LS(NoWeaps)`
+    /// (its close-refusal box; the TC text holds a NUL line break, `tc.cfg:258`).
+    pub weapon: String,
+    pub availability: String,
+    pub no_weaps: String,
+    /// `common.exepal`: `small.tga`'s palette (`InfoBoxState::Draw`'s `clear_screen` palette).
+    pub exepal: Palette,
+    /// `common.weapons[weap_order[i]].name` for `i` in `0..40`: WEAPON OPTIONS' rows.
+    pub weapon_names: Vec<String>,
+    /// `Common::weap_order` (`sim::weapsel::weap_order`): row `i` edits `weap_table[weap_order[i]]`.
+    pub weap_order: Vec<usize>,
 }
 
 impl UiTc {
-    pub fn from_tc(tc: &TcConfig) -> UiTc {
+    /// The menu texts of `tc`, the TC's `weapons` (in `tc.types` order) and its `exepal`.
+    pub fn from_tc(tc: &TcConfig, weapons: &[Weapon], exepal: Palette) -> UiTc {
+        let weap_order = sim::weapsel::weap_order(weapons);
         UiTc {
+            weapon: tc.texts.Weapon.clone(),
+            availability: tc.texts.Availability.clone(),
+            no_weaps: tc.texts.NoWeaps.clone(),
+            exepal,
+            weapon_names: weap_order
+                .iter()
+                .map(|&i| weapons[i].name.clone())
+                .collect(),
+            weap_order,
             copyright2: tc.texts.Copyright2.clone(),
             random2: tc.texts.Random2.clone(),
             regen_level: tc.texts.RegenLevel.clone(),
@@ -107,8 +162,14 @@ impl UiTc {
     }
 
     pub fn load(tc_root: &Path) -> UiTc {
-        let bytes = scenario::assets::read_asset(tc_root, "tc.cfg");
-        UiTc::from_tc(&TcConfig::load(&bytes).expect("tc.cfg parses"))
+        use scenario::assets::read_asset;
+        let tc = TcConfig::load(&read_asset(tc_root, "tc.cfg")).expect("tc.cfg parses");
+        let objects = Objects::load(&tc.types, |sub, id| {
+            Ok(read_asset(tc_root, &format!("{sub}/{id}.cfg")))
+        })
+        .expect("object configs load");
+        let small = Tga::load(&read_asset(tc_root, "sprites/small.tga")).expect("small.tga parses");
+        UiTc::from_tc(&tc, &objects.weapons, small.palette)
     }
 }
 
@@ -176,5 +237,68 @@ mod tests {
             (25, 26, 27, 22),
             "tc.cfg [sounds]"
         );
+    }
+
+    #[test]
+    fn utf8_to_dos_is_one_byte_per_text_event() {
+        // text.cpp:99-118 (plan fact 7).
+        assert_eq!(utf8_to_dos("a"), b'a');
+        assert_eq!(utf8_to_dos("7"), b'7');
+        let swedish: Vec<u8> = ["å", "ä", "ö", "Å", "Ä", "Ö"]
+            .iter()
+            .map(|s| utf8_to_dos(s))
+            .collect();
+        assert_eq!(swedish, [0x86, 0x84, 0x94, 0x8f, 0x8e, 0x99]);
+        assert_eq!(utf8_to_dos("ab"), b'?', "a multi-character string");
+        assert_eq!(
+            utf8_to_dos("é"),
+            b'?',
+            "a two-byte sequence outside the table"
+        );
+        assert_eq!(utf8_to_dos("€"), b'?', "a three-byte sequence");
+        assert_eq!(utf8_to_dos(""), 0);
+    }
+
+    #[test]
+    fn ui_tc_carries_the_weapon_options_texts_and_rows() {
+        let root = std::path::Path::new(scenario::paths::TC_ROOT);
+        let tc = UiTc::load(root);
+        assert_eq!(
+            WEAP_STATES,
+            ["Menu", "Bonus", "Banned"],
+            "common.cpp:222-224"
+        );
+        assert_eq!(
+            (tc.weapon.as_str(), tc.availability.as_str()),
+            ("Weapon", "Availability")
+        );
+        assert_eq!(
+            tc.no_weaps.matches('\0').count(),
+            1,
+            "tc.cfg:258: one NUL line break"
+        );
+        assert_eq!(
+            tc.no_weaps,
+            "At least one weapon must\u{0}be available in the menu!"
+        );
+        let cfg = TcConfig::load(&scenario::assets::read_asset(root, "tc.cfg")).unwrap();
+        let objects = Objects::load(&cfg.types, |sub, id| {
+            Ok(scenario::assets::read_asset(
+                root,
+                &format!("{sub}/{id}.cfg"),
+            ))
+        })
+        .unwrap();
+        assert_eq!(tc.weapon_names.len(), 40);
+        assert_eq!(tc.weap_order, sim::weapsel::weap_order(&objects.weapons));
+        for (i, name) in tc.weapon_names.iter().enumerate() {
+            assert_eq!(*name, objects.weapons[tc.weap_order[i]].name);
+        }
+        assert!(
+            tc.weapon_names.windows(2).all(|w| w[0] < w[1]),
+            "weap_order sorts by name"
+        );
+        let small = Tga::load(&scenario::assets::read_asset(root, "sprites/small.tga")).unwrap();
+        assert_eq!(tc.exepal, small.palette);
     }
 }

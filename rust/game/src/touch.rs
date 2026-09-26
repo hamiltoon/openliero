@@ -54,7 +54,7 @@ pub fn merge(keyboard: ControlState, mask: u32) -> ControlState {
 
 /// The menu key events of a touch-mask change (design §7.3): each bit's rising edge is a key-down
 /// of player 1's `controls_ex[bit]`, its falling edge a key-up; DIG is Left + Right; MENU is Esc.
-/// Touch has no OS repeat.
+/// Touch has no OS repeat. The caller wraps each in `ui::shell::InputEvent::Key` (Step 4½e-1).
 pub fn touch_key_events(prev: u32, now: u32, controls_ex: &[u32; 8]) -> Vec<ui::shell::KeyEvent> {
     let keys = |bit: u32| -> Vec<u32> {
         match bit {

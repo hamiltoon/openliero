@@ -1085,3 +1085,22 @@ T2's `NativeStore::root_label` follows these three rules. The fixture overrides 
 ### What changed in this plan
 
 Nothing in any task. Fact 28's string is `./user`, and T2's root-label rules are the three above. Both agree with §Formats as written.
+
+## Addendum G3 (Batch 6 finding + John's ruling, 2026-09-26)
+
+**Finding.** C++ spawning reads outside the level on maps smaller than the TC's `WormSpawnRect` (5,5 + 494×340):
+`Worm::BeginRespawn` (`worm.cpp:724-739`) draws candidates from the fixed rect, and `CheckRespawnPosition`
+(`game.cpp:611-649`) clamps only the max corner and walks with `!=` bounds, so a candidate row below the level walks
+past `materials[]`; the drop-down `Mat(x, y+4)` can too. A candidate right of the level reads on through following rows
+via the flat index — defined while it stays inside the vector. C++ segfaults or silently reads garbage; Rust indexes
+the same flat array and panics where C++ leaves the vector. Any MAP HEIGHT below ~342 can hit it; below ~165 every
+first spawn does. G3's `small` case therefore moved from 96×64 to 96×344 (`6c2dfd8`), and `tall` runs 4,960 ticks.
+
+**Ruling (John): safe edges.** In Rust, a material read whose flat index falls outside the level's array counts as
+solid rock (not background), so a spawn candidate touching it is rejected and the worm picks another. In-array reads —
+including C++'s defined flat-index wrap for `x ≥ width` — are unchanged, so every run on which C++ stays inside the
+vector stays bit-exact (all existing goldens and G3 re-diff unchanged). This is a documented, intended divergence only
+where C++ has undefined behaviour. Implement it at the sim's material accessor(s) used by the spawn path (and any
+other path Batch 6 showed reaching past the array), with unit tests on a 96×64 and a 160×120 level proving no panic and
+a successful spawn, plus a full re-diff. Batch 7's `map_size` G2 case must still use a UB-free size (height ≥ 342),
+run against an assertions/ASan build of the C++ dumper (`$S/build-chk/`).

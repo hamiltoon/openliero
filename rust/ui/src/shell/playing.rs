@@ -13,7 +13,7 @@ use render::bitmap::{Bitmap, Pal32};
 use render::palette::{build_palette, set_worm_colour};
 use render::viewport::Viewport;
 use scenario::build::{build_match, enter_game, new_match};
-use scenario::settings::{MatchConfig, Settings};
+use scenario::settings::{GM_HOLDAZONE, GM_KILL_EM_ALL, MatchConfig, Settings};
 use scenario::{Loaded, SceneData};
 use sim::state::{ControlState, SimState};
 
@@ -42,12 +42,22 @@ fn focus_palette(scene: &mut SceneData, settings: &Settings) {
 
 /// The boot controller (`gfx.cpp:1441-1450`): `LocalController(common, settings)` on the boot
 /// level, focused for its palette only. Its sim RNG is never used (C++ seeds it from the clock).
+///
+/// A Holdazone setup boots too (C++ constructs any mode's game): the builder refuses
+/// `game_mode 2` because the sim's Holdazone arm is unported, but this game is never
+/// processed, so it is built as Kill'em All and only `state.game_mode` (read by the HUD's
+/// timer arm) carries the 2 (Step 4½d G2 `shell_holdazone_boot`).
 pub fn boot_state(tc_root: &Path, settings: &Settings, level: &LevelData, seed: u32) -> Loaded {
+    let mut buildable = settings.clone();
+    if buildable.game_mode == GM_HOLDAZONE {
+        buildable.game_mode = GM_KILL_EM_ALL;
+    }
     let cfg = MatchConfig {
-        settings: settings.clone(),
+        settings: buildable,
         seed,
     };
     let mut loaded = new_match(tc_root, &cfg, level).expect("the settings build a match");
+    loaded.state.game_mode = settings.game_mode;
     focus_palette(&mut loaded.scene, settings);
     loaded
 }

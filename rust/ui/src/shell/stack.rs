@@ -1,25 +1,35 @@
 //! C++ `StateStack` (`state.hpp:47-139`; design §4.9). A `Screen` enum rather than trait objects:
 //! every dispatch is an exhaustive `match`, so a screen 4½e/4½f/4½g adds cannot be forgotten.
 //! The stack is plain data; `Shell` runs `enter` before `push` (`Push` calls `Enter`,
-//! `state.hpp:50-54`). No 4½d screen has a `Leave`.
+//! `state.hpp:50-54`). No screen has a `Leave`. Step 4½e-1 adds the settings menu's sub-screens.
 
 use super::main_menu::MainMenuState;
+use super::overlay::{InfoBoxState, InputStringState};
+use super::weapon_options::WeaponMenuState;
 
 pub enum Screen {
     MainMenu(MainMenuState),
     /// `GamePlayState`; its controller is `Shell::current`, as C++'s is `gfx.controller`.
     Playing,
+    /// `WeaponMenuState` (4½e-1), pushed by WEAPON OPTIONS over the main menu.
+    WeaponOptions(WeaponMenuState),
+    /// `InputStringState` (4½e-1): number entry, over the main menu.
+    InputString(InputStringState),
+    /// `InfoBoxState` (4½e-1): WEAPON OPTIONS' "no weapons" box, the refusal boxes.
+    InfoBox(InfoBoxState),
 }
 
 impl Screen {
-    /// `AppState::IsOverlay` (`state.hpp:34`): no 4½d screen is one (4½e's `InputStringState` is).
+    /// `AppState::IsOverlay` (`state.hpp:34`): only `InputStringState` is one
+    /// (`inputState.hpp:21-23`).
     pub fn is_overlay(&self) -> bool {
-        false
+        matches!(self, Screen::InputString(_))
     }
 
-    /// `AppState::WantsMenuFlip` (`state.hpp:38`, `gamePlayState.hpp:119`).
+    /// `AppState::WantsMenuFlip` (`state.hpp:38`, `gamePlayState.hpp:119`): every screen but
+    /// `GamePlayState`.
     pub fn wants_menu_flip(&self) -> bool {
-        matches!(self, Screen::MainMenu(_))
+        !matches!(self, Screen::Playing)
     }
 }
 
@@ -149,5 +159,53 @@ mod tests {
         assert_eq!(s.draw_from_by(playing_is_overlay), 0);
         assert_eq!(s.draw_from(), 2, "no 4½d screen is an overlay");
         assert!(!Screen::Playing.wants_menu_flip() && menu().wants_menu_flip());
+    }
+
+    fn input() -> Screen {
+        use crate::menu::ValueEntry;
+        use crate::shell::overlay::InputPurpose;
+        Screen::InputString(InputStringState::new(
+            b"",
+            3,
+            0,
+            0,
+            None,
+            "",
+            false,
+            InputPurpose::IntegerEntry(ValueEntry {
+                item_id: 0,
+                initial: String::new(),
+                digits: 3,
+                x: 0,
+                y: 0,
+                min: 0,
+                max: 999,
+                div: 1,
+                percentage: false,
+            }),
+        ))
+    }
+
+    fn info() -> Screen {
+        use crate::shell::overlay::InfoPurpose;
+        Screen::InfoBox(InfoBoxState::new("X", 0, 0, false, InfoPurpose::NoWeapons))
+    }
+
+    #[test]
+    fn only_the_input_string_is_an_overlay_and_only_play_skips_the_menu_flip() {
+        let weapons = Screen::WeaponOptions(WeaponMenuState::default());
+        assert!(input().is_overlay());
+        assert!(!info().is_overlay() && !weapons.is_overlay() && !menu().is_overlay());
+        for sc in [menu(), weapons, input(), info()] {
+            assert!(sc.wants_menu_flip());
+        }
+        let mut s = ScreenStack::default();
+        s.push(menu());
+        s.push(input());
+        assert_eq!(s.draw_from(), 0, "the entry draws over the main menu");
+        s.pop();
+        s.push(Screen::WeaponOptions(WeaponMenuState::default()));
+        s.push(info());
+        assert_eq!(s.draw_from(), 2, "the info box draws alone");
     }
 }

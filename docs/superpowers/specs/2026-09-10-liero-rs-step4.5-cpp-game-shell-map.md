@@ -48,6 +48,21 @@ Overrides: `GamePlayState::WantsMenuFlip() == false` (`gamePlayState.hpp:13`), `
 (`statsState.hpp:18`), `RematchState` explicitly true (`rematchState.hpp:26`).
 `InputStringState::IsOverlay() == true` (`inputState.hpp:23`) — the menu below repaints beneath the text field.
 
+(**4½e-1**, plan facts 3–7, 9, 12; the source checked for the port.) Sub-states are pushed *inside*
+`MainMenuState::Update` / `WeaponMenuState::Update` and `Push` runs `Enter` at once (`state.hpp:50-54`); the
+rest of that `Update` keeps running. `menuStatePtr_` (set at push, `gfx.cpp:1463`, `:1623`; cleared only at the
+router's dispatch, `:1494`) keeps pointing at the `MainMenuState` while a `WeaponMenuState`, `InputStringState` or
+`InfoBoxState` sits above it, so `kMenuSelection` / `kMenuFadingOut` (`:1488-1489`) come from the main menu
+wherever it is. **`InputStringState`** (`inputState.cpp:13-99`): `HandleEvent` handles every event in order, even
+after `done_` — text typed after Return in the same poll still lands; Backspace / Return / KP Enter / Esc are tested
+by SDL scancode on every key-down, repeats included; each `SDL_EVENT_TEXT_INPUT` string goes through `Utf8ToDos`
+(`text.cpp:99-118`), which makes the **whole string one byte** — a 1-byte string that byte, å ä ö Å Ä Ö their CP437
+codes, anything else (a multi-character string included) `'?'`; `Font::DrawString` UTF-8-decodes, so a typed å is
+drawn as U+FFFD; the strip restore is `BlitBitmap(bmp, frozen, kClrX, y, kClrX + 10 + kWidth, 8)` — the width
+argument is `kClrX + 10 + kWidth` (`:92`). **`InfoBoxState`** (`:166-217`) is not an overlay; any key-down
+(repeats included) dismisses it, a key-up never; `Update` does `ClearKeys`, the optional `Fill(bmp, 0)`,
+`on_dismiss`, pop; `Draw` with `clear_screen` switches to `exepal` first.
+
 ### 1.2 The state classes
 
 | State | File | Role |
@@ -114,6 +129,13 @@ The **menu-selection dispatch** (`gfx.cpp:1493-1593`) is the real "screen router
   - **PageUp/PageDown**: `MovementPage` (`:594-602`)
 - Selecting anything sets `selected_` → `phase_ = kFadingOut`, `fade_value = 32` (`:604-609`); fade-out counts down in `Update()` (`:153-159`) then pops.
 - `Draw()` (`:614`): `DrawBasicMenu()` (frozen screen + main menu), `DrawSpectatorInfo()`, then `cur_menu->Draw` — settings menu is drawn *disabled* when main menu has focus (`:621-625`).
+- (**4½e-1**, plan facts 1, 2.) `cur_menu` is a **`Gfx` member** (`gfx.hpp:321`), not `MainMenuState` state:
+  `DrawBasicMenu` draws the main menu *disabled* whenever `cur_menu != &main_menu` (`gfx.cpp:1702`), so
+  `WeaponMenuState::Draw` (which calls it) shows a disabled main menu; `MainMenuState::Enter` resets it to the main
+  menu (`mainMenuState.cpp:129`). With settings focus, Enter plays `MenuSelect` itself only in the four push arms
+  (LEVEL, WEAPON OPTIONS, LOAD SETUP, SAVE SETUP AS…, `:275-311`); the `default:` arm calls
+  `settings_menu.OnEnter` and the *behavior* plays it (`integerBehavior.cpp:37`, `booleanSwitchBehavior.cpp:20-25`,
+  `enumBehavior.cpp:24-29`) — one `MenuSelect` per Enter either way.
 
 `Gfx::DrawBasicMenu` — `gfx.cpp:1699`. `Gfx::DrawSpectatorInfo` (level name, "P1 vs P2" + colour
 swatches, "PAUSED"/"SETUP") — `gfx.cpp:1739`. (**4½d:** `DrawSpectatorInfo` and
@@ -245,6 +267,11 @@ Two different things share the word "weapon menu":
 enabled (`settings->weap_table[40]`, 0 = available). Pure UI; Esc/Jump refuses to close if zero
 weapons are enabled and pushes `InfoBoxState(LS(NoWeaps))` (`:91-109`). Drawn over `frozen_screen`
 with `WEAPON` / `AVAILABILITY` headers (`:114-127`).
+(**4½e-1**, plan facts 10, 11.) The close rule, exactly (`:91-110`): on Esc, any keyboard player's Jump or pad
+East/South, count the `weap_table` entries equal to 0 over all 40; > 0 → `Update` returns false and the state pops
+that frame; 0 → push `InfoBoxState(LS(NoWeaps), 223, 68, false)` on top (no replace). Enter and Fire do nothing;
+Left/Right are *once* keys (`:66-76`); PgUp/PgDn are live (`Settings::kExtensions`); the headers are exactly
+`Font::DrawFramedText` `(179, 20, "Weapon", 50)` and `(249, 20, "Availability", 50)`.
 
 **(b) `WeaponSelection`** (`src/game/weapsel.cpp`, `weapsel.hpp:9`) — the in-match pick screen.
 **This is inside the controller, not the state stack.**
@@ -255,6 +282,10 @@ key-repeat emulation for held keys (`kKeyRepeatInitial=12`, `kKeyRepeatInterval=
 `localController.hpp:44-46`; `localController.cpp:121-146`) then `ws->ProcessFrame()`; when it
 returns true → `ChangeState(kStateGame)`, which calls `ws->Finalize()`, resets lives, starts replay
 recording, `game.StartGame()` (`localController.cpp:213-286`).
+(**4½e-1**, plan fact 15.) A running `WeaponSelection` reads the live settings too: `game.settings->weap_table` on
+every cycle and RANDOMIZE step (`weapsel.cpp:255`, `:278`, `:327`) and `level_file` in `Draw` (`:107`, `:171`) —
+but it counts `enabled_weaps` once, in its constructor (`:35-39`), and never again. Its picks are the shared
+`WormSettings::weapons` (`:66`, `:255-282`), so the settings menu sees a cycled pick at once.
 
 ### ⚠ Sim-affecting RNG in weapon selection
 
@@ -342,6 +373,18 @@ optional `MODERNLV` display data → optional animation ramps → `materials[i] 
 - Prepends a synthetic `RANDOM` node (`LS(Random)`, `id=1`) at the front (`:78-84`).
 - `Select(settings->level_file)` restores the previous cursor by walking the tree (`fileSelector.hpp:184-214`).
 - `OnSelected` sets `random_level` / `level_file` and `settings_menu.UpdateItems` (`:93-103`).
+- (**4½e design findings 2, 3; confirmed by the 4½e-1 T0 probe** under Xvfb.) `level_file` is a **config-root
+  path**: the tree's root is `gfx.GetConfigNode()`, whose `FullPath()` in the split layout is the *user* folder's
+  (`FsNodeJoin::FullPath`, `filesystem.cpp:356-362`), and NEW GAME opens it with a plain `FsNode(path)`
+  (`level.cpp:401-411`). The saved strings: `<user dir>/TC/openliero/Levels/water_stage.lev` for an absolute
+  `OPENLIERO_TEST_USER_DIR`; `<pref path>/TC/openliero/Levels/water_stage.lev` with a **single** `/` for
+  `SDL_GetPrefPath` (its trailing `/` is dropped: `FsNode(std::string)` re-joins the parts); `./user/TC/openliero/
+  Levels/water_stage.lev` for the relative `OPENLIERO_TEST_USER_DIR=user` (a relative root gains `./`); and
+  `<root>/TC/…` under `--config-root`. So a level that exists only in the shipped data **plays random** in a
+  default split install (the file is not in the user folder and `GenerateFromSettings` falls back, `:416-418`),
+  while LEVEL still shows its name; with the file in the user layer, or with `--config-root`, it plays. With a file
+  level, SettingsMenu hides MAP WIDTH/HEIGHT and REGENERATE LEVEL reads RELOAD LEVEL. (John's Q4: Rust fixes this in
+  4½e-2 — a picked level is played.)
 - `DrawExtra` (`:105-156`) **live-previews** the highlighted level: loads it, draws a 52×36-target minimap into `frozen_screen` at (134,162) and a 252×175-target one into `frozen_spectator_screen`, clearing the previous footprint first. `Level::DrawMiniature` at `level.cpp:489`; the bounding-box constants are `Level::kHudMinimapW/H` and `kSpecMinimapW/H` (`level.hpp:31-34`).
 
 `FileSelector::Process` key handling (`fileSelector.hpp:251-300`): Up/Down, PgUp/PgDn, Esc/Jump =
@@ -376,6 +419,17 @@ Other pickers: replays (`.LRP`, `<config>/Replays`, `fileSelectorState.cpp:160-1
 - `Settings::ToToml` / `FromToml` (`settings.cpp:103` / `:133`) use `cereal::TomlOutputArchive`/`TomlInputArchive` (`src/game/serialization/toml_archive.hpp`).
 - Layout: a `[settings]` table (`version`, `modernColors`, then `SerializeSettingsScalars`, then a `weapTable` array), followed by `[player1]`, `[player2]`, `[network_player]` tables via `SerializeWormSettingsToml`.
 - Field list: `src/game/serialization/cereal_types.hpp:161-194` (scalars), `:282-310` (worm TOML). Worm TOML carries an `rgbDepth` marker; files without it are treated as 6-bit and expanded `(v&63)<<2` on load (`cereal_types.hpp:290-302`).
+- (**4½e design finding 1**, confirmed by the 4½e-1 T0 probe through the real `Gfx::RunOneFrame`.) A running
+  `Game` holds the **same** `std::shared_ptr<Settings>` as `gfx.settings` (`game.hpp:124`,
+  `localController.cpp:31-32`), and the settings menu edits it in place, so a paused match sees menu edits from its
+  next tick — both sim reads (`max_bonuses`, `weap_table`, `game_mode`, `time_to_lose`, `blood`, `loading_time`,
+  `load_change`, `shadow`) and draw reads (`map`, `names_on_bonuses`). `Gfx::LoadSettings` (LOAD SETUP) replaces
+  `gfx.settings` with a new object (`gfx.cpp:1693-1697`), which **breaks the sharing**: the paused game keeps the
+  old one. (Plan fact 14:) `lives` is *not* read per tick by a local match — `game.cpp:159` is `ResetWorms`, which
+  only `RollbackController` calls; `LocalController` reads `settings->lives` once, at `kStateGame`
+  (`localController.cpp:234`), as `StartGame` reads `blood_particle_max` (`game.cpp:513`).
+- At exit `gameEntry.cpp:78` saves `gfx.settings` to `<user config>/Setups/liero.cfg`; at boot (`:52-58`) a failed
+  `LoadSettings` of the merged view saves the defaults there (`FsNode` writes create the parent directories).
 - `Settings::load/save` are byte-level wrappers (`settings.cpp:62-90`, `:158-163`). `Settings::UpdateHash` = XXH3-64 over the *gameplay-only* subset (`settings.cpp:92-101`, subset at `cereal_types.hpp:218-238`) — the match-compatibility hash for netplay/replays.
 - `WormSettings::SaveProfile` / `LoadProfile` — `worm.cpp:60` / `:73`. **Load deliberately preserves `color`** (`worm.cpp:94`). `UpdateHash` = XXH3 over the profile TOML (`worm.cpp:38`).
 - Binary (replay/net) path is a separate `serialize()` with indexed keys (`cereal_types.hpp:197-212`, `:255-280`), `CEREAL_CLASS_VERSION(Settings, 3)`.

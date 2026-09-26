@@ -73,6 +73,12 @@ Everything a menu needs is already Bevy-free in `render`:
 - Palette: `render::palette::pack_pal32(&Palette) -> Pal32` (`palette.rs:36`) or `build_palette(origpal, color_anim, cycles, screen_flash)` (`:47`). `render::palette::rotate_from` already exists (`palette.rs:13`; 4½c design finding 10); 4½c adds `render::weapsel::weapsel_palette` over 168..174, and `render::palette::set_worm_colour` (C++ `Palette::SetWormColour`, reached via `Game::Focus`).
 - The loaded `SceneData` already owns `origpal`, `color_anim`, and the `font` (`scenario/src/loader.rs:40-53`).
 - `frame::draw` restores `bmp.clip = full_clip` at the end (`frame.rs:176`), so overdrawing a menu on top of a rendered world frame (the C++ `frozen_screen` look) is safe.
+- (**4½e-1.**) `Scene` gained `small_labels: Option<SmallLabels>` (the existing `labels` field is the HUD's
+  `&HudLabels`): the three `DrawTextSmall` labels — a weapon bonus's name, a booby trap's disguise name, and the
+  current weapon over a worm whose Change bit is held (`viewport.cpp:408-413`, `:466-479`, `:575-581`) — drawn through
+  `render::small_text::draw_text_small` with `SceneData::text_sprites` (`text.tga`). It is `None` on every
+  pre-4½e-1 golden path (`as_scene`, `shot`, the render harnesses), so no old golden moved; the shell's `Match`
+  sets it. `render::font` also gained `get_dims_h` and `draw_framed_text`, and `render::blit` `blit_bitmap`.
 
 **320×200 / scale**: `SURFACE_W/H = 320/200` (`main.rs:45-46`); window fixed at `960×600`; scale is the
 sprite `Transform` ×3 (`main.rs:422`). HUD geometry derives the multiplier from the surface (`frame.rs:70-73`).
@@ -88,7 +94,7 @@ does (`shot/src/lib.rs:200-204`). Cheap 4½ win.
 - Pure core: `PlayerBindings<K>` (`input.rs:31-42`) → `control_state(|k| pressed(k)) -> ControlState` (`:56-67`), Dig = Left+Right chord (`:57-62`).
 - `InputMap { players: Vec<PlayerBindings<KeyCode>> }` (`:73`), `default_bindings()` (`:85-112`): P0 = R/F/D/G + LCtrl/LShift/LAlt; P1 = arrows + RCtrl/RAlt/RShift; **dig unbound for both**. `N_WORMS = 2` (`:20`).
 - `InputSource::sample(tick, &ButtonInput<KeyCode>) -> [ControlState; 2]` (`:278-289`) — once per FixedUpdate tick.
-- **No general key-event path.** Everything polls `Res<ButtonInput<KeyCode>>`; the only edge reads are `just_pressed(F5)` and `Escape`. No text input, no key-repeat emulation. Menu navigation: `just_pressed` on Up/Down/Enter/Esc (matches existing style) plus a `KeyboardInput` reader for typing (profile names); the C++ weapsel key-repeat (12/3) must be emulated explicitly (deferred in 4f, `docs/…slice4f4g…md:146`). (**4½d:** the menus take key *events* — a `KeyEvent` queue with `KeyCode → DOS` and typed symbols, fed to `ui::keys::KeyLatch` — not `just_pressed`; `just_pressed(F5)` remains only for the Rust-only restart.)
+- **No general key-event path.** Everything polls `Res<ButtonInput<KeyCode>>`; the only edge reads are `just_pressed(F5)` and `Escape`. No text input, no key-repeat emulation. Menu navigation: `just_pressed` on Up/Down/Enter/Esc (matches existing style) plus a `KeyboardInput` reader for typing (profile names); the C++ weapsel key-repeat (12/3) must be emulated explicitly (deferred in 4f, `docs/…slice4f4g…md:146`). (**4½d:** the menus take key *events* — a `KeyEvent` queue with `KeyCode → DOS` and typed symbols, fed to `ui::keys::KeyLatch` — not `just_pressed`; `just_pressed(F5)` remains only for the Rust-only restart.) (**4½e-1:** the queue carries `ui::shell::InputEvent` — `Key(KeyEvent)` or `Text(String)`, in SDL order: a printing key-down is followed by one `Text` per `char` of its typed text (plan D8), and the phone text field's `window.lieroText` entries join it. A live match's worm input is C++ `OnKey`'s *edges* over the sampled words (`ui::keys::KeyEdges`): a bit the sim consumed stays clear while its key is held — `--live`'s non-shell path too.)
 - No binding persistence, no rebinding UI, no per-worm profile: `default_bindings()` is the single hard-coded source. C++: `data/Profiles/*.toml` + `src/game/inputState.cpp`; DOS-scancode ↔ SDL tables in `src/game/keys.cpp`.
 
 ---
@@ -127,6 +133,18 @@ themselves, e.g. `oracle-tests/tests/sim_slice5c_golden.rs:243`):
 (`assets.rs:16-27` native; `:48-103` wasm). The wasm embed is a curated manifest: `include_dir!` of
 `sprites/`, `weapons/`, `nobjects/`, `sobjects/`, `sounds/` + `include_bytes!` of `tc.cfg` and the
 single level `Levels/render_stage.lev` (`assets.rs:53-74`); a miss panics.
+
+**Storage (4½a-2, grown in 4½e-1):** `scenario::storage::ConfigStore` is now `Send + Sync` (the shell owns one
+inside a Bevy resource; `MemoryStore` uses a `Mutex`) and has `root_label()`, the config root as C++ prints it
+(`FsNode::FullPath()`: no trailing separator, a relative root gains `./`; `MemoryStore`'s is `/openliero`, the C++
+web build's root). `storage::load_setup` / `save_setup` do `gameEntry.cpp:55-58` and `:78`. `game::config` picks the
+native store like C++ `paths::Resolve` (`--config-root`, else `OPENLIERO_TEST_USER_DIR` / `SDL_GetPrefPath` over
+`OPENLIERO_DATADIR` / `data/`; no `portable.txt`); the browser's is a `MemoryStore` with the two shipped setups
+(`scenario::assets::EMBEDDED_SETUPS`), for the session only. `ui::shell::level_path::read_level` resolves a
+`level_file` through the store (a C++ config-root path — `root_label() + "/"` — through the store's merged view,
+user layer then system layer, which is John's Q4 fix; else an absolute path natively; else TC-relative, the 4½d
+`?level=` convention; plan fact 27 pulled it forward from 4½e-2), and `generate_level` takes the file as
+`Option<LevelData>` — a missing file falls back to a random level, as C++ does, instead of panicking.
 
 **Level paths / `data/` layout**: TC root = `concat!(CARGO_MANIFEST_DIR, "/../../data/TC/openliero")`
 (`main.rs:36`, duplicated in `input.rs:791`, `shot`, tests). `Levels/` has only 5 test fixtures.

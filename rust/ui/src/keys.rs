@@ -6,12 +6,14 @@
 //! modelled (overview §Deferrals).
 
 use scenario::settings::WormSettings;
-use sim::state::ControlState;
+use sim::state::{ControlState, WormState};
 
 /// `kMaxDosKey` (`keys.hpp:17`): DOS scancodes are `1..177`; 0 means "unbound".
 pub const MAX_DOS_KEY: u32 = 177;
 /// DOS scancodes the menus test (`keys.cpp:9-60`: the `liero_to_sdl_keys` index of each key).
 pub const DK_ESCAPE: u32 = 1;
+/// Step 4½e-1: `InputStringState`'s Backspace (SDL `SDL_SCANCODE_BACKSPACE`, `keys.cpp`).
+pub const DK_BACKSPACE: u32 = 14;
 pub const DK_RETURN: u32 = 28;
 pub const DK_LCTRL: u32 = 29;
 pub const DK_F1: u32 = 59;
@@ -203,6 +205,59 @@ impl ReleaseLatch {
     }
 }
 
+/// One live tick's worm input, built the way C++ `LocalController::OnKey` builds it
+/// (`localController.cpp:57-80`). C++ live input is EDGE-driven: a key-down or key-up sets that
+/// one bit of the worm's `control_states` (OS repeats never arrive, `gfx.cpp:608`), and between
+/// events the sim's own consumption sticks — `PressedOnce` (weapon change `worm.cpp:1080-1096`,
+/// the rope throw `:975`, a dead worm's ready `:435`) and `Release` (the first change tick
+/// `:1065-1070`, death `:425`) clear a bit that stays clear while the key is held. Rust samples
+/// LEVELS and the sim overwrites `control_states` with its input every tick
+/// (`SimState::process_frame`), so the live paths feed it this word instead:
+///
+/// - every bit that changed between `prev` and `now` (the previous and this tick's sampled
+///   words) takes its new value — the event;
+/// - every unchanged bit keeps `current`, the worm's post-tick `control_states` (possibly
+///   consumed);
+/// - then, on a change, `OnKey`'s dig rule. The sampler folds DIG into a Left+Right chord and
+///   DIG is unbound by default (`controls_ex[kDig] == 0`), so `clean[kDig]` is never set and the
+///   rule is its `else` arm: Left / Right are released unless cleanly held (`now`).
+///
+/// Scripted and replayed inputs keep the per-tick overwrite: they already are what the sim saw.
+/// The word this returns is what a recording must store, so a replay reproduces the live run.
+pub fn apply_key_edges(
+    prev: ControlState,
+    now: ControlState,
+    current: ControlState,
+) -> ControlState {
+    let (p, n, c) = (prev.pack(), now.pack(), current.pack());
+    let changed = p ^ n;
+    let mut eff = (c & !changed) | (n & changed);
+    if changed != 0 {
+        for bit in [ControlState::LEFT, ControlState::RIGHT] {
+            if n & (1 << bit) == 0 {
+                eff &= !(1 << bit);
+            }
+        }
+    }
+    ControlState::unpack(eff)
+}
+
+/// [`apply_key_edges`] for both worms, remembering the previous tick's sampled words.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyEdges {
+    prev: [ControlState; 2],
+}
+
+impl KeyEdges {
+    /// This tick's sim input from this tick's sampled (latched) words and the worms' current
+    /// `control_states`.
+    pub fn apply(&mut self, now: &[ControlState; 2], worms: &[WormState]) -> [ControlState; 2] {
+        let out = [0, 1].map(|i| apply_key_edges(self.prev[i], now[i], worms[i].control_states));
+        self.prev = *now;
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +405,179 @@ mod tests {
             16,
             "pressed again: it passes (gfx.cpp:608 + game.cpp:110-118)"
         );
+    }
+
+    // Live input edges (apply_key_edges): C++ OnKey semantics against the real sim.
+
+    use crate::shell::new_game::generate_level;
+    use scenario::build::build_match;
+    use scenario::paths::TC_ROOT;
+    use scenario::settings::MatchConfig;
+    use sim::state::SimState;
+
+    const CHANGE: u32 = 1 << ControlState::CHANGE;
+    const RIGHT: u32 = 1 << ControlState::RIGHT;
+    const FIRE: u32 = 1 << ControlState::FIRE;
+    const JUMP: u32 = 1 << ControlState::JUMP;
+
+    #[test]
+    fn a_changed_bit_takes_the_new_value_and_an_unchanged_one_keeps_the_consumed_state() {
+        let e = |p, n, c| apply_key_edges(cs(p), cs(n), cs(c)).pack();
+        assert_eq!(e(0, RIGHT, 0), RIGHT, "a key-down sets it");
+        assert_eq!(e(RIGHT, RIGHT, 0), 0, "held after PressedOnce: stays clear");
+        assert_eq!(e(RIGHT, 0, 0), 0, "a key-up clears it");
+        assert_eq!(e(CHANGE, CHANGE | RIGHT, CHANGE), CHANGE | RIGHT);
+        assert_eq!(e(FIRE, FIRE, FIRE), FIRE, "held and unconsumed: still held");
+        // OnKey's dig rule (else arm): an event releases a Left/Right that is not cleanly held.
+        let left = 1 << ControlState::LEFT;
+        assert_eq!(
+            e(0, FIRE, left),
+            FIRE,
+            "Left not held: released on the event"
+        );
+        assert_eq!(e(0, 0, left), left, "no event: untouched");
+    }
+
+    /// A default match on a generated level, both worms spawned through a Fire tap (a dead
+    /// worm's `PressedOnce(kFire)` readies it). `edges` drives it the live way.
+    fn spawned(edges: &mut KeyEdges) -> SimState {
+        let tc = std::path::Path::new(TC_ROOT);
+        let s = Settings::default();
+        let level = generate_level(tc, &s, None, 77);
+        let cfg = MatchConfig {
+            settings: s,
+            seed: 77,
+        };
+        let mut sim = build_match(tc, &cfg, &level).unwrap().state;
+        run(&mut sim, edges, [FIRE, FIRE], 1);
+        for _ in 0..600 {
+            if sim.worms.iter().all(|w| w.visible) {
+                return sim;
+            }
+            run(&mut sim, edges, [0, 0], 1);
+        }
+        panic!("the worms never spawned");
+    }
+
+    /// `n` live ticks of worm words `w`.
+    fn run(sim: &mut SimState, edges: &mut KeyEdges, w: [u32; 2], n: usize) {
+        for _ in 0..n {
+            let inputs = edges.apply(&w.map(cs), &sim.worms);
+            sim.process_frame(&inputs);
+        }
+    }
+
+    /// `n` ticks the pre-fix way: the sampled levels overwrite `control_states`.
+    fn run_levels(sim: &mut SimState, w: [u32; 2], n: usize) {
+        for _ in 0..n {
+            sim.process_frame(&w.map(cs));
+        }
+    }
+
+    #[test]
+    fn held_change_and_one_right_tap_steps_exactly_one_weapon() {
+        for live in [true, false] {
+            let mut edges = KeyEdges::default();
+            let mut sim = spawned(&mut edges);
+            let before = sim.worms[0].current_weapon;
+            let mut go = |sim: &mut SimState, w: u32, n| {
+                if live {
+                    run(sim, &mut edges, [w, 0], n);
+                } else {
+                    run_levels(sim, [w, 0], n);
+                }
+            };
+            go(&mut sim, CHANGE, 5);
+            go(&mut sim, CHANGE | RIGHT, 7); // one tap, held 7 ticks
+            go(&mut sim, CHANGE, 5);
+            go(&mut sim, 0, 1);
+            let steps = (sim.worms[0].current_weapon - before).rem_euclid(5);
+            assert_eq!(steps, if live { 1 } else { 7 % 5 }, "live {live}");
+        }
+    }
+
+    #[test]
+    fn holding_right_then_pressing_change_does_not_cycle() {
+        for live in [true, false] {
+            let mut edges = KeyEdges::default();
+            let mut sim = spawned(&mut edges);
+            let before = sim.worms[0].current_weapon;
+            if live {
+                run(&mut sim, &mut edges, [RIGHT, 0], 5);
+                run(&mut sim, &mut edges, [RIGHT | CHANGE, 0], 12);
+            } else {
+                run_levels(&mut sim, [RIGHT, 0], 5);
+                run_levels(&mut sim, [RIGHT | CHANGE, 0], 12);
+            }
+            let steps = (sim.worms[0].current_weapon - before).rem_euclid(5);
+            // The first change tick releases Left/Right (worm.cpp:1065-1070); C++ then sees no
+            // new Right press. The levels re-set Right on each of the 11 later ticks.
+            assert_eq!(steps, if live { 0 } else { 11 % 5 }, "live {live}");
+        }
+    }
+
+    #[test]
+    fn a_fire_press_that_readies_a_dead_worm_is_consumed_until_fire_is_pressed_again() {
+        // C++ has no semi-automatic release: a held Fire keeps firing a live worm. The Fire
+        // edges that matter are the dead worm's `PressedOnce(kFire)` (worm.cpp:435) and
+        // `Release(kFire)` at death (:425): a Fire held from the ready press on does not fire
+        // the respawned worm until it is pressed again.
+        let tc = std::path::Path::new(TC_ROOT);
+        let s = Settings::default();
+        let level = generate_level(tc, &s, None, 77);
+        let cfg = MatchConfig {
+            settings: s,
+            seed: 77,
+        };
+        let shots = |sim: &SimState| sim.worms[0].weapons.iter().map(|w| w.ammo).sum::<i32>();
+        for live in [true, false] {
+            let mut edges = KeyEdges::default();
+            let mut sim = build_match(tc, &cfg, &level).unwrap().state;
+            let mut n = 0;
+            while !sim.worms[0].visible {
+                if live {
+                    run(&mut sim, &mut edges, [FIRE, FIRE], 1);
+                } else {
+                    run_levels(&mut sim, [FIRE, FIRE], 1);
+                }
+                n += 1;
+                assert!(n < 600);
+            }
+            let ammo = shots(&sim);
+            if live {
+                run(&mut sim, &mut edges, [FIRE, FIRE], 60);
+                assert_eq!(shots(&sim), ammo, "held since the ready press: no shot");
+                run(&mut sim, &mut edges, [0, 0], 1);
+                run(&mut sim, &mut edges, [FIRE, 0], 150);
+                assert!(
+                    shots(&sim) < ammo - 1,
+                    "pressed again: it fires, and keeps firing"
+                );
+            } else {
+                run_levels(&mut sim, [FIRE, FIRE], 60);
+                assert!(shots(&sim) < ammo, "the levels fire at once");
+            }
+        }
+    }
+
+    #[test]
+    fn held_change_and_jump_throws_the_rope_once() {
+        for live in [true, false] {
+            let mut edges = KeyEdges::default();
+            let mut sim = spawned(&mut edges);
+            let throw = sim.sound_hooks.NinjaropeThrow;
+            let mut throws = 0;
+            for k in 0..25 {
+                let w = if k < 3 { CHANGE } else { CHANGE | JUMP };
+                if live {
+                    run(&mut sim, &mut edges, [w, 0], 1);
+                } else {
+                    run_levels(&mut sim, [w, 0], 1);
+                }
+                throws += sim.sound_events.iter().filter(|e| e.sound == throw).count();
+            }
+            assert!(sim.worms[0].ninjarope.out);
+            assert_eq!(throws == 1, live, "live {live}: {throws} throws");
+        }
     }
 }

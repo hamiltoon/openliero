@@ -25,6 +25,11 @@
 //! offers "Play again"); F5 is the Rust-only restart during play and selection. The preview's
 //! `?weapons=` / `?level=` / `?seed=` skip the menu unless `?menu=1`. The Scripted, `--replay`,
 //! `--live [<scenario>]` and `--live --record` paths are unchanged (no shell; Esc quits).
+//!
+//! Step 4½e-1: the shell reads `Setups/liero.cfg` at boot and writes it at exit (`game::config`:
+//! `--config-root <dir>`, else the C++ config root natively; in memory for the session in the
+//! browser); key-downs carry their typed text; touch repeats a held pad Up/Down on menus, and a
+//! text box on a phone takes the page's text field (`window.lieroText`), FIRE confirming.
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -48,7 +53,7 @@ use sim::state::{ControlState, SimState};
 
 use game::audio::{AudioSink, Drainer, NullSink, RodioSink};
 use game::hud_mode::{HudFlags, hud_flags};
-use game::input::{InputSource, Mode, ParsedArgs, Recorder, ReleaseLatch};
+use game::input::{InputSource, KeyEdges, Mode, ParsedArgs, Recorder, ReleaseLatch};
 use game::match_flow::{FlowStep, MatchFlow};
 use game::selection::Selection;
 use game::web_params::MatchParams;
@@ -87,6 +92,12 @@ struct RecordPath(Option<PathBuf>);
 /// wasm (no CLI args there).
 #[derive(Resource)]
 struct ReplayPath(Option<PathBuf>);
+
+/// Step 4½e-1: `--config-root <dir>` (plan D10) — the shell's single config directory. Always
+/// `None` on wasm (no CLI args there).
+#[derive(Resource)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read natively only
+struct ConfigRoot(Option<PathBuf>);
 
 /// The PR-preview URL parameters (`web_params`). Parsed from the page URL on wasm;
 /// always the default (no overrides) natively, where the CLI picks the scenario.
@@ -130,6 +141,9 @@ struct Demo {
     /// Step 4½c: the release latch at both phase boundaries (design §7.2). Only a selection
     /// boundary arms it, so a skipped selection never masks a key.
     latch: ReleaseLatch,
+    /// `Mode::Live` only: C++ `OnKey`'s edges over the sampled words (`ui::keys::apply_key_edges`),
+    /// so a bit the sim consumed stays clear while its key is held.
+    edges: KeyEdges,
     /// Whether the world draws shadows: the scenario's `render_shadow` directive. Fixed for
     /// the run.
     draw_shadow: bool,
@@ -156,14 +170,21 @@ struct Demo {
 
 /// Step 4½d: the C++ frame loop (`ui::shell::Shell`) for the live default match — a bare run
 /// or a bare preview. `phase` is the last `window.lieroPhase` published; `stopped` is the
-/// browser's QUIT (the canvas keeps the black frame, Q3); `touch_prev` the last touch mask.
+/// browser's QUIT (the canvas keeps the black frame, Q3); `touch` the touch → key-event state
+/// (Step 4½e-1: menu repeat, FIRE as Return in a text box); `refusal_shown` whether the refusal
+/// box on top was already logged; `saved` whether the exit save ran.
 #[derive(Resource)]
 struct ShellRes {
     shell: Shell,
     phase: Phase,
     stopped: bool,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the browser has touch
-    touch_prev: u32,
+    touch: game::touch::TouchKeys,
+    /// A quick lone WEAPON tap during play steps one weapon (`game::touch::WeaponTap`).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the browser has touch
+    weapon_tap: game::touch::WeaponTap,
+    refusal_shown: bool,
+    saved: bool,
 }
 
 /// Handle of the one `Image` the sprite samples; `tick_and_render` writes it.
@@ -238,6 +259,7 @@ fn main() {
         name,
         record,
         replay,
+        config_root,
     } = resolve_scenario(&preview);
     // Title: drop the stale "3c demo" string (flagged since 4a T2). The bare 4f
     // default match reads as "default match" (its sentinel name); every other
@@ -267,6 +289,7 @@ fn main() {
         .insert_resource(mode)
         .insert_resource(RecordPath(record))
         .insert_resource(ReplayPath(replay))
+        .insert_resource(ConfigRoot(config_root))
         .insert_resource(Preview(preview))
         // C++ gfx.cpp kDelay = 14ms => one processFrame per ~71.43 Hz tick. The
         // number only sets perceived speed; determinism is by tick count, not
@@ -308,6 +331,15 @@ fn main() {
             Last,
             flush_recorder_on_exit.after(bevy::window::ExitSystems),
         )
+        // Step 4½e-1: the shell writes `Setups/liero.cfg` at exit (`gameEntry.cpp:78`, finding 12)
+        // — QUIT TO OS and window close alike, ordered like the recorder flush for the same
+        // reason. The non-shell paths have no `ShellRes` and do no config I/O.
+        .add_systems(
+            Last,
+            save_settings_on_exit
+                .after(bevy::window::ExitSystems)
+                .run_if(resource_exists::<ShellRes>),
+        )
         .run();
 }
 
@@ -338,6 +370,10 @@ fn resolve_scenario(_preview: &MatchParams) -> ParsedArgs {
             eprintln!("--replay requires a path");
             std::process::exit(2);
         }
+        Err(game::input::ParseArgsError::ConfigRootMissingPath) => {
+            eprintln!("--config-root requires a directory");
+            std::process::exit(2);
+        }
     };
 
     // `--replay <path>` (4b, T2) excludes `--live`/`--record` (spec §7/§10 Q2):
@@ -358,6 +394,7 @@ fn resolve_scenario(_preview: &MatchParams) -> ParsedArgs {
             name: parsed.name,
             record: None,
             replay: Some(path),
+            config_root: parsed.config_root,
         };
     }
 
@@ -416,6 +453,7 @@ fn resolve_scenario(preview: &MatchParams) -> ParsedArgs {
             name: DEFAULT_SCENARIO.to_string(),
             record: None,
             replay: None,
+            config_root: None,
         };
     }
     ParsedArgs {
@@ -423,6 +461,7 @@ fn resolve_scenario(preview: &MatchParams) -> ParsedArgs {
         name: game::input::DEFAULT_MATCH.to_string(),
         record: None,
         replay: None,
+        config_root: None,
     }
 }
 
@@ -470,6 +509,7 @@ fn available_scenarios() -> Vec<String> {
 /// Startup: load the scenario, build the sim + render surface + the one Image,
 /// spawn the camera and the ×3 sprite, and render tick 0 so the window shows the
 /// first frame immediately (before the first `FixedUpdate`).
+#[allow(clippy::too_many_arguments)]
 fn setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -478,6 +518,7 @@ fn setup(
     record_path: Res<RecordPath>,
     replay_path: Res<ReplayPath>,
     preview: Res<Preview>,
+    config_root: Res<ConfigRoot>,
 ) {
     let name = &name.0;
     // Step 4½d: the live default match without `--record` (a bare run, a bare preview) is the
@@ -486,7 +527,11 @@ fn setup(
     let shell_start =
         *mode == Mode::Live && name == game::input::DEFAULT_MATCH && record_path.0.is_none();
     if shell_start {
-        let settings = game::new_game::start_settings(preview.0.level_file());
+        // Step 4½e-1: `Setups/liero.cfg` from the config root (`gameEntry.cpp:55-58`), then the
+        // preview's `?level=` on that in-memory copy.
+        let store = shell_store(&config_root);
+        let mut settings = game::config::load_settings(&*store);
+        preview.0.apply_level(&mut settings);
         let seeds = preview.0.seed.map_or(SeedSource::Fresh, SeedSource::Fixed);
         let options = StartOptions {
             skip_selection: preview.0.skips_weapon_selection(),
@@ -498,7 +543,14 @@ fn setup(
         } else {
             Shell::boot
         };
-        let (shell, state, out) = boot(Path::new(TC_ROOT), settings, seeds, fresh_seed(), options);
+        let (shell, state, out) = boot(
+            Path::new(TC_ROOT),
+            settings,
+            store,
+            seeds,
+            fresh_seed(),
+            options,
+        );
         // `Match::start` applies the loadout silently on every NEW GAME: report unknown names once
         // (the boot state carries the same TC weapon table).
         let unknown: Vec<String> = preview
@@ -521,7 +573,10 @@ fn setup(
             shell,
             phase: out.phase,
             stopped: false,
-            touch_prev: 0,
+            touch: game::touch::TouchKeys::default(),
+            weapon_tap: game::touch::WeaponTap::default(),
+            refusal_shown: false,
+            saved: false,
         });
         commands.insert_resource(Sim(state));
         commands.insert_resource(FrameImage(handle));
@@ -609,8 +664,9 @@ fn setup(
         (Vec::new(), Vec::new())
     };
 
-    // Step 4½a-2: the binary loads no setup yet (design §9.3.6), so the minimap follows the
-    // C++ default (`map = true`); 4½e passes the loaded setup's `map` here.
+    // Step 4½a-2: these non-shell paths load no setup (design §9.3.6; since 4½e-1 only the
+    // shell path loads `Setups/liero.cfg`, and its `Match` draws that setup's `map`), so the
+    // minimap follows the C++ default (`map = true`).
     let hud = hud_flags(*mode, scenario.hud(), Settings::default().map);
     let draw_shadow = scenario.shadow();
     let level_file = scenario.level.clone();
@@ -634,6 +690,7 @@ fn setup(
         loadout,
         selection,
         latch: ReleaseLatch::default(),
+        edges: KeyEdges::default(),
         draw_shadow,
         level_file,
         #[cfg(debug_assertions)]
@@ -937,10 +994,16 @@ fn tick_and_render(
         // replays exactly. Only a selection boundary arms it, and a recorded run has none, so
         // recordings and the Scripted/Replay feeds are unchanged.
         demo.latch.apply(&mut inputs);
-        // 4b recorder seam (spec §4.1): tap the SAMPLED array here — after
-        // `sample` (so the Dig→Left+Right chord is already resolved into the
-        // words the sim sees) and before `process_frame`. Present only in
-        // Live + `--record`, so Scripted/Replay are untouched.
+        // Step 4½e-1: Live input is C++'s key EDGES (`LocalController::OnKey`), not levels — a
+        // bit the sim consumed (`PressedOnce`/`Release`) stays clear while its key is held.
+        // Scripted/Replay words already are what the sim saw, and keep the per-tick overwrite.
+        if *mode == Mode::Live {
+            inputs = demo.edges.apply(&inputs, &sim.0.worms);
+        }
+        // 4b recorder seam (spec §4.1): tap the words the sim sees here — after
+        // `sample` (so the Dig→Left+Right chord is already resolved) and the edges,
+        // and before `process_frame`, so a replay reproduces the live run. Present
+        // only in Live + `--record`, so Scripted/Replay are untouched.
         if let Some(recorder) = recorder.as_mut() {
             recorder.record(&inputs);
         }
@@ -1122,18 +1185,23 @@ fn restart_match(
 }
 
 /// Step 4½d: the frame's keyboard events for the shell (design §7.1) — every key-down including
-/// OS repeats, every key-up — in order. Only the shell path reads them.
+/// OS repeats, every key-up — in order, each key-down followed by its typed text (Step 4½e-1).
+/// Only the shell path reads them.
 fn collect_keys(
     mut reader: MessageReader<KeyboardInput>,
     mut queue: ResMut<game::input::KeyQueue>,
 ) {
     for ev in reader.read() {
-        queue.push(ui::shell::KeyEvent {
+        let key = ui::shell::KeyEvent {
             dos: game::input::dos_of_keycode(ev.key_code),
             down: ev.state == ButtonState::Pressed,
             repeat: ev.repeat,
             typed: game::input::typed_of_keycode(ev.key_code),
-        });
+        };
+        // Step 4½e-1 (plan D8): a printing key-down's typed text follows its key.
+        for e in game::input::keyboard_events(key, ev.text.as_deref()) {
+            queue.push(e);
+        }
     }
 }
 
@@ -1156,22 +1224,39 @@ fn tick_shell(
     if sh.stopped {
         return; // the browser's QUIT: the canvas keeps the black frame (Q3)
     }
+    // Step 4½e-1: the phone text field's entries join the keyboard's, behind them in the queue
+    // (so a Backspace/Enter pair splits over two ticks like a key tap, plan-time fact 19).
+    #[cfg(target_arch = "wasm32")]
+    for ev in game::touch::page_text_events(&drain_page_text()) {
+        queue.push(ev);
+    }
     #[allow(unused_mut)] // only the wasm build adds the touch edges
     let mut events = queue.take_tick();
     #[cfg(target_arch = "wasm32")]
     {
-        let mask = touch_mask();
         let ex = sh.shell.settings().worm_settings[0].controls_ex;
-        events.extend(game::touch::touch_key_events(sh.touch_prev, mask, &ex));
-        sh.touch_prev = mask;
+        let phase = sh.phase;
+        events.extend(
+            sh.touch
+                .tick(touch_mask(), phase, &ex)
+                .into_iter()
+                .map(ui::shell::InputEvent::Key),
+        );
     }
     // Q5: F5 restarts during play and selection (Rust only; inert in the menu until 4½f).
-    let restart = events
-        .iter()
-        .any(|e| e.dos == ui::keys::DK_F5 && e.down && !e.repeat);
+    let restart = events.iter().any(|e| {
+        matches!(e, ui::shell::InputEvent::Key(k)
+            if k.dos == ui::keys::DK_F5 && k.down && !k.repeat)
+    });
     let input = ShellInput {
         events: &events,
-        sampled: sample_inputs(source, 0, keys, Mode::Live),
+        sampled: sample_inputs_touch(
+            source,
+            0,
+            keys,
+            Mode::Live,
+            sh.weapon_tap.apply(page_touch(), sh.phase),
+        ),
         fresh_seed: fresh_seed(),
         now_ms: time.elapsed().as_millis() as u64,
         restart,
@@ -1196,6 +1281,21 @@ fn tick_shell(
     if out.phase != sh.phase {
         publish_phase(out.phase.as_str());
         sh.phase = out.phase;
+    }
+    // Plan D5: a refusal box is logged once when it goes up — `ui` already writes stderr, which
+    // the browser does not show, so the console gets it there.
+    let refusal = sh.shell.top_refusal();
+    #[cfg(target_arch = "wasm32")]
+    if let (Some(r), false) = (refusal, sh.refusal_shown) {
+        web_sys::console::warn_1(&format!("openliero: refused: {r}").into());
+    }
+    sh.refusal_shown = refusal.is_some();
+    #[cfg(target_arch = "wasm32")]
+    {
+        publish_top(&sh.shell);
+        if out.phase == Phase::Game {
+            publish_weapon(sim.worms[0].current_weapon);
+        }
     }
     if out.quit {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1269,6 +1369,18 @@ fn sample_inputs(
     keys: &ButtonInput<KeyCode>,
     mode: Mode,
 ) -> [ControlState; 2] {
+    sample_inputs_touch(source, tick, keys, mode, page_touch())
+}
+
+/// [`sample_inputs`] with an explicit touch mask (the shell passes it through
+/// `game::touch::WeaponTap`).
+fn sample_inputs_touch(
+    source: &InputSource,
+    tick: u32,
+    keys: &ButtonInput<KeyCode>,
+    mode: Mode,
+    touch: u32,
+) -> [ControlState; 2] {
     #[allow(unused_mut)] // only the wasm build merges touch input
     let mut inputs = source.sample(tick, keys);
     // Browser build: the on-screen controls (`game::touch`, drawn by `web/index.html` on
@@ -1276,11 +1388,19 @@ fn sample_inputs(
     // so a touch session records and replays exactly like a keyboard one.
     #[cfg(target_arch = "wasm32")]
     if mode == Mode::Live {
-        inputs[0] = game::touch::merge(inputs[0], touch_mask());
+        inputs[0] = game::touch::merge(inputs[0], touch);
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = mode;
+    let _ = (mode, touch);
     inputs
+}
+
+/// The page's on-screen controls mask (`window.lieroTouch`); always 0 natively.
+fn page_touch() -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    return touch_mask();
+    #[cfg(not(target_arch = "wasm32"))]
+    0
 }
 
 /// The page's touch-only flag (`window.lieroTouchOnly`, set by `web/index.html` before the game
@@ -1299,8 +1419,98 @@ fn touch_only() -> bool {
     false
 }
 
-/// Publish the live phase as `window.lieroPhase` (`"menu"` / `"weapsel"` / `"game"` / `"quit"`)
-/// for the page and the headless browser check. A no-op natively.
+/// Step 4½e-1: the shell's config store — `--config-root`, else the C++ config root, natively
+/// (`game::config`); the session's in-memory store with the shipped setups in the browser.
+#[cfg(not(target_arch = "wasm32"))]
+fn shell_store(root: &ConfigRoot) -> Box<dyn scenario::storage::ConfigStore> {
+    game::config::store_for(root.0.as_deref())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn shell_store(_root: &ConfigRoot) -> Box<dyn scenario::storage::ConfigStore> {
+    Box::new(game::config::browser_store())
+}
+
+/// Step 4½e-1: `gfx.settings->save(user/Setups/liero.cfg)` once, on the first `AppExit`
+/// (`gameEntry.cpp:78`, finding 12). A crash saves nothing, as in C++.
+fn save_settings_on_exit(mut exits: MessageReader<AppExit>, mut sh: ResMut<ShellRes>) {
+    if exits.read().next().is_none() || sh.saved {
+        return;
+    }
+    sh.saved = true;
+    if let Err(e) = sh.shell.save_on_exit() {
+        game::config::warn(&format!(
+            "could not save {} under {}: {e}",
+            scenario::storage::SETUP_REL,
+            sh.shell.store().root_label()
+        ));
+    }
+}
+
+/// Step 4½e-1: the phone text field's queue (`window.lieroText`, plan D9), taken and emptied:
+/// strings are typed text, `{k: "Backspace" | "Enter"}` named keys.
+#[cfg(target_arch = "wasm32")]
+fn drain_page_text() -> Vec<game::touch::PageEntry> {
+    use game::touch::PageEntry;
+    let global = js_sys::global();
+    let Ok(list) = js_sys::Reflect::get(&global, &"lieroText".into()) else {
+        return Vec::new();
+    };
+    if !js_sys::Array::is_array(&list) {
+        return Vec::new();
+    }
+    // `Array::from` is JS `Array.from`, a copy: empty the page's queue by replacing it (the page
+    // pushes to `window.lieroText` afresh each time).
+    let list = js_sys::Array::from(&list);
+    if list.length() == 0 {
+        return Vec::new();
+    }
+    let _ = js_sys::Reflect::set(&global, &"lieroText".into(), &js_sys::Array::new());
+    list.iter()
+        .filter_map(|v| match v.as_string() {
+            Some(t) => Some(PageEntry::Text(t)),
+            None => js_sys::Reflect::get(&v, &"k".into())
+                .ok()
+                .and_then(|k| k.as_string())
+                .map(PageEntry::Key),
+        })
+        .collect()
+}
+
+/// Step 4½e-1: player 1's current weapon slot as `window.lieroWeapon` while a match plays — a
+/// read-only hook, like `window.lieroPhase`, for the headless browser check (a held WEAPON plus
+/// one pad tap steps exactly one weapon).
+#[cfg(target_arch = "wasm32")]
+fn publish_weapon(slot: i32) {
+    let _ = js_sys::Reflect::set(&js_sys::global(), &"lieroWeapon".into(), &slot.into());
+}
+
+/// Step 4½e-1: read-only hooks for the headless browser check, like `window.lieroPhase`:
+/// `window.lieroTop` is the top screen (`Shell::top_char`: `M` menu, `O` WEAPON OPTIONS, `I` a
+/// text box, `B` an info box, `G` play, `-` none), which `lieroPhase` (`menu` for `M`, `O` and
+/// `B`) cannot tell apart; `window.lieroSel` the focused menu and its cursor (`M<n>` the main
+/// menu's item index, `S<n>` the settings menu's), so a walk can check each move it makes;
+/// `window.lieroMode` the settings' GAME MODE (0 Kill'em All … 3 Scales of Justice).
+#[cfg(target_arch = "wasm32")]
+fn publish_top(shell: &Shell) {
+    let sel = match shell.cur_menu() {
+        ui::shell::CurMenu::Main => format!("M{}", shell.main_selection()),
+        ui::shell::CurMenu::Settings => format!("S{}", shell.settings_menu().selection()),
+    };
+    let global = js_sys::global();
+    let _ = js_sys::Reflect::set(
+        &global,
+        &"lieroTop".into(),
+        &shell.top_char().to_string().into(),
+    );
+    let _ = js_sys::Reflect::set(&global, &"lieroSel".into(), &sel.into());
+    let mode = shell.settings().game_mode;
+    let _ = js_sys::Reflect::set(&global, &"lieroMode".into(), &mode.into());
+}
+
+/// Publish the live phase as `window.lieroPhase` (`"menu"` / `"text"` (Step 4½e-1: a number box,
+/// the phone page's text field) / `"weapsel"` / `"game"` / `"quit"`) for the page and the headless
+/// browser check. A no-op natively.
 fn publish_phase(phase: &str) {
     #[cfg(target_arch = "wasm32")]
     let _ = js_sys::Reflect::set(&js_sys::global(), &"lieroPhase".into(), &phase.into());

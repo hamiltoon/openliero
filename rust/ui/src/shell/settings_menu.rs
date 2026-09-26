@@ -1,7 +1,8 @@
-//! The settings menu, display only in 4½d (`SettingsMenu`, `gfx.hpp:72-100`; items
-//! `gfx.cpp:485-503`; behaviors `:1262-1312`; `OnUpdate` `:1314-1341`; design finding 1, §4.10).
-//! The main screen draws it disabled at (178, 20) with `value_offset_x = 100`. 4½e gives it
-//! focus, the LEVEL / WEAPON OPTIONS / SAVE / LOAD pushes and config I/O.
+//! The settings menu (`SettingsMenu`, `gfx.hpp:72-100`; items `gfx.cpp:485-503`; behaviors
+//! `:1262-1312`; `OnUpdate` `:1314-1341`; design finding 1, §4.10). The main screen draws it at
+//! (178, 20) with `value_offset_x = 100`, disabled unless it has focus. Step 4½e-1 gives it focus,
+//! the WEAPON OPTIONS push and number entry (`MainMenuState::update`); the LEVEL / SAVE / LOAD
+//! pushes are 4½e-2's.
 
 use scenario::settings::{
     GM_GAME_OF_TAG, GM_HOLDAZONE, GM_KILL_EM_ALL, GM_SCALES_OF_JUSTICE, Settings,
@@ -63,11 +64,31 @@ pub fn settings_menu() -> Menu {
 }
 
 /// `SettingsMenu`'s virtuals over the live `Settings` (C++ `gfx.settings`). `setup_name` is
-/// `GetBasename(GetLeaf(gfx.settings_node.FullPath()))`: `"liero"` until 4½e loads setups.
+/// `GetBasename(GetLeaf(gfx.settings_node.FullPath()))`: `"liero"` until 4½e-2's LOAD SETUP.
 pub struct SettingsModel<'a> {
     pub settings: &'a mut Settings,
     pub tc: &'a UiTc,
     pub setup_name: &'a str,
+}
+
+impl SettingsModel<'_> {
+    /// The `int&` an `IntegerBehavior` (or `TimeBehavior`) of item `item_id` edits
+    /// (`gfx.cpp:1262-1312`): where a number entry's continuation writes (plan fact 13).
+    pub fn int_field(&mut self, item_id: i32) -> Option<&mut i32> {
+        let s = &mut *self.settings;
+        Some(match item_id {
+            SI_LOADING_TIMES => &mut s.loading_time,
+            SI_MAX_BONUSES => &mut s.max_bonuses,
+            SI_AMOUNT_OF_BLOOD => &mut s.blood,
+            SI_LIVES => &mut s.lives,
+            SI_TIME_TO_LOSE | SI_TIME_TO_WIN => &mut s.time_to_lose,
+            SI_ZONE_TIMEOUT => &mut s.zone_timeout,
+            SI_FLAGS_TO_WIN => &mut s.flags_to_win,
+            SI_RANDOM_MAP_WIDTH => &mut s.random_map_width,
+            SI_RANDOM_MAP_HEIGHT => &mut s.random_map_height,
+            _ => return None,
+        })
+    }
 }
 
 /// `LevelSelectBehavior::OnUpdate` (`gfx.cpp:1222-1238`), which relabels REGENERATE LEVEL.
@@ -152,7 +173,8 @@ impl MenuModel for SettingsModel<'_> {
             },
             SAVE_OPTIONS => Behavior::Custom(Box::new(OptionsSave { name: setup_name })),
             LOAD_CHANGE => Behavior::Bool(&mut s.load_change),
-            // WEAPON OPTIONS, LOAD SETUP: behaviors with no display (their pushes are 4½e's).
+            // WEAPON OPTIONS, LOAD SETUP: behaviors with no display (`MainMenuState::update` pushes
+            // WEAPON OPTIONS since 4½e-1; LOAD SETUP is 4½e-2's).
             _ => Behavior::Plain,
         }
     }

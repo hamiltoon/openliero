@@ -1,0 +1,4 @@
+# Step 4½e-1 G2e-1 cfg_default: no liero.cfg in either layer, so the boot saves the
+# defaults to the user layer (gameEntry.cpp:55-58).
+dir sys Profiles
+dir sys Resources

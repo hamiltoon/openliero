@@ -61,6 +61,32 @@ fn clip_image(
     }
 }
 
+/// `BlitBitmap` (`blit.cpp:215-231`): the ARGB → ARGB rectangle copy at **identical
+/// coordinates** — `src(x, y, w, h)` onto `scr(x, y, w, h)`, no palette — through
+/// `CLIP_IMAGE(scr.clip_rect)`. The source start slides with the clip exactly as a sprite's
+/// does, with `pitch = src.pitch`, so every copied pixel keeps its position. Step 4½e-1: the
+/// `frozen_screen` restore of `InputStringState::Draw` (`inputState.cpp:92`), whose `x` can be
+/// negative and whose `width` (`kClrX + 10 + kWidth`) can overrun the right edge.
+pub fn blit_bitmap(scr: &mut Bitmap, src: &Bitmap, x: i32, y: i32, width: i32, height: i32) {
+    let src_pitch = src.pitch;
+    // blit.cpp:217 `mem = src.pixels + y * pitch + x`, at the UNclipped origin.
+    let origin = y * src_pitch + x;
+    let (x, y, w, h, slide) = match clip_image(scr.clip, x, y, width, height, src_pitch) {
+        Some(v) => v,
+        None => return,
+    };
+    // CLIP_IMAGE's slide moves `mem` in lockstep with (x, y): it lands on the clipped origin.
+    let mut mem = (origin + slide) as usize;
+    let mut scrptr = (y * scr.pitch + x) as usize;
+    let w = w as usize;
+    for _ in 0..h {
+        // blit.cpp:224 memcpy of one row.
+        scr.pixels[scrptr..scrptr + w].copy_from_slice(&src.pixels[mem..mem + w]);
+        scrptr += scr.pitch as usize;
+        mem += src_pitch as usize;
+    }
+}
+
 /// `blit.cpp:239-262` BlitImage: index-0-transparent sprite blit; writes
 /// `pal[c]` for every source index `c != 0`.
 pub fn blit_image(scr: &mut Bitmap, pal: &Pal32, spr: &SpriteSet, frame: usize, x: i32, y: i32) {
@@ -486,6 +512,88 @@ mod tests {
         );
         // Clip-clamped like FillRect: a box hanging off every edge must not panic.
         draw_rounded_box(&mut bmp, &pal, -3, -2, 0, 40, 30);
+    }
+
+    // ---- blit_bitmap (Step 4½e-1) ----
+
+    // A source whose every pixel encodes its own (x, y): 0x5000_0000 | y << 12 | x.
+    fn coord_bitmap(w: i32, h: i32) -> Bitmap {
+        let mut b = Bitmap::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                b.pixels[(y * w + x) as usize] = 0x5000_0000 | ((y as u32) << 12) | x as u32;
+            }
+        }
+        b
+    }
+
+    fn coord(x: i32, y: i32) -> u32 {
+        0x5000_0000 | ((y as u32) << 12) | x as u32
+    }
+
+    // Every pixel of `b` is either the source pixel at the same (x, y) (inside `want`) or the
+    // sentinel (outside).
+    fn assert_copied(b: &Bitmap, want: Rect) {
+        for y in 0..b.h {
+            for x in 0..b.w {
+                let p = b.pixels[(y * b.pitch + x) as usize];
+                if want.inside(x, y) {
+                    assert_eq!(p, coord(x, y), "({x},{y}) copied at identical coordinates");
+                } else {
+                    assert_eq!(p, SENTINEL, "({x},{y}) outside the copy stays");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blit_bitmap_copies_an_interior_rectangle_at_identical_coordinates() {
+        // blit.cpp:215-231: memcpy rows of src(x, y, w, h) onto scr(x, y, w, h).
+        let src = coord_bitmap(32, 20);
+        let mut b = filled(32, 20);
+        blit_bitmap(&mut b, &src, 4, 3, 10, 6);
+        assert_copied(&b, Rect::new(4, 3, 14, 9));
+    }
+
+    #[test]
+    fn blit_bitmap_clips_on_each_edge() {
+        let src = coord_bitmap(32, 20);
+        // Left: a negative x (the InputStringState strip, kClrX = x - 10 - adjust).
+        let mut b = filled(32, 20);
+        blit_bitmap(&mut b, &src, -5, 2, 12, 3);
+        assert_copied(&b, Rect::new(0, 2, 7, 5));
+        // Right: the width overruns the surface (kClrX + 10 + kWidth).
+        let mut b = filled(32, 20);
+        blit_bitmap(&mut b, &src, 25, 2, 40, 3);
+        assert_copied(&b, Rect::new(25, 2, 32, 5));
+        // Top.
+        let mut b = filled(32, 20);
+        blit_bitmap(&mut b, &src, 3, -4, 5, 6);
+        assert_copied(&b, Rect::new(3, 0, 8, 2));
+        // Bottom.
+        let mut b = filled(32, 20);
+        blit_bitmap(&mut b, &src, 3, 17, 5, 8);
+        assert_copied(&b, Rect::new(3, 17, 8, 20));
+        // Fully outside: nothing.
+        let mut b = filled(32, 20);
+        blit_bitmap(&mut b, &src, 40, 2, 5, 5);
+        blit_bitmap(&mut b, &src, -10, 2, 5, 5);
+        assert!(b.pixels.iter().all(|&p| p == SENTINEL));
+    }
+
+    #[test]
+    fn blit_bitmap_never_writes_outside_the_clip_rect() {
+        // CLIP_IMAGE(scr.clip_rect): the clip, not the surface, bounds the copy.
+        let src = coord_bitmap(32, 20);
+        let mut b = filled(32, 20);
+        b.clip = Rect::new(6, 4, 20, 12);
+        blit_bitmap(&mut b, &src, -3, -3, 60, 60);
+        assert_copied(&b, Rect::new(6, 4, 20, 12));
+        // The same clip with a negative x strip (the InputString shape, 8 rows tall).
+        let mut b = filled(32, 20);
+        b.clip = Rect::new(6, 4, 20, 12);
+        blit_bitmap(&mut b, &src, -2, 5, 10, 8);
+        assert_copied(&b, Rect::new(6, 5, 8, 12));
     }
 
     fn sprite(width: i32, height: i32, data: Vec<u8>) -> SpriteSet {

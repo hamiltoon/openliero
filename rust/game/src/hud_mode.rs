@@ -5,8 +5,9 @@
 //! minimap on `settings->map` (`viewport.cpp:593`). A played match (`Live`) and a replay of
 //! one (`Replay`) therefore draw `(true, settings.map)`. The `Scripted` demo keeps its
 //! scenario's `render_hud` directive for both flags, so the `blood` demo — and the wasm
-//! frame-parity witness built on it — stays world-only. Until 4½e loads the setup (design
-//! §9.3.6) the binary passes `Settings::default().map`.
+//! frame-parity witness built on it — stays world-only. These non-shell paths load no setup
+//! (design §9.3.6), so the binary passes `Settings::default().map`; the shell path (since
+//! 4½e-1) loads `Setups/liero.cfg` and its `Match` draws that setup's `map`.
 
 use crate::input::Mode;
 pub use ui::shell::HudFlags;
@@ -96,7 +97,7 @@ mod tests {
         let tc = Path::new(TC_ROOT);
         let settings = Settings::default();
         let shadow = settings.shadow;
-        let level = generate_level(tc, &settings, 42);
+        let level = generate_level(tc, &settings, None, 42);
         let loaded = build_match(tc, &MatchConfig { settings, seed: 42 }, &level)
             .expect("the default settings build");
         let frame = |flags: HudFlags| -> Vec<u32> {

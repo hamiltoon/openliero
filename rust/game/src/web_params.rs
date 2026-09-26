@@ -108,6 +108,16 @@ impl MatchParams {
         self.level.as_ref().map(|stem| format!("Levels/{stem}.lev"))
     }
 
+    /// Step 4½e-1: `?level=` on the loaded settings (the in-memory copy only; URL parameters are
+    /// never saved, design §7.5): a stock level instead of a generated one, TC-relative
+    /// (`level_path` rule 3; 4½e-2 makes it the canonical root form).
+    pub fn apply_level(&self, s: &mut scenario::settings::Settings) {
+        if let Some(file) = self.level_file() {
+            s.random_level = false;
+            s.level_file = file;
+        }
+    }
+
     /// Q3 (Step 4½c): `?weapons=` naming at least one weapon skips weapon selection — the
     /// preview reaches the thing under test in one click. Without it the match opens on the
     /// selection screen.
@@ -174,6 +184,23 @@ mod tests {
         assert!(p.demo);
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
         assert_eq!(p.level_file().as_deref(), Some("Levels/water_stage.lev"));
+    }
+
+    #[test]
+    fn level_overrides_the_loaded_settings_only_when_given() {
+        use scenario::settings::Settings;
+        let loaded = Settings {
+            lives: 7,
+            ..Settings::default()
+        };
+        let mut s = loaded.clone();
+        MatchParams::parse("?seed=3").apply_level(&mut s);
+        assert_eq!(s, loaded, "no ?level=: the loaded setup as it is");
+        MatchParams::parse("?level=water_stage").apply_level(&mut s);
+        assert_eq!(
+            (s.random_level, s.level_file.as_str(), s.lives),
+            (false, "Levels/water_stage.lev", 7)
+        );
     }
 
     #[test]

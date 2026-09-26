@@ -1,0 +1,172 @@
+# oracle_dump_shell rust/oracle-tests/golden/shell_cfg_default_script.txt — the REAL C++ Gfx frame loop, headless (Step 4½d design §6.2)
+# boot <presents> <presented16> <bmp16> <fade> <menu_cycles> <top> <sel>
+# f <frame> <upd> <presents> <presented16> <bmp16> <fade> <menu_cycles> <top> <sel> <sounds>
+# d <frame> <cur> <ssel> <cfg16> <state8|->
+# file <rel> <fnv16>
+boot 1 f36cbe2231ce2b83 22467052687099a3 0 0 M 1
+f 0 M 1 80e18ae8d26d6809 c70fd0ecebfa3e4b 1 1 M 1 -
+d 0 M 0 bc29c9d5ce487a40 -
+f 1 M 1 18d7bc296d2501b6 6210fa81c0c1cc0b 2 2 M 1 -
+d 1 M 0 bc29c9d5ce487a40 -
+f 2 M 1 07c41c2c1feee65f 9dbb7969edb124cb 3 3 M 1 -
+d 2 M 0 bc29c9d5ce487a40 -
+f 3 M 1 00c281546288cd90 6210fa81c0c1cc0b 4 4 M 1 -
+d 3 M 0 bc29c9d5ce487a40 -
+f 4 M 1 6be921d48d5f54ab c70fd0ecebfa3e4b 5 5 M 1 -
+d 4 M 0 bc29c9d5ce487a40 -
+f 5 M 1 b95333c4cb6f5c00 525d855f89709b0b 6 6 M 1 -
+d 5 M 0 bc29c9d5ce487a40 -
+f 6 M 1 7a785c340e683a65 a9059c38877510cb 7 7 M 1 -
+d 6 M 0 bc29c9d5ce487a40 -
+f 7 M 1 0a92e375d7082dc1 c70fd0ecebfa3e4b 8 8 M 1 -
+d 7 M 0 bc29c9d5ce487a40 -
+f 8 M 1 e26456bdfabf8539 6210fa81c0c1cc0b 9 9 M 1 -
+d 8 M 0 bc29c9d5ce487a40 -
+f 9 M 1 ba0a2696ba8055d6 9dbb7969edb124cb 10 10 M 1 -
+d 9 M 0 bc29c9d5ce487a40 -
+f 10 M 1 53f02ce908394057 6210fa81c0c1cc0b 11 11 M 1 -
+d 10 M 0 bc29c9d5ce487a40 -
+f 11 M 1 b1d0ffc587207c8c c70fd0ecebfa3e4b 12 12 M 1 -
+d 11 M 0 bc29c9d5ce487a40 -
+f 12 M 1 822a8471941b5c7f 525d855f89709b0b 13 13 M 1 -
+d 12 M 0 bc29c9d5ce487a40 -
+f 13 M 1 d14f2279630dd510 a9059c38877510cb 14 14 M 1 -
+d 13 M 0 bc29c9d5ce487a40 -
+f 14 M 1 a8cfffac40478545 c70fd0ecebfa3e4b 15 15 M 1 -
+d 14 M 0 bc29c9d5ce487a40 -
+f 15 M 1 bce4a8f4177cb67f 6210fa81c0c1cc0b 16 16 M 1 -
+d 15 M 0 bc29c9d5ce487a40 -
+f 16 M 1 ec1ea176c5bc71e9 9dbb7969edb124cb 17 17 M 1 -
+d 16 M 0 bc29c9d5ce487a40 -
+f 17 M 1 767f2e8f7a47e38e 6210fa81c0c1cc0b 18 18 M 1 -
+d 17 M 0 bc29c9d5ce487a40 -
+f 18 M 1 0d83066eb528cbaf c70fd0ecebfa3e4b 19 19 M 1 -
+d 18 M 0 bc29c9d5ce487a40 -
+f 19 M 1 445a2b9aa7404b4c 525d855f89709b0b 20 20 M 1 -
+d 19 M 0 bc29c9d5ce487a40 -
+f 20 M 1 7bf1aadcecc2e317 a9059c38877510cb 21 21 M 1 -
+d 20 M 0 bc29c9d5ce487a40 -
+f 21 M 1 77692dfb9c0dae94 c70fd0ecebfa3e4b 22 22 M 1 -
+d 21 M 0 bc29c9d5ce487a40 -
+f 22 M 1 cad4edad460758e1 6210fa81c0c1cc0b 23 23 M 1 -
+d 22 M 0 bc29c9d5ce487a40 -
+f 23 M 1 83f6c6a2eabe9961 9dbb7969edb124cb 24 24 M 1 -
+d 23 M 0 bc29c9d5ce487a40 -
+f 24 M 1 8c7a0d8b69636e19 6210fa81c0c1cc0b 25 25 M 1 -
+d 24 M 0 bc29c9d5ce487a40 -
+f 25 M 1 dfc5cd3338e293de c70fd0ecebfa3e4b 26 26 M 1 -
+d 25 M 0 bc29c9d5ce487a40 -
+f 26 M 1 292903785424e587 525d855f89709b0b 27 27 M 1 -
+d 26 M 0 bc29c9d5ce487a40 -
+f 27 M 1 85bf9d4ccbe66bb8 a9059c38877510cb 28 28 M 1 -
+d 27 M 0 bc29c9d5ce487a40 -
+f 28 M 1 89e479d9d5fe6b07 c70fd0ecebfa3e4b 29 29 M 1 -
+d 28 M 0 bc29c9d5ce487a40 -
+f 29 M 1 5b363dae3d753930 6210fa81c0c1cc0b 30 30 M 1 -
+d 29 M 0 bc29c9d5ce487a40 -
+f 30 M 1 2fe3fd067f5b78f5 9dbb7969edb124cb 31 31 M 1 -
+d 30 M 0 bc29c9d5ce487a40 -
+f 31 M 1 6210fa81c0c1cc0b 6210fa81c0c1cc0b 32 32 M 1 -
+d 31 M 0 bc29c9d5ce487a40 -
+f 32 M 1 c70fd0ecebfa3e4b c70fd0ecebfa3e4b 32 33 M 1 -
+d 32 M 0 bc29c9d5ce487a40 -
+f 33 M 1 525d855f89709b0b 525d855f89709b0b 32 34 M 1 -
+d 33 M 0 bc29c9d5ce487a40 -
+f 34 M 1 a9059c38877510cb a9059c38877510cb 32 35 M 1 -
+d 34 M 0 bc29c9d5ce487a40 -
+f 35 M 1 c70fd0ecebfa3e4b c70fd0ecebfa3e4b 32 36 M 1 -
+d 35 M 0 bc29c9d5ce487a40 -
+f 36 M 1 6210fa81c0c1cc0b 6210fa81c0c1cc0b 32 37 M 1 -
+d 36 M 0 bc29c9d5ce487a40 -
+f 37 M 1 9dbb7969edb124cb 9dbb7969edb124cb 32 38 M 1 -
+d 37 M 0 bc29c9d5ce487a40 -
+f 38 M 1 6210fa81c0c1cc0b 6210fa81c0c1cc0b 32 39 M 1 -
+d 38 M 0 bc29c9d5ce487a40 -
+f 39 M 1 c70fd0ecebfa3e4b c70fd0ecebfa3e4b 32 40 M 1 -
+d 39 M 0 bc29c9d5ce487a40 -
+f 40 M 1 41d04b00e6b74fdb 41d04b00e6b74fdb 32 41 M 9 -
+d 40 M 0 bc29c9d5ce487a40 -
+f 41 M 1 a6b8be8eda8ca8fb a6b8be8eda8ca8fb 32 42 M 9 -
+d 41 M 0 bc29c9d5ce487a40 -
+f 42 M 1 f4b5d0f2ad99c4bb f4b5d0f2ad99c4bb 32 43 M 9 -
+d 42 M 0 bc29c9d5ce487a40 -
+f 43 M 1 a09e82bde7128f9b a09e82bde7128f9b 32 44 M 9 -
+d 43 M 0 bc29c9d5ce487a40 -
+f 44 M 1 1f4dda08e0e99f7b 1f4dda08e0e99f7b 32 45 M 9 -
+d 44 M 0 bc29c9d5ce487a40 -
+f 45 M 1 a09e82bde7128f9b a09e82bde7128f9b 32 46 M 9 -
+d 45 M 0 bc29c9d5ce487a40 -
+f 46 M 1 f4b5d0f2ad99c4bb f4b5d0f2ad99c4bb 32 47 M 9 -
+d 46 M 0 bc29c9d5ce487a40 -
+f 47 M 1 41d04b00e6b74fdb 41d04b00e6b74fdb 32 48 M 9 -
+d 47 M 0 bc29c9d5ce487a40 -
+f 48 M 1 a6b8be8eda8ca8fb a6b8be8eda8ca8fb 32 49 M 9 27
+d 48 M 0 bc29c9d5ce487a40 -
+f 49 M 1 fc9228aa7974a793 f4b5d0f2ad99c4bb 31 50 M 9 -
+d 49 M 0 bc29c9d5ce487a40 -
+f 50 M 1 f9279b9d20f35e21 a09e82bde7128f9b 30 51 M 9 -
+d 50 M 0 bc29c9d5ce487a40 -
+f 51 M 1 ba6f4dc35b1dba50 1f4dda08e0e99f7b 29 52 M 9 -
+d 51 M 0 bc29c9d5ce487a40 -
+f 52 M 1 83146b36f8bbfb9e a09e82bde7128f9b 28 53 M 9 -
+d 52 M 0 bc29c9d5ce487a40 -
+f 53 M 1 fac4d1bdacdd1893 f4b5d0f2ad99c4bb 27 54 M 9 -
+d 53 M 0 bc29c9d5ce487a40 -
+f 54 M 1 5f88b2dd995d625c 41d04b00e6b74fdb 26 55 M 9 -
+d 54 M 0 bc29c9d5ce487a40 -
+f 55 M 1 235445b72c4eb506 a6b8be8eda8ca8fb 25 56 M 9 -
+d 55 M 0 bc29c9d5ce487a40 -
+f 56 M 1 973ea7cfb18fb14d f4b5d0f2ad99c4bb 24 57 M 9 -
+d 56 M 0 bc29c9d5ce487a40 -
+f 57 M 1 7d2a9b047abc112a a09e82bde7128f9b 23 58 M 9 -
+d 57 M 0 bc29c9d5ce487a40 -
+f 58 M 1 426e184098c33f07 1f4dda08e0e99f7b 22 59 M 9 -
+d 58 M 0 bc29c9d5ce487a40 -
+f 59 M 1 bd8a962ba144ce47 a09e82bde7128f9b 21 60 M 9 -
+d 59 M 0 bc29c9d5ce487a40 -
+f 60 M 1 86ca36b5b5fc9634 f4b5d0f2ad99c4bb 20 61 M 9 -
+d 60 M 0 bc29c9d5ce487a40 -
+f 61 M 1 630fd9409dfc5f7a 41d04b00e6b74fdb 19 62 M 9 -
+d 61 M 0 bc29c9d5ce487a40 -
+f 62 M 1 63d129fc037ff31e a6b8be8eda8ca8fb 18 63 M 9 -
+d 62 M 0 bc29c9d5ce487a40 -
+f 63 M 1 90819f07c9f3269a f4b5d0f2ad99c4bb 17 64 M 9 -
+d 63 M 0 bc29c9d5ce487a40 -
+f 64 M 1 5c400431833507ef a09e82bde7128f9b 16 65 M 9 -
+d 64 M 0 bc29c9d5ce487a40 -
+f 65 M 1 17b7e0aca805b0e9 1f4dda08e0e99f7b 15 66 M 9 -
+d 65 M 0 bc29c9d5ce487a40 -
+f 66 M 1 509382dc1efaa765 a09e82bde7128f9b 14 67 M 9 -
+d 66 M 0 bc29c9d5ce487a40 -
+f 67 M 1 0a3f0b381cb26a9a f4b5d0f2ad99c4bb 13 68 M 9 -
+d 67 M 0 bc29c9d5ce487a40 -
+f 68 M 1 32111a47bcd5ac52 41d04b00e6b74fdb 12 69 M 9 -
+d 68 M 0 bc29c9d5ce487a40 -
+f 69 M 1 1f9c9b38815f27dd a6b8be8eda8ca8fb 11 70 M 9 -
+d 69 M 0 bc29c9d5ce487a40 -
+f 70 M 1 62fe84d7d7b6b686 f4b5d0f2ad99c4bb 10 71 M 9 -
+d 70 M 0 bc29c9d5ce487a40 -
+f 71 M 1 da25f829b1ed3403 a09e82bde7128f9b 9 72 M 9 -
+d 71 M 0 bc29c9d5ce487a40 -
+f 72 M 1 875588188fc9e1b9 1f4dda08e0e99f7b 8 73 M 9 -
+d 72 M 0 bc29c9d5ce487a40 -
+f 73 M 1 d2457a04ee2d7b46 a09e82bde7128f9b 7 74 M 9 -
+d 73 M 0 bc29c9d5ce487a40 -
+f 74 M 1 bf8a5e8bb57a7d37 f4b5d0f2ad99c4bb 6 75 M 9 -
+d 74 M 0 bc29c9d5ce487a40 -
+f 75 M 1 ed1559a256a73e99 41d04b00e6b74fdb 5 76 M 9 -
+d 75 M 0 bc29c9d5ce487a40 -
+f 76 M 1 e6bfb44aa32d01e8 a6b8be8eda8ca8fb 4 77 M 9 -
+d 76 M 0 bc29c9d5ce487a40 -
+f 77 M 1 cad2dc2beeea3c37 f4b5d0f2ad99c4bb 3 78 M 9 -
+d 77 M 0 bc29c9d5ce487a40 -
+f 78 M 1 389c2e2e04a35e08 a09e82bde7128f9b 2 79 M 9 -
+d 78 M 0 bc29c9d5ce487a40 -
+f 79 M 1 fc64bf4b4803ab2c 1f4dda08e0e99f7b 1 80 M 9 -
+d 79 M 0 bc29c9d5ce487a40 -
+f 80 M 1 f36cbe2231ce2b83 a09e82bde7128f9b 0 81 M 9 -
+d 80 M 0 bc29c9d5ce487a40 -
+f 81 M 0 - a09e82bde7128f9b 0 81 - 9 -
+d 81 M 0 bc29c9d5ce487a40 -
+end 81 quit
+file Setups/liero.cfg bc29c9d5ce487a40

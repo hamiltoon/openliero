@@ -31,6 +31,11 @@
 //!                                                 # weapon-selection phase input, sparse (absent
 //!                                                 # => 0); the LAST line's frame is the frame the
 //!                                                 # phase ends on — see [`Scenario::weapsel_end`]
+//! generate    <level_seed>                       # Step 4½e-1; oracle-only, needs `settings`,
+//!                                                 # excludes `level` (exactly one of the two):
+//!                                                 # the level is GenerateFromSettings with a
+//!                                                 # `Rand` seeded `level_seed` (a u32) — see
+//!                                                 # [`Scenario::generate`]
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
@@ -59,7 +64,8 @@ pub struct ScenarioWorm {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Scenario {
     pub seed: u32,
-    /// Level path relative to the TC root (`data/TC/openliero`).
+    /// Level path relative to the TC root (`data/TC/openliero`). Empty for a `generate`
+    /// scenario (Step 4½e-1).
     pub level: String,
     pub ticks: u32,
     /// C++ `Settings::max_bonuses` — the cap the per-tick bonus-drop roll gates on
@@ -87,6 +93,12 @@ pub struct Scenario {
     /// last line's frame is exactly the frame `ProcessFrame` returns true (the dumpers and the
     /// Rust drivers check it). Empty on every pre-4½c scenario.
     weapsel: HashMap<u32, (u32, u32)>,
+    /// Step-4½e-1 `generate <level_seed>` — the oracle-only generated level (LD 4 amended): the
+    /// C++ dumper builds it with the real `Level::GenerateFromSettings` over a dedicated `Rand`
+    /// seeded `level_seed`; Rust with `sim::levelgen::generate_from_settings` (`file = None`).
+    /// Needs `settings`; replaces `level` (exactly one of the two). `None` on every other
+    /// scenario, and [`crate::load`] refuses it (it refuses every `settings` scenario).
+    generate: Option<u32>,
     /// Sparse per-tick input overrides: `tick -> (worm0_7bit, worm1_7bit)`.
     inputs: HashMap<u32, (u32, u32)>,
     /// Per-slot weapon overrides: `slot -> weapon_name`.
@@ -139,6 +151,7 @@ impl Scenario {
         let mut render_hud = false;
         let mut render_live = false;
         let mut settings: Option<String> = None;
+        let mut generate: Option<u32> = None;
         let mut game_mode_given = false;
         let mut max_bonuses_given = false;
         let mut render_given = false;
@@ -239,6 +252,16 @@ impl Scenario {
                         return Err(format!("line {n}: duplicate `settings`"));
                     }
                 }
+                "generate" => {
+                    // Step 4½e-1: exactly one u32 (no sign, no overflow), once.
+                    expect_args(n, key, &nums, 1)?;
+                    let seed = nums[0].parse::<u32>().map_err(|e| {
+                        format!("line {n}: bad `generate` level seed {:?}: {e}", nums[0])
+                    })?;
+                    if generate.replace(seed).is_some() {
+                        return Err(format!("line {n}: duplicate `generate`"));
+                    }
+                }
                 "worm" => {
                     expect_args(n, key, &nums, 7)?;
                     let visible = match parse_at(6)? {
@@ -326,6 +349,17 @@ impl Scenario {
         if !weapsel.is_empty() && settings.is_none() {
             return Err("`weapsel` is oracle-only: it needs a `settings` directive".to_string());
         }
+        if generate.is_some() {
+            if settings.is_none() {
+                return Err(
+                    "`generate` is oracle-only: it needs a `settings` directive".to_string()
+                );
+            }
+            if level.is_some() {
+                return Err("`generate` excludes `level`: give exactly one of them".to_string());
+            }
+            level = Some(String::new());
+        }
 
         Ok(Scenario {
             seed: seed.ok_or("missing `seed`")?,
@@ -336,6 +370,7 @@ impl Scenario {
             worms,
             settings,
             weapsel,
+            generate,
             inputs,
             weapons,
             weapon_ammo,
@@ -345,6 +380,12 @@ impl Scenario {
             render_hud,
             render_live,
         })
+    }
+
+    /// Step 4½e-1: the `generate <level_seed>` directive's seed, or `None` for a scenario that
+    /// names its `level`.
+    pub fn generate(&self) -> Option<u32> {
+        self.generate
     }
 
     /// The 7-bit input for `worm` (0 or 1) at `tick`. Returns `0` for any tick
@@ -447,7 +488,11 @@ impl Scenario {
         // always-defaulted directives it replaces (0 re-parses to 0, so emitting those
         // unconditionally on the classic path still round-trips and is explicit/diffable).
         out.push_str(&format!("seed {}\n", self.seed));
-        out.push_str(&format!("level {}\n", self.level));
+        // Step 4½e-1: a generated level is written where `level` would be.
+        match self.generate {
+            Some(level_seed) => out.push_str(&format!("generate {level_seed}\n")),
+            None => out.push_str(&format!("level {}\n", self.level)),
+        }
         out.push_str(&format!("ticks {}\n", self.ticks));
         match &self.settings {
             // A settings scenario carries mode/bonuses in its setup; the parser rejects
@@ -1083,5 +1128,77 @@ weapsel 2 16 144
         let inp = out.find("input 2 16 0").unwrap();
         assert!(sel < w1 && w1 < w4 && w4 < inp, "{out}");
         assert_eq!(Scenario::parse(&out).unwrap(), s);
+    }
+
+    // ---- Step 4½e-1: the `generate` directive (LD 4 amended, plan §Formats) -------------
+
+    const GENERATE: &str = "\
+seed 5
+generate 77   # the level seed
+ticks 50
+settings g_setup.cfg
+";
+
+    #[test]
+    fn generate_parses_and_replaces_level() {
+        let s = Scenario::parse(GENERATE).expect("parses");
+        assert_eq!(s.generate(), Some(77));
+        assert_eq!(s.level, "", "a generate scenario has no level path");
+        assert_eq!(s.settings.as_deref(), Some("g_setup.cfg"));
+        assert_eq!(Scenario::parse(SETTINGS_SCN).unwrap().generate(), None);
+        assert_eq!(Scenario::parse(SAMPLE).unwrap().generate(), None);
+        let max = GENERATE.replace("generate 77", "generate 4294967295");
+        assert_eq!(Scenario::parse(&max).unwrap().generate(), Some(u32::MAX));
+    }
+
+    #[test]
+    fn generate_needs_settings_and_excludes_level() {
+        let e = Scenario::parse("seed 5\ngenerate 77\nticks 50\n").unwrap_err();
+        assert!(e.contains("generate") && e.contains("settings"), "{e}");
+        let e = Scenario::parse(&format!("{GENERATE}level Levels/a.lev\n")).unwrap_err();
+        assert!(e.contains("generate") && e.contains("level"), "{e}");
+        let e = Scenario::parse("seed 5\nticks 50\nsettings g.cfg\n").unwrap_err();
+        assert!(e.contains("missing `level`"), "neither: {e}");
+    }
+
+    #[test]
+    fn generate_rejects_a_bad_argument() {
+        for (bad, why) in [
+            ("generate", "expects 1"),
+            ("generate 1 2", "expects 1"),
+            ("generate -1", "bad `generate`"),
+            ("generate 4294967296", "bad `generate`"),
+            ("generate x", "bad `generate`"),
+            ("generate 1\ngenerate 2", "duplicate"),
+        ] {
+            let text = format!("seed 5\nticks 50\nsettings g.cfg\n{bad}\n");
+            let e = Scenario::parse(&text).unwrap_err();
+            assert!(e.contains(why), "{bad:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn generate_round_trips_through_to_text() {
+        let s = Scenario::parse(&format!("{GENERATE}weapsel 3 1 0\n")).unwrap();
+        let out = s.to_text();
+        assert!(
+            out.contains("generate 77\n") && !out.contains("level"),
+            "{out}"
+        );
+        assert_eq!(Scenario::parse(&out).unwrap(), s);
+    }
+
+    #[test]
+    #[should_panic(expected = "settings")]
+    fn scenario_load_refuses_a_generate_scenario() {
+        // `crate::load` refuses every `settings` scenario (loader.rs), `generate` included.
+        let s = Scenario::parse(GENERATE).unwrap();
+        let _ = crate::loader::load(
+            std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../data/TC/openliero"
+            )),
+            &s,
+        );
     }
 }

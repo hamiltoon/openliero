@@ -57,13 +57,17 @@ pub struct SceneData {
     /// `max_bonuses > 0` (the NEW GAME start) spawns bonuses, and `viewport.cpp:279,405`
     /// index this table — an empty table panicked the draw.
     pub bonus_frames: Vec<i32>,
+    /// Step 4½e-1: `Common::text_sprites` — `sprites/text.tga`, 4×4, 26 frames (`A`..`Z`), the
+    /// bank of the three `DrawTextSmall` name labels. Loaded always; drawn only when a caller
+    /// sets `Scene::small_labels` (never on a golden path).
+    pub text_sprites: SpriteSet,
 }
 
 impl SceneData {
     /// Borrow the owned ingredients into a `render::frame::Scene` for one draw.
     /// `screen_flash`/`draw_shadow` are per-draw (since 4d T2 the `game` binary
     /// passes the live `sim.screen_flash`; `scenario.shadow()` for the shadow gate).
-    /// `draw_hud`/`map` default to `false` — the world-only path every existing
+    /// `draw_hud`/`map` default to `false` and `small_labels` to `None` — the world-only path every existing
     /// caller (shot, game, the 3b harness) drives, so 3a/3b frame hashes stay
     /// byte-identical. A HUD-enabling caller (3e T8) sets them on the returned
     /// `Scene`.
@@ -82,6 +86,7 @@ impl SceneData {
             labels: &self.labels,
             draw_hud: false,
             map: false,
+            small_labels: None,
         }
     }
 }
@@ -246,6 +251,8 @@ pub(crate) fn scene_data(
         labels,
         weapsel_texts: render::weapsel::WeapselTexts::from_tc(&tc.texts),
         bonus_frames: tc.bonuses.iter().map(|b| b.frame).collect(),
+        // After the existing loads (Step 4½e-1).
+        text_sprites: load_sprites(tc_root, "text.tga", 4, 4, 26),
     }
 }
 
@@ -294,6 +301,20 @@ weapon 0 DART
         // Death-banner strings (Slice 4d T5): the KilledMsg prefix / suicide suffix.
         assert_eq!(loaded.scene.labels.killed_msg, "Killed ");
         assert_eq!(loaded.scene.labels.committed_suicide_msg, " committed suicide");
+    }
+
+    #[test]
+    fn load_yields_the_text_sprites_and_no_small_labels() {
+        // Step 4½e-1: text.tga is the 4x4, 26-frame DrawTextSmall bank; `as_scene` never turns
+        // the labels on (every golden path draws without them).
+        let loaded = load(
+            Path::new(TC_ROOT),
+            &Scenario::parse(SAMPLE).expect("parses"),
+        );
+        let t = &loaded.scene.text_sprites;
+        assert_eq!((t.width, t.height, t.count), (4, 4, 26));
+        assert!(t.data.iter().any(|&p| p != 0), "the real bank has letters");
+        assert!(loaded.scene.as_scene(0, false).small_labels.is_none());
     }
 
     #[test]

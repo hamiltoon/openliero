@@ -233,13 +233,10 @@ fn new_match_with(
     state.h_bonus_reload_only = tc.hacks.BonusReloadOnly;
     state.sound_hooks = tc.sound_hooks.clone();
 
-    // Settings (design §4.2). The blood pool is `enter_game`'s (StartGame, game.cpp:513).
-    state.settings_max_bonuses = s.max_bonuses;
-    state.weap_table = s.weap_table.iter().map(|&v| v as i32).collect();
-    state.settings_health = s.worm_settings[0].health; // == [1] (validated)
-    state.game_mode = s.game_mode;
-    state.time_to_lose = s.time_to_lose;
-    state.shadow = s.shadow;
+    // Settings (design §4.2): the live-read set through the one choke point RESUME shares
+    // (Step 4½e-1). The blood pool is `enter_game`'s (StartGame, game.cpp:513).
+    apply_live_settings(&mut state, s);
+    state.settings_health = s.worm_settings[0].health; // == [1] (validated); per-worm, 4½f
 
     // Palette (design §4.1): the level's POWERLEVEL palette only when
     // load_powerlevel_palette (level.cpp:281-294), else exepal == small.tga's palette
@@ -257,6 +254,49 @@ fn new_match_with(
         viewports: Viewport::player_layout(),
         scene,
     })
+}
+
+/// Write the settings a running C++ `Game` reads **live** from `gfx.settings` (design finding 1,
+/// confirmed by the T0 probe) onto `state`: exactly the eight per-tick sim fields, nothing else.
+/// [`new_match`]'s one settings choke point (Step 4½e-1), and what the shell's RESUME runs so a
+/// paused match sees the menu's edits, as the C++ one does. None of these fields is hashed, so
+/// the call is hash-neutral by construction; it draws nothing.
+///
+/// Every C++ `settings->` read in the simulation and the viewport (`grep -n 'settings->'
+/// game.cpp worm.cpp weapon.cpp nobject.cpp sobject.cpp bonus.cpp viewport.cpp`, re-derived
+/// for 4½e-1), plus `Weapon::ComputedLoadingTime`'s `settings.loading_time` (`weapon.cpp:9`,
+/// called from `worm.cpp:824`):
+///
+/// | C++ read site | Setting | Rust |
+/// |---|---|---|
+/// | `game.cpp:219`, `:359` | `max_bonuses` | `SimState::settings_max_bonuses` (here) |
+/// | `game.cpp:258` | `weap_table` | `SimState::weap_table` (here, as `i32`) |
+/// | `game.cpp:372`, `:516`, `:522-523`, `:529`, `:535`, `:557`, `:571`, `:594`; `worm.cpp:215-216`, `:384`, `:396`, `:794` | `game_mode` | `SimState::game_mode` (here) |
+/// | `game.cpp:385`, `:531`, `:537` | `time_to_lose` | `SimState::time_to_lose` (here) |
+/// | `worm.cpp:410`; `weapon.cpp:301`; `nobject.cpp:188`; `sobject.cpp:96` | `blood` | `SimState::blood` (here) |
+/// | `weapon.cpp:9` (via `worm.cpp:824`) | `loading_time` | `SimState::settings_loading_time` (here) |
+/// | `worm.cpp:1079` | `load_change` | `SimState::load_change` (here) |
+/// | `worm.cpp:784`, `:932`, `:942`; `weapon.cpp:121`; `nobject.cpp:123`, `:215`; `sobject.cpp:212` | `shadow` | `SimState::shadow` (here) |
+/// | `viewport.cpp:274` | `shadow` | draw (`Match`: the render shadow pass) |
+/// | `viewport.cpp:114` (`ComputedLoadingTime`) | `loading_time` | draw (`Match`: the HUD ammo bar) |
+/// | `viewport.cpp:148`, `:212`, `:250`, `:615` | `game_mode` | draw (`Match`: the HUD) |
+/// | `viewport.cpp:408`, `:466` | `names_on_bonuses` | draw (`Match`: `Scene::small_labels`) |
+/// | `viewport.cpp:593` | `map` | draw (`Match`: `Scene::map`) |
+/// | `viewport.cpp:239` | `allow_viewing_spawn_point` | draw (hidden menu, 4½g) |
+/// | `game.cpp:159` | `lives` | kStateGame only (`ResetWorms` is Rollback-only; `LocalController` reads it once, `localController.cpp:234`: [`enter_game`]) |
+/// | `game.cpp:513` | `blood_particle_max` | kStateGame / `StartGame` only ([`enter_game`]) |
+/// | `game.cpp:427-432`, `:499` | `zone_timeout` | Holdazone (unported) |
+/// | `game.cpp:158`, `:558-563`, `:607`; `worm.cpp:213`, `:292-296`, `:355`, `:386`, `:795`; `viewport.cpp:85` | `worm.settings->health` | per-worm (4½f; `SimState::settings_health`, set by [`new_match`] only) |
+/// | `game.cpp:63-96`; `worm.cpp:704`; `viewport.cpp:135-139`, `:261`, `:265` | `worm.settings->{input_device, controls, weapons, name, color}` | per-worm (input / `InitWeapons` / names; not live sim settings) |
+pub fn apply_live_settings(state: &mut SimState, s: &Settings) {
+    state.settings_max_bonuses = s.max_bonuses;
+    state.weap_table = s.weap_table.iter().map(|&v| v as i32).collect();
+    state.game_mode = s.game_mode;
+    state.time_to_lose = s.time_to_lose;
+    state.blood = s.blood;
+    state.settings_loading_time = s.loading_time;
+    state.load_change = s.load_change;
+    state.shadow = s.shadow;
 }
 
 /// `ChangeState(kStateGame)` after weapon selection (`localController.cpp:232-235`: `lives =
@@ -592,6 +632,136 @@ mod tests {
         assert_eq!(split.worms[1].lives, 7);
     }
 
+    /// A `Settings` whose eight live fields all differ from `Settings::default()`'s.
+    fn live_edited() -> Settings {
+        let mut s = Settings::default();
+        s.max_bonuses += 3;
+        s.weap_table[4] = 2;
+        s.weap_table[9] = 1;
+        s.game_mode = GM_SCALES_OF_JUSTICE;
+        s.time_to_lose += 7;
+        s.blood += 50;
+        s.loading_time += 25;
+        s.load_change = !s.load_change;
+        s.shadow = !s.shadow;
+        // Not live: none of these may reach the state.
+        s.lives += 4;
+        s.blood_particle_max += 11;
+        s.worm_settings[0].health += 5;
+        s.worm_settings[1].health += 5;
+        s.map = !s.map;
+        s.names_on_bonuses = !s.names_on_bonuses;
+        s
+    }
+
+    #[test]
+    fn apply_live_settings_writes_exactly_the_eight_live_fields() {
+        let mut state = new_match(Path::new(TC_ROOT), &cfg(), &level())
+            .expect("new_match")
+            .state;
+        let before_hash = sim::hash::hash_game_state(&state);
+        let before_parts = sim::hash::hash_components(&state);
+        let before_rand = (state.rand.draws(), state.rand.last());
+        let before_level = state.level.clone();
+        let e = live_edited();
+        let d = Settings::default();
+        // Non-vacuous: every live field of `e` differs from the default.
+        assert_ne!(e.max_bonuses, d.max_bonuses);
+        assert_ne!(e.weap_table, d.weap_table);
+        assert_ne!(e.game_mode, d.game_mode);
+        assert_ne!(e.time_to_lose, d.time_to_lose);
+        assert_ne!(e.blood, d.blood);
+        assert_ne!(e.loading_time, d.loading_time);
+        assert_ne!(e.load_change, d.load_change);
+        assert_ne!(e.shadow, d.shadow);
+
+        let worms_before = state.worms.clone();
+        let settings_health = state.settings_health;
+        apply_live_settings(&mut state, &e);
+
+        assert_eq!(state.settings_max_bonuses, e.max_bonuses);
+        assert_eq!(
+            state.weap_table,
+            e.weap_table.iter().map(|&v| v as i32).collect::<Vec<_>>()
+        );
+        assert_eq!(state.game_mode, e.game_mode);
+        assert_eq!(state.time_to_lose, e.time_to_lose);
+        assert_eq!(state.blood, e.blood);
+        assert_eq!(state.settings_loading_time, e.loading_time);
+        assert_eq!(state.load_change, e.load_change);
+        assert_eq!(state.shadow, e.shadow);
+
+        // Nothing else: the worms (lives, health), the per-worm health, the rand, the level,
+        // the cycles and the pools, and the state hash (none of the eight is hashed).
+        assert_eq!(state.worms, worms_before);
+        assert_eq!(state.settings_health, settings_health);
+        assert_eq!((state.rand.draws(), state.rand.last()), before_rand);
+        assert!(state.level == before_level);
+        assert_eq!(state.cycles, 0);
+        assert_eq!(
+            sim::hash::hash_components(&state),
+            before_parts,
+            "rng, level, worms and every pool"
+        );
+        assert_eq!(
+            sim::hash::hash_game_state(&state),
+            before_hash,
+            "hash-neutral"
+        );
+
+        // Idempotent, and applying the defaults back restores new_match's fields.
+        apply_live_settings(&mut state, &d);
+        let fresh = new_match(Path::new(TC_ROOT), &cfg(), &level())
+            .expect("new_match")
+            .state;
+        assert_eq!(state.settings_max_bonuses, fresh.settings_max_bonuses);
+        assert_eq!(state.weap_table, fresh.weap_table);
+        assert_eq!(
+            (state.game_mode, state.time_to_lose, state.blood),
+            (fresh.game_mode, fresh.time_to_lose, fresh.blood)
+        );
+        assert_eq!(
+            (state.settings_loading_time, state.load_change, state.shadow),
+            (fresh.settings_loading_time, fresh.load_change, fresh.shadow)
+        );
+    }
+
+    #[test]
+    fn new_match_takes_its_live_fields_through_apply_live_settings() {
+        // The choke point: new_match of an edited setup equals new_match of the defaults with
+        // the edit applied afterwards, on every live field.
+        let mut edited = cfg();
+        edited.settings = live_edited();
+        edited.settings.worm_settings[0].health = 100;
+        edited.settings.worm_settings[1].health = 100;
+        edited.settings.game_mode = GM_SCALES_OF_JUSTICE;
+        let direct = new_match(Path::new(TC_ROOT), &edited, &level())
+            .expect("new_match")
+            .state;
+        let mut via = new_match(Path::new(TC_ROOT), &cfg(), &level())
+            .expect("new_match")
+            .state;
+        apply_live_settings(&mut via, &edited.settings);
+        assert_eq!(direct.settings_max_bonuses, via.settings_max_bonuses);
+        assert_eq!(direct.weap_table, via.weap_table);
+        assert_eq!(
+            (direct.game_mode, direct.time_to_lose, direct.blood),
+            (via.game_mode, via.time_to_lose, via.blood)
+        );
+        assert_eq!(
+            (
+                direct.settings_loading_time,
+                direct.load_change,
+                direct.shadow
+            ),
+            (via.settings_loading_time, via.load_change, via.shadow)
+        );
+        assert_eq!(
+            sim::hash::hash_game_state(&direct),
+            sim::hash::hash_game_state(&via)
+        );
+    }
+
     #[test]
     fn weapsel_config_maps_the_settings() {
         let mut s = Settings::default();
@@ -606,5 +776,132 @@ mod tests {
         assert_eq!(w.players[0].weapons, [0, 1, 2, 3, 4]);
         assert_eq!((w.players[0].controller, w.players[1].controller), (0, 1));
         assert_eq!(w.players[1].weapons, [1; 5]);
+    }
+
+    // ---- 4½e-1 Addendum G3: safe edges (John's ruling) ----------------------------------
+
+    /// `Level::GenerateFromSettings` over a `Rand` seeded `level_seed` (`file = None`): the
+    /// NEW GAME / `generate` path at a small MAP WIDTH x MAP HEIGHT.
+    fn generated(w: i32, h: i32, level_seed: u32) -> (Settings, LevelData) {
+        use assets::sprite::{SpriteSet, Tga};
+        use sim::levelgen::{generate_from_settings, LevelGenAssets, LevelGenParams};
+        let (tc, _) = tc_and_objects();
+        let tga =
+            Tga::load(&std::fs::read(format!("{TC_ROOT}/sprites/large.tga")).unwrap()).unwrap();
+        let large = SpriteSet::from_tga(&tga, 16, 16, 110).unwrap();
+        let s = Settings {
+            random_level: true,
+            random_map_width: w,
+            random_map_height: h,
+            ..Settings::default()
+        };
+        let params = LevelGenParams {
+            random_level: true,
+            random_map_width: w,
+            random_map_height: h,
+            shadow: s.shadow,
+        };
+        let assets = LevelGenAssets {
+            large_sprites: &large,
+            textures: &tc.textures,
+            material_flags: &tc.materials,
+        };
+        let mut rand = sim_core::rng::Rand::new();
+        rand.seed(level_seed);
+        let level = generate_from_settings(&assets, &params, None, &mut rand);
+        assert_eq!((level.width, level.height), (w, h));
+        (s, level)
+    }
+
+    /// Run `ticks` ticks on a `w x h` generated level with Fire held (a dead worm respawns
+    /// only once ready) and a deterministic walk/jump pattern, and return how many times each
+    /// worm became visible. C++ reads past `materials[]` in `BeginRespawn` /
+    /// `CheckRespawnPosition` on these sizes (UB); Rust reads rock there and must neither panic
+    /// nor fail to spawn.
+    fn spawns_on_small_level(w: i32, h: i32, seed: u32, ticks: u32) -> [u32; 2] {
+        use sim::state::ControlState;
+        let (s, level) = generated(w, h, seed);
+        let c = MatchConfig {
+            settings: s,
+            seed: seed ^ 0x5eed,
+        };
+        let mut st = build_match(Path::new(TC_ROOT), &c, &level)
+            .expect("a small level builds")
+            .state;
+        assert_eq!((st.level.width, st.level.height), (w, h));
+        let mut spawns = [0u32; 2];
+        let mut prev = [false; 2];
+        let mut x = seed;
+        for _ in 0..ticks {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let bits = [((x >> 16) & 0x7f) | 1 << 4, ((x >> 23) & 0x7f) | 1 << 4];
+            st.process_frame(&[ControlState::unpack(bits[0]), ControlState::unpack(bits[1])]);
+            for i in 0..2 {
+                let vis = st.worms[i].visible;
+                if vis && !prev[i] {
+                    spawns[i] += 1;
+                }
+                prev[i] = vis;
+            }
+        }
+        spawns
+    }
+
+    #[test]
+    fn safe_edges_a_96x64_match_spawns_both_worms_without_panicking() {
+        for seed in [1u32, 9664, 424242] {
+            let spawns = spawns_on_small_level(96, 64, seed, 2000);
+            assert!(
+                spawns.iter().all(|&n| n >= 1),
+                "96x64 seed {seed}: both worms spawn, got {spawns:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_edges_a_160x120_match_spawns_both_worms_without_panicking() {
+        for seed in [2u32, 160120, 777] {
+            let spawns = spawns_on_small_level(160, 120, seed, 2000);
+            assert!(
+                spawns.iter().all(|&n| n >= 1),
+                "160x120 seed {seed}: both worms spawn, got {spawns:?}"
+            );
+        }
+    }
+
+    /// A candidate exactly three rows below the level and far right of it: C++'s rock walk
+    /// reads nothing and spins through a signed overflow; Rust accepts without the spin.
+    #[test]
+    fn safe_edges_a_100x200_match_survives_the_empty_walk() {
+        let spawns = spawns_on_small_level(100, 200, 1, 8000);
+        assert!(spawns.iter().all(|&n| n >= 1), "100x200: {spawns:?}");
+    }
+
+    /// The ruling at the accessor: an index inside the array (including the flat wrap for
+    /// `x >= width`) reads the real pixel; one past the end, or before the start, reads rock.
+    #[test]
+    fn safe_edges_an_out_of_array_read_is_rock_and_in_array_reads_are_unchanged() {
+        let (_, level) = generated(96, 64, 3);
+        let st = build_match(Path::new(TC_ROOT), &cfg(), &level)
+            .unwrap()
+            .state;
+        let l = &st.level;
+        let flags = |idx: usize| l.material_flags[l.material_id[idx] as usize];
+        // The defined flat wrap: (width + 5, 10) is (5, 11).
+        let wrapped = (flags(5 + 11 * 96) & sim::state::MAT_BACKGROUND) != 0;
+        assert_eq!(l.background(96 + 5, 10), wrapped);
+        assert_eq!(l.background(96 + 5, 10), l.background(5, 11));
+        assert_eq!(l.rock(96 + 5, 10), l.rock(5, 11));
+        // Past the end (the last row, x beyond the width) and before the start.
+        for (x, y) in [(96 + 40, 63), (0, 64), (400, 300), (-1, 0), (5, -3)] {
+            assert!(l.rock(x, y), "({x}, {y}) is out of the array: rock");
+            assert!(!l.background(x, y), "({x}, {y}): not background");
+            assert!(!l.any_dirt(x, y) && !l.dirt(x, y) && !l.dirt2(x, y));
+        }
+        // `checked_mat_background`'s C++-defined out-of-range read is untouched.
+        assert_eq!(
+            l.checked_mat_background(0, 64),
+            (l.material_flags[0] & sim::state::MAT_BACKGROUND) != 0
+        );
     }
 }

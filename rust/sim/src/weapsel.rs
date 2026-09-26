@@ -161,8 +161,9 @@ impl KeyRepeat {
 }
 
 /// The phase (design §4.2): plain data, `Clone` — Step 5 snapshots it next to `SimState`
-/// (design §8). `weap_order`, `weap_table` and `enabled_weaps` are derived once and immutable;
-/// `menu_sounds` is per-frame output, not state.
+/// (design §8). `weap_order` and `enabled_weaps` are derived once and immutable; `weap_table`
+/// is replaced only by [`set_weap_table`](WeaponSelection::set_weap_table) (a paused phase
+/// resumed after a menu edit, Step 4½e-1); `menu_sounds` is per-frame output, not state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WeaponSelection {
     weap_order: Vec<usize>,
@@ -182,26 +183,12 @@ impl WeaponSelection {
     /// The constructor (`weapsel.cpp:28-97`, design §3.2/§4.3), in C++ draw order: player 0's
     /// five slots, then player 1's. Draws `state.rand`, writes each worm's weapons as
     /// `{type, ammo 0}` (`:82-85`, the frozen HUD reads them) and `current_weapon = 0` (`:92`).
-    /// Every refusal happens before the first draw.
+    /// Every refusal happens before the first draw: [`validate`](WeaponSelection::validate)
+    /// runs first.
     pub fn new(state: &mut SimState, cfg: &WeapselConfig) -> Result<Self, WeapselError> {
-        if state.weapons.len() != WEAPON_COUNT {
-            return Err(WeapselError::WeaponCount(state.weapons.len()));
-        }
-        if state.worms.len() != 2 {
-            return Err(WeapselError::WormCount(state.worms.len()));
-        }
-        for (worm, p) in cfg.players.iter().enumerate() {
-            for (slot, &value) in p.weapons.iter().enumerate() {
-                if value as usize > WEAPON_COUNT {
-                    return Err(WeapselError::InvalidPick { worm, slot, value });
-                }
-            }
-        }
+        WeaponSelection::validate(state.weapons.len(), state.worms.len(), cfg)?;
         // weapsel.cpp:35-39 — over all forty entries.
-        let enabled_weaps = cfg.weap_table.iter().filter(|&&v| v == 0).count() as i32;
-        if enabled_weaps == 0 {
-            return Err(WeapselError::NoWeaponsEnabled);
-        }
+        let enabled_weaps = enabled_count(&cfg.weap_table);
         let mut ws = WeaponSelection {
             weap_order: weap_order(&state.weapons),
             weap_table: cfg.weap_table,
@@ -246,6 +233,45 @@ impl WeaponSelection {
             };
         }
         Ok(ws)
+    }
+
+    /// The constructor's refusals, pure (Step 4½e-1, plan fact 30): the ones [`new`] returns,
+    /// in its order — `WeaponCount`, `WormCount`, `InvalidPick`, then `NoWeaponsEnabled` — for a
+    /// TC of `n_weapons` weapons and `n_worms` worms. The shell composes it into the refusal a
+    /// NEW GAME shows before it builds anything.
+    ///
+    /// [`new`]: WeaponSelection::new
+    pub fn validate(
+        n_weapons: usize,
+        n_worms: usize,
+        cfg: &WeapselConfig,
+    ) -> Result<(), WeapselError> {
+        if n_weapons != WEAPON_COUNT {
+            return Err(WeapselError::WeaponCount(n_weapons));
+        }
+        if n_worms != 2 {
+            return Err(WeapselError::WormCount(n_worms));
+        }
+        for (worm, p) in cfg.players.iter().enumerate() {
+            for (slot, &value) in p.weapons.iter().enumerate() {
+                if value as usize > WEAPON_COUNT {
+                    return Err(WeapselError::InvalidPick { worm, slot, value });
+                }
+            }
+        }
+        if enabled_count(&cfg.weap_table) == 0 {
+            return Err(WeapselError::NoWeaponsEnabled);
+        }
+        Ok(())
+    }
+
+    /// Replace the weapon table a running phase reads (Step 4½e-1, plan fact 15). A C++
+    /// `WeaponSelection` reads `game.settings->weap_table` live on every cycle and RANDOMIZE
+    /// step (`weapsel.cpp:255`, `:278`, `:327`), so a phase paused to the menu and resumed sees
+    /// the menu's edits; but it counted `enabled_weaps` once, in its constructor (`:35-39`), and
+    /// never again — so this leaves `enabled_weaps` (and `enough`) untouched.
+    pub fn set_weap_table(&mut self, t: [u32; WEAPON_COUNT]) {
+        self.weap_table = t;
     }
 
     /// One `LocalController::Process` weapsel frame (design §4.4): the key repeat for EVERY
@@ -399,6 +425,11 @@ impl WeaponSelection {
     pub fn menu_sounds(&self) -> &[i32] {
         &self.menu_sounds
     }
+}
+
+/// `weapsel.cpp:35-39`: how many of the forty `weap_table` entries are 0 (Menu).
+fn enabled_count(weap_table: &[u32; WEAPON_COUNT]) -> i32 {
+    weap_table.iter().filter(|&&v| v == 0).count() as i32
 }
 
 /// `Worm::InitWeapons` for worms 0 and 1 (`worm.cpp:698-709`): `current_weapon = 0`, and per
@@ -784,6 +815,118 @@ mod tests {
             st.worms[0].weapons.iter().all(|w| w.ty.is_none()),
             "and writes nothing"
         );
+    }
+
+    // ---- 4½e-1 T2: validate (factored out of new) and set_weap_table -------------------
+
+    #[test]
+    fn validate_matches_new_on_every_refusal_and_its_order() {
+        let none = cfg([1; WEAPON_COUNT], 1, ([0; 5], 0), ([0; 5], 0));
+        let mut bad_pick = humans();
+        bad_pick.players[1].weapons[4] = 41;
+        let mut all_bad = none.clone();
+        all_bad.players[0].weapons[2] = 99;
+        for (n_weapons, n_worms, c) in [
+            (39, 2, humans()),
+            (WEAPON_COUNT, 3, humans()),
+            (WEAPON_COUNT, 2, none),
+            (WEAPON_COUNT, 2, bad_pick),
+            // Several hazards at once: the first in fact-30 order wins.
+            (41, 1, all_bad.clone()),
+            (WEAPON_COUNT, 1, all_bad.clone()),
+            (WEAPON_COUNT, 2, all_bad.clone()),
+            (WEAPON_COUNT, 2, humans()),
+        ] {
+            let mut st = state_n(1, n_weapons, n_worms);
+            let got = WeaponSelection::validate(n_weapons, n_worms, &c);
+            assert_eq!(
+                got,
+                WeaponSelection::new(&mut st, &c).map(|_| ()),
+                "{n_weapons} {n_worms}"
+            );
+        }
+        assert_eq!(
+            WeaponSelection::validate(41, 1, &all_bad),
+            Err(WeapselError::WeaponCount(41))
+        );
+        assert_eq!(
+            WeaponSelection::validate(WEAPON_COUNT, 1, &all_bad),
+            Err(WeapselError::WormCount(1))
+        );
+        assert_eq!(
+            WeaponSelection::validate(WEAPON_COUNT, 2, &all_bad),
+            Err(WeapselError::InvalidPick {
+                worm: 0,
+                slot: 2,
+                value: 99
+            }),
+            "InvalidPick before NoWeaponsEnabled"
+        );
+        assert_eq!(
+            WeaponSelection::validate(WEAPON_COUNT, 2, &humans()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn set_weap_table_bans_a_weapon_for_cycling_but_keeps_enabled_weaps() {
+        // Every weapon enabled at construction; the resumed table bans pick 3.
+        let mut st = state(1);
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap(); // picks [1; 5]
+        assert_eq!(ws.enabled_weaps(), 40);
+        let mut t = [0u32; WEAPON_COUNT];
+        t[2] = 2; // pick 3 (identity order) Banned
+        ws.set_weap_table(t);
+        assert_eq!(
+            ws.enabled_weaps(),
+            40,
+            "counted once, in the constructor (fact 15)"
+        );
+        step(&mut ws, &mut st, DOWN, 0); // cursor -> slot 0
+        step(&mut ws, &mut st, 0, 0);
+        step(&mut ws, &mut st, RIGHT, 0);
+        assert_eq!(ws.player(0).picks[0], 2);
+        step(&mut ws, &mut st, 0, 0);
+        step(&mut ws, &mut st, RIGHT, 0);
+        assert_eq!(ws.player(0).picks[0], 4, "the banned pick 3 is skipped");
+        assert_eq!(st.worms[0].weapons[0].ty, Some(3));
+        step(&mut ws, &mut st, 0, 0);
+        step(&mut ws, &mut st, LEFT, 0);
+        assert_eq!(ws.player(0).picks[0], 2, "and skipped going back");
+        // Without the new table the same walk lands on 3: the table is what moved.
+        let mut st2 = state(1);
+        let mut ws2 = WeaponSelection::new(&mut st2, &humans()).unwrap();
+        for bits in [DOWN, 0, RIGHT, 0, RIGHT] {
+            step(&mut ws2, &mut st2, bits, 0);
+        }
+        assert_eq!(ws2.player(0).picks[0], 3);
+    }
+
+    #[test]
+    fn set_weap_table_is_what_randomize_honours() {
+        // Constructed with every weapon enabled (enough = true, fixed); the new table leaves
+        // exactly five: RANDOMIZE's loop then only accepts those, as a permutation.
+        let mut st = state(21);
+        let mut ws = WeaponSelection::new(&mut st, &humans()).unwrap();
+        ws.set_weap_table(only(&[6, 7, 8, 9, 10]));
+        assert_eq!(ws.enabled_weaps(), 40);
+        let mut r = stream(21);
+        let mut used = [false; 41];
+        let mut want = [0u32; 5];
+        for slot in want.iter_mut() {
+            *slot = loop {
+                let p = r.bound_range(1, 41);
+                if (6..=10).contains(&p) && !used[p as usize] {
+                    break p;
+                }
+            };
+            used[*slot as usize] = true;
+        }
+        step(&mut ws, &mut st, FIRE, 0); // cursor 0 = RANDOMIZE
+        assert_eq!(ws.player(0).picks, want);
+        let mut sorted = want;
+        sorted.sort_unstable();
+        assert_eq!(sorted, [6, 7, 8, 9, 10]);
     }
 
     // ---- 4½c T2: process_frame (localController.cpp:128-152, weapsel.cpp:219-350) ------

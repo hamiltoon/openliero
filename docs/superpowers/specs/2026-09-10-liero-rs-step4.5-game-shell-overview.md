@@ -1,6 +1,6 @@
 # Step 4½ — Game shell: overview / altitude decisions
 
-Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, **4½c LANDED**, **4½d LANDED (the Step 4½ milestone)**, 4½e–4½h planned
+Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, **4½c LANDED**, **4½d LANDED (the Step 4½ milestone)**, **4½e-1 LANDED** (4½e-2 planned), 4½f–4½h planned
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 4½ — Game shell" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++ map, cited as **cpp-map §N**)
@@ -355,6 +355,30 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   + the **first sim golden on a non-504×350 level** (MAP WIDTH/HEIGHT land here; the sim has only
   ever been gated at 504×350).
   **Parallel with 4½f.**
+  **Split in two** (design `specs/2026-09-26-liero-rs-step4.5-slice4.5e-settings-menu-design.md`,
+  John's Q1): **4½e-1 ✅** the settings menu (the settings focus, every `SettingsMenu` item, number
+  entry through `InputStringState`), WEAPON OPTIONS with its `InfoBoxState`, `liero.cfg` at boot and
+  exit (the C++ config root natively, `--config-root`), the three `DrawTextSmall` labels and
+  edits reaching a paused match; **⬜ 4½e-2** the level selector (RANDOM node, preview, cursor
+  restore), LOAD SETUP / SAVE SETUP AS… and the shipped-level fix (Q4).
+  **4½e-1 landed** (plan `plans/2026-09-26-liero-rs-step4.5-slice4.5e1-plan.md`). The gate became
+  C++-oracle gates, not self-goldens: G2e-1 (11 shell cases, 6,099 frames with their `d` lines —
+  the focused menu, cursor, an FNV of the whole settings TOML and the state hash — and the saved
+  `liero.cfg` bytes, all bit-exact vs the real headless `Gfx::RunOneFrame`; 🎯 `shell_match_setup`)
+  and G3 (four sim goldens on levels made by the real `GenerateFromSettings`: 96×344, 333×211,
+  160×1000, 1024×256). Corrections from the design's source check:
+  (1) **finding 1** — a running C++ `Game` shares `gfx.settings`, so menu edits reach a paused
+  match from its next tick (T0 probe: a sim field and a draw field); this amends LD 3: RESUME now
+  also writes the live-read settings into the `SimState` (`scenario::build::apply_live_settings`),
+  and LOAD SETUP (e-2) breaks the sharing;
+  (2) **finding 5** — the C++ level selector shows no preview for RANDOM, so Q5's recommendation
+  ("show the RANDOM node's generated preview") is corrected;
+  (3) **fact 14** — `lives` is not read per tick by a local match (only `RollbackController`'s
+  `ResetWorms` reads it); `LocalController` reads it once at `kStateGame`;
+  (4) C++ spawning reads past `materials[]` on levels shorter than ~342 rows (undefined
+  behaviour), so the "first non-504×350 sim golden" uses 96×344 instead of 96×64, and John ruled
+  **safe edges**: Rust reads an out-of-array material as rock (a documented divergence only where
+  C++ is UB).
 - **4½f — Player menu, profiles, DumbLieroAI.** The `PlayerMenu` (`gfx.cpp:459-483`, `:1362-1428`):
   NAME (with `GenerateName` for an empty name, `mainMenuState.cpp:323-347`), HEALTH, R/G/B with the
   classic 0..252-step-4 `display_div=4` picker (`gfx.cpp:1376-1388`) and the colour-bar overlay
@@ -473,6 +497,8 @@ depends on a+b+c. 4½g depends on 4½a's `IsGameOver`. 4½h is last by nature.*
    to draw its miniature (`fileSelectorState.cpp:105-156`). Natively this is fine. On wasm only the
    embedded manifest exists. **Recommendation:** preview whatever the manifest contains and show the
    RANDOM node's generated preview otherwise; do not attempt network level fetching in 4½.
+   **Corrected (4½e design finding 5):** C++ shows no preview for the RANDOM node (`DrawExtra`
+   previews only a non-RANDOM file), so neither does Rust; the preview is 4½e-2's.
 6. **Level corpus — ship stock levels, or rely on random generation?** `data/TC/openliero/Levels/`
    holds only 5 test fixtures (rust-map §4), so a file picker has almost nothing to pick.
    **This one is John's call**, because it is a content/licensing decision, not a technical one:
@@ -480,6 +506,8 @@ depends on a+b+c. 4½g depends on 4½a's `IsGameOver`. 4½h is last by nature.*
    and keep the picker for the fixtures plus whatever the user drops in. **Recommendation: (b) for
    4½** — random generation is bit-exact-gated in 4½b and makes the picker meaningful on its own —
    with (a) as a follow-up if John wants the original level pack.
+   **Ruled (John, 2026-09-26, 4½e design Q6 → A): today's level set** — RANDOM, the 5 test levels
+   on desktop, the 4 small ones on the web; that is option (b) here.
 
 ---
 

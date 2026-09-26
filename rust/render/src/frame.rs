@@ -14,7 +14,7 @@ use crate::bitmap::{Bitmap, ColorMode};
 use crate::font::Font;
 use crate::hud::{self, HudLabels};
 use crate::level_draw::draw_level;
-use crate::object_draw::{shadow_pass, sprite_pass};
+use crate::object_draw::{shadow_pass, sprite_pass_with, SmallLabels};
 use crate::palette::build_palette;
 use crate::shadow_query::ShadowQuery;
 use crate::viewport::Viewport;
@@ -52,6 +52,10 @@ pub struct Scene<'a> {
     /// `Settings::map` — the minimap toggle. The minimap is drawn only when
     /// `draw_hud && map` (`viewport.cpp:593`, gated inside the HUD path here).
     pub map: bool,
+    /// Step 4½e-1: the three `DrawTextSmall` name labels (bonus, booby trap, Change held).
+    /// `None` on every golden path — the sprite pass is then byte-identical to its pre-4½e-1
+    /// self; `Some` draws them at their C++ points (`object_draw::sprite_pass_with`).
+    pub small_labels: Option<SmallLabels<'a>>,
 }
 
 pub fn draw(bmp: &mut Bitmap, state: &SimState, viewports: &mut [Viewport], scene: &Scene) {
@@ -158,8 +162,9 @@ pub fn draw(bmp: &mut Bitmap, state: &SimState, viewports: &mut [Viewport], scen
             };
             shadow_pass(bmp, state, &shadow, off_x, off_y, scene.bonus_frames);
         }
-        // Pass 2: all sprites (advances vp.rand for laser sights).
-        sprite_pass(
+        // Pass 2: all sprites (advances vp.rand for laser sights), with the optional
+        // name labels.
+        sprite_pass_with(
             bmp,
             state,
             &pal,
@@ -171,6 +176,7 @@ pub fn draw(bmp: &mut Bitmap, state: &SimState, viewports: &mut [Viewport], scen
             scene.nr_end,
             scene.laser_weapon,
             scene.bonus_frames,
+            scene.small_labels.as_ref(),
         );
         bmp.clip = full_clip;
         // Minimap (viewport.cpp:593-635) — AFTER the world block, into the
@@ -288,6 +294,7 @@ mod tests {
             labels: &labels,
             draw_hud: false,
             map: false,
+            small_labels: None,
         };
         draw(&mut bmp, &state, &mut vps, &scene);
 
@@ -396,6 +403,7 @@ mod tests {
             labels: &labels,
             draw_hud: false,
             map: false,
+            small_labels: None,
         };
         let scene_on = Scene {
             draw_hud: true,

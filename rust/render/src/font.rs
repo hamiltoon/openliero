@@ -223,14 +223,26 @@ impl Font {
     /// `Font::GetDims` (`font.cpp:87-112`) without the height out-param: the pixel width of
     /// `s` — the widest line (a NUL codepoint breaks a line), summing `chars[c - 2].width` over
     /// the bytes the `2..252` gate passes, decoded exactly as [`draw_string`](Self::draw_string)
-    /// decodes them.
+    /// decodes them. The width half of [`get_dims_h`](Self::get_dims_h).
     pub fn get_dims(&self, s: &str) -> i32 {
+        self.get_dims_h(s).0
+    }
+
+    /// `Font::GetDims` (`font.cpp:87-112`) with the height out-param: `(width, height)`. The
+    /// width is [`get_dims`](Self::get_dims)'s; the height starts at 8 and grows by 8 per NUL
+    /// codepoint (`max_height += 8` on every line break), so a text with `n` NULs is
+    /// `8 + 8n` tall. Step 4½e-1: `InfoBoxState::Draw` (`inputState.cpp:201-205`) sizes its box
+    /// with both.
+    pub fn get_dims_h(&self, s: &str) -> (i32, i32) {
         let mut width = 0;
         let mut max_width = 0;
+        let mut max_height = 8; // font.cpp:89
         for cp in s.chars() {
             if cp == '\0' {
+                // font.cpp:96-100
                 max_width = max_width.max(width);
                 width = 0;
+                max_height += 8;
                 continue;
             }
             let c = codepoint_to_font_byte(cp);
@@ -238,7 +250,24 @@ impl Font {
                 width += self.chars[(c - 2) as usize].width;
             }
         }
-        max_width.max(width)
+        (max_width.max(width), max_height)
+    }
+
+    /// `Font::DrawFramedText` (`font.cpp:82-85`): the colour-0 rounded box
+    /// `DrawRoundedBox(x, y, 0, 7, GetDims(text))`, then the text at `(x + 2, y + 1)` in
+    /// `pal[color]`, size 1 (the `DrawString` default). Step 4½e-1: `WeaponMenuState`'s two
+    /// column headers (`weaponMenuState.cpp:120-124`).
+    pub fn draw_framed_text(
+        &self,
+        scr: &mut Bitmap,
+        pal: &Pal32,
+        s: &str,
+        x: i32,
+        y: i32,
+        color: i32,
+    ) {
+        crate::blit::draw_rounded_box(scr, pal, x, y, 0, 7, self.get_dims(s));
+        self.draw_string(scr, pal, s, x + 2, y + 1, color, 1);
     }
 }
 
@@ -555,6 +584,68 @@ mod tests {
         assert_eq!(codepoint_to_font_byte('\u{a0}'), 0xff, "the last entry");
         assert_eq!(codepoint_to_font_byte('\u{20ac}'), 1, "no CP437 byte");
         assert_eq!(HIGH_HALF.len(), 128);
+    }
+
+    #[test]
+    fn get_dims_h_counts_eight_rows_per_line() {
+        // font.cpp:87-112: height = 8 + 8 per NUL codepoint; the width is get_dims's.
+        let font = real_font();
+        let w = |c: char| font.chars[c as usize - 2].width;
+        assert_eq!(font.get_dims_h("A\0BB"), (w('B') * 2, 16));
+        assert!(
+            w('B') * 2 > w('A'),
+            "non-vacuous: the second line is the widest"
+        );
+        assert_eq!(font.get_dims_h(""), (0, 8));
+        assert_eq!(font.get_dims_h("A"), (w('A'), 8));
+        assert_eq!(
+            font.get_dims_h("\0\0"),
+            (0, 24),
+            "a trailing NUL still adds a row"
+        );
+        // tc.cfg:258 NoWeaps: one NUL, two rows.
+        let no_weaps = "At least one weapon must\0be available in the menu!";
+        assert_eq!(font.get_dims_h(no_weaps), (font.get_dims(no_weaps), 16));
+    }
+
+    #[test]
+    fn draw_framed_text_is_the_rounded_box_then_the_text_at_plus_2_plus_1() {
+        // font.cpp:82-85: DrawRoundedBox(x, y, 0, 7, GetDims(text)); DrawString(x+2, y+1).
+        // A synthetic bank: every glyph paints only its cell (0,0) and advances 3 px.
+        let pal = ramp_pal();
+        let mut font = blank_font();
+        for ch in font.chars.iter_mut() {
+            ch.data[0] = 8;
+            ch.width = 3;
+        }
+        let (x, y) = (5, 4);
+        let mut b = filled(40, 20);
+        font.draw_framed_text(&mut b, &pal, "AB", x, y, 50);
+        let at = |px: i32, py: i32| b.pixels[(py * 40 + px) as usize];
+        let w = font.get_dims("AB");
+        assert_eq!(w, 6);
+        // The two glyph origins at (x+2, y+1) and (x+2+3, y+1) are pal[50].
+        assert_eq!(at(x + 2, y + 1), pal[50], "the text origin is (x+2, y+1)");
+        assert_eq!(
+            at(x + 5, y + 1),
+            pal[50],
+            "the second glyph advances by its width"
+        );
+        // The box: band (x, y+1, w+3, 5) and rows (x+1, y|y+6, w+1, 1), colour 0; corners open.
+        assert_eq!(at(x, y + 1), pal[0], "band left edge");
+        assert_eq!(at(x + w + 2, y + 5), pal[0], "band right edge");
+        assert_eq!(at(x + w + 3, y + 3), SENTINEL, "one right of the band");
+        assert_eq!(at(x + 1, y), pal[0], "top row");
+        assert_eq!(at(x + w + 1, y + 6), pal[0], "bottom row");
+        assert_eq!(at(x, y), SENTINEL, "open top-left corner");
+        assert_eq!(at(x, y + 6), SENTINEL, "open bottom-left corner");
+        assert_eq!(at(x + 1, y + 7), SENTINEL, "the box is 7 tall");
+        let boxed = b.pixels.iter().filter(|&&p| p == pal[0]).count();
+        assert_eq!(
+            boxed,
+            ((w + 3) * 5 + (w + 1) * 2) as usize - 2,
+            "box minus the two glyphs"
+        );
     }
 
     #[test]

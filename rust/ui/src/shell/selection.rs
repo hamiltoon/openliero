@@ -21,7 +21,7 @@ use render::weapsel::{self as screen, WeapselTexts};
 use scenario::build::weapsel_config;
 use scenario::settings::Settings;
 use sim::state::{ControlState, NUM_WEAPONS, SimState};
-use sim::weapsel::{WeaponSelection, WeapselConfig, WeapselError, weap_order};
+use sim::weapsel::{WEAPON_COUNT, WeaponSelection, WeapselConfig, WeapselError, weap_order};
 
 /// `WormSettings::controller` DumbLieroAI (`localController.cpp:20`).
 pub const CONTROLLER_BOT: u32 = 1;
@@ -152,6 +152,16 @@ impl Selection {
         }
     }
 
+    /// The picks as C++'s shared `WormSettings::weapons` hold them now (finding 4; the cycles of
+    /// `weapsel.cpp:255-282` and RANDOMIZE edit them in place): the running selection's, else
+    /// the saved (finalized or abandoned) ones.
+    pub fn picks(&self) -> [[u32; NUM_WEAPONS]; 2] {
+        match &self.active {
+            Some(ws) => [ws.player(0).picks, ws.player(1).picks],
+            None => [self.cfg.players[0].weapons, self.cfg.players[1].weapons],
+        }
+    }
+
     fn write_back(&mut self, picks: [[u32; NUM_WEAPONS]; 2]) {
         for (p, picks) in self.cfg.players.iter_mut().zip(picks) {
             p.weapons = picks;
@@ -201,6 +211,14 @@ impl Selection {
             surface.clip = Rect::new(0, 0, surface.w, surface.h);
         }
         pal
+    }
+
+    /// A running selection reads `settings->weap_table` live (`weapsel.cpp:255`, `:278`, `:327`;
+    /// plan fact 15): RESUME hands it the menu's table. The enabled count stays the constructor's.
+    pub fn set_weap_table(&mut self, t: [u32; WEAPON_COUNT]) {
+        if let Some(ws) = self.active.as_mut() {
+            ws.set_weap_table(t);
+        }
     }
 
     /// `WeaponSelection::Focus` / `Unfocus` (`weapsel.cpp:363-365`).

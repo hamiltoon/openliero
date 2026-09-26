@@ -1,0 +1,169 @@
+# Step 4½e-1 G2e-1 case map_size (plan Task 8) — written by gen_slice4_5e1_shell.
+# Rust ledger: 1006 frames, end `end 1005 quit`, NEW GAME 2, RESUME 0, back-to-menu 2, tops -GIM, entries 4, weapon boxes 0, file lines 0
+setup default
+boot_seed 25
+match_seed 2501
+match_seed 2502
+frames 1015
+expect quit
+detail
+key 40 down F7
+key 42 up F7
+key 46 down DOWN
+key 48 up DOWN
+key 49 down DOWN
+key 51 up DOWN
+key 52 down DOWN
+key 54 up DOWN
+key 55 down RETURN
+key 57 up RETURN
+key 60 down BACKSPACE
+key 62 up BACKSPACE
+key 63 down BACKSPACE
+key 65 up BACKSPACE
+key 66 down BACKSPACE
+key 68 up BACKSPACE
+key 69 down 3
+text 69 33
+key 71 up 3
+key 72 down 3
+text 72 33
+key 74 up 3
+key 75 down 3
+text 75 33
+key 77 up 3
+key 78 down RETURN
+key 80 up RETURN
+key 84 down DOWN
+key 86 up DOWN
+key 87 down RETURN
+key 89 up RETURN
+key 92 down BACKSPACE
+key 94 up BACKSPACE
+key 95 down BACKSPACE
+key 97 up BACKSPACE
+key 98 down BACKSPACE
+key 100 up BACKSPACE
+key 101 down 3
+text 101 33
+key 103 up 3
+key 104 down 6
+text 104 36
+key 106 up 6
+key 107 down 0
+text 107 30
+key 109 up 0
+key 110 down RETURN
+key 112 up RETURN
+key 116 down ESC
+key 118 up ESC
+key 122 down F1
+key 124 up F1
+key 156 down R
+key 156 down UP
+key 158 up R
+key 158 up UP
+key 159 down LCTRL
+key 159 down RCTRL
+key 161 up LCTRL
+key 161 up RCTRL
+key 162 down G
+key 172 down LCTRL
+key 174 up LCTRL
+key 187 down LCTRL
+key 189 up LCTRL
+key 202 up G
+key 207 down LEFT
+key 212 down RCTRL
+key 214 up RCTRL
+key 242 up LEFT
+key 252 down F
+key 272 up F
+key 275 down LCTRL
+key 277 up LCTRL
+key 462 down ESC
+key 464 up ESC
+key 504 down F7
+key 506 up F7
+key 510 down DOWN
+key 512 up DOWN
+key 513 down DOWN
+key 515 up DOWN
+key 516 down DOWN
+key 518 up DOWN
+key 519 down RETURN
+key 521 up RETURN
+key 524 down BACKSPACE
+key 526 up BACKSPACE
+key 527 down BACKSPACE
+key 529 up BACKSPACE
+key 530 down BACKSPACE
+key 532 up BACKSPACE
+key 533 down 1
+text 533 31
+key 535 up 1
+key 536 down 8
+text 536 38
+key 538 up 8
+key 539 down 4
+text 539 34
+key 541 up 4
+key 542 down RETURN
+key 544 up RETURN
+key 548 down DOWN
+key 550 up DOWN
+key 551 down RETURN
+key 553 up RETURN
+key 556 down BACKSPACE
+key 558 up BACKSPACE
+key 559 down BACKSPACE
+key 561 up BACKSPACE
+key 562 down BACKSPACE
+key 564 up BACKSPACE
+key 565 down 4
+text 565 34
+key 567 up 4
+key 568 down 2
+text 568 32
+key 570 up 2
+key 571 down 0
+text 571 30
+key 573 up 0
+key 574 down RETURN
+key 576 up RETURN
+key 580 down ESC
+key 582 up ESC
+key 586 down DOWN
+key 588 up DOWN
+key 589 down DOWN
+key 591 up DOWN
+key 592 down RETURN
+key 594 up RETURN
+key 626 down R
+key 626 down UP
+key 628 up R
+key 628 up UP
+key 629 down LCTRL
+key 629 down RCTRL
+key 631 up LCTRL
+key 631 up RCTRL
+key 632 down G
+key 642 down LCTRL
+key 644 up LCTRL
+key 657 down LCTRL
+key 659 up LCTRL
+key 672 up G
+key 677 down LEFT
+key 682 down RCTRL
+key 684 up RCTRL
+key 712 up LEFT
+key 722 down F
+key 742 up F
+key 745 down LCTRL
+key 747 up LCTRL
+key 932 down ESC
+key 934 up ESC
+key 964 down ESC
+key 966 up ESC
+key 972 down RETURN
+key 974 up RETURN

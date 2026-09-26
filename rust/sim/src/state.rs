@@ -783,32 +783,54 @@ impl LevelSim {
     // takes a flat index because Task 1 computes the index once per pixel and
     // both reads and the write share it.
 
+    /// The material flag byte of `(x, y)` — C++ `Level::Mat(x, y)`
+    /// (`materials[x + y * width]`), the unchecked read behind `Background()`,
+    /// `Rock()`, `Dirt()` and friends.
+    ///
+    /// **Safe edges (John's ruling, 4½e-1 plan, Addendum G3).** C++ indexes
+    /// `materials[]` with the flat `x + y * width` and never checks it. On a level
+    /// smaller than the TC's `WormSpawnRect` the spawn path (`Worm::BeginRespawn`'s
+    /// drop-down `Mat(x, y + 4)`, `worm.cpp:731-734`, and `CheckRespawnPosition`'s
+    /// `!=`-bounded rock scan, `game.cpp:640-647`) walks past the end of the
+    /// vector: undefined behaviour (a segfault or garbage). Rust instead treats a
+    /// flat index outside `material_id` as **solid rock** (not background), so a
+    /// spawn candidate touching it is rejected and the worm draws another. A flat
+    /// index inside the array — including C++'s defined wrap onto the next row for
+    /// `x >= width` — reads the real pixel exactly as before, so every run on which
+    /// C++ stays inside the vector is unchanged (every golden re-diffs identical).
+    #[inline]
+    fn mat_flags(&self, x: i32, y: i32) -> u8 {
+        let idx = x as i64 + y as i64 * self.width as i64;
+        if idx >= 0 && (idx as u64) < self.material_id.len() as u64 {
+            self.material_flags[self.material_id[idx as usize] as usize]
+        } else {
+            MAT_ROCK
+        }
+    }
+
     /// Background bit (`material.hpp:18`) of the **in-bounds** pixel `(x, y)`.
     /// Looks up `material_flags[material_id[x + y*width]]` and tests
-    /// [`MAT_BACKGROUND`]. In-bounds only (see the shape note above).
+    /// [`MAT_BACKGROUND`]. Meant for in-bounds pixels (see the shape note above);
+    /// a flat index outside the array reads as rock ([`mat_flags`](Self::mat_flags)).
     pub fn background(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_BACKGROUND) != 0
+        (self.mat_flags(x, y) & MAT_BACKGROUND) != 0
     }
 
     /// Either dirt bit (`material.hpp`: `kDirt | kDirt2`) of the in-bounds
     /// pixel `(x, y)` — the "any destructible dirt" predicate `DrawDirtEffect`
     /// uses to decide a pixel may be dug.
     pub fn any_dirt(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & (MAT_DIRT | MAT_DIRT2)) != 0
+        (self.mat_flags(x, y) & (MAT_DIRT | MAT_DIRT2)) != 0
     }
 
     /// First dirt bit ([`MAT_DIRT`]) of the in-bounds pixel `(x, y)`.
     pub fn dirt(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_DIRT) != 0
+        (self.mat_flags(x, y) & MAT_DIRT) != 0
     }
 
     /// Second dirt bit ([`MAT_DIRT2`]) of the in-bounds pixel `(x, y)`.
     pub fn dirt2(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_DIRT2) != 0
+        (self.mat_flags(x, y) & MAT_DIRT2) != 0
     }
 
     /// The FIRST `material_id` writer (used by `DrawDirtEffect` in Task 1 to
@@ -833,10 +855,11 @@ impl LevelSim {
     }
 
     /// Rock bit ([`MAT_ROCK`], `material.hpp:17`) of the in-bounds pixel `(x, y)`.
-    /// The `BObject::Process` rock-landing probe (`bobject.cpp:43`). In-bounds only.
+    /// The `BObject::Process` rock-landing probe (`bobject.cpp:43`) and
+    /// `CheckRespawnPosition`'s scan. A flat index outside the array reads as rock
+    /// ([`mat_flags`](Self::mat_flags), the safe-edges ruling).
     pub fn rock(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_ROCK) != 0
+        (self.mat_flags(x, y) & MAT_ROCK) != 0
     }
 
     /// Port of `common.materials[pal].Worm()` (`worm.cpp:1181` + `material.hpp:25`):
@@ -2616,8 +2639,10 @@ fn begin_respawn(
         worms[index].pos.y = itof(cand_y);
 
         // :731-734 drop-down: slide `pos.y` down over Background pixels. Reads the
-        // LIVE level via `Mat(x, y+4).Background()` (in-bounds; guarded by
-        // `Ftoi(pos.y)+4 < height`), draws NO rand.
+        // LIVE level via `Mat(x, y+4).Background()`, draws NO rand. `y + 4 < height`
+        // is guarded but `x` is not: a candidate right of a narrow level reads on
+        // through the flat index, and past the array's end C++ is UB; Rust reads
+        // rock there (safe edges, `LevelSim::mat_flags`), which stops the slide.
         while ftoi(worms[index].pos.y) + 4 < level.height
             && level.background(ftoi(worms[index].pos.x), ftoi(worms[index].pos.y) + 4)
         {
@@ -2710,10 +2735,21 @@ fn check_respawn_position(
     min_x = min_x.max(0);
     min_y = min_y.max(0);
 
-    // :640-647 reject on any Rock() pixel (half-open `!=` bounds, exactly as C++;
-    // the clamps guarantee `min <= max`). The "special rock respawn bug" TODO
-    // (:642) behaviour is intentionally preserved.
-    let mut i = min_x;
+    // :640-647 reject on any Rock() pixel (half-open `!=` bounds, exactly as C++).
+    // The clamps do NOT guarantee `min <= max`: a candidate below or right of a
+    // small level (the spawn rect is 5,5 + 494x340) has `min > max`, and the `!=`
+    // walk runs on through the flat index until it finds rock. C++ reads past
+    // `materials[]` there (UB); Rust's `rock` reads an out-of-array index as rock
+    // (safe edges, `LevelSim::mat_flags`), so the walk always ends in a reject.
+    // The "special rock respawn bug" TODO (:642) behaviour is intentionally
+    // preserved.
+    //
+    // With `min_y == max_y` (a candidate exactly 3 rows below the level) the inner
+    // walk is empty, so the outer walk reads nothing; with `min_x > max_x` too it
+    // would only spin `i` through a signed overflow (C++ UB; in practice the loop
+    // does nothing and the candidate is accepted). Skipping it is exact for every
+    // non-overflowing walk and keeps that accept without the overflow.
+    let mut i = if min_y == max_y { max_x } else { min_x };
     while i != max_x {
         let mut j = min_y;
         while j != max_y {
@@ -5091,6 +5127,35 @@ mod tests {
             check_respawn_position(&level, 9999, 9999, 9999, 9999, 200, 200, 30, 30),
             "clear of last, enemy, and rock => accept"
         );
+    }
+
+    /// 4½e-1 Addendum G3, safe edges (John's ruling): a candidate below or right of a small
+    /// level makes the `!=` rock walk run past `materials[]` (C++ UB). Rust reads rock there,
+    /// so the walk rejects; a walk that stays in the array (the flat wrap) is unchanged; and a
+    /// walk that reads nothing still accepts, without the signed-overflow spin.
+    #[test]
+    fn safe_edges_check_respawn_position_past_the_array_rejects_without_panicking() {
+        let level = flat_level(20, 10); // all no-flag: no rock anywhere in the array
+        let far = 9999;
+        let ok = |l: &LevelSim, x, y| check_respawn_position(l, far, far, far, far, x, y, 30, 30);
+        // Below the level (y >= height + 4): min_y > max_y, the walk leaves the array.
+        assert!(!ok(&level, 10, 40));
+        // Right of the level (x >= width + 3), inside rows: it wraps in-array, then leaves it.
+        assert!(!ok(&level, 300, 5));
+        // The drop-down read past the end (last row, x beyond the width) is rock, not
+        // background, so the slide stops.
+        assert!(!level.background(60, 9) && level.rock(60, 9));
+        // x == width + 2: min_x == max_x, nothing is read, accept (C++-defined).
+        assert!(ok(&level, 22, 300));
+        // y == height + 3 with x far right: the inner walk is empty for every i; C++ spins i
+        // through a signed overflow and reads nothing; Rust accepts at once.
+        assert!(ok(&level, 400, 13));
+        // In-array rock found through the defined flat wrap still rejects as before.
+        let mut rlevel = flat_level(20, 10);
+        rlevel.material_flags[9] = MAT_ROCK;
+        rlevel.material_id[(1 + 3 * 20) as usize] = 9; // (21, 2) wraps to (1, 3)
+        assert!(rlevel.rock(21, 2));
+        assert!(!ok(&rlevel, 24, 5));
     }
 
     // ------------------------------------------------------------------------

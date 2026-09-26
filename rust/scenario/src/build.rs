@@ -777,4 +777,131 @@ mod tests {
         assert_eq!((w.players[0].controller, w.players[1].controller), (0, 1));
         assert_eq!(w.players[1].weapons, [1; 5]);
     }
+
+    // ---- 4½e-1 Addendum G3: safe edges (John's ruling) ----------------------------------
+
+    /// `Level::GenerateFromSettings` over a `Rand` seeded `level_seed` (`file = None`): the
+    /// NEW GAME / `generate` path at a small MAP WIDTH x MAP HEIGHT.
+    fn generated(w: i32, h: i32, level_seed: u32) -> (Settings, LevelData) {
+        use assets::sprite::{SpriteSet, Tga};
+        use sim::levelgen::{generate_from_settings, LevelGenAssets, LevelGenParams};
+        let (tc, _) = tc_and_objects();
+        let tga =
+            Tga::load(&std::fs::read(format!("{TC_ROOT}/sprites/large.tga")).unwrap()).unwrap();
+        let large = SpriteSet::from_tga(&tga, 16, 16, 110).unwrap();
+        let s = Settings {
+            random_level: true,
+            random_map_width: w,
+            random_map_height: h,
+            ..Settings::default()
+        };
+        let params = LevelGenParams {
+            random_level: true,
+            random_map_width: w,
+            random_map_height: h,
+            shadow: s.shadow,
+        };
+        let assets = LevelGenAssets {
+            large_sprites: &large,
+            textures: &tc.textures,
+            material_flags: &tc.materials,
+        };
+        let mut rand = sim_core::rng::Rand::new();
+        rand.seed(level_seed);
+        let level = generate_from_settings(&assets, &params, None, &mut rand);
+        assert_eq!((level.width, level.height), (w, h));
+        (s, level)
+    }
+
+    /// Run `ticks` ticks on a `w x h` generated level with Fire held (a dead worm respawns
+    /// only once ready) and a deterministic walk/jump pattern, and return how many times each
+    /// worm became visible. C++ reads past `materials[]` in `BeginRespawn` /
+    /// `CheckRespawnPosition` on these sizes (UB); Rust reads rock there and must neither panic
+    /// nor fail to spawn.
+    fn spawns_on_small_level(w: i32, h: i32, seed: u32, ticks: u32) -> [u32; 2] {
+        use sim::state::ControlState;
+        let (s, level) = generated(w, h, seed);
+        let c = MatchConfig {
+            settings: s,
+            seed: seed ^ 0x5eed,
+        };
+        let mut st = build_match(Path::new(TC_ROOT), &c, &level)
+            .expect("a small level builds")
+            .state;
+        assert_eq!((st.level.width, st.level.height), (w, h));
+        let mut spawns = [0u32; 2];
+        let mut prev = [false; 2];
+        let mut x = seed;
+        for _ in 0..ticks {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let bits = [((x >> 16) & 0x7f) | 1 << 4, ((x >> 23) & 0x7f) | 1 << 4];
+            st.process_frame(&[ControlState::unpack(bits[0]), ControlState::unpack(bits[1])]);
+            for i in 0..2 {
+                let vis = st.worms[i].visible;
+                if vis && !prev[i] {
+                    spawns[i] += 1;
+                }
+                prev[i] = vis;
+            }
+        }
+        spawns
+    }
+
+    #[test]
+    fn safe_edges_a_96x64_match_spawns_both_worms_without_panicking() {
+        for seed in [1u32, 9664, 424242] {
+            let spawns = spawns_on_small_level(96, 64, seed, 2000);
+            assert!(
+                spawns.iter().all(|&n| n >= 1),
+                "96x64 seed {seed}: both worms spawn, got {spawns:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_edges_a_160x120_match_spawns_both_worms_without_panicking() {
+        for seed in [2u32, 160120, 777] {
+            let spawns = spawns_on_small_level(160, 120, seed, 2000);
+            assert!(
+                spawns.iter().all(|&n| n >= 1),
+                "160x120 seed {seed}: both worms spawn, got {spawns:?}"
+            );
+        }
+    }
+
+    /// A candidate exactly three rows below the level and far right of it: C++'s rock walk
+    /// reads nothing and spins through a signed overflow; Rust accepts without the spin.
+    #[test]
+    fn safe_edges_a_100x200_match_survives_the_empty_walk() {
+        let spawns = spawns_on_small_level(100, 200, 1, 8000);
+        assert!(spawns.iter().all(|&n| n >= 1), "100x200: {spawns:?}");
+    }
+
+    /// The ruling at the accessor: an index inside the array (including the flat wrap for
+    /// `x >= width`) reads the real pixel; one past the end, or before the start, reads rock.
+    #[test]
+    fn safe_edges_an_out_of_array_read_is_rock_and_in_array_reads_are_unchanged() {
+        let (_, level) = generated(96, 64, 3);
+        let st = build_match(Path::new(TC_ROOT), &cfg(), &level)
+            .unwrap()
+            .state;
+        let l = &st.level;
+        let flags = |idx: usize| l.material_flags[l.material_id[idx] as usize];
+        // The defined flat wrap: (width + 5, 10) is (5, 11).
+        let wrapped = (flags(5 + 11 * 96) & sim::state::MAT_BACKGROUND) != 0;
+        assert_eq!(l.background(96 + 5, 10), wrapped);
+        assert_eq!(l.background(96 + 5, 10), l.background(5, 11));
+        assert_eq!(l.rock(96 + 5, 10), l.rock(5, 11));
+        // Past the end (the last row, x beyond the width) and before the start.
+        for (x, y) in [(96 + 40, 63), (0, 64), (400, 300), (-1, 0), (5, -3)] {
+            assert!(l.rock(x, y), "({x}, {y}) is out of the array: rock");
+            assert!(!l.background(x, y), "({x}, {y}): not background");
+            assert!(!l.any_dirt(x, y) && !l.dirt(x, y) && !l.dirt2(x, y));
+        }
+        // `checked_mat_background`'s C++-defined out-of-range read is untouched.
+        assert_eq!(
+            l.checked_mat_background(0, 64),
+            (l.material_flags[0] & sim::state::MAT_BACKGROUND) != 0
+        );
+    }
 }

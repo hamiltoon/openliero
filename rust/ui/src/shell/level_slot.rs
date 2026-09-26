@@ -56,7 +56,12 @@ impl LevelSlot {
         let file = if settings.random_level {
             None
         } else {
-            read_level(store, tc_root, &settings.level_file)
+            read_level(
+                store,
+                tc_root,
+                &settings.level_file,
+                settings.load_powerlevel_palette,
+            )
         };
         LevelSlot {
             level: generate_level(tc_root, settings, file, seed),

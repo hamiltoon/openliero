@@ -124,11 +124,74 @@ pub fn leaf_basename(path: &str) -> &str {
     leaf.rsplit_once('.').map_or(leaf, |(b, _)| b)
 }
 
+/// `SafeToUpper` (`text.cpp:51`): `std::toupper` in the "C" locale over the unsigned byte —
+/// ASCII only.
+fn ci_upper(b: u8) -> u8 {
+    b.to_ascii_uppercase()
+}
+
+/// `CiCompare(a, b)` (`text.cpp:53-65`): equal lengths and equal bytes under `ci_upper`.
+pub fn ci_compare(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .all(|(x, y)| ci_upper(x) == ci_upper(y))
+}
+
+/// `CiStartsWith(text, starts_with)` (`text.cpp:67-79`).
+pub fn ci_starts_with(text: &str, starts_with: &str) -> bool {
+    starts_with.len() <= text.len()
+        && text
+            .bytes()
+            .zip(starts_with.bytes())
+            .all(|(x, y)| ci_upper(x) == ci_upper(y))
+}
+
+/// `CiLess(a, b)` (`text.cpp:81-96`): byte by byte under `ci_upper` (unsigned), a proper
+/// prefix first (plan fact 4).
+pub fn ci_less(a: &str, b: &str) -> bool {
+    let b = b.as_bytes();
+    for (i, &x) in a.as_bytes().iter().enumerate() {
+        let Some(&y) = b.get(i) else {
+            return false;
+        };
+        let (x, y) = (ci_upper(x), ci_upper(y));
+        if x != y {
+            return x < y;
+        }
+    }
+    b.len() > a.len()
+}
+
+/// `JoinPath(root, leaf)` (`filesystem.cpp:283-288`): a `/` between them unless `root` is empty
+/// or already ends in `/` or `\`.
+pub fn join_path(root: &str, leaf: &str) -> String {
+    if !root.is_empty() && !root.ends_with(['/', '\\']) {
+        format!("{root}/{leaf}")
+    } else {
+        format!("{root}{leaf}")
+    }
+}
+
+/// `GetBasename(path)` (`filesystem.cpp:47-54`): up to the last `.` (the whole path without one).
+pub fn get_basename(path: &str) -> &str {
+    path.rsplit_once('.').map_or(path, |(b, _)| b)
+}
+
+/// `GetExtension(path)` (`filesystem.cpp:56-63`): after the last `.`, or `""` without one.
+pub fn get_extension(path: &str) -> &str {
+    path.rsplit_once('.').map_or("", |(_, e)| e)
+}
+
 /// What the menus read from the TC: `common.s[..]` strings (`tc.cfg [texts]`), `common.c[..]`
 /// constants, and `common.sound_hook[..]` as sample ids (`tc.cfg [sounds]`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiTc {
     pub copyright2: String,
+    /// Step 4½e-2: `LS(Random)` (`"[RANDOM]"`, `tc.cfg:239`), the level selector's first row,
+    /// and `LS(SelLevel)` (`"Select level:"`, `tc.cfg:255`), its title.
+    pub random: String,
+    pub sel_level: String,
     pub random2: String,
     pub regen_level: String,
     pub reload_level: String,
@@ -165,6 +228,8 @@ impl UiTc {
                 .collect(),
             weap_order,
             copyright2: tc.texts.Copyright2.clone(),
+            random: tc.texts.Random.clone(),
+            sel_level: tc.texts.SelLevel.clone(),
             random2: tc.texts.Random2.clone(),
             regen_level: tc.texts.RegenLevel.clone(),
             reload_level: tc.texts.ReloadLevel.clone(),
@@ -230,6 +295,34 @@ mod tests {
     }
 
     #[test]
+    fn the_cpp_string_helpers() {
+        // text.cpp:51-96 (plan fact 4): ASCII toupper per byte, a proper prefix first.
+        assert!(ci_less("a", "B") && !ci_less("B", "a"));
+        assert!(!ci_less("ab", "a") && ci_less("a", "ab"));
+        assert!(ci_less("", "a") && !ci_less("", "") && !ci_less("a", "A"));
+        assert!(
+            ci_less("Z", "_") && ci_less("z", "_"),
+            "0x5F sorts after 'Z'"
+        );
+        assert!(ci_less("Zeta", "\u{e4}"), "bytes >= 0x80 compare unsigned");
+        assert!(ci_compare("alpha.LEV", "ALPHA.lev") && !ci_compare("a", "ab"));
+        assert!(ci_compare("", ""));
+        assert!(ci_starts_with("./user/TC", "./USER") && ci_starts_with("x", ""));
+        assert!(!ci_starts_with("./us", "./user"));
+        // filesystem.cpp:47-63, :283-288.
+        assert_eq!(join_path("./user", "TC"), "./user/TC");
+        assert_eq!(join_path("/", "x"), "/x");
+        assert_eq!(join_path("C:\\", "x"), "C:\\x");
+        assert_eq!(join_path("", "x"), "x");
+        assert_eq!(get_basename("a.b.lev"), "a.b");
+        assert_eq!(get_basename("noext"), "noext");
+        assert_eq!(get_basename(".hidden.lev"), ".hidden");
+        assert_eq!(get_extension("noext"), "");
+        assert_eq!(get_extension("alpha.LEV"), "LEV");
+        assert_eq!(get_extension("a.b.lev"), "lev");
+    }
+
+    #[test]
     fn ui_tc_is_read_from_the_tc() {
         let tc = UiTc::load(std::path::Path::new(scenario::paths::TC_ROOT));
         assert_eq!(
@@ -245,6 +338,11 @@ mod tests {
             ("Random", "REGENERATE LEVEL", "RELOAD LEVEL")
         );
         assert_eq!((tc.blood_limit, tc.blood_step_up), (500, 25));
+        assert_eq!(
+            (tc.random.as_str(), tc.sel_level.as_str()),
+            ("[RANDOM]", "Select level:"),
+            "tc.cfg:239, :255"
+        );
         assert_eq!(
             (
                 tc.hooks.move_up,

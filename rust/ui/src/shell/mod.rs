@@ -7,6 +7,11 @@
 //! Step 4½e-1 (T3): the ordered `InputEvent` stream (keys and text), the settings menu's
 //! sub-screens (`overlay`, `weapon_options`) on the stack, `cur_menu` in `MenuWorld`,
 //! `level_path`, and the `ConfigStore` the shell owns.
+//!
+//! Step 4½e-2 (T3): the file tree and the two selectors (`files`; `Screen::LevelSelect`,
+//! `Screen::SetupSelect`, tops `L`/`P`), their `Picked` continuation, and the store in
+//! `MenuCtx`.
+pub mod files;
 pub mod level_path;
 pub mod level_slot;
 pub mod loadout;
@@ -37,6 +42,7 @@ use sim::state::{ControlState, SimState};
 use crate::keys::{DK_ESCAPE, KeyLatch, TypedKey};
 use crate::menu::Menu;
 use crate::text::UiTc;
+use files::{Picked, SelectorView};
 use level_slot::{LevelSlot, SeedSource};
 use main_menu::{MA_NEW_GAME, MA_QUIT, MA_RESUME_GAME, MainMenuState, MenuCtx, main_menu};
 use overlay::{InfoPurpose, InputPurpose, RefusalGate};
@@ -413,10 +419,12 @@ impl Shell {
         let gate = self.gate();
         let mut pushes = Vec::new();
         let mut closing = None;
+        let mut picked = None;
         let keep = match self.stack.top_mut().expect("non-empty") {
             Screen::MainMenu(s) => {
                 let mut cx = MenuCtx {
                     w: &mut self.world,
+                    store: &*self.store,
                     font: &self.boot_scene.font,
                     running,
                     sounds: &mut out.menu_sounds,
@@ -437,6 +445,7 @@ impl Shell {
             Screen::WeaponOptions(s) => {
                 let mut cx = MenuCtx {
                     w: &mut self.world,
+                    store: &*self.store,
                     font: &self.boot_scene.font,
                     running,
                     sounds: &mut out.menu_sounds,
@@ -461,11 +470,43 @@ impl Shell {
                 }
                 !b.done
             }
+            Screen::LevelSelect(s) => {
+                let o = s.update(&mut MenuCtx {
+                    w: &mut self.world,
+                    store: &*self.store,
+                    font: &self.boot_scene.font,
+                    running,
+                    sounds: &mut out.menu_sounds,
+                    pushes: Vec::new(),
+                    now_ms: input.now_ms,
+                    gate,
+                });
+                picked = o.picked;
+                o.keep
+            }
+            Screen::SetupSelect(s) => {
+                let o = s.update(&mut MenuCtx {
+                    w: &mut self.world,
+                    store: &*self.store,
+                    font: &self.boot_scene.font,
+                    running,
+                    sounds: &mut out.menu_sounds,
+                    pushes: Vec::new(),
+                    now_ms: input.now_ms,
+                    gate,
+                });
+                picked = o.picked;
+                o.keep
+            }
         };
         // An overlay's close runs inside its `Update`, before the stack's pop test
         // (`inputState.cpp:75-84`, `:186-198`): a continuation may schedule a replacement.
         if let Some(c) = closing {
             self.close(c, &mut out);
+        }
+        // A selector's `OnSelected` is the last thing its `Update` does (plan D4, fact 9).
+        if let Some(p) = picked {
+            self.apply_picked(p);
         }
         match self.stack.finish_update(keep) {
             AfterUpdate::Popped { empty: true } => {
@@ -585,6 +626,34 @@ impl Shell {
         }
     }
 
+    /// A selector's `OnSelected` (plan D4). `LevelSelectorState::OnSelected`
+    /// (`fileSelectorState.cpp:95-103`): `[RANDOM]` sets `random_level` and clears `level_file`;
+    /// a file sets `level_file` to its `full_path`; then `settings_menu.UpdateItems`.
+    fn apply_picked(&mut self, p: Picked) {
+        let w = &mut self.world;
+        match p {
+            Picked::Random => {
+                w.settings.random_level = true;
+                w.settings.level_file.clear();
+            }
+            Picked::Level(path) => {
+                w.settings.random_level = false;
+                w.settings.level_file = path;
+            }
+            // LOAD SETUP's continuation is 4½e-2 T4's; nothing pushes the options selector
+            // before it.
+            Picked::Setup { .. } => {
+                debug_assert!(false, "LOAD SETUP's continuation lands with T4");
+                return;
+            }
+        }
+        w.settings_menu.update_items(&mut SettingsModel {
+            settings: &mut w.settings,
+            tc: &w.tc,
+            setup_name: &w.setup_name,
+        });
+    }
+
     /// `StateStack::Push`'s `Enter` (`state.hpp:50-54`) of a screen about to go on the stack.
     fn enter(&mut self, screen: &mut Screen, out: &mut FrameOut) {
         match screen {
@@ -594,6 +663,7 @@ impl Shell {
                 let gate = self.gate();
                 s.enter(&mut MenuCtx {
                     w: &mut self.world,
+                    store: &*self.store,
                     font: &self.boot_scene.font,
                     running,
                     sounds: &mut out.menu_sounds,
@@ -607,6 +677,9 @@ impl Shell {
             // `InputStringState::Enter` is `SDL_StartTextInput` (the page's text field keys on
             // `Phase::Text`, D9); `InfoBoxState::Enter` is empty.
             Screen::InputString(_) | Screen::InfoBox(_) => {}
+            // `LevelSelectorState::Enter`, `OptionsSelectorState::Enter`.
+            Screen::LevelSelect(s) => s.enter(&mut self.world, &*self.store),
+            Screen::SetupSelect(s) => s.enter(&mut self.world, &*self.store),
         }
     }
 
@@ -720,11 +793,12 @@ impl Shell {
         let running = self.current.as_ref().is_some_and(Match::running);
         let gate = self.gate();
         for i in self.stack.draw_from()..self.stack.len() {
-            match &self.stack.screens()[i] {
+            match &mut self.stack.screens_mut()[i] {
                 Screen::MainMenu(s) => {
                     let mut sounds = Vec::new();
                     s.draw(&mut MenuCtx {
                         w: &mut self.world,
+                        store: &*self.store,
                         font: &self.boot_scene.font,
                         running,
                         sounds: &mut sounds,
@@ -757,6 +831,12 @@ impl Shell {
                     &self.world.tc.exepal,
                     &self.boot_scene.font,
                 ),
+                Screen::LevelSelect(s) => {
+                    s.draw(&mut self.world, &*self.store, &self.boot_scene.font);
+                }
+                Screen::SetupSelect(s) => {
+                    s.draw(&mut self.world, &*self.store, &self.boot_scene.font);
+                }
             }
         }
     }
@@ -782,9 +862,13 @@ impl Shell {
     pub fn phase(&self) -> Phase {
         match self.stack.top() {
             None => Phase::Quit,
-            Some(Screen::MainMenu(_) | Screen::WeaponOptions(_) | Screen::InfoBox(_)) => {
-                Phase::Menu
-            }
+            Some(
+                Screen::MainMenu(_)
+                | Screen::WeaponOptions(_)
+                | Screen::InfoBox(_)
+                | Screen::LevelSelect(_)
+                | Screen::SetupSelect(_),
+            ) => Phase::Menu,
             Some(Screen::InputString(_)) => Phase::Text,
             Some(Screen::Playing) => {
                 if self.current.as_ref().is_some_and(Match::in_selection) {
@@ -796,8 +880,9 @@ impl Shell {
         }
     }
 
-    /// `M` / `G` / `O` / `I` / `B` / `-` (the G2 golden's `<top>`; `O`, `I`, `B` are WEAPON
-    /// OPTIONS, an `InputStringState` and an `InfoBoxState`, Step 4½e-1).
+    /// `M` / `G` / `O` / `I` / `B` / `L` / `P` / `-` (the G2 golden's `<top>`; `O`, `I`, `B` are
+    /// WEAPON OPTIONS, an `InputStringState` and an `InfoBoxState`, Step 4½e-1; `L`, `P` the
+    /// level and options selectors, Step 4½e-2).
     pub fn top_char(&self) -> char {
         match self.stack.top() {
             None => '-',
@@ -806,6 +891,18 @@ impl Shell {
             Some(Screen::WeaponOptions(_)) => 'O',
             Some(Screen::InputString(_)) => 'I',
             Some(Screen::InfoBox(_)) => 'B',
+            Some(Screen::LevelSelect(_)) => 'L',
+            Some(Screen::SetupSelect(_)) => 'P',
+        }
+    }
+
+    /// The selector on top, if one is (Step 4½e-2; the harness's ledger and the glue's hooks):
+    /// its top, current folder and cursor.
+    pub fn selector_view(&self) -> Option<SelectorView> {
+        match self.stack.top() {
+            Some(Screen::LevelSelect(s)) => Some(s.view()),
+            Some(Screen::SetupSelect(s)) => Some(s.view()),
+            _ => None,
         }
     }
 
@@ -2534,5 +2631,211 @@ mod tests {
             step(&mut sh, &mut sim, &[], [w, 0]);
         }
         assert_eq!((sim.worms[0].current_weapon - before).rem_euclid(5), 1);
+    }
+
+    // Step 4½e-2 (T3 Step 7): the selectors through `Shell::frame`, pushed directly (T4 wires
+    // the Enter arms), on T0 P1's fixture (root label `./user`).
+
+    const WATER_PATH: &str = "./user/TC/openliero/Levels/water_stage.lev";
+
+    fn boot_store(store: MemoryStore) -> (Shell, SimState) {
+        let seeds = SeedSource::Scripted {
+            boot: 11,
+            matches: VecDeque::from([21, 22, 23]),
+        };
+        let (mut sh, mut sim, _) = Shell::boot(
+            tc(),
+            Settings::default(),
+            Box::new(store),
+            seeds,
+            0,
+            StartOptions::default(),
+        );
+        idle(&mut sh, &mut sim, 40);
+        sh.world.cur_menu = CurMenu::Settings;
+        sh.world.settings_menu.move_to_id(settings_menu::SI_LEVEL);
+        step(&mut sh, &mut sim, &[], [0, 0]);
+        (sh, sim)
+    }
+
+    /// A push from the settings menu's Enter (`Push` runs `Enter`, then the frame draws it).
+    fn push_selector(sh: &mut Shell, sim: &mut SimState, mut screen: Screen) -> FrameOut {
+        let mut out = FrameOut::new(Phase::Menu);
+        sh.enter(&mut screen, &mut out);
+        sh.stack.push(screen);
+        step(sh, sim, &[], [0, 0])
+    }
+
+    fn view(sh: &Shell) -> (char, String, i32) {
+        let v = sh.selector_view().expect("a selector on top");
+        (v.top, v.folder, v.selection)
+    }
+
+    fn level_value(sh: &Shell) -> (String, bool, String, bool, bool) {
+        let m = sh.settings_menu();
+        let item = |id| m.item_from_id(id).unwrap();
+        let lv = item(settings_menu::SI_LEVEL);
+        (
+            lv.value.clone(),
+            lv.has_value,
+            item(settings_menu::SI_REGENERATE_LEVEL).string.clone(),
+            item(settings_menu::SI_RANDOM_MAP_WIDTH).visible,
+            item(settings_menu::SI_RANDOM_MAP_HEIGHT).visible,
+        )
+    }
+
+    #[test]
+    fn the_level_selector_walks_t0s_p1_path_frame_by_frame() {
+        use crate::keys::DK_LEFT;
+        use crate::keys::DK_RIGHT;
+        let (mut sh, mut sim) = boot_store(files::tests::p1_store());
+        let h = hooks().hooks;
+        let o = push_selector(
+            &mut sh,
+            &mut sim,
+            Screen::LevelSelect(files::LevelSelectorState::new()),
+        );
+        assert_eq!((sh.top_char(), o.phase), ('L', Phase::Menu));
+        assert_eq!(view(&sh), ('L', "./user".into(), 0));
+        assert_eq!(sh.selector_view().unwrap().top, 'L');
+        assert!(
+            sh.main_menu_state().is_some(),
+            "(sel, fading) still come from the buried main menu"
+        );
+        let expect = |sh: &mut Shell, sim: &mut SimState, k, sounds: &[i32], want: (&str, i32)| {
+            let o = tap(sh, sim, k);
+            assert_eq!(o.menu_sounds, sounds, "key {k}");
+            assert_eq!(
+                (o.upd, o.phase, sh.top_char()),
+                (Phase::Menu, Phase::Menu, 'L')
+            );
+            assert_eq!(view(sh), ('L', want.0.to_string(), want.1), "key {k}");
+        };
+        expect(&mut sh, &mut sim, DK_DOWN, &[h.move_up], ("./user", 1));
+        expect(&mut sh, &mut sim, DK_RIGHT, &[], ("./user/Profiles", 0));
+        expect(&mut sh, &mut sim, DK_LEFT, &[], ("./user", 1));
+        for row in 2..=5 {
+            expect(&mut sh, &mut sim, DK_DOWN, &[h.move_up], ("./user", row));
+        }
+        expect(&mut sh, &mut sim, DK_RIGHT, &[], ("./user/TC", 0));
+        expect(&mut sh, &mut sim, DK_RIGHT, &[], ("./user/TC/openliero", 0));
+        let levels = "./user/TC/openliero/Levels";
+        expect(&mut sh, &mut sim, DK_RIGHT, &[], (levels, 0));
+        for row in 1..=8 {
+            expect(&mut sh, &mut sim, DK_DOWN, &[h.move_up], (levels, row));
+        }
+        expect(&mut sh, &mut sim, DK_PGUP, &[h.move_down], (levels, 1));
+        expect(&mut sh, &mut sim, DK_LEFT, &[], ("./user/TC/openliero", 0));
+        expect(&mut sh, &mut sim, DK_RIGHT, &[], (levels, 1));
+        let preview = |b: &Bitmap| -> Vec<u32> {
+            (162..198)
+                .flat_map(|y| (134..186).map(move |x| (x, y)))
+                .map(|(x, y)| b.get_pixel(x, y))
+                .collect()
+        };
+        let last = preview(sh.frozen());
+        assert_eq!(preview(sh.surface()), last, "alpha's preview, shown late");
+        let o = tap(&mut sh, &mut sim, DK_ESCAPE);
+        assert_eq!(
+            (o.upd, sh.top_char(), o.menu_sounds.len()),
+            (Phase::Menu, 'M', 0),
+            "Esc leaves with no sound"
+        );
+        assert_eq!(sh.selector_view(), None);
+        assert_eq!(
+            preview(sh.surface()),
+            last,
+            "the preview persists into the main menu"
+        );
+        assert!(sh.settings().random_level, "Esc picks nothing");
+    }
+
+    #[test]
+    fn picking_a_level_or_random_updates_the_settings_menu() {
+        let (mut sh, mut sim) = boot_store(files::tests::p1_store());
+        let select = hooks().hooks.select;
+        assert_eq!(
+            level_value(&sh),
+            ("Random".into(), true, "REGENERATE LEVEL".into(), true, true)
+        );
+        sh.world.settings.level_file = WATER_PATH.into();
+        push_selector(
+            &mut sh,
+            &mut sim,
+            Screen::LevelSelect(files::LevelSelectorState::new()),
+        );
+        assert_eq!(
+            view(&sh),
+            ('L', "./user/TC/openliero/Levels".into(), 7),
+            "restore (select runs even with random_level set)"
+        );
+        let o = tap(&mut sh, &mut sim, DK_RETURN);
+        assert_eq!(
+            (o.upd, o.phase, sh.top_char(), o.menu_sounds),
+            (Phase::Menu, Phase::Menu, 'M', vec![select]),
+            "one MenuSelect; the state pops that frame (T0 P2)"
+        );
+        assert_eq!(
+            (
+                sh.settings().random_level,
+                sh.settings().level_file.as_str()
+            ),
+            (false, WATER_PATH)
+        );
+        assert_eq!(
+            level_value(&sh),
+            (
+                "\"water_stage\"".into(),
+                true,
+                "RELOAD LEVEL".into(),
+                false,
+                false
+            )
+        );
+        push_selector(
+            &mut sh,
+            &mut sim,
+            Screen::LevelSelect(files::LevelSelectorState::new()),
+        );
+        assert_eq!(view(&sh).1, "./user/TC/openliero/Levels");
+        for _ in 0..3 {
+            tap(&mut sh, &mut sim, crate::keys::DK_LEFT);
+        }
+        assert_eq!(view(&sh), ('L', "./user".into(), 5), "the root, on TC");
+        tap(&mut sh, &mut sim, DK_PGUP);
+        assert_eq!(view(&sh).2, 0, "[RANDOM]");
+        let o = tap(&mut sh, &mut sim, DK_RETURN);
+        assert_eq!((sh.top_char(), o.menu_sounds), ('M', vec![select]));
+        assert_eq!(
+            (
+                sh.settings().random_level,
+                sh.settings().level_file.as_str()
+            ),
+            (true, "")
+        );
+        assert_eq!(
+            level_value(&sh),
+            ("Random".into(), true, "REGENERATE LEVEL".into(), true, true)
+        );
+    }
+
+    #[test]
+    fn the_setup_selector_is_a_menu_phase_screen_on_top_p() {
+        let store = files::tests::install();
+        let (mut sh, mut sim) = boot_store(store);
+        let o = push_selector(
+            &mut sh,
+            &mut sim,
+            Screen::SetupSelect(files::SetupSelectorState::new()),
+        );
+        assert_eq!(
+            (sh.top_char(), sh.phase(), o.phase),
+            ('P', Phase::Menu, Phase::Menu)
+        );
+        assert_eq!(view(&sh), ('P', "./user/Setups".into(), 0));
+        tap(&mut sh, &mut sim, crate::keys::DK_LEFT);
+        assert_eq!(view(&sh), ('P', "./user".into(), 2));
+        let o = tap(&mut sh, &mut sim, DK_ESCAPE);
+        assert_eq!((sh.top_char(), o.menu_sounds.len()), ('M', 0));
     }
 }

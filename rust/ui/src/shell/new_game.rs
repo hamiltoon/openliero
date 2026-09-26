@@ -113,7 +113,7 @@ mod tests {
             ..Settings::default()
         };
         let store = scenario::storage::MemoryStore::new();
-        let file = crate::shell::level_path::read_level(&store, tc(), &s.level_file);
+        let file = crate::shell::level_path::read_level(&store, tc(), &s.level_file, true);
         let level = generate_level(tc(), &s, file, 5);
         let mut want = assets::level::load(&read_asset(tc(), "Levels/water_stage.lev")).unwrap();
         let mut lv = LevelSim {

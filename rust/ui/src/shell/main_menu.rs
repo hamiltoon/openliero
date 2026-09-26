@@ -3,6 +3,7 @@
 
 use render::bitmap::Rect;
 use render::font::Font;
+use scenario::storage::ConfigStore;
 
 use super::overlay::{
     InfoBoxState, InfoPurpose, InputPurpose, InputStringState, RefusalGate, filter_digits,
@@ -76,10 +77,12 @@ pub type MainModel = PlainModel;
 /// current controller `Running()`, and this frame's sound log. No path to the sim (LD 3, §4.9).
 /// Step 4½e-1: `pushes` are the screens an update pushes (C++ `state_stack.Push` inside
 /// `Update`, plan fact 4), in order; the shell runs each one's `enter` and pushes it after the
-/// update. `now_ms` is the type-to-search clock (WEAPON OPTIONS), and `gate` the Rust-only
-/// refusal check (plan T4 Step 5).
+/// update. `now_ms` is the type-to-search clock (WEAPON OPTIONS, the selectors), and `gate` the
+/// Rust-only refusal check (plan T4 Step 5).
 pub struct MenuCtx<'a> {
     pub w: &'a mut MenuWorld,
+    /// Step 4½e-2: the config store the selectors list and read (C++ `GetConfigNode()`).
+    pub store: &'a dyn ConfigStore,
     pub font: &'a Font,
     pub running: bool,
     pub sounds: &'a mut Vec<i32>,

@@ -180,6 +180,9 @@ struct ShellRes {
     stopped: bool,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the browser has touch
     touch: game::touch::TouchKeys,
+    /// A quick lone WEAPON tap during play steps one weapon (`game::touch::WeaponTap`).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the browser has touch
+    weapon_tap: game::touch::WeaponTap,
     refusal_shown: bool,
     saved: bool,
 }
@@ -571,6 +574,7 @@ fn setup(
             phase: out.phase,
             stopped: false,
             touch: game::touch::TouchKeys::default(),
+            weapon_tap: game::touch::WeaponTap::default(),
             refusal_shown: false,
             saved: false,
         });
@@ -1246,7 +1250,13 @@ fn tick_shell(
     });
     let input = ShellInput {
         events: &events,
-        sampled: sample_inputs(source, 0, keys, Mode::Live),
+        sampled: sample_inputs_touch(
+            source,
+            0,
+            keys,
+            Mode::Live,
+            sh.weapon_tap.apply(page_touch(), sh.phase),
+        ),
         fresh_seed: fresh_seed(),
         now_ms: time.elapsed().as_millis() as u64,
         restart,
@@ -1359,6 +1369,18 @@ fn sample_inputs(
     keys: &ButtonInput<KeyCode>,
     mode: Mode,
 ) -> [ControlState; 2] {
+    sample_inputs_touch(source, tick, keys, mode, page_touch())
+}
+
+/// [`sample_inputs`] with an explicit touch mask (the shell passes it through
+/// `game::touch::WeaponTap`).
+fn sample_inputs_touch(
+    source: &InputSource,
+    tick: u32,
+    keys: &ButtonInput<KeyCode>,
+    mode: Mode,
+    touch: u32,
+) -> [ControlState; 2] {
     #[allow(unused_mut)] // only the wasm build merges touch input
     let mut inputs = source.sample(tick, keys);
     // Browser build: the on-screen controls (`game::touch`, drawn by `web/index.html` on
@@ -1366,11 +1388,19 @@ fn sample_inputs(
     // so a touch session records and replays exactly like a keyboard one.
     #[cfg(target_arch = "wasm32")]
     if mode == Mode::Live {
-        inputs[0] = game::touch::merge(inputs[0], touch_mask());
+        inputs[0] = game::touch::merge(inputs[0], touch);
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = mode;
+    let _ = (mode, touch);
     inputs
+}
+
+/// The page's on-screen controls mask (`window.lieroTouch`); always 0 natively.
+fn page_touch() -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    return touch_mask();
+    #[cfg(not(target_arch = "wasm32"))]
+    0
 }
 
 /// The page's touch-only flag (`window.lieroTouchOnly`, set by `web/index.html` before the game

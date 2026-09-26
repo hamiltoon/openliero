@@ -154,6 +154,71 @@ impl TouchKeys {
     }
 }
 
+/// The longest WEAPON press (in ticks, 0.3 s) that still counts as a tap for [`WeaponTap`].
+pub const WEAPON_TAP_MAX_TICKS: u32 = 21;
+
+/// A Rust-only touch convenience (John: weapon change is "only one touch" on a phone): during
+/// play, a quick tap on WEAPON on its own steps to the next weapon.
+///
+/// C++ changes weapon only with Change held and Left/Right pressed (`worm.cpp:1065-1096`), and
+/// a lone Change tap just shows the weapon's name, which is what a phone player saw. So a tap is
+/// turned into exactly the key sequence a keyboard player would press. The press ticks are Change
+/// alone, which latches `key_change_pressed`. The tick after the release is Change + Right, one
+/// step. The next tick is Change alone, and then nothing. The sim sees ordinary
+/// [`ControlState`] words (recorded and replayed like any other input), so nothing
+/// downstream changes. A press held longer, or one that also touched the pad or another
+/// button, is left alone: hold WEAPON + pad Left/Right and WEAPON + JUMP (the rope) work as in
+/// the original. Outside `game` the mask passes through untouched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WeaponTap {
+    /// Ticks WEAPON has been held (0 on the press tick); `None` while it is up.
+    held: Option<u32>,
+    /// Another control was down at some point during this press.
+    other: bool,
+    /// Ticks of the synthesized step still to send (2: Change + Right, 1: Change).
+    pulse: u8,
+}
+
+impl WeaponTap {
+    /// This tick's touch mask for sampling, from the page's raw mask `now`.
+    pub fn apply(&mut self, now: u32, phase: Phase) -> u32 {
+        if phase != Phase::Game {
+            *self = WeaponTap::default();
+            return now;
+        }
+        let others = now & !(TOUCH_CHANGE | TOUCH_MENU) != 0;
+        match (self.held, now & TOUCH_CHANGE != 0) {
+            (None, true) => {
+                self.held = Some(0);
+                self.other = others;
+                self.pulse = 0;
+            }
+            (Some(t), true) => {
+                self.held = Some(t + 1);
+                self.other |= others;
+            }
+            (Some(t), false) => {
+                if t <= WEAPON_TAP_MAX_TICKS && !self.other && !others {
+                    self.pulse = 2;
+                }
+                self.held = None;
+            }
+            (None, false) => {}
+        }
+        match self.pulse {
+            2 => {
+                self.pulse = 1;
+                now | TOUCH_CHANGE | TOUCH_RIGHT
+            }
+            1 => {
+                self.pulse = 0;
+                now | TOUCH_CHANGE
+            }
+            _ => now,
+        }
+    }
+}
+
 /// One entry of the phone text field's queue (`window.lieroText`, plan D9): typed text, or a
 /// named key (`{k: "Backspace"}` / `{k: "Enter"}`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -419,5 +484,95 @@ mod tests {
                 key(DK_RETURN, false),
             ]
         );
+    }
+
+    /// Drives the real sim weapon-change code the way the live shell does: the tap's mask →
+    /// [`touch_state`] → C++ `OnKey`'s edges (`ui::keys::apply_key_edges`) → the change/movement
+    /// gate (`worm.cpp:348-353`). Returns the worm's weapon after each tick.
+    fn run_taps(masks: &[u32]) -> Vec<i32> {
+        use sim::control::process_weapon_change;
+        use sim::state::{NUM_WEAPONS, WeaponInit, WormInit, WormState};
+        use sim_core::vec::Vec2;
+        let mut w = WormState::from_init(&WormInit {
+            index: 0,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit {
+                ty: Some(0),
+                ammo: 10,
+            }; NUM_WEAPONS],
+            start_pos: Vec2::zero(),
+            visible: true,
+        });
+        let (mut tap, mut prev) = (WeaponTap::default(), ControlState::new());
+        masks
+            .iter()
+            .map(|&m| {
+                let now = touch_state(tap.apply(m, Phase::Game));
+                w.control_states = ui::keys::apply_key_edges(prev, now, w.control_states);
+                prev = now;
+                if w.control_states.get(ControlState::CHANGE) {
+                    process_weapon_change(&mut w, true);
+                } else {
+                    w.key_change_pressed = false;
+                }
+                w.current_weapon
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_lone_weapon_tap_steps_exactly_one_weapon() {
+        // John: "only one touch". A 5-tick tap, then nothing: one step, on the tick after the
+        // release, and no more.
+        let mut masks = vec![TOUCH_CHANGE; 5];
+        masks.extend([0; 10]);
+        let w = run_taps(&masks);
+        assert_eq!(w[..5], [0; 5], "holding WEAPON alone never steps");
+        assert_eq!(w[5..], [1; 10], "the release steps once");
+        // Three taps: three weapons.
+        let tap = [TOUCH_CHANGE, TOUCH_CHANGE, TOUCH_CHANGE, 0, 0, 0, 0];
+        let three: Vec<u32> = tap.iter().chain(&tap).chain(&tap).copied().collect();
+        assert_eq!(*run_taps(&three).last().unwrap(), 3);
+    }
+
+    #[test]
+    fn a_long_press_or_a_chord_is_the_original_hold() {
+        // Held past the tap limit: only the name shows, as in C++.
+        let mut long = vec![TOUCH_CHANGE; WEAPON_TAP_MAX_TICKS as usize + 2];
+        long.extend([0; 5]);
+        assert_eq!(*run_taps(&long).last().unwrap(), 0);
+        // WEAPON + one pad Right: the original's one step, and no extra step on release.
+        let chord = [
+            TOUCH_CHANGE,
+            TOUCH_CHANGE | TOUCH_RIGHT,
+            TOUCH_CHANGE | TOUCH_RIGHT,
+            TOUCH_CHANGE,
+            0,
+            0,
+            0,
+        ];
+        assert_eq!(*run_taps(&chord).last().unwrap(), 1);
+        // WEAPON + JUMP (the rope): no step either.
+        let rope = [
+            TOUCH_CHANGE,
+            TOUCH_CHANGE | TOUCH_JUMP,
+            TOUCH_CHANGE,
+            0,
+            0,
+            0,
+        ];
+        assert_eq!(*run_taps(&rope).last().unwrap(), 0);
+    }
+
+    #[test]
+    fn the_tap_is_only_for_play() {
+        for phase in [Phase::Menu, Phase::Text, Phase::Weapsel, Phase::Quit] {
+            let mut tap = WeaponTap::default();
+            for m in [TOUCH_CHANGE, TOUCH_CHANGE, 0, 0] {
+                assert_eq!(tap.apply(m, phase), m, "{phase:?} passes the mask through");
+            }
+        }
     }
 }

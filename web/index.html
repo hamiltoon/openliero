@@ -188,6 +188,9 @@
       <kbd>Right Ctrl</kbd> fire · hold <kbd>Right Alt</kbd> and tap <kbd>←</kbd>/<kbd>→</kbd> to
       change weapon · <kbd>Right Shift</kbd> jump
       <br />
+      <b>Phone</b>: tap WEAPON for the next weapon (or hold it and tap the pad ←/→ as on a
+      keyboard; WEAPON + JUMP throws the rope)
+      <br />
       <b>Weapon selection</b> first, both players: aim up/down picks a line · move left/right
       changes the weapon · fire on <i>Randomize</i> re-rolls all five · fire on <i>DONE!</i>
       when ready
@@ -285,31 +288,77 @@
           knob.style.transform = `translate(${dx * radius * 0.6}px, ${dy * radius * 0.6}px)`;
           update();
         };
+        // Real fingers use Touch Events, not pointer events: iOS Safari cancels a held finger's
+        // pointer (pointercancel) when a second finger lands and it guesses a pinch, so WEAPON
+        // dropped the moment the thumb touched the pad (John: the weapon name flashed but never
+        // changed). Touch Events with preventDefault on touchstart never start a gesture, and a
+        // touch keeps reporting to the element it started on. Pointer events remain for a mouse
+        // (?touch=1 on a desktop); `held` keys the two apart ('t' + touch id / 'p' + pointer id).
+        const fingers = 'ontouchstart' in window;
+        const isFinger = (e) => fingers && e.pointerType === 'touch';
+        const padAt = (key, x, y) => {
+          padMove({ pointerId: key, clientX: x, clientY: y });
+        };
+        const padRelease = (key) => {
+          knob.style.transform = 'translate(0, 0)';
+          release({ pointerId: key });
+        };
         pad.addEventListener('pointerdown', (e) => {
+          if (isFinger(e)) return;
           e.preventDefault();
           pad.setPointerCapture(e.pointerId);
-          padMove(e);
+          padAt('p' + e.pointerId, e.clientX, e.clientY);
         });
         pad.addEventListener('pointermove', (e) => {
-          if (held.has(e.pointerId)) padMove(e);
+          if (!isFinger(e) && held.has('p' + e.pointerId)) padAt('p' + e.pointerId, e.clientX, e.clientY);
         });
         for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) {
           pad.addEventListener(ev, (e) => {
-            knob.style.transform = 'translate(0, 0)';
-            release(e);
+            if (!isFinger(e)) padRelease('p' + e.pointerId);
           });
+        }
+        pad.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          for (const t of e.changedTouches) padAt('t' + t.identifier, t.clientX, t.clientY);
+        }, { passive: false });
+        pad.addEventListener('touchmove', (e) => {
+          e.preventDefault();
+          for (const t of e.changedTouches) {
+            if (held.has('t' + t.identifier)) padAt('t' + t.identifier, t.clientX, t.clientY);
+          }
+        }, { passive: false });
+        for (const ev of ['touchend', 'touchcancel']) {
+          pad.addEventListener(ev, (e) => {
+            e.preventDefault();
+            for (const t of e.changedTouches) padRelease('t' + t.identifier);
+          }, { passive: false });
         }
 
         // Buttons: held while the finger that pressed them is down.
         for (const el of document.querySelectorAll('#touch .ctl[data-bit]')) {
+          const bit = TOUCH[el.dataset.bit];
           el.addEventListener('pointerdown', (e) => {
+            if (isFinger(e)) return;
             e.preventDefault();
             el.setPointerCapture(e.pointerId);
-            held.set(e.pointerId, TOUCH[el.dataset.bit]);
+            held.set('p' + e.pointerId, bit);
             update();
           });
           for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) {
-            el.addEventListener(ev, release);
+            el.addEventListener(ev, (e) => {
+              if (!isFinger(e)) release({ pointerId: 'p' + e.pointerId });
+            });
+          }
+          el.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            for (const t of e.changedTouches) held.set('t' + t.identifier, bit);
+            update();
+          }, { passive: false });
+          for (const ev of ['touchend', 'touchcancel']) {
+            el.addEventListener(ev, (e) => {
+              e.preventDefault();
+              for (const t of e.changedTouches) release({ pointerId: 't' + t.identifier });
+            }, { passive: false });
           }
         }
 
@@ -332,7 +381,7 @@
         menu: ['↑↓ pick', '←→ change', 'FIRE selects', 'MATCH SETUP: rules', 'JUMP: back'],
         text: ['Type, FIRE = OK', 'MENU = cancel'],
         weapsel: ['Pick ↑↓ ←→', 'FIRE on DONE!', 'You: blue worm', 'P2: a bot'],
-        game: ['MENU pauses', 'Hold WEAPON + ←→', 'You: blue worm'],
+        game: ['MENU pauses', 'Tap WEAPON: next weapon', 'You: blue worm'],
       };
       const hint = document.getElementById('touch-hint');
       const quit = document.getElementById('quit');

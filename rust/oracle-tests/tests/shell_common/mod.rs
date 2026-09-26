@@ -1,6 +1,11 @@
 //! Step 4½d G2 — the shell cases (design §6.4; plan Tasks 8-10): the script model and builder,
 //! the case table, the Rust driver that produces the golden lines through `ui::shell::Shell`,
 //! and the validators the generator enforces. The C++ side is `oracle_dump_shell`.
+//!
+//! Step 4½e-2 (plan T5): intervention 6′'s mirror (`record_replays = false` after every frame),
+//! the tops `L`/`P`, [`B::type_chars`], the `fs` manifest builder [`Fs`], the Q4 twin
+//! ([`Opts::q4_twin`], plan D1.2) and the e-2 ledger fields and validators; e-1's D6 validator is
+//! gone (the Enter arms push screens now).
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
@@ -10,13 +15,17 @@ use render::bitmap::Bitmap;
 use render::hash::{hash_frame, FNV_OFFSET, FNV_PRIME};
 use scenario::settings::{Settings, GM_HOLDAZONE};
 use scenario::settings_toml::{settings_from_toml, settings_to_toml};
-use scenario::storage::{load_setup, ConfigStore, MemoryStore, NativeStore};
+use scenario::storage::{load_setup, placeable_leaf, ConfigStore, MemoryStore, NativeStore};
 use sim::hash::hash_game_state;
 use sim::state::{ControlState, SimState};
 use ui::keys::TypedKey;
+use ui::shell::files::{cfg_filter, lev_filter, FileSelector, SelectorView};
+use ui::shell::level_path::cpp_accepts;
 use ui::shell::level_slot::SeedSource;
+use ui::shell::main_menu::MA_NEW_GAME;
+use ui::shell::overlay::RefusalGate;
 use ui::shell::playing::StartOptions;
-use ui::shell::settings_menu::{LOAD_OPTIONS, SAVE_OPTIONS, SI_LEVEL};
+use ui::shell::settings_menu::{SAVE_OPTIONS, SI_LEVEL};
 use ui::shell::{CurMenu, InputEvent, KeyEvent, Phase, Present, Route, Shell, ShellInput};
 use ui::text::UiTc;
 
@@ -398,6 +407,16 @@ impl B {
         b
     }
 
+    /// Step 4½e-2: type `s` one char per event (known pitfall 11): per char, `key down <UPPER>`
+    /// and `text <c>` on one frame, `key up` two frames later; the cursor moves 3 per char.
+    pub fn type_chars(self, s: &str) -> B {
+        assert!(
+            s.bytes().all(|b| b.is_ascii_alphanumeric()),
+            "type_chars {s}"
+        );
+        self.type_digits(s)
+    }
+
     pub fn idle(mut self, n: u32) -> B {
         self.t += n;
         self
@@ -743,19 +762,66 @@ fn valid_rel(rel: &str) -> bool {
 /// The `fs` fixture (plan §Formats): `root/{user,sys}`, filled from `manifest` with copies.
 /// Any other line is refused, as the dumper refuses it.
 pub fn make_fixture(manifest: &Path, root: &Path) {
+    make_fixture_with(manifest, root, Twin::Off);
+}
+
+/// Which manifest lines the Q4 twin drops (Step 4½e-2, plan D1.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Twin {
+    /// Every line.
+    Off,
+    /// Each `file user TC/openliero/Levels/<x>` whose `<x>` also has a `file sys` line: the
+    /// default-install layout, where C++ plays random and Rust the system copy.
+    UserCopies,
+    /// Those and their system copies too (the negative twin: the level is gone).
+    Both,
+}
+
+const TWIN_LEVELS: &str = "TC/openliero/Levels/";
+
+/// [`make_fixture`] with the Q4 twin's drops; returns the dropped `user` rels.
+pub fn make_fixture_with(manifest: &Path, root: &Path, twin: Twin) -> Vec<String> {
     let _ = std::fs::remove_dir_all(root);
     std::fs::create_dir_all(root.join("user")).unwrap();
     std::fs::create_dir_all(root.join("sys")).unwrap();
-    for line in std::fs::read_to_string(manifest).unwrap().lines() {
-        let t: Vec<&str> = line
-            .split_whitespace()
+    let text = std::fs::read_to_string(manifest).unwrap();
+    let words = |line: &str| -> Vec<String> {
+        line.split_whitespace()
             .take_while(|t| !t.starts_with('#'))
-            .collect();
+            .map(str::to_string)
+            .collect()
+    };
+    let sys_files: BTreeSet<String> = text
+        .lines()
+        .map(words)
+        .filter(|t| t.len() == 4 && t[0] == "file" && t[1] == "sys")
+        .map(|t| t[2].clone())
+        .collect();
+    let copies: BTreeSet<String> = text
+        .lines()
+        .map(words)
+        .filter(|t| {
+            t.len() == 4
+                && t[0] == "file"
+                && t[1] == "user"
+                && t[2].starts_with(TWIN_LEVELS)
+                && sys_files.contains(&t[2])
+        })
+        .map(|t| t[2].clone())
+        .collect();
+    let mut dropped = Vec::new();
+    for line in text.lines() {
+        let t = words(line);
+        let t: Vec<&str> = t.iter().map(String::as_str).collect();
         match t.as_slice() {
             [] => {}
             ["dir", layer @ ("user" | "sys"), rel] if valid_rel(rel) => {
                 std::fs::create_dir_all(root.join(layer).join(rel)).unwrap();
             }
+            ["file", "user", rel, _] if twin != Twin::Off && copies.contains(*rel) => {
+                dropped.push(rel.to_string());
+            }
+            ["file", "sys", rel, _] if twin == Twin::Both && copies.contains(*rel) => {}
             ["file", layer @ ("user" | "sys"), rel, src] if valid_rel(rel) => {
                 let dest = root.join(layer).join(rel);
                 assert!(!dest.exists(), "fs manifest: {layer}/{rel} given twice");
@@ -766,6 +832,138 @@ pub fn make_fixture(manifest: &Path, root: &Path) {
             _ => panic!("bad fs manifest line: {line}"),
         }
     }
+    dropped
+}
+
+/// The shipped levels (`data/TC/openliero/Levels`).
+pub const SHIPPED_LEVELS: [&str; 5] = [
+    "modern_test",
+    "physics_fall_test",
+    "render_stage",
+    "see_shadow_test",
+    "water_stage",
+];
+
+/// The folders the fixture's system layer leaves empty whose `.cfg`s LOAD SETUP would list
+/// (plan §Formats): no case enters them with the `CFG` filter (a validator).
+pub const UNLISTED_CFG_DIRS: [&str; 3] = [
+    "TC/openliero/weapons",
+    "TC/openliero/nobjects",
+    "TC/openliero/sobjects",
+];
+
+/// Step 4½e-2's `fs` manifest builder (plan §Formats): [`Fs::install`] — the system layer of a
+/// real install, restricted to what the two filters can show — then the case's user lines.
+pub struct Fs {
+    lines: Vec<String>,
+}
+
+impl Fs {
+    pub fn install() -> Fs {
+        let mut lines = vec![
+            "dir sys Profiles".to_string(),
+            "dir sys Resources".to_string(),
+        ];
+        for s in [
+            "Setups/liero.cfg",
+            "Setups/orbmit.cfg",
+            "TC/openliero/tc.cfg",
+        ] {
+            lines.push(format!("file sys {s} data/{s}"));
+        }
+        for l in SHIPPED_LEVELS {
+            let rel = format!("{TWIN_LEVELS}{l}.lev");
+            lines.push(format!("file sys {rel} data/{rel}"));
+        }
+        for d in ["nobjects", "sobjects", "sounds", "sprites", "weapons"] {
+            lines.push(format!("dir sys TC/openliero/{d}"));
+        }
+        Fs { lines }
+    }
+
+    pub fn user_dir(mut self, rel: &str) -> Fs {
+        self.lines.push(format!("dir user {rel}"));
+        self
+    }
+
+    /// `file user <rel> <source>` (`source` repo-relative).
+    pub fn user_file(mut self, rel: &str, source: &str) -> Fs {
+        self.lines.push(format!("file user {rel} {source}"));
+        self
+    }
+
+    /// A user copy of shipped level `name` (plan D1.1: C++ opens it from `./user/…`).
+    pub fn user_level_copy(self, name: &str) -> Fs {
+        let rel = format!("{TWIN_LEVELS}{name}.lev");
+        let src = format!("data/{rel}");
+        self.user_file(&rel, &src)
+    }
+
+    /// The manifest text: `# ` header lines, then one line per entry.
+    pub fn text(&self, header: &[&str]) -> String {
+        let mut out: String = header.iter().map(|h| format!("# {h}\n")).collect();
+        for l in &self.lines {
+            out += l;
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// Plan §Formats' generator test: every `data/` file [`Fs::install`] leaves out is filtered by
+/// both `LEV` and `CFG`, or lies under an [`UNLISTED_CFG_DIRS`] folder; every directory of
+/// `data/` is in the install. Returns the offenders.
+pub fn install_coverage() -> Vec<String> {
+    let text = Fs::install().text(&[]);
+    let listed: BTreeSet<String> = text
+        .lines()
+        .map(|l| l.split_whitespace().nth(2).unwrap().to_string())
+        .collect();
+    fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, bool)>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let rel = p
+                .strip_prefix(base)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if p.is_dir() {
+                out.push((rel, true));
+                walk(&p, base, out);
+            } else {
+                out.push((rel, false));
+            }
+        }
+    }
+    let data = Path::new(REPO).join("data");
+    let mut all = Vec::new();
+    walk(&data, &data, &mut all);
+    let mut bad = Vec::new();
+    for (rel, dir) in all {
+        if listed.contains(&rel) {
+            continue;
+        }
+        let covered = if dir {
+            // Implied by a listed file under it, or a folder no case enters.
+            listed.iter().any(|l| l.starts_with(&format!("{rel}/")))
+                || UNLISTED_CFG_DIRS.iter().any(|u| rel == *u)
+        } else {
+            let ext = rel.rsplit_once('.').map_or("", |(_, e)| e);
+            let leaf_ext = if rel.rsplit('/').next().unwrap().contains('.') {
+                ext
+            } else {
+                ""
+            };
+            UNLISTED_CFG_DIRS
+                .iter()
+                .any(|u| rel.starts_with(&format!("{u}/")))
+                || !(leaf_ext.eq_ignore_ascii_case("LEV") || leaf_ext.eq_ignore_ascii_case("CFG"))
+        };
+        if !covered {
+            bad.push(rel);
+        }
+    }
+    bad
 }
 
 /// `file <rel> <fnv16>` for every regular file under `user`, `rel` sorted bytewise.
@@ -802,6 +1000,11 @@ pub fn file_lines(user: &Path) -> Vec<String> {
 pub struct Opts {
     pub resume_sync: bool,
     pub small_labels: bool,
+    /// Step 4½e-2 (plan D17): LOAD SETUP's detach (`setup_load`'s counterfactual).
+    pub load_detach: bool,
+    /// Step 4½e-2 (plan D1.2): the Q4 twin's fixture drops; with them on, the Q4 validator
+    /// records ([`Ledger::q4_hits`]) instead of refusing.
+    pub q4_twin: Twin,
 }
 
 impl Default for Opts {
@@ -809,6 +1012,8 @@ impl Default for Opts {
         Opts {
             resume_sync: true,
             small_labels: true,
+            load_detach: true,
+            q4_twin: Twin::Off,
         }
     }
 }
@@ -869,6 +1074,33 @@ pub struct Ledger {
     pub booby_labels: u32,
     /// Match frames per player with a visible worm holding Change.
     pub change_labels: [u32; 2],
+    /// Step 4½e-2: per frame, the selector on top after it (its view and the row under its
+    /// cursor).
+    pub selector: Vec<Option<(SelectorView, String)>>,
+    /// Per frame, FNV-1a-64 of the preview rectangle (134..186 × 162..198) in the frozen screen
+    /// and in this frame's surface after the frame (T0 P3).
+    pub preview_rect: Vec<(u64, u64)>,
+    /// `L` frames whose frozen preview rectangle changed, with the row under the selector's
+    /// cursor.
+    pub previews: Vec<(u32, String)>,
+    /// SAVE SETUP AS…'s `NAME '…' IS RESERVED` boxes.
+    pub reserved_boxes: u32,
+    /// SAVE SETUP AS… accepts that saved: the names.
+    pub saves: Vec<String>,
+    /// SAVE SETUP AS… closes by Esc or an empty Return.
+    pub save_cancels: u32,
+    /// LOAD SETUP picks: (frame, the setup name after it).
+    pub loads: Vec<(u32, String)>,
+    /// Level selector picks: (frame, `level_file`, or `[RANDOM]`).
+    pub level_picks: Vec<(u32, String)>,
+    /// The settings menu's LEVEL value, at boot and on each frame it changed.
+    pub level_values: Vec<(u32, String)>,
+    /// `Shell::level_from_file` after the boot.
+    pub boot_from_file: bool,
+    /// `Shell::level_from_file` after each NEW GAME route.
+    pub level_from_file: Vec<bool>,
+    /// The Q4 validator's hits in a twin run (plan D1.2).
+    pub q4_hits: u32,
 }
 
 pub struct Run {
@@ -888,6 +1120,10 @@ pub struct Run {
     pub p1_weapons: Vec<Option<i32>>,
     /// The menu's settings after the run.
     pub settings: Settings,
+    /// Step 4½e-2: the `user` rels the Q4 twin dropped from the fixture.
+    pub dropped: Vec<String>,
+    /// `Shell::setup_name` after the run.
+    pub setup_name: String,
 }
 
 fn present_fields(sh: &Shell, p: Option<Present>) -> (String, Option<i32>) {
@@ -954,12 +1190,93 @@ fn snaps(sim: &SimState) -> [WormSnap; 2] {
     })
 }
 
+/// The level preview's rectangle (`fileSelectorState.cpp:108-145`: 52×36 at (134, 162)),
+/// FNV-1a-64 over its ARGB pixels.
+fn preview_hash(b: &Bitmap) -> u64 {
+    let mut h = FNV_OFFSET;
+    for y in 162..198 {
+        for x in 134..186 {
+            for byte in b.pixels[(y * b.pitch + x) as usize].to_le_bytes() {
+                h = (h ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+            }
+        }
+    }
+    h
+}
+
+/// The row under a selector's cursor, listed afresh through the store (the tree is private to
+/// the screen): `[RANDOM]` is the level selector root's row 0.
+fn selector_row(store: &dyn ConfigStore, v: &SelectorView, random: &str) -> String {
+    let filter = if v.top == 'L' { lev_filter } else { cfg_filter };
+    let mut sel = FileSelector::new(store, filter);
+    let at_root = v.folder == store.root_label();
+    if !at_root {
+        sel.select(store, &v.folder);
+    }
+    let mut i = v.selection;
+    if v.top == 'L' && at_root {
+        if i == 0 {
+            return random.to_string();
+        }
+        i -= 1;
+    }
+    let items = &sel.current_menu(store).items;
+    usize::try_from(i)
+        .ok()
+        .and_then(|i| items.get(i))
+        .map_or_else(|| "-".to_string(), |it| it.string.clone())
+}
+
+/// The settings menu's LEVEL value.
+fn level_value(sh: &Shell) -> String {
+    sh.settings_menu()
+        .items
+        .iter()
+        .find(|i| i.id == SI_LEVEL)
+        .map(|i| i.value.clone())
+        .unwrap_or_default()
+}
+
+/// Step 4½e-2's level checks for an `fs` case at boot and at each NEW GAME (plan D3's mirror,
+/// Addendum T0 change 2): `(q4, ub)` — `q4` when a root-form `level_file` is absent from
+/// `user/` but the merged store reads it (C++ plays random, Rust the file: finding 2); `ub`
+/// when the file passes the `MODERNLV` magic but `cpp_accepts` rejects it (C++ UB, P10).
+fn level_checks(store: &dyn ConfigStore, user: &Path, s: &Settings) -> (bool, bool) {
+    if s.random_level {
+        return (false, false);
+    }
+    let Some(rel) = s
+        .level_file
+        .strip_prefix(store.root_label())
+        .and_then(|r| r.strip_prefix('/'))
+    else {
+        return (false, false);
+    };
+    let Some(bytes) = store.read(rel) else {
+        return (false, false);
+    };
+    let q4 = !user.join(rel).is_file();
+    let ub = bytes.windows(8).any(|w| w == b"MODERNLV")
+        && !cpp_accepts(&bytes, s.load_powerlevel_palette);
+    (q4, ub)
+}
+
+/// The number entry or SAVE SETUP AS…'s name box the harness mirrors (Step 4½e-1; e-2 adds the
+/// name box).
+struct OpenEntry {
+    buf: Vec<u8>,
+    /// `Some(true)` for Return, `Some(false)` for Esc.
+    closed: Option<bool>,
+    save_as: bool,
+}
+
 /// [`drive`] with the harness switches (T8's counterfactual witnesses). Step 4½e-1: the events
 /// in order (key and text), the `fs` store (plan §Formats), `record_replays = false` after the
 /// boot load (intervention 6's mirror), `upd` from the top before the frame, the `d` and `file`
 /// lines and the e-1 validators (plan T8 Step 2).
 pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) -> Run {
     let mut fixture: Option<PathBuf> = None;
+    let mut dropped = Vec::new();
     let (mut settings, store): (Settings, Box<dyn ConfigStore>) = match &script.fs {
         None => (settings_for(script), Box::new(MemoryStore::new())),
         Some(m) => {
@@ -969,7 +1286,7 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 "liero_rs_shell_fs_{stem}_{}_{n}",
                 std::process::id()
             ));
-            make_fixture(&Path::new(GOLDEN).join(m), &root);
+            dropped = make_fixture_with(&Path::new(GOLDEN).join(m), &root, opts.q4_twin);
             let store = NativeStore::split(root.join("user"), Some(root.join("sys")))
                 .with_root_label("./user");
             let s = load_setup(&store).expect("the boot load (gameEntry.cpp:55-58)");
@@ -994,6 +1311,7 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
     );
     sh.debug_mut().resume_sync = opts.resume_sync;
     sh.debug_mut().small_labels = opts.small_labels;
+    sh.debug_mut().load_detach = opts.load_detach;
     let (p, _) = present_fields(&sh, out.present);
     let mut run = Run {
         boot: format!("boot {p} {}", tail(&sh)),
@@ -1006,6 +1324,8 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
         worms: Vec::new(),
         p1_weapons: Vec::new(),
         settings: Settings::default(),
+        dropped,
+        setup_name: String::new(),
     };
     let mut held: BTreeSet<u32> = BTreeSet::new();
     let v = |run: &mut Run, frame: u32, what: String| {
@@ -1018,8 +1338,40 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
         .flat_map(|w| w.controls_ex.iter().copied())
         .filter(|&k| k != 0)
         .collect();
-    // The open number entry: the harness's mirror of its buffer, and whether Esc closed it.
-    let mut entry: Option<(Vec<u8>, Option<bool>)> = None;
+    // Step 4½e-2: the boot's level checks, the LEVEL value, the preview rectangle.
+    let user_dir = fixture.as_ref().map(|r| r.join("user"));
+    let q4_twin = opts.q4_twin != Twin::Off;
+    let random_row = UiTc::load(Path::new(TC_ROOT)).random;
+    let n_weapons = UiTc::load(Path::new(TC_ROOT)).weapon_names.len();
+    run.ledger.boot_from_file = sh.level_from_file();
+    if let Some(user) = &user_dir {
+        let (q4, ub) = level_checks(sh.store(), user, sh.settings());
+        if q4 && q4_twin {
+            run.ledger.q4_hits += 1;
+        } else if q4 {
+            v(
+                &mut run,
+                0,
+                "boot: Q4 — C++ plays random where Rust plays the level file; copy the level into \
+                 user/ (plan D1)"
+                    .into(),
+            );
+        }
+        if ub {
+            v(
+                &mut run,
+                0,
+                "boot: a MODERNLV level C++ rejects (UB, Addendum T0 P10)".into(),
+            );
+        }
+    }
+    let mut last_level_value = level_value(&sh);
+    run.ledger.level_values.push((0, last_level_value.clone()));
+    let mut last_frozen = preview_hash(sh.frozen());
+    // The open number entry or name box: the harness's mirror of its buffer, how it closed.
+    let mut entry: Option<OpenEntry> = None;
+    // The name the reserved box's replacement reopens with (plan fact 12).
+    let mut reserved_typed: Option<Vec<u8>> = None;
     for frame in 0..script.frames {
         let top0 = sh.top_char();
         let upd = if top0 == 'G' && sh.phase() == Phase::Weapsel {
@@ -1042,9 +1394,12 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                             format!("a text event while the top is {top0}"),
                         );
                     }
-                    if let Some((buf, _)) = entry.as_mut() {
-                        if bytes.len() == 1 && bytes[0].is_ascii_digit() {
-                            buf.push(bytes[0]);
+                    if !bytes.is_ascii() {
+                        v(&mut run, frame, "a non-ASCII text event".into());
+                    }
+                    if let Some(e) = entry.as_mut() {
+                        if bytes.len() == 1 && (e.save_as || bytes[0].is_ascii_digit()) {
+                            e.buf.push(bytes[0]);
                         }
                     }
                     downs += 1;
@@ -1084,23 +1439,27 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
             }
             if k.kind != Kind::Up {
                 downs += 1;
-                if top0 == 'O' && k.name.len() == 1 && controls.contains(&dos) {
+                // Step 4½e-2: the selectors search too, after testing the controls (fact 24).
+                if matches!(top0, 'O' | 'L' | 'P') && k.name.len() == 1 && controls.contains(&dos) {
                     v(
                         &mut run,
                         frame,
-                        format!("{} typed in WEAPON OPTIONS is a player's control", k.name),
+                        format!(
+                            "{} typed in a searchable menu ({top0}) is a player's control",
+                            k.name
+                        ),
                     );
                 }
-                if let Some((buf, closed)) = entry.as_mut().filter(|_| top0 == 'I') {
+                if let Some(e) = entry.as_mut().filter(|_| top0 == 'I') {
                     match k.name.as_str() {
                         "BACKSPACE" => {
-                            buf.pop();
+                            e.buf.pop();
                         }
                         "RETURN" | "KP_ENTER" => {
-                            closed.get_or_insert(true);
+                            e.closed.get_or_insert(true);
                         }
                         "ESC" => {
-                            closed.get_or_insert(false);
+                            e.closed.get_or_insert(false);
                         }
                         _ => {}
                     }
@@ -1124,6 +1483,12 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
             restart: false,
         };
         let out = sh.frame(&mut sim, &input);
+        // Intervention 6′'s mirror (Step 4½e-2, plan D2): LOAD SETUP brings `recordReplays`
+        // back; before the `d` line, as the dumper.
+        sh.settings_mut().record_replays = false;
+        for n in &out.notes {
+            v(&mut run, frame, format!("a Rust-only note: {n}"));
+        }
         let top1 = sh.top_char();
         run.ledger.tops.insert(top1);
         let selected = out.menu_sounds.contains(&select);
@@ -1141,19 +1506,6 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 "a placeholder was selected (the C++ menu acts on it)".into(),
             );
         }
-        if upd == 'M'
-            && cur0 == CurMenu::Settings
-            && sh.cur_menu() == CurMenu::Settings
-            && top1 == 'M'
-            && selected
-            && [SI_LEVEL, LOAD_OPTIONS, SAVE_OPTIONS].contains(&sh.settings_menu().selected_id())
-        {
-            v(
-                &mut run,
-                frame,
-                "Enter on LEVEL / LOAD SETUP / SAVE SETUP AS... (C++ pushes a selector, D6)".into(),
-            );
-        }
         if upd == 'M' && top1 == 'B' {
             v(
                 &mut run,
@@ -1161,7 +1513,8 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 "Rust refused a NEW GAME or RESUME that C++ plays (plan D5)".into(),
             );
         }
-        if matches!(top0, 'M' | 'O') && matches!(top1, 'O' | 'I' | 'B') && top1 != top0 {
+        if matches!(top0, 'M' | 'O') && matches!(top1, 'O' | 'I' | 'B' | 'L' | 'P') && top1 != top0
+        {
             if downs > 1 {
                 v(
                     &mut run,
@@ -1173,22 +1526,130 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 run.ledger.weapon_boxes += 1;
             }
         }
+        if top0 == 'I' && top1 != 'I' {
+            let e = entry.take().expect("an open entry");
+            if e.save_as {
+                // Step 4½e-2: SAVE SETUP AS…'s close (plan fact 12): Esc or an empty Return
+                // completes with nothing; a reserved name raises the box; the rest saves.
+                match e.closed {
+                    Some(true) if !e.buf.is_empty() => {
+                        let name = String::from_utf8_lossy(&e.buf).into_owned();
+                        if !e.buf.is_ascii() || !placeable_leaf(&format!("{name}.cfg")) {
+                            v(
+                                &mut run,
+                                frame,
+                                format!("SAVE SETUP AS… '{name}' is Rust-only (plan D7)"),
+                            );
+                        }
+                        if top1 == 'B' {
+                            run.ledger.reserved_boxes += 1;
+                            reserved_typed = Some(e.buf);
+                        } else {
+                            run.ledger.saves.push(name);
+                        }
+                    }
+                    _ => run.ledger.save_cancels += 1,
+                }
+            } else {
+                let item = sh.settings_menu().selected().expect("the entry's item");
+                run.ledger.entries.push(Entry {
+                    frame,
+                    item: item.string.clone(),
+                    outcome: match e.closed {
+                        Some(false) => EntryOutcome::Cancelled,
+                        _ if e.buf.is_empty() => EntryOutcome::Empty,
+                        _ => EntryOutcome::Accepted,
+                    },
+                    value: item.value.clone(),
+                });
+            }
+        }
         if top0 != 'I' && top1 == 'I' {
-            let item = sh.settings_menu().selected().expect("the entry's item");
-            entry = Some((item.value.trim_end_matches('%').as_bytes().to_vec(), None));
-        } else if top0 == 'I' && top1 != 'I' {
-            let (buf, closed) = entry.take().expect("an open entry");
-            let item = sh.settings_menu().selected().expect("the entry's item");
-            run.ledger.entries.push(Entry {
-                frame,
-                item: item.string.clone(),
-                outcome: match closed {
-                    Some(false) => EntryOutcome::Cancelled,
-                    _ if buf.is_empty() => EntryOutcome::Empty,
-                    _ => EntryOutcome::Accepted,
-                },
-                value: item.value.clone(),
+            entry = Some(if top0 == 'B' {
+                // The reserved box's replacement: the name box again, on what was typed.
+                OpenEntry {
+                    buf: reserved_typed
+                        .take()
+                        .expect("a reserved box before the reopen"),
+                    closed: None,
+                    save_as: true,
+                }
+            } else if sh.settings_menu().selected_id() == SAVE_OPTIONS {
+                OpenEntry {
+                    buf: sh.setup_name().as_bytes().to_vec(),
+                    closed: None,
+                    save_as: true,
+                }
+            } else {
+                let item = sh.settings_menu().selected().expect("the entry's item");
+                OpenEntry {
+                    buf: item.value.trim_end_matches('%').as_bytes().to_vec(),
+                    closed: None,
+                    save_as: false,
+                }
             });
+        }
+        // Step 4½e-2: the selectors, the preview, the picks and loads.
+        let view = sh.selector_view();
+        if let Some(sv) = &view {
+            if sv.top == 'P'
+                && UNLISTED_CFG_DIRS
+                    .iter()
+                    .any(|d| sv.folder == format!("{}/{d}", sh.store().root_label()))
+            {
+                v(
+                    &mut run,
+                    frame,
+                    format!(
+                        "LOAD SETUP entered {} (the fixture leaves it empty)",
+                        sv.folder
+                    ),
+                );
+            }
+        }
+        let row = view
+            .as_ref()
+            .map(|sv| selector_row(sh.store(), sv, &random_row));
+        let frozen = preview_hash(sh.frozen());
+        run.ledger
+            .preview_rect
+            .push((frozen, preview_hash(sh.surface())));
+        if frozen != last_frozen && top1 == 'L' {
+            run.ledger
+                .previews
+                .push((frame, row.clone().unwrap_or_else(|| "-".into())));
+        }
+        last_frozen = frozen;
+        run.ledger.selector.push(view.zip(row));
+        if upd == 'L' && top1 == 'M' && selected {
+            let s = sh.settings();
+            let pick = if s.random_level {
+                random_row.clone()
+            } else {
+                s.level_file.clone()
+            };
+            run.ledger.level_picks.push((frame, pick));
+        }
+        if upd == 'P' && top1 == 'M' && selected {
+            run.ledger.loads.push((frame, sh.setup_name().to_string()));
+            let gate = RefusalGate {
+                n_weapons,
+                ..RefusalGate::default()
+            };
+            if sh.settings().game_mode == GM_HOLDAZONE
+                || gate.refusal(sh.settings(), MA_NEW_GAME).is_some()
+            {
+                v(
+                    &mut run,
+                    frame,
+                    "LOAD SETUP of a setup whose NEW GAME Rust refuses".into(),
+                );
+            }
+        }
+        let lv = level_value(&sh);
+        if lv != last_level_value {
+            run.ledger.level_values.push((frame, lv.clone()));
+            last_level_value = lv;
         }
         let weap1 = sh.settings().weap_table;
         for (i, (a, b)) in weap0.iter().zip(weap1.iter()).enumerate() {
@@ -1212,6 +1673,40 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 }
                 if sh.settings().game_mode == GM_HOLDAZONE {
                     v(&mut run, frame, "a Holdazone match (unported)".into());
+                }
+                // Step 4½e-2.
+                run.ledger.level_from_file.push(sh.level_from_file());
+                if sim.level.height < 342 {
+                    v(
+                        &mut run,
+                        frame,
+                        format!(
+                            "a level {} rows high (C++ spawning reads past it, e-1 Addendum G3)",
+                            sim.level.height
+                        ),
+                    );
+                }
+                if let Some(user) = &user_dir {
+                    let (q4, ub) = level_checks(sh.store(), user, sh.settings());
+                    if q4 && q4_twin {
+                        run.ledger.q4_hits += 1;
+                    } else if q4 {
+                        v(
+                            &mut run,
+                            frame,
+                            "Q4 — C++ plays random where Rust plays the level file; copy the \
+                             level into user/ (plan D1)"
+                                .into(),
+                        );
+                    }
+                    if ub {
+                        v(
+                            &mut run,
+                            frame,
+                            "a NEW GAME on a MODERNLV level C++ rejects (UB, Addendum T0 P10)"
+                                .into(),
+                        );
+                    }
                 }
             }
             Some(Route::Resume) => {
@@ -1321,6 +1816,7 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
     }
     run.p1_weapons = sim.worms[0].weapons.iter().map(|w| w.ty).collect();
     run.settings = sh.settings().clone();
+    run.setup_name = sh.setup_name().to_string();
     if let Some(root) = fixture {
         if run.ledger.quit {
             sh.save_on_exit()

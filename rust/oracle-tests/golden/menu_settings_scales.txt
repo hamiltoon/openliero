@@ -1,0 +1,12 @@
+# oracle_dump_menu rust/oracle-tests/golden/menu_settings_scales_script.txt — the REAL C++ Menu / behaviors / SettingsMenu (Step 4½d design §6.1)
+# <n> <op> <sel> <top> <bottom> <vis> <shown> <prefix> <vals> <bound> <sounds> <ret> <push> <hash>
+0 update_items 0 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|1|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+1 first_visible 0 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|1|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+2 draw 0 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|1|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 6c8fbd395e089483
+3 move 5 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|1|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+4 cycles 5 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|1|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+5 right 5 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|2|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - 1 0 -
+6 left 5 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|1|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - 1 0 -
+7 left 5 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|1|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - 1 0 -
+8 enter 5 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|1|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - 27 -1 1 -
+9 draw 5 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|1|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 0aa3b35bb8757377

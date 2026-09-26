@@ -1,0 +1,47 @@
+# Step 4½d G1 integer: the menu_cycles % scroll_interval gate, clamping at both ends, the
+# percentage and display_div values, Enter with and without allow_entry, Enter out of view.
+menu 30 20 15 60 0
+item 1 48 7 1 1 COUNT
+item 2 48 7 1 1 PERCENT
+item 3 48 7 1 1 COLOUR
+item 4 48 7 1 1 NOENTRY
+bind 1 integer 5 0 10 3 0 5 1 1
+bind 2 integer 100 0 9999 1 1 5 1 1
+bind 3 integer 252 0 252 4 0 4 4 1
+bind 4 integer 1 1 999 1 0 5 1 0
+update_items
+first_visible
+cycles 1
+right
+cycles 0
+right
+right
+right
+left
+left
+left
+left
+left
+enter
+move 1
+cycles 10
+left
+right
+right
+enter
+move 1
+cycles 4
+left
+left
+right
+enter
+move 1
+enter
+left
+draw 0 -1 0
+move_to 0
+set_height 2
+scroll 1
+enter
+set_height 15
+draw 0 -1 0

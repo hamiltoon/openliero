@@ -1,0 +1,42 @@
+# Step 4½d G1 page_scroll: MovementPage over a 20-item menu with a space, Scroll clamping,
+# SetHeight shrinking and growing the view.
+menu 40 10 15 0 0
+item 0 48 7 1 1 ITEM 00
+item 1 48 7 1 1 ITEM 01
+item 2 48 7 1 1 ITEM 02
+item 3 48 7 1 1 ITEM 03
+item 4 48 7 1 1 ITEM 04
+item 5 48 7 1 1 ITEM 05
+item 6 48 7 1 1 ITEM 06
+space
+item 8 48 7 1 1 ITEM 08
+item 9 48 7 1 1 ITEM 09
+item 10 48 7 1 1 ITEM 10
+item 11 48 7 1 1 ITEM 11
+item 12 48 7 1 1 ITEM 12
+item 13 48 7 1 1 ITEM 13
+item 14 48 7 1 1 ITEM 14
+item 15 48 7 1 1 ITEM 15
+item 16 48 7 1 1 ITEM 16
+item 17 48 7 1 1 ITEM 17
+item 18 48 7 1 1 ITEM 18
+item 19 48 7 1 1 ITEM 19
+first_visible
+page 1
+page 1
+page 1
+draw 0 -1 0
+page -1
+page -1
+page -1
+move -1
+draw 0 -1 0
+move 1
+scroll 3
+draw 0 -1 0
+scroll -10
+set_height 10
+draw 0 -1 0
+move_to 15
+set_height 15
+draw 0 -1 0

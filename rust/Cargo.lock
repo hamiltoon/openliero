@@ -3658,6 +3658,7 @@ dependencies = [
  "scenario",
  "sim",
  "sim-core",
+ "ui",
 ]
 
 [[package]]

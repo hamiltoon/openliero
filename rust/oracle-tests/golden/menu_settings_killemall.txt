@@ -1,0 +1,26 @@
+# oracle_dump_menu rust/oracle-tests/golden/menu_settings_killemall_script.txt — the REAL C++ Menu / behaviors / SettingsMenu (Step 4½d design §6.1)
+# <n> <op> <sel> <top> <bottom> <vis> <shown> <prefix> <vals> <bound> <sounds> <ret> <push> <hash>
+0 draw 0 0 0 19 1111111111111111111 - .|.|.|.|.|.|.|.|.|.|.|.|.|.|.|.|.|.|. - - - 0 e09c75c0d1a255fb
+1 update_items 0 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+2 draw 0 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 a0fa86802f615ea3
+3 first_visible 0 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+4 draw 0 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 a0fa86802f615ea3
+5 page 11 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+6 draw 11 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 be9864772f8c3f23
+7 move 12 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+8 move 13 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+9 move 14 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+10 move 15 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+11 move 16 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+12 move 17 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+13 move 18 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+14 move 0 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+15 move 5 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+16 move 6 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+17 move 7 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+18 move 8 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+19 move 9 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+20 move 10 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+21 move 11 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+22 move 12 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+23 draw 12 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 953dbb6fb8c575ab

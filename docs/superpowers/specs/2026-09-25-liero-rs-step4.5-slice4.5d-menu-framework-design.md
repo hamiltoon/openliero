@@ -1048,6 +1048,13 @@ T3 and T6 (C++) can run in parallel with T0–T2.
 
 ## 12. Open questions (with recommendations)
 
+**Rulings (John, 2026-09-26):** show all 15 main-menu items, the unported ones inert; QUIT in
+the browser stops on a black frame with a "Play again" overlay that reloads; `?weapons=` /
+`?level=` / `?seed=` skip the menu (plain link → main menu; `?menu=1` forces it); the touch
+controls gain a MENU (Esc) button. The other John-questions follow the recommendations below
+(the Bevy-free `rust/ui` crate; F5 as a Rust-only restart in play and selection; recording of
+menu-driven matches postponed; `liero.cfg` load/save in 4½e). The plan settles the rest.
+
 1. **Where does the shell live?** *(John — it amends LD 2's location)* **Recommendation: a new Bevy-free crate
    `rust/ui`** holding the widgets and the shell, plus `new_game`, `selection`, `match_flow` and `ReleaseLatch` moved
    out of `game` and re-exported there. The C++ frame gate needs `oracle-tests` and `shot` to drive the whole

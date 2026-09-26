@@ -5,7 +5,7 @@
 //! minimap on `settings->map` (`viewport.cpp:593`). A played match (`Live`) and a replay of
 //! one (`Replay`) therefore draw `(true, settings.map)`. The `Scripted` demo keeps its
 //! scenario's `render_hud` directive for both flags, so the `blood` demo — and the wasm
-//! frame-parity witness built on it — stays world-only. Until 4½d loads the setup (design
+//! frame-parity witness built on it — stays world-only. Until 4½e loads the setup (design
 //! §9.3.6) the binary passes `Settings::default().map`.
 
 use crate::input::Mode;

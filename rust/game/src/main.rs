@@ -574,7 +574,7 @@ fn setup(
     if *mode == Mode::Live && record_path.0.is_some() {
         eprintln!(
             "--record: weapon selection is skipped — the recording starts at match tick 0 with \
-             the scenario loadout (recording a selection is 4½d)"
+             the scenario loadout (recording a menu-driven match is postponed)"
         );
     }
     let select = *mode == Mode::Live && !skip_selection;
@@ -610,7 +610,7 @@ fn setup(
     };
 
     // Step 4½a-2: the binary loads no setup yet (design §9.3.6), so the minimap follows the
-    // C++ default (`map = true`); 4½d passes the loaded setup's `map` here.
+    // C++ default (`map = true`); 4½e passes the loaded setup's `map` here.
     let hud = hud_flags(*mode, scenario.hud(), Settings::default().map);
     let draw_shadow = scenario.shadow();
     let level_file = scenario.level.clone();

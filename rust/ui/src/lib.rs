@@ -6,4 +6,5 @@
 //! main menu, the router and `Gfx::RunOneFrame`. Bevy-free so `oracle-tests` (the C++ frame
 //! gates) and `shot` drive the whole shell headlessly (design §2, amended LD 2).
 pub mod keys;
+pub mod menu;
 pub mod text;

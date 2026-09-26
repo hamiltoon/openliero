@@ -1,6 +1,6 @@
 # Step 4½, Slice 4½e — the settings menu, weapon options, the level selector and setup files: design
 
-Status: **DESIGN — rulings in §14** · 2026-09-26 · branch `claude/cpp-oracle-vcpkg-assets-chcwcm` (on `liero-rs-step-4-5`; 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅ landed)
+Status: **DESIGN — rulings in §14** · 2026-09-26 · branch `claude/cpp-oracle-vcpkg-assets-chcwcm` (on `liero-rs-step-4-5`; 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅ landed) · **4½e-1 LANDED** (plan `plans/2026-09-26-liero-rs-step4.5-slice4.5e1-plan.md`); 4½e-2 planned
 Part of: `2026-09-10-liero-rs-step4.5-game-shell-overview.md` (the 4½e bullet, §4½h, §Deferrals, open Q5/Q6; cited **overview**)
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` §1–§5 (cited **cpp-map**) and
 `2026-09-10-liero-rs-step4.5-rust-baseline-map.md` (cited **rust-map**)
@@ -600,6 +600,14 @@ The existing 11 `shell_*` cases must regenerate **byte-identically**. So every n
 | `cfg_boot` | `fs` with a user `liero.cfg` (Game of Tag, `random_level = false`, water level copied to user): boot values, then QUIT → `file` lines (the exit save) |
 | `cfg_default` | `fs` with no `liero.cfg` anywhere: the defaults save at boot and the exit save |
 
+**As landed (4½e-1, `ca72317` / `77406bb`):** 11 cases in `examples/gen_slice4_5e1_shell.rs` +
+`tests/shell_e1_cases/` — the plan's 10 (the nine above plus the `match_setup` milestone) and `key_edges` (the C++
+`OnKey` edges of a live match: held Change + one Right steps one weapon, a Change+Jump rope throw, a dead worm's
+Fire-ready press), 6,099 frames, 6,099 `d` lines and 3 `file` lines, 30 golden files. `map_size` types 333 × 360, then
+184 × 420, and `match_setup` 333 × 352: C++ spawning reads past a level shorter than ~342 rows (plan Addendum G3), so
+no case may play one. `cfg_boot` keeps a random level (the `fs` file-level path is e-2's, plan fact 27), and
+`live_settings` bans no weapon (`weapon_options` and `match_setup` cover the live `weap_table`).
+
 ### 6.3 G2e-2 corpus (about 5 cases, all `fs` + `detail`)
 
 | Case | Pins |
@@ -634,7 +642,10 @@ are reused.
 | `sim_slice4_5e_banned` | 1024 × 256 | MAX BONUSES 20, most weapons Banned | the bonus `do … while weap_table == 2` loop (`game.cpp:256-258`) drawing several times |
 
 About 1,500 ticks each. The absent-directive path regenerates every existing sim golden byte-identically (the
-standing re-diff). The G2 `map_size` and `live_settings` cases then cover the same sim through the real menu.
+standing re-diff). **As landed (`6c2dfd8`):** `small` is 96 × 344 and `tall` runs 4,960 ticks (game over at 4,760,
+then a 200-row tail): C++ `Worm::BeginRespawn` / `CheckRespawnPosition` read past `materials[]` on a map shorter than
+the TC's spawn rectangle (undefined behaviour), so no C++ golden can exist for 96 × 64 (plan Addendum G3 and John's
+safe-edges ruling: Rust reads an out-of-array material as rock). The G2 `map_size` and `live_settings` cases then cover the same sim through the real menu.
 
 ### 6.6 Standing gates
 

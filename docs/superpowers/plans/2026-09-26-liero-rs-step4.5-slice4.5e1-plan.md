@@ -242,7 +242,7 @@ The C++ comparison happens **here**, against the real C++ run headlessly. If a d
   - `menu_dump.cpp`, `weapsel_dump.cpp`, `weapsel_drive.hpp`, `gen_menu_golden.sh`, and every `golden/*` that exists at `2377b0c`.
 
   4½d's `examples/gen_slice4_5d.rs` is **not** edited. It must still regenerate its 11 scripts byte-identically, because `tests/shell_common/mod.rs`, which it shares, changes.
-- **Golden audit.** `git diff --name-status 2377b0c -- rust/oracle-tests/golden` may list **only `A` lines**, exactly the **39 files** in §File structure: 27 `shell_*` and 12 `sim_slice4_5e_*`.
+- **Golden audit.** `git diff --name-status 2377b0c -- rust/oracle-tests/golden` may list **only `A` lines**, exactly the **39 files** in §File structure: 27 `shell_*` and 12 `sim_slice4_5e_*`. *(As landed: **42** — 30 `shell_*`, because Batch 7 added the `key_edges` case's script, golden and setup, plus the 12 `sim_slice4_5e_*`.)*
 - **rustfmt.** Run it only on files a task *creates*: `rustfmt --edition 2024 <abs file>` for `ui`/`game`, `--edition 2021` elsewhere. Never run it on an existing file or on a `lib.rs`/`main.rs`, because it recurses. Hand-format edits to match the surrounding style.
 - **The non-shell paths stay behaviour-identical:** `--live [<scenario>]`, `--live --record`, `--replay`, `Scripted`, `?demo`. `game/tests/round_trip.rs` and `record_regression.rs` stay green and untouched.
 
@@ -331,9 +331,9 @@ The dumper builds the level with the **real** `game.level.GenerateFromSettings(*
 | `rust/oracle-tests/tests/sim_slice4_5e_generated_golden.rs` (create) | T7 | the G3 gate |
 | `rust/oracle-tests/golden/sim_slice4_5e_{small,odd,tall,banned}{_scenario.txt,_setup.cfg,.txt}` (create, **12**) | T7 | G3 corpus + goldens |
 | `rust/oracle-tests/tests/shell_common/mod.rs` (modify) | T3 (mechanical), T8 | events/`text`/`detail`/`fs` in the script model and driver; `d` + `file` lines |
-| `rust/oracle-tests/tests/shell_e1_cases/mod.rs` (create) | T8 | the 10 e-1 cases, their builders, validators, ledgers |
+| `rust/oracle-tests/tests/shell_e1_cases/mod.rs` (create) | T8 | the 10 e-1 cases (as landed: 11, with `key_edges`), their builders, validators, ledgers |
 | `rust/oracle-tests/examples/gen_slice4_5e1_shell.rs` (create) | T8 | `check` / `write` |
-| `rust/oracle-tests/golden/shell_*` e-1 (create, **27**) | T8 | 10 scripts + 10 goldens; `shell_{weapon_options,labels}_setup.cfg`; `shell_{cfg_boot,cfg_default,match_setup}_fs.txt`; `shell_{cfg_boot,match_setup}_user_liero.cfg` |
+| `rust/oracle-tests/golden/shell_*` e-1 (create, **27**; as landed **30**) | T8 | 10 scripts + 10 goldens; `shell_{weapon_options,labels}_setup.cfg`; `shell_{cfg_boot,cfg_default,match_setup}_fs.txt`; `shell_{cfg_boot,match_setup}_user_liero.cfg`; as landed also `shell_key_edges{_script.txt,.txt,_setup.cfg}` |
 | `rust/oracle-tests/tests/shell_golden.rs` (modify) | T9 | the e-1 cases, `d` + `file` comparison, the union case list, the milestone |
 | PROGRESS, overview, design status, cpp-map, rust-map, `.claude/skills/liero-shot/SKILL.md` | T11 | status + corrections |
 
@@ -717,9 +717,9 @@ Finding 1 is probed with the **real** `Gfx::RunOneFrame`, through a temporary, n
 
   | Case | Size | Settings | Witnesses (required) |
   |---|---|---|---|
-  | `small` | 96×64 | Kill'em All, lives 3 | ≥1 death and ≥1 respawn; an object freed while its last position lay outside the level rectangle (slot diff between ticks) |
+  | `small` | 96×64 (**as landed 96×344**: C++ spawning reads past a level below ~342 rows, Addendum G3) | Kill'em All, lives 3 | ≥1 death and ≥1 respawn; an object freed while its last position lay outside the level rectangle (slot diff between ticks) |
   | `odd` | 333×211 | Scales, LOADING TIMES 37, blood 300, `shadow = true` | a reload (`loading_left > 0` seen); ≥50 live bobjects at some tick; a Scales health transfer |
-  | `tall` | 160×1000 | Game of Tag, TIME TO LOSE 60 | `is_game_over` flips 0 → 1 exactly once and stays 1 for ≥200 rows |
+  | `tall` | 160×1000 | Game of Tag, TIME TO LOSE 60 | `is_game_over` flips 0 → 1 exactly once and stays 1 for ≥200 rows (**as landed: 4,960 ticks**, over at tick 4,760) |
   | `banned` | 1024×256 | MAX BONUSES 20, 36/40 weapons `2` (the players' picks untouched) | ≥3 weapon bonuses spawned (statistical witness of the `game.cpp:256-258` re-draw loop: with 90% banned, P(no re-draw in 3 spawns) ≈ 10⁻³; state that in the ledger) |
 
   Each case runs about 1,500 ticks (plus the ≥200-row margin for `tall`). `level_seed` is fixed per case and recorded; `seed` is the game seed.
@@ -730,7 +730,7 @@ Finding 1 is probed with the **real** `Gfx::RunOneFrame`, through a temporary, n
 - [ ] **Step 6: gate.** `cargo test --manifest-path rust/Cargo.toml -p oracle-tests --test sim_slice4_5e_generated_golden` passes (**G3 bit-exact**), and so does the full re-diff. The golden audit shows exactly the 12 G3 `A` lines, plus any shell ones already landed.
 - [ ] **Step 7: commits.**
   - A sim fix first, if any: `sim(4.5e-1): <what> (found by G3 <case>)`.
-  - Then `oracle(4.5e-1): G3 — four generated-level sim goldens at 96x64, 333x211, 160x1000, 1024x256, bit-exact vs the real GenerateFromSettings`.
+  - Then `oracle(4.5e-1): G3 — four generated-level sim goldens at 96x64, 333x211, 160x1000, 1024x256, bit-exact vs the real GenerateFromSettings` (landed as `6c2dfd8`, at 96x344).
 
 **Done when:** all four cases are bit-exact on every row and column, every witness holds, and any sim fix is separate and re-diffed.
 
@@ -758,7 +758,7 @@ Finding 1 is probed with the **real** `Gfx::RunOneFrame`, through a temporary, n
   - any key-down besides the push trigger in a frame whose update pushed a screen (fact 4);
   - a `text` event while the top is not `I`;
   - a letter typed on an `O` frame that is any keyboard player's control. P1 is R, F, D, G; P2 is arrows and RCTRL/RALT/RSHIFT; the `ALLOWED` set is extended with explicit letters and digits.
-- [ ] **Step 3: the 10 cases** (`shell_e1_cases::cases()`). All have `detail`; all `match_seed`s are scripted, and each boot seed is distinct.
+- [ ] **Step 3: the 10 cases** (`shell_e1_cases::cases()`). All have `detail`; all `match_seed`s are scripted, and each boot seed is distinct. *(As landed: 11 — Batch 7 added `key_edges`: held Change + one Right steps one weapon, a Change+Jump rope throw, and a dead worm's Fire-ready press, the C++ `OnKey` edge semantics of `8291511`.)*
   1. `settings_nav`:
      - Enter on MATCH SETUP;
      - Up/Down with wrap over hidden rows;
@@ -787,7 +787,7 @@ Finding 1 is probed with the **real** `Gfx::RunOneFrame`, through a temporary, n
      - Open: 40 rows; DOWN ×20; PAGEDOWN; PAGEUP; search `L`,`A` in one visit; once-LEFT/RIGHT sounds.
      - Ban the one weapon → ESC → the `B` box → any key → re-enable → ESC.
      - NEW GAME → selection (only that weapon) → ESC during selection → F7 → WEAPON OPTIONS → enable a second weapon → ESC → ESC → F1 (RESUME) → P1 RIGHT cycles onto the second weapon (the live `weap_table`, fact 15) → DONE → 60 ticks → QUIT.
-  5. `map_size`: typed 333×211 → NEW GAME → 300 ticks → ESC → typed 96×64 → NEW GAME → 300 ticks → QUIT.
+  5. `map_size`: typed 333×211 → NEW GAME → 300 ticks → ESC → typed 96×64 → NEW GAME → 300 ticks → QUIT. *(As landed: 333×360, then 184×420 — heights ≥ 342 keep C++ spawning inside the level, Addendum G3.)*
   6. `live_settings`:
      - play 200;
      - ESC;
@@ -800,7 +800,7 @@ Finding 1 is probed with the **real** `Gfx::RunOneFrame`, through a temporary, n
   9. `cfg_default` (`fs`): no `liero.cfg` anywhere, plus the two sys dirs.
      - Boot (the defaults saved) → idle 40 → QUIT.
   10. `match_setup` 🎯 (`fs`, the done-when-2 path). The user `liero.cfg` is `shell_match_setup_user_liero.cfg`: one weapon at 0 and the rest banned, the picks on it, a random level.
-      - F7 → GAME MODE Enter ×3 (Kill'em All → Scales, via Tag and Holdazone) → LIVES typed `3` → LOADING TIMES held → MAP WIDTH `333` / MAP HEIGHT `211` typed.
+      - F7 → GAME MODE Enter ×3 (Kill'em All → Scales, via Tag and Holdazone) → LIVES typed `3` → LOADING TIMES held → MAP WIDTH `333` / MAP HEIGHT `211` typed. *(As landed: 333×352, for the same Addendum G3 reason.)*
       - WEAPON OPTIONS: ban the last weapon → ESC → the box → any key → re-enable → ESC → ESC.
       - NEW GAME → selection → 300 ticks → ESC → AMOUNT OF BLOOD (held) and MAX BONUSES (typed) → ESC → F1 (RESUME) → 200 ticks → ESC → QUIT, so the exit save writes `file` lines.
 - [ ] **Step 4: ledgers and witnesses** (printed by the generator; `write` refuses a case that lacks its own). Every case needs no violations. Per case:
@@ -820,7 +820,7 @@ Finding 1 is probed with the **real** `Gfx::RunOneFrame`, through a temporary, n
   2. `… -- check`;
   3. `cargo run … --example gen_slice4_5d -- check`, which must still be clean.
 - [ ] **Step 6: the C++ goldens.** `source $S/env.sh && bash rust/oracle-tests/gen_shell_golden.sh`, with the default count of 21. All awk gates pass, and the 11 4½d goldens are still byte-identical (the golden status shows only the new files as `??`).
-- [ ] **Step 7: commit** `oracle(4.5e-1): G2e-1 — 10 shell cases (generator-validated, with the finding-1 and label witnesses) and their C++ goldens from the real headless Gfx frame loop`, staging exactly the 27 golden files and the three source files.
+- [ ] **Step 7: commit** `oracle(4.5e-1): G2e-1 — 10 shell cases (generator-validated, with the finding-1 and label witnesses) and their C++ goldens from the real headless Gfx frame loop`, staging exactly the 27 golden files and the three source files. *(Landed as `ca72317`: 11 cases — the plan's 10 plus `key_edges`, which pins `8291511`'s live key edges — and 30 golden files.)*
 
 **Done when:** the generator is clean with every witness, the C++ gen script passes, the 4½d goldens are unchanged, and there are 27 new golden files.
 
@@ -842,7 +842,7 @@ Finding 1 is probed with the **real** `Gfx::RunOneFrame`, through a temporary, n
   - On the first mismatch, get PPMs of both sides around it. Rust: `SHELL_RUST_PPM_DIR=$S/g2r`. C++: `SHELL_PPM_DIR=$S/g2c bash rust/oracle-tests/gen_shell_golden.sh`, which rewrites the same bytes (the golden status stays empty).
   - Fix the Rust side (`ui`/`render`). Each fix gets a unit test pinning the C++ line it follows, and the full re-diff.
   - Never edit a golden. A dumper bug is fixed in T5's file with its regeneration proof re-run, and only the e-1 goldens are regenerated.
-- [ ] **Step 3: gate.** `shell_golden` (all 21 cases) green, the full re-diff green, `menu_widget_golden` green. The golden audit: `git diff --name-status 2377b0c -- rust/oracle-tests/golden | grep -v '^A'` is empty, and the count is 39 once G3 has landed.
+- [ ] **Step 3: gate.** `shell_golden` (all 21 cases) green, the full re-diff green, `menu_widget_golden` green. The golden audit: `git diff --name-status 2377b0c -- rust/oracle-tests/golden | grep -v '^A'` is empty, and the count is 39 once G3 has landed. *(As landed: 22 cases and 42 files, with `key_edges`.)*
 - [ ] **Step 4: commits.**
   - Fixes first, each `ui(4.5e-1): <what> (found by G2e-1 <case>, frame N)`.
   - Then `oracle(4.5e-1): 🎯 MILESTONE e-1 — every G2e-1 case bit-exact against the real C++ Gfx frame loop (frames, d lines, saved files)`.
@@ -902,7 +902,7 @@ Finding 1 is probed with the **real** `Gfx::RunOneFrame`, through a temporary, n
   - `cargo tree -p ui -e normal | grep -c bevy` → `0`; `cargo tree -p ui --depth 1 -e normal` shows workspace crates only; `cargo tree -p sim-core --depth 1` has no dependencies.
 - [ ] **Step 2: tripwires and audits.**
   - `grep -rnE "HashMap|HashSet|\bf32\b|\bf64\b|SystemTime|Instant" rust/ui/src rust/render/src/small_text.rs` → empty.
-  - `git diff --name-status 2377b0c -- rust/oracle-tests/golden | grep -v '^A'` → empty, and `| wc -l` → **39**.
+  - `git diff --name-status 2377b0c -- rust/oracle-tests/golden | grep -v '^A'` → empty, and `| wc -l` → **39** (as landed **42**, with `key_edges`).
   - `git diff --name-only 2377b0c -- src CMakeLists.txt` → exactly the two dumpers.
   - `git diff --name-only 2377b0c -- rust/sim` → `weapsel.rs`, plus only the listed G3/G2 fixes.
   - `grep -c "ResMut<Sim>" rust/game/src/main.rs` equals its count at `2377b0c`.

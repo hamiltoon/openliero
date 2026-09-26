@@ -147,6 +147,26 @@ and `--live --record` never show the menu. Headless: `cargo run -p shot -- --men
 the real `Menu`/behaviors/`SettingsMenu`) and `shell_*` (G2: C++ `oracle_dump_shell`, the real
 `Gfx::RunOneFrame` headless, every presented frame bit-exact).
 
+**Match setup (Step 4½e-1).** MATCH SETUP (F7, or Enter on it) moves the focus into the settings
+menu: Up/Down/PgUp/PgDn move, held Left/Right change a value, Enter on a number opens the C++
+number entry (digits, Backspace, Enter; Esc cancels; typed text arrives as text events, one per
+char), Esc returns to the main menu. WEAPON OPTIONS sets each weapon Menu / Bonus / Banned (once
+Left/Right, type-to-search), and Esc with none left in the menu shows the TC's `NoWeaps` box. Edits
+reach a paused match at RESUME (C++ shares `gfx.settings`). `Setups/liero.cfg` is read at boot and
+written at exit: `--config-root <dir>` (or `=<dir>`) is one directory, otherwise the C++ config
+root (`OPENLIERO_TEST_USER_DIR` / the pref path over `OPENLIERO_DATADIR` / `data/`); the browser
+keeps settings in memory until reload. NEW GAME / RESUME on a setup Rust cannot play yet
+(Holdazone, unequal health, no weapon) shows a Rust-only refusal box (`console.warn` in the
+browser). NAMES ON BONUSES draws the bonus / booby-trap names, and a held Change shows the weapon
+name over the worm. On a phone a number box raises the device keyboard (iPhone: TAP TO TYPE),
+FIRE confirms and MENU cancels; a held pad Up/Down repeats in menus. The browser page publishes
+read-only `window.lieroTop` / `lieroSel` / `lieroMode` / `lieroWeapon` for headless walks. The
+gates are `shell_*` G2e-1 (11 cases with `d` lines and the saved `liero.cfg` bytes, vs the real
+`Gfx::RunOneFrame`; `gen_slice4_5e1_shell -- check|write`, `gen_shell_golden.sh`) and
+`sim_slice4_5e_*` G3 (the sim on four generated levels, `gen_sim_slice4_5e_golden.sh`). For a
+C++ side-by-side, run the real `openliero --config-root <copy of data/>` under Xvfb and the
+browser bundle with the same keys (the native `game` needs a GPU).
+
 ```
 cargo run --manifest-path rust/Cargo.toml -p game -- --live [name]
 ```

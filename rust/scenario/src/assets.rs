@@ -35,6 +35,27 @@ pub fn try_read_asset(tc_root: &Path, rel: &str) -> Option<Vec<u8>> {
     std::fs::read(tc_root.join(rel)).ok()
 }
 
+/// The shipped setups, embedded (Step 4½e-1, plan D11): the browser's config store carries them
+/// in its read-only system layer (`game::config`), keyed as config paths, so `liero.cfg` loads
+/// at boot as it does from `data/` natively. About 2 KB each; compiled on every target so the
+/// native tests pin them. The level catalogue joins them in 4½e-2.
+pub static EMBEDDED_SETUPS: &[(&str, &[u8])] = &[
+    (
+        "Setups/liero.cfg",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Setups/liero.cfg"
+        )),
+    ),
+    (
+        "Setups/orbmit.cfg",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Setups/orbmit.cfg"
+        )),
+    ),
+];
+
 /// wasm [`read_asset`]: the embedded set's [`try_read_asset`], panicking on a miss (a bug: the
 /// key set is build-time-known).
 #[cfg(target_arch = "wasm32")]
@@ -151,6 +172,22 @@ mod tests {
             None,
             "a directory is not a file"
         );
+    }
+
+    #[test]
+    fn the_embedded_setups_are_the_shipped_files_and_parse() {
+        let data = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data");
+        let rels: Vec<&str> = EMBEDDED_SETUPS.iter().map(|(rel, _)| *rel).collect();
+        assert_eq!(rels, ["Setups/liero.cfg", "Setups/orbmit.cfg"]);
+        for (rel, bytes) in EMBEDDED_SETUPS {
+            assert_eq!(
+                *bytes,
+                std::fs::read(Path::new(data).join(rel)).unwrap().as_slice(),
+                "{rel}"
+            );
+            let text = std::str::from_utf8(bytes).expect("UTF-8");
+            crate::settings_toml::settings_from_toml(text).expect("a shipped setup parses");
+        }
     }
 
     #[test]

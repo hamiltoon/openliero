@@ -19,6 +19,8 @@
 //! cores `match_flow`, `new_game`, `selection` and `viewport_step` live in `ui::shell`
 //! (re-exported here), next to the shell that drives them.
 pub mod audio;
+/// Step 4½e-1: where the live shell keeps `liero.cfg` (`--config-root`, the C++ config root).
+pub mod config;
 pub mod hud_mode;
 pub mod input;
 pub mod touch;

@@ -846,6 +846,18 @@ impl Shell {
         self.world.cur_menu
     }
 
+    /// The Rust-only refusal the top info box shows, if one is up (plan D5): `game` logs it to
+    /// the browser console, where the `eprintln!` goes nowhere (Step 4½e-1, T10).
+    pub fn top_refusal(&self) -> Option<&overlay::Refusal> {
+        match self.stack.top() {
+            Some(Screen::InfoBox(b)) => match &b.purpose {
+                InfoPurpose::Refused(r) => Some(r),
+                InfoPurpose::NoWeapons => None,
+            },
+            _ => None,
+        }
+    }
+
     /// The config store (Step 4½e-1).
     pub fn store(&self) -> &dyn ConfigStore {
         &*self.store
@@ -2194,6 +2206,7 @@ mod tests {
                 &InfoPurpose::NoWeapons
             )
         );
+        assert_eq!(sh.top_refusal(), None, "a C++ box is not a refusal");
         let (w, hh) = sh.boot_scene.font.get_dims_h(&b.text);
         let (cx, cy) = (223 - w / 2 - 2, 68 - hh / 2 - 2);
         for y in 0..200 {
@@ -2237,6 +2250,12 @@ mod tests {
                 "the Enter's own MenuSelect only; F1 none"
             );
             assert_eq!((sh.top_char(), sh.menu_fading()), ('B', false));
+            assert_eq!(
+                sh.top_refusal(),
+                Some(&overlay::Refusal::Build(
+                    scenario::build::BuildError::HoldazoneUnsupported
+                ))
+            );
             let b = top_box(&sh);
             assert_eq!(
                 (b.text.as_str(), b.x, b.y, b.clear_screen),

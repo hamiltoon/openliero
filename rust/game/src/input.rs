@@ -182,6 +182,10 @@ pub struct ParsedArgs {
     /// guard/loop off. Mutually exclusive with `--live`/`--record` (enforced by
     /// the caller).
     pub replay: Option<PathBuf>,
+    /// `Some(dir)` iff `--config-root <dir>` or `--config-root=<dir>` was given (Step 4½e-1,
+    /// plan D10): C++ `paths::Resolve`'s single-directory override (`filesystem.cpp:798-817`).
+    /// Accepted with any mode; only the shell path (the live default match) reads it.
+    pub config_root: Option<PathBuf>,
 }
 
 /// A syntactic error `parse_args` can detect on its own, with no external
@@ -197,6 +201,9 @@ pub enum ParseArgsError {
     /// `--replay` was the last token — no path token followed it (4b, T2),
     /// mirroring [`ParseArgsError::RecordMissingPath`].
     ReplayMissingPath,
+    /// `--config-root` with no directory (Step 4½e-1): the last token, or followed by another
+    /// flag (C++ `match_opt` refuses a value that starts with `-`, `filesystem.cpp:790-792`).
+    ConfigRootMissingPath,
 }
 
 /// Parse the native CLI args (post `argv[0]`): leading flags — `--live`
@@ -208,11 +215,30 @@ pub enum ParseArgsError {
 /// excludes `--live`/`--record`" combination rule needs no external state, but
 /// (like "record requires live") stays the caller's job (`main.rs::resolve_scenario`)
 /// for consistency — this parser only builds the flag shape.
+///
+/// Step 4½e-1: `--config-root <dir>` / `--config-root=<dir>` may appear anywhere, as in C++
+/// `paths::Resolve`; it is taken out first and does not count as a mode flag, so
+/// `--config-root <dir>` alone is still the bare default match.
 pub fn parse_args<I: IntoIterator<Item = String>>(
     args: I,
     default_name: &str,
 ) -> Result<ParsedArgs, ParseArgsError> {
-    let mut it = args.into_iter().peekable();
+    let mut rest = Vec::new();
+    let mut config_root: Option<PathBuf> = None;
+    let mut all = args.into_iter();
+    while let Some(arg) = all.next() {
+        if let Some(dir) = arg.strip_prefix("--config-root=") {
+            config_root = Some(PathBuf::from(dir));
+        } else if arg == "--config-root" {
+            match all.next() {
+                Some(dir) if !dir.starts_with('-') => config_root = Some(PathBuf::from(dir)),
+                _ => return Err(ParseArgsError::ConfigRootMissingPath),
+            }
+        } else {
+            rest.push(arg);
+        }
+    }
+    let mut it = rest.into_iter().peekable();
     let mut mode = Mode::Scripted;
     let mut record: Option<PathBuf> = None;
     let mut replay: Option<PathBuf> = None;
@@ -258,6 +284,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(
             name: DEFAULT_MATCH.to_string(),
             record: None,
             replay: None,
+            config_root,
         });
     }
     let name = positional.unwrap_or_else(|| default_name.to_string());
@@ -266,6 +293,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(
         name,
         record,
         replay,
+        config_root,
     })
 }
 
@@ -566,6 +594,20 @@ pub fn typed_of_keycode(k: KeyCode) -> TypedKey {
         _ => return TypedKey::Sym(0),
     };
     TypedKey::Sym(c as u32)
+}
+
+/// One keyboard event as the shell's input events (Step 4½e-1, plan D8): the key, then — on a
+/// key-down whose `text` has no control character (`< 0x20`, `0x7f`: Enter's `"\r"`,
+/// Backspace's `"\u{8}"`, Tab) — one [`InputEvent::Text`] per `char`, in order, right after it
+/// (SDL's order: `SDL_EVENT_KEY_DOWN`, then `SDL_EVENT_TEXT_INPUT`). SDL would send an IME
+/// multi-char commit as one string, which `Utf8ToDos` turns into `'?'` (plan fact 7); splitting
+/// it is a Rust-only live convenience, outside the gate. A key-up never types.
+pub fn keyboard_events(key: ui::shell::KeyEvent, text: Option<&str>) -> Vec<InputEvent> {
+    let mut out = vec![InputEvent::Key(key)];
+    if let Some(t) = text.filter(|t| key.down && !t.chars().any(|c| c < ' ' || c == '\u{7f}')) {
+        out.extend(t.chars().map(|c| InputEvent::Text(c.to_string())));
+    }
+    out
 }
 
 /// The keyboard events waiting for the next fixed tick (design §7.1). C++ polls every pending
@@ -1150,6 +1192,119 @@ input 5 64 96
             typed_of_keycode(KeyCode::ArrowUp),
             TypedKey::Sym(0),
             "not 32..=127: ignored"
+        );
+    }
+
+    #[test]
+    fn a_typed_key_is_its_key_then_one_text_event_per_char() {
+        // plan D8: key first, then the text, one event per char; control characters and key-ups
+        // type nothing.
+        use ui::shell::KeyEvent;
+        let key = |dos, down| KeyEvent {
+            dos,
+            down,
+            repeat: false,
+            typed: TypedKey::Sym(0),
+        };
+        let t = |s: &str| InputEvent::Text(s.into());
+        assert_eq!(
+            keyboard_events(key(2, true), Some("1")),
+            vec![InputEvent::Key(key(2, true)), t("1")]
+        );
+        assert_eq!(
+            keyboard_events(key(30, true), Some("åb")),
+            vec![InputEvent::Key(key(30, true)), t("å"), t("b")],
+            "a multi-char commit is split per char"
+        );
+        for control in ["\r", "\u{8}", "\t", "\u{1b}", "\u{7f}", "a\r"] {
+            assert_eq!(
+                keyboard_events(key(28, true), Some(control)),
+                vec![InputEvent::Key(key(28, true))],
+                "{control:?} is dropped"
+            );
+        }
+        assert_eq!(
+            keyboard_events(key(2, false), Some("1")),
+            vec![InputEvent::Key(key(2, false))],
+            "a key-up never types"
+        );
+        assert_eq!(
+            keyboard_events(key(160, true), None),
+            vec![InputEvent::Key(key(160, true))]
+        );
+        let repeat = KeyEvent {
+            repeat: true,
+            ..key(2, true)
+        };
+        assert_eq!(
+            keyboard_events(repeat, Some("1")),
+            vec![InputEvent::Key(repeat), t("1")],
+            "an OS repeat of a printing key types again, as SDL does"
+        );
+    }
+
+    #[test]
+    fn a_deferred_key_keeps_its_text_behind_it() {
+        // plan T10 step 4: the text of a key whose event is deferred waits with it — the queue
+        // never reorders text ahead of the key.
+        use ui::shell::KeyEvent;
+        let key = |dos, down| KeyEvent {
+            dos,
+            down,
+            repeat: false,
+            typed: TypedKey::Sym(0),
+        };
+        let mut q = KeyQueue::default();
+        for (k, text) in [
+            (key(2, true), Some("1")),
+            (key(2, false), None),
+            (key(2, true), Some("1")),
+            (key(3, true), Some("2")),
+        ] {
+            for ev in keyboard_events(k, text) {
+                q.push(ev);
+            }
+        }
+        let t = |s: &str| InputEvent::Text(s.into());
+        assert_eq!(q.take_tick(), vec![InputEvent::Key(key(2, true)), t("1")]);
+        assert_eq!(q.take_tick(), vec![InputEvent::Key(key(2, false))]);
+        assert_eq!(
+            q.take_tick(),
+            vec![
+                InputEvent::Key(key(2, true)),
+                t("1"),
+                InputEvent::Key(key(3, true)),
+                t("2")
+            ]
+        );
+    }
+
+    #[test]
+    fn config_root_parses_in_both_forms_anywhere() {
+        // plan D10: `--config-root <dir>` and `--config-root=<dir>`, with any mode, and alone it
+        // is still the bare default match.
+        let parse = |a: &[&str]| parse_args(a.iter().map(|s| s.to_string()), "blood");
+        let p = parse(&["--config-root", "/tmp/root"]).unwrap();
+        assert_eq!(p.config_root, Some(PathBuf::from("/tmp/root")));
+        assert_eq!((p.mode, p.name.as_str()), (Mode::Live, DEFAULT_MATCH));
+        let p = parse(&["--config-root=/tmp/eq"]).unwrap();
+        assert_eq!(p.config_root, Some(PathBuf::from("/tmp/eq")));
+        assert_eq!(p.name, DEFAULT_MATCH);
+        let p = parse(&["--live", "dart", "--config-root", "r"]).unwrap();
+        assert_eq!((p.mode, p.name.as_str()), (Mode::Live, "dart"));
+        assert_eq!(p.config_root, Some(PathBuf::from("r")));
+        let p = parse(&["--replay", "/tmp/x.txt", "--config-root=r"]).unwrap();
+        assert_eq!(p.replay, Some(PathBuf::from("/tmp/x.txt")));
+        assert_eq!(p.config_root, Some(PathBuf::from("r")));
+        assert_eq!(parse(&["--live"]).unwrap().config_root, None);
+        assert_eq!(
+            parse(&["--config-root"]).unwrap_err(),
+            ParseArgsError::ConfigRootMissingPath
+        );
+        assert_eq!(
+            parse(&["--config-root", "--live"]).unwrap_err(),
+            ParseArgsError::ConfigRootMissingPath,
+            "a flag is never taken as the directory (C++ match_opt)"
         );
     }
 

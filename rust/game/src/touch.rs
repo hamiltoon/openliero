@@ -16,8 +16,14 @@
 //! DOS keys ([`touch_key_events`]): to the menu, touch is exactly player 1's keyboard. The new
 //! MENU button (bit 8, [`TOUCH_MENU`]) is Esc; [`touch_state`] ignores it, so it never reaches
 //! the sim.
+//!
+//! Step 4½e-1 (design §7.4, plan D9 and T10 step 5): [`TouchKeys`] adds the menu auto-repeat of a
+//! held pad Up/Down and FIRE-as-Return while a text box is up, and [`page_text_events`] turns the
+//! phone text field's entries (`window.lieroText`) into input events.
 
 use sim::state::ControlState;
+use ui::keys::{DK_BACKSPACE, DK_RETURN, TypedKey};
+use ui::shell::{InputEvent, KeyEvent, Phase};
 
 /// The page's bit layout (`TOUCH` in `web/index.html` must match).
 pub const TOUCH_UP: u32 = 1 << 0;
@@ -75,6 +81,112 @@ pub fn touch_key_events(prev: u32, now: u32, controls_ex: &[u32; 8]) -> Vec<ui::
                     typed: ui::keys::TypedKey::Sym(0),
                 });
             }
+        }
+    }
+    out
+}
+
+/// Ticks a pad Up/Down is held on a menu before its first repeat, then the repeat period: the
+/// `LocalController` cadence (design §7.4).
+pub const MENU_REPEAT_DELAY: u32 = 12;
+pub const MENU_REPEAT_PERIOD: u32 = 3;
+
+/// The live touch → shell key events, one [`TouchKeys::tick`] per fixed tick (Step 4½e-1):
+/// [`touch_key_events`], plus two Rust-only, presentation-only additions (design §7.4):
+///
+/// - while the phase is `menu`, a held pad Up or Down repeats: `repeat` key-downs of
+///   `controls_ex[0]` / `[1]` on the 12th tick after the press, then every 3rd — the kind of
+///   event the OS keyboard repeat already sends;
+/// - while the phase is `text` (an `InputStringState` is on top), FIRE's press is Return (DOS 28)
+///   instead of `controls_ex[4]`, so FIRE confirms; MENU stays Esc, which cancels (Q5). A
+///   release sends the key its press sent, whatever the phase has become.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TouchKeys {
+    prev: u32,
+    fire_dos: Option<u32>,
+    /// Ticks since pad Up / Down was pressed (0 on the press tick).
+    held: [u32; 2],
+}
+
+impl TouchKeys {
+    /// This tick's key events for the mask `now`; `phase` is the screen that updates this tick.
+    pub fn tick(&mut self, now: u32, phase: Phase, controls_ex: &[u32; 8]) -> Vec<KeyEvent> {
+        let prev = self.prev;
+        self.prev = now;
+        let mut out = touch_key_events(prev & !TOUCH_FIRE, now & !TOUCH_FIRE, controls_ex);
+        let key = |dos, down, repeat| KeyEvent {
+            dos,
+            down,
+            repeat,
+            typed: TypedKey::Sym(0),
+        };
+        match (prev & TOUCH_FIRE != 0, now & TOUCH_FIRE != 0) {
+            (false, true) => {
+                let dos = if phase == Phase::Text {
+                    DK_RETURN
+                } else {
+                    controls_ex[4]
+                };
+                self.fire_dos = Some(dos);
+                out.push(key(dos, true, false));
+            }
+            (true, false) => {
+                let dos = self.fire_dos.take().unwrap_or(controls_ex[4]);
+                out.push(key(dos, false, false));
+            }
+            _ => {}
+        }
+        for (i, bit) in [TOUCH_UP, TOUCH_DOWN].into_iter().enumerate() {
+            if now & bit == 0 {
+                self.held[i] = 0;
+                continue;
+            }
+            self.held[i] = if prev & bit != 0 { self.held[i] + 1 } else { 0 };
+            let t = self.held[i];
+            if phase == Phase::Menu
+                && t >= MENU_REPEAT_DELAY
+                && (t - MENU_REPEAT_DELAY).is_multiple_of(MENU_REPEAT_PERIOD)
+            {
+                out.push(key(controls_ex[i], true, true));
+            }
+        }
+        out
+    }
+}
+
+/// One entry of the phone text field's queue (`window.lieroText`, plan D9): typed text, or a
+/// named key (`{k: "Backspace"}` / `{k: "Enter"}`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageEntry {
+    Text(String),
+    Key(String),
+}
+
+/// The input events of the text field's entries, in order: a text entry is one
+/// [`InputEvent::Text`] (the page sends one char per entry); Backspace and Enter are a key
+/// down/up pair of DOS 14 / 28; anything else is ignored.
+pub fn page_text_events(entries: &[PageEntry]) -> Vec<InputEvent> {
+    let key = |dos, down| {
+        InputEvent::Key(KeyEvent {
+            dos,
+            down,
+            repeat: false,
+            typed: TypedKey::Sym(0),
+        })
+    };
+    let mut out = Vec::new();
+    for e in entries {
+        match e {
+            PageEntry::Text(t) if !t.is_empty() => out.push(InputEvent::Text(t.clone())),
+            PageEntry::Key(k) => {
+                let dos = match k.as_str() {
+                    "Backspace" => DK_BACKSPACE,
+                    "Enter" => DK_RETURN,
+                    _ => continue,
+                };
+                out.extend([key(dos, true), key(dos, false)]);
+            }
+            PageEntry::Text(_) => {}
         }
     }
     out
@@ -166,6 +278,146 @@ mod tests {
             touch_state(TOUCH_MENU),
             ControlState::new(),
             "MENU never reaches the sim"
+        );
+    }
+
+    fn ex() -> [u32; 8] {
+        scenario::settings::Settings::default().worm_settings[0].controls_ex
+    }
+
+    /// The ticks (0 = the press) on which a pad button held from tick 0 emits a repeat.
+    fn repeat_ticks(bit: u32, phase: Phase, ticks: u32) -> Vec<u32> {
+        let mut t = TouchKeys::default();
+        (0..ticks)
+            .filter(|_| t.tick(bit, phase, &ex()).iter().any(|e| e.repeat))
+            .collect()
+    }
+
+    #[test]
+    fn a_held_pad_up_or_down_repeats_on_menus_at_12_then_every_3() {
+        for (bit, dos) in [(TOUCH_UP, ex()[0]), (TOUCH_DOWN, ex()[1])] {
+            assert_eq!(
+                repeat_ticks(bit, Phase::Menu, 22),
+                [12, 15, 18, 21],
+                "bit {bit}"
+            );
+            let mut t = TouchKeys::default();
+            let evs: Vec<Vec<KeyEvent>> =
+                (0..13).map(|_| t.tick(bit, Phase::Menu, &ex())).collect();
+            assert_eq!(
+                evs[0],
+                [KeyEvent {
+                    dos,
+                    down: true,
+                    repeat: false,
+                    typed: TypedKey::Sym(0)
+                }]
+            );
+            assert!(evs[1..12].iter().all(Vec::is_empty));
+            assert_eq!(
+                evs[12],
+                [KeyEvent {
+                    dos,
+                    down: true,
+                    repeat: true,
+                    typed: TypedKey::Sym(0)
+                }]
+            );
+        }
+        // A release restarts the count.
+        let mut t = TouchKeys::default();
+        for _ in 0..14 {
+            t.tick(TOUCH_DOWN, Phase::Menu, &ex());
+        }
+        t.tick(0, Phase::Menu, &ex());
+        let again: Vec<bool> = (0..13)
+            .map(|_| {
+                t.tick(TOUCH_DOWN, Phase::Menu, &ex())
+                    .iter()
+                    .any(|e| e.repeat)
+            })
+            .collect();
+        assert_eq!(again.iter().position(|&r| r), Some(12));
+    }
+
+    #[test]
+    fn no_repeat_outside_menus_nor_for_other_buttons() {
+        for phase in [Phase::Text, Phase::Weapsel, Phase::Game, Phase::Quit] {
+            assert!(repeat_ticks(TOUCH_UP, phase, 40).is_empty(), "{phase:?}");
+        }
+        for bit in [TOUCH_LEFT, TOUCH_RIGHT, TOUCH_FIRE, TOUCH_JUMP, TOUCH_MENU] {
+            assert!(repeat_ticks(bit, Phase::Menu, 40).is_empty(), "bit {bit}");
+        }
+    }
+
+    #[test]
+    fn fire_is_return_only_while_a_text_box_is_up() {
+        use ui::keys::DK_ESCAPE;
+        let down_up = |phase_down: Phase, phase_up: Phase| {
+            let mut t = TouchKeys::default();
+            let d = t.tick(TOUCH_FIRE, phase_down, &ex());
+            let u = t.tick(0, phase_up, &ex());
+            [d, u].map(|evs| evs.iter().map(|e| (e.dos, e.down)).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            down_up(Phase::Text, Phase::Text),
+            [vec![(DK_RETURN, true)], vec![(DK_RETURN, false)]]
+        );
+        for phase in [Phase::Menu, Phase::Weapsel, Phase::Game] {
+            assert_eq!(
+                down_up(phase, phase),
+                [vec![(ex()[4], true)], vec![(ex()[4], false)]],
+                "{phase:?}"
+            );
+        }
+        assert_eq!(
+            down_up(Phase::Text, Phase::Menu),
+            [vec![(DK_RETURN, true)], vec![(DK_RETURN, false)]],
+            "the release is the press's key"
+        );
+        assert_eq!(
+            down_up(Phase::Menu, Phase::Text),
+            [vec![(ex()[4], true)], vec![(ex()[4], false)]]
+        );
+        let mut t = TouchKeys::default();
+        assert_eq!(
+            t.tick(TOUCH_MENU, Phase::Text, &ex())
+                .iter()
+                .map(|e| (e.dos, e.down))
+                .collect::<Vec<_>>(),
+            [(DK_ESCAPE, true)],
+            "MENU stays Esc"
+        );
+    }
+
+    #[test]
+    fn the_text_field_entries_are_text_and_key_pairs() {
+        let key = |dos, down| {
+            InputEvent::Key(KeyEvent {
+                dos,
+                down,
+                repeat: false,
+                typed: TypedKey::Sym(0),
+            })
+        };
+        let entries = [
+            PageEntry::Text("1".into()),
+            PageEntry::Key("Backspace".into()),
+            PageEntry::Text(String::new()),
+            PageEntry::Key("Tab".into()),
+            PageEntry::Text("7".into()),
+            PageEntry::Key("Enter".into()),
+        ];
+        assert_eq!(
+            page_text_events(&entries),
+            [
+                InputEvent::Text("1".into()),
+                key(DK_BACKSPACE, true),
+                key(DK_BACKSPACE, false),
+                InputEvent::Text("7".into()),
+                key(DK_RETURN, true),
+                key(DK_RETURN, false),
+            ]
         );
     }
 }

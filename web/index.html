@@ -20,7 +20,10 @@
       @supports (height: 100dvh) {
         canvas { width: min(100vw, 960px, 160dvh) !important; }
       }
-      #help { order: 2; margin-top: 12px; max-width: 960px; padding: 0 16px; text-align: center; }
+      /* The game keeps its size; on a short window the help scrolls in the space left below it. */
+      canvas { flex-shrink: 0; }
+      #help { order: 2; margin-top: 12px; max-width: 960px; padding: 0 16px; text-align: center;
+        min-height: 0; overflow-y: auto; }
       #help kbd { color: #fff; }
       #help .dim { color: #707080; }
       #status { order: 1; margin-bottom: 8px; color: #707080; }
@@ -80,6 +83,22 @@
         #touch-hint span { display: block; }
         #touch-hint span + span::before { content: none; }
       }
+      /* Step 4½e-1 (Q5): a number box on a phone takes the device keyboard through this field.
+         It stays in the layout (a hidden element cannot take focus), invisible; 16px keeps iOS
+         from zooming in on focus. */
+      #text-form { position: fixed; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden;
+        opacity: 0; margin: 0; }
+      #text-entry { font-size: 16px; width: 100px; }
+      /* iOS raises its keyboard only from a real tap, so the box also offers a button: below the
+         game in portrait, in the left gutter under the hint in landscape. */
+      #tap-type { pointer-events: auto; left: 50%; transform: translateX(-50%);
+        top: calc(62px + min(100vw, 960px) * 0.625); width: 150px; height: 40px; border-radius: 20px;
+        font-size: 12px; }
+      #tap-type[hidden] { display: none; }
+      @media (orientation: landscape) {
+        #tap-type { left: max(8px, env(safe-area-inset-left)); transform: none; top: 130px;
+          width: 96px; height: 48px; }
+      }
     </style>
   </head>
   <body>
@@ -134,6 +153,7 @@
     <div id="quit" hidden>Quit — tap or press a key to play again</div>
     <div id="touch" aria-hidden="true">
       <div id="touch-hint"></div>
+      <div id="tap-type" class="ctl" hidden>TAP TO TYPE</div>
       <div id="b-menu" class="ctl" data-bit="menu">MENU</div>
       <div id="pad" class="ctl"><div id="knob"></div></div>
       <div id="btns">
@@ -143,6 +163,10 @@
         <div id="b-dig" class="ctl" data-bit="dig">DIG</div>
       </div>
     </div>
+    <form id="text-form" autocomplete="off" aria-hidden="true">
+      <input id="text-entry" type="text" inputmode="numeric" autocomplete="off" autocorrect="off"
+        autocapitalize="off" spellcheck="false" enterkeyhint="done" tabindex="-1" />
+    </form>
     <div id="help">
       Click the game to give it the keyboard.
       <br />
@@ -150,11 +174,19 @@
       <kbd>Esc</kbd> (or jump) goes to QUIT TO OS · NEW GAME starts weapon selection; <kbd>Esc</kbd> in a
       match pauses to the menu (RESUME GAME)
       <br />
+      <b>Match setup</b>: <kbd>F7</kbd> (or <kbd>Enter</kbd> on MATCH SETUP) moves the cursor into
+      the settings · <kbd>←</kbd>/<kbd>→</kbd> change a value · <kbd>Enter</kbd> on a number types a
+      new one (digits, then <kbd>Enter</kbd>; <kbd>Esc</kbd> cancels) · WEAPON OPTIONS:
+      <kbd>←</kbd>/<kbd>→</kbd> makes a weapon Menu / Bonus / Banned, <kbd>Esc</kbd> closes ·
+      <kbd>Esc</kbd> back to the main menu · edits reach a paused match at RESUME GAME
+      <br />
       <b>Player 1</b>: <kbd>R</kbd>/<kbd>F</kbd> aim · <kbd>D</kbd>/<kbd>G</kbd> move ·
-      <kbd>Left Ctrl</kbd> fire · <kbd>Left Shift</kbd> change weapon · <kbd>Left Alt</kbd> jump
+      <kbd>Left Ctrl</kbd> fire · hold <kbd>Left Shift</kbd> and tap <kbd>D</kbd>/<kbd>G</kbd> to
+      change weapon · <kbd>Left Alt</kbd> jump
       <br />
       <b>Player 2</b>: <kbd>↑</kbd>/<kbd>↓</kbd> aim · <kbd>←</kbd>/<kbd>→</kbd> move ·
-      <kbd>Right Ctrl</kbd> fire · <kbd>Right Alt</kbd> change weapon · <kbd>Right Shift</kbd> jump
+      <kbd>Right Ctrl</kbd> fire · hold <kbd>Right Alt</kbd> and tap <kbd>←</kbd>/<kbd>→</kbd> to
+      change weapon · <kbd>Right Shift</kbd> jump
       <br />
       <b>Weapon selection</b> first, both players: aim up/down picks a line · move left/right
       changes the weapon · fire on <i>Randomize</i> re-rolls all five · fire on <i>DONE!</i>
@@ -171,6 +203,8 @@
         weapons/level/seed · <code>?demo</code> for the scripted demo ·
         <code>?touch=1</code> for on-screen controls
       </span>
+      <br />
+      <span class="dim">Settings are kept until you reload the page.</span>
     </div>
     <script type="module">
       import init from './game.js';
@@ -291,21 +325,67 @@
           update();
         });
       }
-      // --- Step 4½d: the page follows the game's phase (window.lieroPhase: menu | weapsel |
-      // game | quit). The touch hint changes with it, and QUIT (the game stops on its black
+      // --- Step 4½d: the page follows the game's phase (window.lieroPhase: menu | text (4½e-1) |
+      // weapsel | game | quit). The touch hint changes with it, and QUIT (the game stops on its black
       // frame, like the C++ web build) shows an overlay that reloads the page.
       const HINTS = {
-        menu: ['↑↓ pick', 'FIRE selects', 'JUMP: to QUIT'],
+        menu: ['↑↓ pick', '←→ change', 'FIRE selects', 'MATCH SETUP: rules', 'JUMP: back'],
+        text: ['Type, FIRE = OK', 'MENU = cancel'],
         weapsel: ['Pick ↑↓ ←→', 'FIRE on DONE!', 'You: blue worm', 'P2: a bot'],
-        game: ['MENU pauses', 'You: blue worm'],
+        game: ['MENU pauses', 'Hold WEAPON + ←→', 'You: blue worm'],
       };
       const hint = document.getElementById('touch-hint');
       const quit = document.getElementById('quit');
+
+      // --- Step 4½e-1 (Q5, plan D9): while a number box is up (phase "text") on a touch page,
+      // the hidden field takes the device keyboard. It holds a two-space sentinel: what is typed
+      // after it goes to the game as text, a deletion into it as Backspace, and the keyboard's
+      // Enter/Done as Return; then the sentinel is restored. The game drains window.lieroText
+      // once per tick (rust/game/src/touch.rs page_text_events). FIRE confirms and MENU cancels
+      // in the game itself. Android raises the keyboard on focus(); iOS only from a real tap,
+      // hence TAP TO TYPE.
+      window.lieroText = [];
+      const SENTINEL = '  ';
+      const entry = document.getElementById('text-entry');
+      const tapType = document.getElementById('tap-type');
+      const resetEntry = () => {
+        entry.value = SENTINEL;
+        try { entry.setSelectionRange(SENTINEL.length, SENTINEL.length); } catch (_) {}
+      };
+      const focusEntry = () => {
+        resetEntry();
+        entry.focus({ preventScroll: true });
+      };
+      entry.addEventListener('input', () => {
+        const v = entry.value;
+        let keep = 0;
+        while (keep < SENTINEL.length && keep < v.length && v[keep] === SENTINEL[keep]) keep++;
+        for (let i = keep; i < SENTINEL.length; i++) window.lieroText.push({ k: 'Backspace' });
+        for (const ch of v.slice(keep)) window.lieroText.push(ch);
+        resetEntry();
+      });
+      document.getElementById('text-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        window.lieroText.push({ k: 'Enter' });
+      });
+      for (const ev of ['pointerup', 'touchend', 'click']) {
+        tapType.addEventListener(ev, (e) => {
+          e.preventDefault();
+          focusEntry();
+        });
+      }
+
       let shownPhase = null;
       setInterval(() => {
         const phase = window.lieroPhase;
         if (phase === shownPhase) return;
         shownPhase = phase;
+        if (wantTouch) {
+          const typing = phase === 'text';
+          tapType.hidden = !typing;
+          if (typing) focusEntry();
+          else if (document.activeElement === entry) entry.blur();
+        }
         hint.replaceChildren(...(HINTS[phase] || []).map((t) => {
           const span = document.createElement('span');
           span.textContent = t;

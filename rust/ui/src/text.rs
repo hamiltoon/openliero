@@ -1,6 +1,12 @@
 //! Texts the C++ hardcodes in `Texts::Texts()` (`common.cpp:205-225`, design finding 3 — not
 //! read from `tc.cfg`), the `text.cpp` time formatters, and `GetBasename(GetLeaf(..))`.
 
+use std::path::Path;
+
+use assets::tc::TcConfig;
+
+use crate::menu::MenuHooks;
+
 /// `Texts::game_modes` (`common.cpp:206-209`), indexed by `Settings::game_mode`.
 pub const GAME_MODES: [&str; 4] = [
     "Kill'em All",
@@ -67,6 +73,45 @@ pub fn leaf_basename(path: &str) -> &str {
     leaf.rsplit_once('.').map_or(leaf, |(b, _)| b)
 }
 
+/// What the menus read from the TC: `common.s[..]` strings (`tc.cfg [texts]`), `common.c[..]`
+/// constants, and `common.sound_hook[..]` as sample ids (`tc.cfg [sounds]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiTc {
+    pub copyright2: String,
+    pub random2: String,
+    pub regen_level: String,
+    pub reload_level: String,
+    pub blood_limit: i32,
+    pub blood_step_up: i32,
+    pub hooks: MenuHooks,
+    /// `SoundBegin` (`game.cpp:500-503`, played by `StartGame`).
+    pub begin: i32,
+}
+
+impl UiTc {
+    pub fn from_tc(tc: &TcConfig) -> UiTc {
+        UiTc {
+            copyright2: tc.texts.Copyright2.clone(),
+            random2: tc.texts.Random2.clone(),
+            regen_level: tc.texts.RegenLevel.clone(),
+            reload_level: tc.texts.ReloadLevel.clone(),
+            blood_limit: tc.constants.BloodLimit,
+            blood_step_up: tc.constants.BloodStepUp,
+            hooks: MenuHooks {
+                move_up: tc.sound_hooks.MenuMoveUp,
+                move_down: tc.sound_hooks.MenuMoveDown,
+                select: tc.sound_hooks.MenuSelect,
+            },
+            begin: tc.sound_hooks.Begin,
+        }
+    }
+
+    pub fn load(tc_root: &Path) -> UiTc {
+        let bytes = scenario::assets::read_asset(tc_root, "tc.cfg");
+        UiTc::from_tc(&TcConfig::load(&bytes).expect("tc.cfg parses"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +148,33 @@ mod tests {
         assert_eq!(leaf_basename("noext"), "noext");
         assert_eq!(leaf_basename(""), "");
         assert_eq!(leaf_basename("data/Setups/liero.cfg"), "liero");
+    }
+
+    #[test]
+    fn ui_tc_is_read_from_the_tc() {
+        let tc = UiTc::load(std::path::Path::new(scenario::paths::TC_ROOT));
+        assert_eq!(
+            tc.copyright2, "Liero v1.33 (c) Mets\u{e4}nEl\u{e4}met 1998,1999",
+            "tc.cfg:244"
+        );
+        assert_eq!(
+            (
+                tc.random2.as_str(),
+                tc.regen_level.as_str(),
+                tc.reload_level.as_str()
+            ),
+            ("Random", "REGENERATE LEVEL", "RELOAD LEVEL")
+        );
+        assert_eq!((tc.blood_limit, tc.blood_step_up), (500, 25));
+        assert_eq!(
+            (
+                tc.hooks.move_up,
+                tc.hooks.move_down,
+                tc.hooks.select,
+                tc.begin
+            ),
+            (25, 26, 27, 22),
+            "tc.cfg [sounds]"
+        );
     }
 }

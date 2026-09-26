@@ -7,4 +7,5 @@
 //! gates) and `shot` drive the whole shell headlessly (design §2, amended LD 2).
 pub mod keys;
 pub mod menu;
+pub mod shell;
 pub mod text;

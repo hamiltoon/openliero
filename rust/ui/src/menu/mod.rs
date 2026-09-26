@@ -828,4 +828,378 @@ mod tests {
         );
         assert!(sounds.is_empty());
     }
+
+    use crate::keys::TypedKey;
+
+    const HOOKS: MenuHooks = MenuHooks {
+        move_up: 25,
+        move_down: 26,
+        select: 27,
+    };
+
+    /// A model over local variables, one per item id.
+    struct Vars {
+        int: i32,
+        time: i32,
+        flag: bool,
+        en: u32,
+        broken: u32,
+        mode: u32,
+        entry: bool,
+        div: i32,
+    }
+
+    impl MenuModel for Vars {
+        fn behavior(&mut self, id: i32) -> Behavior<'_> {
+            match id {
+                1 => {
+                    let mut b = behavior::Integer::new(&mut self.int, 0, 10, 3, false);
+                    b.allow_entry = self.entry;
+                    b.display_div = self.div;
+                    Behavior::Integer(b)
+                }
+                2 => Behavior::time(&mut self.time, 60, 3600, 10, false),
+                3 => Behavior::Bool(&mut self.flag),
+                4 => Behavior::Enum {
+                    v: &mut self.en,
+                    min: 0,
+                    max: 3,
+                    broken: false,
+                },
+                5 => Behavior::Enum {
+                    v: &mut self.broken,
+                    min: 1,
+                    max: 3,
+                    broken: true,
+                },
+                6 => Behavior::ArrayEnum {
+                    v: &mut self.mode,
+                    arr: &crate::text::GAME_MODES,
+                    broken: false,
+                },
+                _ => Behavior::Plain,
+            }
+        }
+    }
+
+    fn vars() -> Vars {
+        Vars {
+            int: 5,
+            time: 600,
+            flag: false,
+            en: 0,
+            broken: 2,
+            mode: 3,
+            entry: true,
+            div: 1,
+        }
+    }
+
+    fn vars_menu() -> Menu {
+        let mut m = Menu::new(30, 20, false);
+        m.value_offset_x = 60;
+        for id in 1..=6 {
+            m.add_item(MenuItem::new(48, 7, &format!("V{id}"), id));
+        }
+        m
+    }
+
+    fn values(m: &Menu) -> Vec<String> {
+        m.items
+            .iter()
+            .map(|i| {
+                if i.has_value {
+                    i.value.clone()
+                } else {
+                    ".".into()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn on_update_fills_every_value() {
+        let (mut m, mut v) = (vars_menu(), vars());
+        m.update_items(&mut v);
+        assert_eq!(
+            values(&m),
+            ["5", "10:00", "OFF", "0", "2", "Scales of Justice"]
+        );
+    }
+
+    #[test]
+    fn integer_left_right_obeys_the_scroll_interval_and_clamps() {
+        // integerBehavior.cpp:14-33: act only when menu_cycles % 5 == 0; clamp(v + dir*step).
+        let (mut m, mut v) = (vars_menu(), vars());
+        m.move_to_first_visible();
+        let mut sounds = Vec::new();
+        for (cycles, dir, want) in [
+            (1, 1, 5),
+            (0, 1, 8),
+            (5, 1, 10),
+            (10, 1, 10),
+            (0, -1, 7),
+            (0, -1, 4),
+            (0, -1, 1),
+            (0, -1, 0),
+            (0, -1, 0),
+        ] {
+            let mut cx = MenuCx {
+                menu_cycles: cycles,
+                hooks: HOOKS,
+                sounds: &mut sounds,
+            };
+            assert!(
+                m.on_left_right(&mut v, dir, &mut cx),
+                "Integer returns true: the key stays held"
+            );
+            assert_eq!(v.int, want, "cycles {cycles} dir {dir}");
+        }
+        assert!(sounds.is_empty(), "Integer left/right plays nothing");
+        assert_eq!(m.items[0].value, "0", "OnUpdate ran on change");
+    }
+
+    #[test]
+    fn integer_enter_requests_an_edit_only_when_allowed_and_in_view() {
+        let (mut m, mut v) = (vars_menu(), vars());
+        m.move_to_first_visible();
+        let mut sounds = Vec::new();
+        let mut cx = MenuCx {
+            menu_cycles: 0,
+            hooks: HOOKS,
+            sounds: &mut sounds,
+        };
+        let e = m.on_enter(&mut v, &mut cx);
+        assert_eq!(
+            e,
+            Enter::EditValue(ValueEntry {
+                item_id: 1,
+                initial: "5".into(),
+                digits: 2,
+                x: 30 + 60 + 2,
+                y: 20,
+                min: 0,
+                max: 10,
+                div: 1,
+                percentage: false
+            }),
+            "integerBehavior.cpp:41-78: x = item x + voff + 2, digits = 1 + floor(log10(10))"
+        );
+        v.entry = false;
+        assert_eq!(m.on_enter(&mut v, &mut cx), Enter::Result(-1));
+        v.entry = true;
+        m.scroll(1);
+        m.set_height(1);
+        m.scroll(1);
+        assert_eq!(
+            m.on_enter(&mut v, &mut cx),
+            Enter::Result(-1),
+            "ItemPosition false: no entry"
+        );
+        assert_eq!(
+            sounds,
+            [27, 27, 27],
+            "MenuSelect every time (integerBehavior.cpp:37)"
+        );
+    }
+
+    #[test]
+    fn digits_is_one_plus_floor_log10_for_every_power_of_ten() {
+        let mut n = 1i64;
+        let mut d = 1;
+        while n <= i32::MAX as i64 {
+            for k in [n, n + 1, 2 * n - 1] {
+                if k <= i32::MAX as i64 {
+                    assert_eq!(behavior::decimal_digits(k as i32), d, "{k}");
+                }
+            }
+            if n > 1 {
+                assert_eq!(behavior::decimal_digits((n - 1) as i32), d - 1, "{}", n - 1);
+            }
+            n *= 10;
+            d += 1;
+        }
+        assert_eq!(behavior::decimal_digits(i32::MAX), 10);
+    }
+
+    #[test]
+    fn time_uses_the_integer_step_but_never_allows_entry() {
+        let (mut m, mut v) = (vars_menu(), vars());
+        m.update_items(&mut v);
+        m.move_to_id(2);
+        let mut sounds = Vec::new();
+        let mut cx = MenuCx {
+            menu_cycles: 0,
+            hooks: HOOKS,
+            sounds: &mut sounds,
+        };
+        assert!(m.on_left_right(&mut v, -1, &mut cx));
+        assert_eq!((v.time, m.items[1].value.as_str()), (590, "09:50"));
+        assert_eq!(
+            m.on_enter(&mut v, &mut cx),
+            Enter::Result(-1),
+            "timeBehavior.hpp:11: allow_entry = false"
+        );
+        assert_eq!(sounds, [27]);
+    }
+
+    #[test]
+    fn a_boolean_switch_toggles_with_crossed_sounds_and_releases_left_right() {
+        let (mut m, mut v) = (vars_menu(), vars());
+        m.move_to_id(3);
+        let mut sounds = Vec::new();
+        let mut cx = MenuCx {
+            menu_cycles: 1,
+            hooks: HOOKS,
+            sounds: &mut sounds,
+        };
+        assert!(
+            !m.on_left_right(&mut v, 1, &mut cx),
+            "booleanSwitchBehavior.cpp:17: false"
+        );
+        assert!(v.flag && m.items[2].value == "ON");
+        assert!(!m.on_left_right(&mut v, -1, &mut cx));
+        assert_eq!(m.on_enter(&mut v, &mut cx), Enter::Result(-1));
+        assert!(v.flag);
+        assert_eq!(
+            sounds,
+            [25, 26, 27],
+            "dir > 0: MoveUp, else MoveDown; Enter: Select"
+        );
+    }
+
+    #[test]
+    fn an_enum_wraps_in_u32_and_updates_every_item() {
+        let (mut m, mut v) = (vars_menu(), vars());
+        m.move_to_id(4);
+        let mut sounds = Vec::new();
+        let mut cx = MenuCx {
+            menu_cycles: 3,
+            hooks: HOOKS,
+            sounds: &mut sounds,
+        };
+        let mut seen = Vec::new();
+        for dir in [-1, -1, 1, 1, 1] {
+            assert!(!m.on_left_right(&mut v, dir, &mut cx));
+            seen.push(v.en);
+        }
+        assert_eq!(seen, [3, 2, 3, 0, 1], "enumBehavior.cpp:31-39");
+        assert_eq!(
+            m.items[5].value, "Scales of Justice",
+            "Change -> UpdateItems ran every OnUpdate"
+        );
+        assert_eq!(m.on_enter(&mut v, &mut cx), Enter::Result(-1));
+        assert_eq!(v.en, 2);
+        m.move_to_id(5);
+        assert!(
+            !m.on_left_right(&mut v, 1, &mut cx),
+            "broken: false, no change, no sound"
+        );
+        assert_eq!(v.broken, 2);
+        m.on_enter(&mut v, &mut cx);
+        assert_eq!(v.broken, 3, "broken only affects left/right");
+        m.move_to_id(6);
+        m.on_left_right(&mut v, 1, &mut cx);
+        assert_eq!(
+            (v.mode, m.items[5].value.as_str()),
+            (0, "Kill'em All"),
+            "ArrayEnum: [0, N-1] wraps"
+        );
+        assert_eq!(
+            sounds.len(),
+            5 + 1 + 1 + 1,
+            "5 left/right + Enter + broken Enter + array right"
+        );
+    }
+
+    fn search_menu() -> Menu {
+        let mut m = Menu::new(40, 20, false);
+        for (id, s) in [
+            "APPLE",
+            "APRICOT",
+            "BANANA",
+            "BLUEBERRY",
+            "CHERRY GREY",
+            "COCONUT",
+            "DATE",
+            "",
+            "apricot jam",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut it = MenuItem::new(48, 7, s, id as i32);
+            it.visible = id != 3;
+            it.selectable = id != 4;
+            m.add_item(it);
+        }
+        m.move_to_first_visible();
+        m
+    }
+
+    #[test]
+    fn type_to_search_prefix_timeout_retry_and_skips() {
+        // menu.cpp:14-79; ms from the caller's clock (design §4.5).
+        let sym = |c: char| TypedKey::Sym(c as u32);
+        let mut m = search_menu();
+        let at = |m: &mut Menu, keys: &[TypedKey], t: u64, contains: bool| {
+            m.on_keys(keys, t, contains);
+            (m.selection(), m.search.prefix.clone())
+        };
+        assert_eq!(
+            at(&mut m, &[sym('a'), sym('p')], 0, false),
+            (0, "ap".into()),
+            "APPLE stays (offs 0)"
+        );
+        assert_eq!(at(&mut m, &[sym('r')], 200, false), (1, "apr".into()));
+        assert_eq!(
+            at(&mut m, &[sym('b')], 2000, false),
+            (2, "b".into()),
+            "> 1500 ms: a new prefix"
+        );
+        assert_eq!(
+            at(&mut m, &[sym('l')], 2100, false),
+            (2, "".into()),
+            "BLUEBERRY is invisible; retry 'l' fails"
+        );
+        assert_eq!(
+            at(&mut m, &[sym('c')], 2200, false),
+            (5, "c".into()),
+            "CHERRY (unselectable) -> MoveTo skips to COCONUT"
+        );
+        assert_eq!(
+            at(&mut m, &[TypedKey::Tab], 9000, false),
+            (5, "c".into()),
+            "Tab: no timeout, skip 1, CHERRY again"
+        );
+        assert_eq!(
+            at(&mut m, &[sym('j')], 9100, true),
+            (8, "j".into()),
+            "'cj' fails; retry 'j' contains"
+        );
+        assert_eq!(
+            at(&mut m, &[TypedKey::Tab], 9200, true),
+            (0, "".into()),
+            "no other 'j'; retry with '' matches APPLE"
+        );
+        m.move_to(6);
+        assert_eq!(
+            at(&mut m, &[TypedKey::Tab], 9300, true),
+            (8, "".into()),
+            "contains '' never matches an empty string"
+        );
+        m.move_to(6);
+        assert_eq!(
+            at(&mut m, &[TypedKey::Tab], 9400, false),
+            (7, "".into()),
+            "a prefix '' does"
+        );
+        let before = (m.selection(), m.search.clone());
+        m.on_keys(&[TypedKey::Sym(0x4000_0052)], 99_999, false);
+        assert_eq!(
+            (m.selection(), m.search.clone()),
+            before,
+            "a non-ASCII symbol is ignored entirely"
+        );
+    }
 }

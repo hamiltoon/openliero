@@ -9,6 +9,8 @@
 //! sprites, HUD, minimap arrive in 3b/3e. Step 4½c adds the menu-item recipe
 //! (menu) and the weapon-selection screen (weapsel), pulled forward from 4½d.
 //! Step 4½d adds the value arm and the scrollbar (menu) and the composition fade (present).
+//! Step 4½e-1 adds the text helpers (`get_dims_h`, `draw_framed_text`, `blit_bitmap`) and the
+//! three `DrawTextSmall` labels (small_text), behind `Scene::small_labels`.
 pub mod bitmap;
 pub mod blit;
 pub mod fire_cone;
@@ -22,5 +24,6 @@ pub mod object_draw;
 pub mod palette;
 pub mod present;
 pub mod shadow_query;
+pub mod small_text;
 pub mod viewport;
 pub mod weapsel;

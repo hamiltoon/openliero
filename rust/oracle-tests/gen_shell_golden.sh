@@ -11,8 +11,11 @@
 # after every f line, a script with `fs` ends with `file` lines after the end line (formats:
 # docs/superpowers/plans/2026-09-26-liero-rs-step4.5-slice4.5e1-plan.md, §Formats pinned). The
 # e-1 scripts come from `--example gen_slice4_5e1_shell -- write <golden dir>`.
-# EXPECTED_SHELL_CASES (default 22: the 4½d 11 + the e-1 11, i.e. the plan's 10 and Batch 5's
-# key_edges) overrides the expected script count.
+# Slice 4½e-2 adds the tops L (the level selector) and P (the LOAD SETUP options selector), and no
+# line kind (formats: docs/superpowers/plans/2026-09-26-liero-rs-step4.5-slice4.5e2-plan.md,
+# §Formats pinned); its scripts come from `--example gen_slice4_5e2_shell -- write <golden dir>`.
+# EXPECTED_SHELL_CASES (default 28: the 4½d 11 + the e-1 11, i.e. the plan's 10 and Batch 5's
+# key_edges, + the e-2 6) overrides the expected script count.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PRESET="${PRESET:-macos-arm64}"
@@ -33,9 +36,10 @@ for scn in rust/oracle-tests/golden/shell_*_script.txt; do
   detail=$(awk '$1 == "detail" { d = 1 } END { print d + 0 }' "$scn")
   fs=$(awk '$1 == "fs" { f = 1 } END { print f + 0 }' "$scn")
   # C++-SIDE GATE (design §6.4): one 8-field boot line presenting once; 11-field f lines in frame
-  # order with presents in {0,1}, '-' exactly when nothing was presented, upd in {M,W,G,O,I,B},
-  # top in {M,G,O,I,B,-}; one end line agreeing with `expect`. With `detail`: exactly one 6-field
-  # d line right after each f line, same frame, cur in {M,S}, cfg16 16 hex, state8 8 hex or '-'.
+  # order with presents in {0,1}, '-' exactly when nothing was presented, upd in
+  # {M,W,G,O,I,B,L,P}, top in {M,G,O,I,B,L,P,-}; one end line agreeing with `expect`. With
+  # `detail`: exactly one 6-field d line right after each f line, same frame, cur in {M,S}, cfg16
+  # 16 hex, state8 8 hex or '-'.
   # With `fs`: at least one 3-field file line after the end line, rel strictly sorted bytewise,
   # fnv16 16 hex. With neither, the 4½d rules unchanged (no d or file line at all).
   LC_ALL=C awk -v c="$c" -v expect="$expect" -v detail="$detail" -v fs="$fs" '
@@ -51,7 +55,7 @@ for scn in rust/oracle-tests/golden/shell_*_script.txt; do
       if (ends) { printf "FAIL %s: f line after end\n", c; exit 1 }
       if (NF != 11) { printf "FAIL %s: f line with %d fields\n", c, NF; exit 1 }
       if ($2 != k) { printf "FAIL %s: frame %s out of order (want %d)\n", c, $2, k; exit 1 }
-      if ($3 !~ /^[MWGOIB]$/ || $9 !~ /^[MGOIB-]$/) { printf "FAIL %s: bad upd/top on frame %s\n", c, $2; exit 1 }
+      if ($3 !~ /^[MWGOIBLP]$/ || $9 !~ /^[MGOIBLP-]$/) { printf "FAIL %s: bad upd/top on frame %s\n", c, $2; exit 1 }
       if ($4 != "0" && $4 != "1") { printf "FAIL %s: presents %s\n", c, $4; exit 1 }
       if (($4 == "0") != ($5 == "-")) { printf "FAIL %s: presented vs presents on frame %s\n", c, $2; exit 1 }
       need_d = detail; k++; next
@@ -86,5 +90,5 @@ for scn in rust/oracle-tests/golden/shell_*_script.txt; do
   echo "wrote $out"
   n=$((n + 1))
 done
-want="${EXPECTED_SHELL_CASES:-22}"
+want="${EXPECTED_SHELL_CASES:-28}"
 test "$n" -eq "$want" || { echo "FAIL: $n shell scripts (want $want)"; exit 1; }

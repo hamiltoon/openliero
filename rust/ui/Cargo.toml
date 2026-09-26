@@ -1,0 +1,13 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2024"
+
+# Step 4½d: the Bevy-free menu framework and the C++ Gfx/StateStack shell (design §4.1, Q1).
+# Bevy stays in `game`; `oracle-tests` and `shot` drive this crate headlessly.
+[dependencies]
+sim-core = { path = "../sim-core" }
+assets = { path = "../assets" }
+sim = { path = "../sim" }
+render = { path = "../render" }
+scenario = { path = "../scenario" }

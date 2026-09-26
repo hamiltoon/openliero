@@ -16,11 +16,22 @@
 //! `?demo`) starts like C++ NEW GAME (`game::new_game`: default settings, a generated
 //! level, a fresh seed) and opens on weapon selection (`game::selection`, drawn by
 //! `render::weapsel`); `--record` and the preview's `?weapons=` skip selection.
+//!
+//! Step 4½d: a bare run and the bare preview boot the C++ main menu through the Bevy-free
+//! `ui::shell::Shell` — one `Shell::frame` per C++ `Gfx::RunOneFrame`, fed this tick's key events
+//! (`KeyCode` → DOS, plus the touch edges) and uploaded at the play renderer's fade. NEW GAME
+//! starts weapon selection and play; Esc (MENU on touch) pauses to the menu (RESUME GAME / NEW
+//! GAME); QUIT TO OS exits natively and stops on the black frame in the browser (the page then
+//! offers "Play again"); F5 is the Rust-only restart during play and selection. The preview's
+//! `?weapons=` / `?level=` / `?seed=` skip the menu unless `?menu=1`. The Scripted, `--replay`,
+//! `--live [<scenario>]` and `--live --record` paths are unchanged (no shell; Esc quits).
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
+use bevy::input::ButtonState;
+use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::WindowResolution;
@@ -39,9 +50,11 @@ use game::audio::{AudioSink, Drainer, NullSink, RodioSink};
 use game::hud_mode::{HudFlags, hud_flags};
 use game::input::{InputSource, Mode, ParsedArgs, Recorder, ReleaseLatch};
 use game::match_flow::{FlowStep, MatchFlow};
-use game::new_game::NewGame;
 use game::selection::Selection;
 use game::web_params::MatchParams;
+use ui::shell::level_slot::SeedSource;
+use ui::shell::playing::StartOptions;
+use ui::shell::{Phase, Present, Route, Shell, ShellInput};
 
 mod blit;
 
@@ -93,9 +106,9 @@ struct Demo {
     viewports: [Viewport; 2],
     scene: SceneData,
     surface: Bitmap,
-    /// Step 4½d: the selection's frozen screen (the shell's shared one; here per-run) and the
-    /// selection's `menu_cycles`, from 0 per selection as in 4½c (T11 retires both for the
-    /// default match).
+    /// Step 4½d: the `--live <scenario>` selection's frozen screen (the shell has the shared
+    /// one) and its `menu_cycles`, from 0 per selection as in 4½c. The default match runs on the
+    /// shell, which owns both.
     frozen: Bitmap,
     weapsel_cycles: u32,
     tick: u32,
@@ -110,22 +123,17 @@ struct Demo {
     /// PR-preview loadout (`?weapons=`, `web_params`): re-applied to the tick-0 state
     /// on every (re)start of the live match. Empty natively and without the parameter.
     loadout: Vec<String>,
-    /// Step 4½c (John's T9 ruling): the C++ NEW GAME start — `Some` for the live default
-    /// match without `--record`. Every (re)start builds from it (`new_match` on its level),
-    /// and `scenario` is then only a placeholder (the default-match fixture).
-    new_game: Option<NewGame>,
-    /// Step 4½c: the weapon-selection phase (design §7) — `Some` in `Mode::Live` unless
-    /// `--record` or `?weapons=` skips it. Holds the running selection, the in-memory picks
-    /// every (re)start selects from, and the frozen screen.
+    /// Step 4½c: the weapon-selection phase (design §7) — `Some` in `Mode::Live` (since 4½d
+    /// only `--live [<scenario>]`) unless `--record` skips it. Holds the running selection and
+    /// the in-memory picks every (re)start selects from.
     selection: Option<Selection>,
     /// Step 4½c: the release latch at both phase boundaries (design §7.2). Only a selection
     /// boundary arms it, so a skipped selection never masks a key.
     latch: ReleaseLatch,
-    /// Whether the world draws shadows: `settings.shadow` for a NEW GAME, else the
-    /// scenario's `render_shadow` directive. Fixed for the run.
+    /// Whether the world draws shadows: the scenario's `render_shadow` directive. Fixed for
+    /// the run.
     draw_shadow: bool,
-    /// The level file the selection screen labels (`weapsel.cpp:171-176`): a NEW GAME's
-    /// `settings.level_file` (empty = the random-level label), else the scenario's level.
+    /// The level file the selection screen labels (`weapsel.cpp:171-176`): the scenario's level.
     level_file: String,
     /// Per-tick `state_hash` column of the committed golden (index = tick) — the
     /// sim determinism witness, asserted on BOTH targets in debug builds.
@@ -144,6 +152,18 @@ struct Demo {
     /// `render_slice3b_*` oracle-tests, making a native demo frame-hash redundant.
     #[cfg(all(target_arch = "wasm32", debug_assertions))]
     golden_frame: Vec<u64>,
+}
+
+/// Step 4½d: the C++ frame loop (`ui::shell::Shell`) for the live default match — a bare run
+/// or a bare preview. `phase` is the last `window.lieroPhase` published; `stopped` is the
+/// browser's QUIT (the canvas keeps the black frame, Q3); `touch_prev` the last touch mask.
+#[derive(Resource)]
+struct ShellRes {
+    shell: Shell,
+    phase: Phase,
+    stopped: bool,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the browser has touch
+    touch_prev: u32,
 }
 
 /// Handle of the one `Image` the sprite samples; `tick_and_render` writes it.
@@ -259,11 +279,22 @@ fn main() {
         // ordering between the two Startup systems is unconstrained — both
         // complete before the first FixedUpdate regardless.
         .add_systems(Startup, setup_audio)
+        // Step 4½d: the shell's keyboard events, collected after Bevy's input systems and
+        // taken by the next fixed tick (`KeyQueue`).
+        .add_systems(
+            PreUpdate,
+            collect_keys
+                .after(bevy::input::InputSystems)
+                .run_if(resource_exists::<game::input::KeyQueue>),
+        )
         .add_systems(FixedUpdate, tick_and_render)
-        // Esc quits natively; in a browser tab it would only leave a dead canvas.
+        // Esc quits natively; in a browser tab it would only leave a dead canvas. On the shell
+        // path Esc pauses to the menu instead (QUIT TO OS exits).
         .add_systems(
             Update,
-            close_on_esc.run_if(|| !cfg!(target_arch = "wasm32")),
+            close_on_esc
+                .run_if(|| !cfg!(target_arch = "wasm32"))
+                .run_if(not(resource_exists::<ShellRes>)),
         )
         // 4b: flush the recorder once, on graceful exit. Esc's `AppExit` is written
         // by `close_on_esc` in `Update`, so it is always observable here in `Last`.
@@ -449,6 +480,54 @@ fn setup(
     preview: Res<Preview>,
 ) {
     let name = &name.0;
+    // Step 4½d: the live default match without `--record` (a bare run, a bare preview) is the
+    // C++ frame loop: the main menu, or — `?weapons=` / `?level=` / `?seed=` — straight into a
+    // NEW GAME (Q4). The 4½c `new_game_start` condition (plan-time fact 1).
+    let shell_start =
+        *mode == Mode::Live && name == game::input::DEFAULT_MATCH && record_path.0.is_none();
+    if shell_start {
+        let settings = game::new_game::start_settings(preview.0.level_file());
+        let seeds = preview.0.seed.map_or(SeedSource::Fresh, SeedSource::Fixed);
+        let options = StartOptions {
+            skip_selection: preview.0.skips_weapon_selection(),
+            loadout: preview.0.weapons.clone(),
+            touch_only: touch_only(),
+        };
+        let boot = if preview.0.skips_menu() {
+            Shell::boot_playing
+        } else {
+            Shell::boot
+        };
+        let (shell, state, out) = boot(Path::new(TC_ROOT), settings, seeds, fresh_seed(), options);
+        // `Match::start` applies the loadout silently on every NEW GAME: report unknown names once
+        // (the boot state carries the same TC weapon table).
+        let unknown: Vec<String> = preview
+            .0
+            .weapons
+            .iter()
+            .filter(|n| !state.weapons.iter().any(|w| w.name.eq_ignore_ascii_case(n)))
+            .cloned()
+            .collect();
+        warn_unknown_weapons(&unknown);
+        let handle = spawn_view(&mut commands, &mut images);
+        present(&shell, out.present, &mut images, &handle);
+        publish_phase(out.phase.as_str());
+        if let Some(Route::NewGame { seed }) = out.routed {
+            log_new_game(seed, shell.settings());
+        }
+        commands.insert_resource(InputSource::Live(game::input::default_bindings()));
+        commands.insert_resource(game::input::KeyQueue::default());
+        commands.insert_resource(ShellRes {
+            shell,
+            phase: out.phase,
+            stopped: false,
+            touch_prev: 0,
+        });
+        commands.insert_resource(Sim(state));
+        commands.insert_resource(FrameImage(handle));
+        return;
+    }
+
     // 1. Read + parse the scenario text. `Mode::Replay` (4b, T2) reads an
     //    ARBITRARY path (not `GOLDEN_DIR`) — the whole point of `--replay` is to
     //    play back a file that need not be a committed golden (spec §5).
@@ -463,32 +542,18 @@ fn setup(
     } else if name == game::input::DEFAULT_MATCH {
         // 4f: the default match — the committed default-match fixture (Mode::Live),
         // sourced here instead of a `render_slice3b_*` golden. See
-        // `default_match_text`. Since 4½c only `--live --record` plays it; otherwise
-        // it is a placeholder and the NEW GAME start below builds the match.
+        // `default_match_text`. Since 4½c only `--live --record` plays it (the shell above
+        // starts every other default match).
         default_match_text()
     } else {
         load_scenario_text(name)
     };
     let scenario = Scenario::parse(&scenario_text).expect("scenario parses");
 
-    // 2. Tick-0 load (moves `state` into `Sim`; viewports + scene into `Demo`).
-    //    Step 4½c (John's T9 ruling): the live default match starts like C++ NEW GAME
-    //    (`gfx.cpp:1507-1523`) — default settings (`?level=` swaps the generated level for
-    //    a stock file), a fresh seed (`?seed=` fixes it), `new_match` on the generated
-    //    level. A `--record` session keeps the fixture: a recording starts from a scenario.
-    let new_game_start =
-        *mode == Mode::Live && name == game::input::DEFAULT_MATCH && record_path.0.is_none();
+    // 2. Tick-0 load (moves `state` into `Sim`; viewports + scene into `Demo`). A
+    //    `--record` session plays the fixture: a recording starts from a scenario.
     let skip_selection = record_path.0.is_some() || preview.0.skips_weapon_selection();
-    let new_game = new_game_start.then(|| {
-        let settings = game::new_game::start_settings(preview.0.level_file());
-        let ng = NewGame::new(Path::new(TC_ROOT), settings, preview.0.seed, fresh_seed());
-        log_new_game(&ng);
-        ng
-    });
-    let loaded = match &new_game {
-        Some(ng) => start_new_game(ng, skip_selection),
-        None => scenario::load(Path::new(TC_ROOT), &scenario),
-    };
+    let loaded = scenario::load(Path::new(TC_ROOT), &scenario);
     let scenario::Loaded {
         mut state,
         viewports,
@@ -514,11 +579,7 @@ fn setup(
     }
     let select = *mode == Mode::Live && !skip_selection;
     let selection = select.then(|| {
-        let cfg = match &new_game {
-            Some(ng) => game::selection::new_game_config(&ng.config().settings, touch_only()),
-            None => game::selection::live_config(&state, touch_only()),
-        };
-        let mut sel = Selection::new(cfg);
+        let mut sel = Selection::new(game::selection::live_config(&state, touch_only()));
         sel.begin(&mut state)
             .expect("the live config selects over the 40-weapon TC");
         sel
@@ -534,42 +595,8 @@ fn setup(
     // 3. Owned CPU surface the `render` crate paints into.
     let surface = Bitmap::new(SURFACE_W as i32, SURFACE_H as i32);
 
-    // 4. The one Image the sprite samples. `Rgba8UnormSrgb`: the VGA palette RGB
-    //    is treated as sRGB (see the texture-format note in the done-report). The
-    //    CPU frame hash is the gate; the format is advisory.
-    let mut image = Image::new_fill(
-        Extent3d {
-            width: SURFACE_W,
-            height: SURFACE_H,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        &[0, 0, 0, 255],
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::all(),
-    );
-    image.sampler = ImageSampler::nearest();
-    let handle = images.add(image);
-
-    // 5. Camera + one sprite scaled ×3 into the 960×600 window.
-    //    `AutoMin` keeps the whole 960x600 frame in view whatever the window's
-    //    size: natively the window is exactly 960x600 (1:1, unchanged), but in a
-    //    browser winit sizes the surface to the canvas's CSS box, which
-    //    `web/index.html` fits to the screen (a phone would otherwise crop it).
-    commands.spawn((
-        Camera2d,
-        Projection::Orthographic(OrthographicProjection {
-            scaling_mode: bevy::camera::ScalingMode::AutoMin {
-                min_width: 960.0,
-                min_height: 600.0,
-            },
-            ..OrthographicProjection::default_2d()
-        }),
-    ));
-    commands.spawn((
-        Sprite::from_image(handle.clone()),
-        Transform::from_scale(Vec3::splat(3.0)),
-    ));
+    // 4 + 5. The one Image, the camera and the sprite.
+    let handle = spawn_view(&mut commands, &mut images);
 
     // 6. Assemble the resources. Live and Replay have no golden to self-check
     //    against and do not load the golden column at all (spec §7/T2; Replay's
@@ -585,12 +612,8 @@ fn setup(
     // Step 4½a-2: the binary loads no setup yet (design §9.3.6), so the minimap follows the
     // C++ default (`map = true`); 4½d passes the loaded setup's `map` here.
     let hud = hud_flags(*mode, scenario.hud(), Settings::default().map);
-    let draw_shadow = new_game
-        .as_ref()
-        .map_or(scenario.shadow(), |ng| ng.config().settings.shadow);
-    let level_file = new_game.as_ref().map_or(scenario.level.clone(), |ng| {
-        ng.config().settings.level_file.clone()
-    });
+    let draw_shadow = scenario.shadow();
+    let level_file = scenario.level.clone();
 
     let mut demo = Demo {
         scenario,
@@ -609,7 +632,6 @@ fn setup(
         }),
         hud,
         loadout,
-        new_game,
         selection,
         latch: ReleaseLatch::default(),
         draw_shadow,
@@ -651,6 +673,47 @@ fn setup(
     commands.insert_resource(sim);
     commands.insert_resource(demo);
     commands.insert_resource(FrameImage(handle));
+}
+
+/// Steps 4-5 of `setup`: the one Image the sprite samples, the camera, and the ×3 sprite.
+fn spawn_view(commands: &mut Commands, images: &mut Assets<Image>) -> Handle<Image> {
+    // 4. The one Image the sprite samples. `Rgba8UnormSrgb`: the VGA palette RGB
+    //    is treated as sRGB (see the texture-format note in the done-report). The
+    //    CPU frame hash is the gate; the format is advisory.
+    let mut image = Image::new_fill(
+        Extent3d {
+            width: SURFACE_W,
+            height: SURFACE_H,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0, 0, 0, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::all(),
+    );
+    image.sampler = ImageSampler::nearest();
+    let handle = images.add(image);
+
+    // 5. Camera + one sprite scaled ×3 into the 960×600 window.
+    //    `AutoMin` keeps the whole 960x600 frame in view whatever the window's
+    //    size: natively the window is exactly 960x600 (1:1, unchanged), but in a
+    //    browser winit sizes the surface to the canvas's CSS box, which
+    //    `web/index.html` fits to the screen (a phone would otherwise crop it).
+    commands.spawn((
+        Camera2d,
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: bevy::camera::ScalingMode::AutoMin {
+                min_width: 960.0,
+                min_height: 600.0,
+            },
+            ..OrthographicProjection::default_2d()
+        }),
+    ));
+    commands.spawn((
+        Sprite::from_image(handle.clone()),
+        Transform::from_scale(Vec3::splat(3.0)),
+    ));
+    handle
 }
 
 /// Startup (T4, exclusive — see `AudioDrainer`): build the native audio
@@ -745,9 +808,11 @@ fn live_loop_keys(sim: &SimState) -> HashSet<LoopKey> {
 /// FixedUpdate: advance the sim EXACTLY one tick, run the loop step, render the
 /// current tick, upload, then (debug) assert the sim hash against the golden.
 /// This is the ONLY system that mutates `Sim` (the determinism firewall).
+#[allow(clippy::too_many_arguments)]
 fn tick_and_render(
     mut sim: ResMut<Sim>,
-    mut demo: ResMut<Demo>,
+    // Every path but the shell (Step 4½d).
+    demo: Option<ResMut<Demo>>,
     mut images: ResMut<Assets<Image>>,
     frame: Res<FrameImage>,
     source: Res<InputSource>,
@@ -760,7 +825,29 @@ fn tick_and_render(
     mut audio: NonSendMut<AudioDrainer>,
     // Step 4½c: whether F5 was already seen down (the restart fires once per press).
     mut f5_down: Local<bool>,
+    // Step 4½d: the shell path (the live default match) — its state and its key events.
+    shell: Option<ResMut<ShellRes>>,
+    queue: Option<ResMut<game::input::KeyQueue>>,
+    time: Res<Time<Real>>,
+    mut exit: MessageWriter<AppExit>,
 ) {
+    if let Some(mut sh) = shell {
+        let queue = queue.expect("the shell path has a key queue");
+        tick_shell(
+            &mut sim.0,
+            &mut sh,
+            queue.into_inner(),
+            &source,
+            &keys,
+            &time,
+            &mut images,
+            &frame.0,
+            &mut audio.0,
+            &mut exit,
+        );
+        return;
+    }
+    let mut demo = demo.expect("the non-shell paths have a Demo");
     // 4f: F5 restarts a Live/Replay match — rebuild tick 0 through the SAME
     // `scenario::load` reload the `Mode::Scripted` loop arm uses (reset `sim.0`,
     // `demo.viewports`, `demo.scene`, `demo.tick`), then render the fresh frame
@@ -819,11 +906,6 @@ fn tick_and_render(
             }
         }
         if done {
-            // ChangeState(kStateGame) (localController.cpp:224-235, game.cpp:513): a NEW GAME
-            // gets its lives and blood pool now (a scenario start already has them).
-            if let Some(ng) = demo.new_game.as_ref() {
-                ng.enter_game(&mut sim.0);
-            }
             // Keys still held (Fire from DONE) wait for a new press.
             demo.latch.arm(&sampled);
             publish_phase("game");
@@ -1001,11 +1083,10 @@ fn render_and_upload(
 }
 
 /// Rebuild tick 0 — the 4f F5 restart, shared since 4½a-1 with the live match-end restart:
-/// through `scenario::load`, or, for a NEW GAME (Step 4½c), the next C++ NEW GAME
-/// (`NewGame::next`: a new seed, the played level reused). Restarts an in-flight recording
-/// too (the 4f T0 fix: the flushed file then covers only ticks since the restart), in Live
-/// the `MatchFlow`, and, with selection, a new weapon selection from the written-back picks
-/// (Step 4½c). `held` arms the release latch at that boundary.
+/// through `scenario::load` (since Step 4½d the NEW GAME loop is the shell's). Restarts an
+/// in-flight recording too (the 4f T0 fix: the flushed file then covers only ticks since the
+/// restart), in Live the `MatchFlow`, and, with selection, a new weapon selection from the
+/// written-back picks (Step 4½c). `held` arms the release latch at that boundary.
 fn restart_match(
     sim: &mut SimState,
     demo: &mut Demo,
@@ -1019,14 +1100,7 @@ fn restart_match(
     if let Some(sel) = demo.selection.as_mut() {
         sel.abandon();
     }
-    let loaded = match demo.new_game.as_mut() {
-        Some(ng) => {
-            ng.next(Path::new(TC_ROOT), &sim.level, fresh_seed());
-            log_new_game(ng);
-            start_new_game(ng, demo.selection.is_none())
-        }
-        None => scenario::load(Path::new(TC_ROOT), &demo.scenario),
-    };
+    let loaded = scenario::load(Path::new(TC_ROOT), &demo.scenario);
     *sim = loaded.state;
     apply_loadout(sim, &demo.loadout);
     demo.viewports = loaded.viewports;
@@ -1034,8 +1108,8 @@ fn restart_match(
     set_worm_colours(&mut demo.scene);
     demo.tick = 0;
     if let Some(sel) = demo.selection.as_mut() {
-        // The C++ NEW GAME loop with the menu left out: a NEW selection from the saved picks.
-        // A scenario start keeps its seed, so its restart stays deterministic.
+        // A NEW selection from the saved picks. A scenario start keeps its seed, so its
+        // restart stays deterministic.
         sel.begin(sim)
             .expect("the live config selects over the 40-weapon TC");
         demo.weapsel_cycles = 0;
@@ -1047,16 +1121,107 @@ fn restart_match(
     }
 }
 
-/// The tick-0 `Loaded` of a NEW GAME: the fresh `LocalController` before weapon selection, or,
-/// when selection is skipped, with the saved picks loaded and the game entered.
-fn start_new_game(ng: &NewGame, skip_selection: bool) -> scenario::Loaded {
-    let tc = Path::new(TC_ROOT);
-    let built = if skip_selection {
-        ng.start_without_selection(tc)
-    } else {
-        ng.start(tc)
+/// Step 4½d: the frame's keyboard events for the shell (design §7.1) — every key-down including
+/// OS repeats, every key-up — in order. Only the shell path reads them.
+fn collect_keys(
+    mut reader: MessageReader<KeyboardInput>,
+    mut queue: ResMut<game::input::KeyQueue>,
+) {
+    for ev in reader.read() {
+        queue.push(ui::shell::KeyEvent {
+            dos: game::input::dos_of_keycode(ev.key_code),
+            down: ev.state == ButtonState::Pressed,
+            repeat: ev.repeat,
+            typed: game::input::typed_of_keycode(ev.key_code),
+        });
+    }
+}
+
+/// One C++ `Gfx::RunOneFrame` of the live shell (design §7.1): this tick's key events (+ the
+/// touch edges), the sampled words (keyboard levels + touch, as 4½c), `Shell::frame`, then the
+/// present, the menu and sim sounds, the phase, a NEW GAME's log line, and QUIT.
+#[allow(clippy::too_many_arguments)]
+fn tick_shell(
+    sim: &mut SimState,
+    sh: &mut ShellRes,
+    queue: &mut game::input::KeyQueue,
+    source: &InputSource,
+    keys: &ButtonInput<KeyCode>,
+    time: &Time<Real>,
+    images: &mut Assets<Image>,
+    handle: &Handle<Image>,
+    audio: &mut Drainer<Sink>,
+    exit: &mut MessageWriter<AppExit>,
+) {
+    if sh.stopped {
+        return; // the browser's QUIT: the canvas keeps the black frame (Q3)
+    }
+    #[allow(unused_mut)] // only the wasm build adds the touch edges
+    let mut events = queue.take_tick();
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mask = touch_mask();
+        let ex = sh.shell.settings().worm_settings[0].controls_ex;
+        events.extend(game::touch::touch_key_events(sh.touch_prev, mask, &ex));
+        sh.touch_prev = mask;
+    }
+    // Q5: F5 restarts during play and selection (Rust only; inert in the menu until 4½f).
+    let restart = events
+        .iter()
+        .any(|e| e.dos == ui::keys::DK_F5 && e.down && !e.repeat);
+    let input = ShellInput {
+        events: &events,
+        sampled: sample_inputs(source, 0, keys, Mode::Live),
+        fresh_seed: fresh_seed(),
+        now_ms: time.elapsed().as_millis() as u64,
+        restart,
     };
-    built.expect("the default settings build a match")
+    let out = sh.shell.frame(sim, &input);
+    present(&sh.shell, out.present, images, handle);
+    if !out.menu_sounds.is_empty() {
+        let events: Vec<SoundEvent> = out
+            .menu_sounds
+            .iter()
+            .map(|&s| SoundEvent::one_shot(s))
+            .collect();
+        audio.drain(&events);
+    }
+    if out.sim_ticked {
+        audio.drain(&sim.sound_events);
+        audio.reap(&live_loop_keys(sim));
+    }
+    if let Some(Route::NewGame { seed }) = out.routed {
+        log_new_game(seed, sh.shell.settings());
+    }
+    if out.phase != sh.phase {
+        publish_phase(out.phase.as_str());
+        sh.phase = out.phase;
+    }
+    if out.quit {
+        #[cfg(not(target_arch = "wasm32"))]
+        exit.write(AppExit::Success);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = exit;
+            sh.stopped = true;
+        }
+    }
+}
+
+/// Upload what the frame presents (design §4.7): the shell surface at the frame's fade
+/// (`Gfx::Draw`'s `ScaleDraw`), the black `Enter` flip, or nothing (a pop frame keeps the image).
+fn present(shell: &Shell, p: Option<Present>, images: &mut Assets<Image>, handle: &Handle<Image>) {
+    let fade = match p {
+        None => return,
+        Some(Present::Frame { fade }) => fade,
+        Some(Present::Black) => 0,
+    };
+    let mut image = images.get_mut(handle).expect("frame image exists");
+    render::present::fade_into_rgba(
+        shell.surface(),
+        fade,
+        image.data.as_mut().expect("image has data"),
+    );
 }
 
 /// A fresh NEW GAME seed. C++ seeds each new `Game` from the wall clock (`game.cpp:42`,
@@ -1080,8 +1245,7 @@ fn fresh_seed() -> u32 {
 
 /// Report a NEW GAME's seed and level (stderr natively, the console on wasm), so a match can
 /// be replayed with `?seed=`.
-fn log_new_game(ng: &NewGame) {
-    let s = &ng.config().settings;
+fn log_new_game(seed: u32, s: &Settings) {
     let level = if s.random_level {
         format!(
             "a random {}x{} level",
@@ -1090,7 +1254,7 @@ fn log_new_game(ng: &NewGame) {
     } else {
         s.level_file.clone()
     };
-    let msg = format!("openliero: new game, seed {} on {level}", ng.seed());
+    let msg = format!("openliero: new game, seed {seed} on {level}");
     #[cfg(target_arch = "wasm32")]
     web_sys::console::log_1(&msg.into());
     #[cfg(not(target_arch = "wasm32"))]
@@ -1135,8 +1299,8 @@ fn touch_only() -> bool {
     false
 }
 
-/// Publish the live phase as `window.lieroPhase` (`"weapsel"` / `"game"`) for the page and the
-/// headless browser check. A no-op natively.
+/// Publish the live phase as `window.lieroPhase` (`"menu"` / `"weapsel"` / `"game"` / `"quit"`)
+/// for the page and the headless browser check. A no-op natively.
 fn publish_phase(phase: &str) {
     #[cfg(target_arch = "wasm32")]
     let _ = js_sys::Reflect::set(&js_sys::global(), &"lieroPhase".into(), &phase.into());
@@ -1171,7 +1335,11 @@ fn set_worm_colours(scene: &mut SceneData) {
 /// Apply a PR-preview loadout to a freshly loaded tick-0 state (no-op when empty);
 /// names that match no weapon are reported and leave their slot unchanged.
 fn apply_loadout(state: &mut SimState, loadout: &[String]) {
-    let unknown = game::web_params::apply_weapons(state, loadout);
+    warn_unknown_weapons(&game::web_params::apply_weapons(state, loadout));
+}
+
+/// Report the preview loadout's names that match no weapon (no-op when none).
+fn warn_unknown_weapons(unknown: &[String]) {
     if !unknown.is_empty() {
         preview_warn(&format!(
             "unknown weapon name(s) {unknown:?}; those slots keep the default"

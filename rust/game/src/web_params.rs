@@ -1,17 +1,19 @@
 //! Preview-build match parameters (the "mini" playable web build).
 //!
-//! A PR preview needs to reach the feature under test without menus (4½d), so the
-//! page URL can pick the loadout, level and seed of the live match:
+//! Since Step 4½d a bare preview opens the C++ main menu (`ui::shell::Shell`), like a bare
+//! `cargo run -p game`. The page URL can instead jump straight to a match with a chosen loadout,
+//! level and seed — those parameters skip the menu (John's Q4 ruling), unless `menu=1` forces it:
 //!
 //! ```text
 //! ?weapons=MISSILE,LASER,BIG%20NUKE&level=water_stage&seed=7
+//! ?level=water_stage&menu=1   (the main menu, over the water level)
 //! ?demo            (the old scripted `blood` demo instead of a live match)
 //! ```
 //!
-//! A bare preview starts like C++ NEW GAME (`game::new_game`): a generated level, a fresh
-//! seed, then weapon selection (4½c). `weapons=` skips selection (John's Q3 ruling) and loads
-//! the named weapons; `level=` loads a stock level instead of generating one; `seed=` fixes
-//! the seed.
+//! Every NEW GAME starts like C++ NEW GAME (`ui::shell`): a generated level, a fresh seed, then
+//! weapon selection (4½c). `weapons=` skips selection (John's Q3 ruling) and loads the named
+//! weapons; `level=` loads a stock level instead of generating one; `seed=` fixes the seed.
+//! With `menu=1` they configure the boot level and every NEW GAME from the menu.
 //!
 //! This module is Bevy-free and target-independent so it is unit-tested natively;
 //! `main.rs` feeds it `window.location.search` on wasm. Nothing here touches the
@@ -45,6 +47,8 @@ pub struct MatchParams {
     pub level: Option<String>,
     /// `seed=`: the match seed (default: a fresh one per match).
     pub seed: Option<u32>,
+    /// `menu`: force the main menu even with `weapons`/`level`/`seed` (Step 4½d, Q4).
+    pub menu: bool,
     /// Human-readable notes about ignored values (logged to the console).
     pub warnings: Vec<String>,
 }
@@ -61,6 +65,7 @@ impl MatchParams {
             };
             match key.as_str() {
                 "demo" => p.demo = value.is_empty() || value == "1" || value == "true",
+                "menu" => p.menu = value.is_empty() || value == "1" || value == "true",
                 "weapons" => {
                     p.weapons = value
                         .split(',')
@@ -108,6 +113,13 @@ impl MatchParams {
     /// selection screen.
     pub fn skips_weapon_selection(&self) -> bool {
         !self.weapons.is_empty()
+    }
+
+    /// Q4 (John, 2026-09-26): `?weapons=`, `?level=` or `?seed=` skip the main menu, so every
+    /// earlier preview link behaves as before; a plain link opens the menu; `?menu=1` forces it
+    /// (the parameters then configure the boot level and every NEW GAME).
+    pub fn skips_menu(&self) -> bool {
+        !self.menu && (!self.weapons.is_empty() || self.level.is_some() || self.seed.is_some())
     }
 }
 
@@ -223,5 +235,18 @@ mod tests {
             state.worms[0].weapons[2], before,
             "an unknown name leaves its slot"
         );
+    }
+
+    #[test]
+    fn match_parameters_skip_the_menu_unless_menu_is_forced() {
+        // Q4 (John, 2026-09-26): a plain link opens the menu; weapons/level/seed skip it.
+        assert!(!MatchParams::parse("").skips_menu());
+        assert!(!MatchParams::parse("?touch=1").skips_menu());
+        for q in ["?weapons=BAZOOKA", "?level=water_stage", "?seed=7"] {
+            assert!(MatchParams::parse(q).skips_menu(), "{q}");
+            let forced = MatchParams::parse(&format!("{q}&menu=1"));
+            assert!(forced.menu && !forced.skips_menu(), "{q}&menu=1");
+        }
+        assert!(MatchParams::parse("?menu").menu);
     }
 }

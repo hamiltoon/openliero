@@ -34,9 +34,9 @@
       /* iOS: double-tap-to-zoom fires on any element that allows it, including the
          page behind the buttons, so switch every default touch gesture off. */
       html.touch, body.touch, body.touch * { touch-action: none; }
-      /* Portrait phone: the game at the top, the thumbs' space below it. */
+      /* Portrait phone: the game at the top (below the hint and MENU), the thumbs' space below it. */
       @media (orientation: portrait) {
-        body.touch { justify-content: flex-start; padding-top: 28px; box-sizing: border-box; }
+        body.touch { justify-content: flex-start; padding-top: 50px; box-sizing: border-box; }
       }
       #touch .ctl { position: absolute; pointer-events: auto; touch-action: none;
         border: 2px solid rgba(255, 255, 255, 0.35); background: rgba(255, 255, 255, 0.10);
@@ -55,12 +55,25 @@
       #b-change { right: 96px; bottom: 84px; width: 64px; height: 64px; font-size: 11px; }
       #b-dig { right: 10px; bottom: 136px; width: 52px; height: 34px; border-radius: 17px;
         font-size: 11px; }
+      /* Step 4½d: MENU is Esc (pause to the main menu). Top right: above the game's top-right
+         corner in portrait, in the right gutter above the buttons in landscape. */
+      #b-menu { top: max(8px, env(safe-area-inset-top)); right: max(8px, env(safe-area-inset-right));
+        width: 64px; height: 34px; border-radius: 17px; font-size: 11px; }
+      /* Step 4½d: QUIT TO OS in the browser stops on the black frame (like the C++ web build);
+         this overlay reloads the page. */
+      #quit { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center;
+        justify-content: center; background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 16px;
+        text-align: center; padding: 16px; box-sizing: border-box; }
+      #quit[hidden] { display: none; }
       /* The hint stays out of the canvas's top centre, where the weapon-selection title is:
          one short line above the game in portrait, a small block in the top-left gutter
          (beside the game, above the pad) in landscape. */
       #touch-hint { position: absolute; top: max(6px, env(safe-area-inset-top)); left: 0; right: 0;
         text-align: center; color: #707080; font-size: 11px; }
       #touch-hint span + span::before { content: ' · '; }
+      @media (orientation: portrait) {
+        #touch-hint { left: max(8px, env(safe-area-inset-left)); right: 80px; top: max(16px, env(safe-area-inset-top)); }
+      }
       @media (orientation: landscape) {
         #touch-hint { left: max(8px, env(safe-area-inset-left)); right: auto; width: 96px;
           text-align: left; line-height: 1.5; }
@@ -78,14 +91,16 @@
 
       Since the PR-preview build the page plays the LIVE default match on the
       keyboard; the URL picks the match (game::web_params):
-      Since Step 4½c it starts like C++ NEW GAME (game::new_game: a generated
-      level, a fresh seed) and opens on weapon selection; ?weapons= skips it.
+      Since Step 4½d it boots the C++ main menu (ui::shell); NEW GAME starts like
+      C++ NEW GAME (a generated level, a fresh seed) and opens on weapon selection.
+      weapons/level/seed skip the menu and go straight into a match.
         ?weapons=MISSILE,LASER,BIG%20NUKE   up to five slots, both worms;
                                             skips weapon selection
         ?level=water_stage                  a stock level instead of a generated
                                             one: render_stage | water_stage |
                                             see_shadow_test | physics_fall_test
         ?seed=7                             fix the match seed (default: fresh)
+        ?menu=1                             show the menu even with the above
         ?demo                               the scripted `blood` demo instead
 
       ── Dev loop (one command, no static bundle, no hand-written page) ──
@@ -116,8 +131,10 @@
       and init the glue.
     -->
     <div id="status">Loading…</div>
+    <div id="quit" hidden>Quit — tap or press a key to play again</div>
     <div id="touch" aria-hidden="true">
-      <div id="touch-hint"><span>Pick ↑↓ ←→</span><span>FIRE on DONE!</span><span>You: blue worm</span><span>P2: a bot</span></div>
+      <div id="touch-hint"></div>
+      <div id="b-menu" class="ctl" data-bit="menu">MENU</div>
       <div id="pad" class="ctl"><div id="knob"></div></div>
       <div id="btns">
         <div id="b-fire" class="ctl" data-bit="fire">FIRE</div>
@@ -129,6 +146,10 @@
     <div id="help">
       Click the game to give it the keyboard.
       <br />
+      <b>Main menu</b>: <kbd>↑</kbd>/<kbd>↓</kbd> (or P1 aim) pick · <kbd>Enter</kbd> (or fire) selects ·
+      <kbd>Esc</kbd> (or jump) goes to QUIT TO OS · NEW GAME starts weapon selection; <kbd>Esc</kbd> in a
+      match pauses to the menu (RESUME GAME)
+      <br />
       <b>Player 1</b>: <kbd>R</kbd>/<kbd>F</kbd> aim · <kbd>D</kbd>/<kbd>G</kbd> move ·
       <kbd>Left Ctrl</kbd> fire · <kbd>Left Shift</kbd> change weapon · <kbd>Left Alt</kbd> jump
       <br />
@@ -139,13 +160,15 @@
       changes the weapon · fire on <i>Randomize</i> re-rolls all five · fire on <i>DONE!</i>
       when ready
       <br />
-      Dig: hold left + right · <kbd>F5</kbd> restarts (back to weapon selection)
+      Dig: hold left + right · <kbd>F5</kbd> restarts a match (back to weapon selection)
       <br />
       <span class="dim">
-        URL: <code>?weapons=MISSILE,LASER,BIG%20NUKE</code> (skips weapon selection) ·
+        URL (<code>weapons</code>/<code>level</code>/<code>seed</code> skip the menu):
+        <code>?weapons=MISSILE,LASER,BIG%20NUKE</code> (skips weapon selection) ·
         <code>&amp;level=water_stage</code> instead of a generated level
         (render_stage, water_stage, see_shadow_test, physics_fall_test) ·
-        <code>&amp;seed=7</code> fixes the seed · <code>?demo</code> for the scripted demo ·
+        <code>&amp;seed=7</code> fixes the seed · <code>?menu=1</code> shows the menu even with
+        weapons/level/seed · <code>?demo</code> for the scripted demo ·
         <code>?touch=1</code> for on-screen controls
       </span>
     </div>
@@ -175,8 +198,9 @@
         window.addEventListener(ev, resumeAudio, { capture: true, passive: true });
       }
 
-      // --- On-screen controls. Bit layout = rust/game/src/touch.rs TOUCH_*.
-      const TOUCH = { up: 1, down: 2, left: 4, right: 8, fire: 16, change: 32, jump: 64, dig: 128 };
+      // --- On-screen controls. Bit layout = rust/game/src/touch.rs TOUCH_* (MENU: Esc, 4½d).
+      const TOUCH = { up: 1, down: 2, left: 4, right: 8, fire: 16, change: 32, jump: 64, dig: 128,
+        menu: 256 };
       window.lieroTouch = 0;
       const params = new URLSearchParams(location.search);
       const touchParam = params.get('touch');
@@ -197,7 +221,7 @@
           let mask = 0;
           for (const bits of held.values()) mask |= bits;
           window.lieroTouch = mask;
-          for (const el of document.querySelectorAll('#btns .ctl')) {
+          for (const el of document.querySelectorAll('#touch .ctl[data-bit]')) {
             el.classList.toggle('on', (mask & TOUCH[el.dataset.bit]) !== 0);
           }
         };
@@ -243,7 +267,7 @@
         }
 
         // Buttons: held while the finger that pressed them is down.
-        for (const el of document.querySelectorAll('#btns .ctl')) {
+        for (const el of document.querySelectorAll('#touch .ctl[data-bit]')) {
           el.addEventListener('pointerdown', (e) => {
             e.preventDefault();
             el.setPointerCapture(e.pointerId);
@@ -267,6 +291,34 @@
           update();
         });
       }
+      // --- Step 4½d: the page follows the game's phase (window.lieroPhase: menu | weapsel |
+      // game | quit). The touch hint changes with it, and QUIT (the game stops on its black
+      // frame, like the C++ web build) shows an overlay that reloads the page.
+      const HINTS = {
+        menu: ['↑↓ pick', 'FIRE selects', 'JUMP: to QUIT'],
+        weapsel: ['Pick ↑↓ ←→', 'FIRE on DONE!', 'You: blue worm', 'P2: a bot'],
+        game: ['MENU pauses', 'You: blue worm'],
+      };
+      const hint = document.getElementById('touch-hint');
+      const quit = document.getElementById('quit');
+      let shownPhase = null;
+      setInterval(() => {
+        const phase = window.lieroPhase;
+        if (phase === shownPhase) return;
+        shownPhase = phase;
+        hint.replaceChildren(...(HINTS[phase] || []).map((t) => {
+          const span = document.createElement('span');
+          span.textContent = t;
+          return span;
+        }));
+        if (phase === 'quit' && quit.hidden) {
+          quit.hidden = false;
+          // A key still held from selecting QUIT auto-repeats: only a fresh press reloads.
+          window.addEventListener('keydown', (e) => { if (!e.repeat) location.reload(); });
+          window.addEventListener('pointerdown', () => location.reload(), { once: true });
+        }
+      }, 200);
+
       // The Bevy app never returns from `init()` (its event loop takes over), so
       // mark the page ready once the canvas appears and give it the keyboard.
       new MutationObserver((_, obs) => {

@@ -159,8 +159,11 @@ impl TouchKeys {
     }
 }
 
-/// The longest WEAPON press (in ticks, 0.3 s) that still counts as a tap for [`WeaponTap`].
-pub const WEAPON_TAP_MAX_TICKS: u32 = 21;
+/// The longest WEAPON press (in ticks, 1 s) that still counts as a tap for [`WeaponTap`]. It was
+/// 0.3 s at first, but a deliberate phone press often takes 0.3-0.45 s. The headless walk
+/// measured presses of 390-420 ms being dropped. Only a press held longer than this keeps the
+/// original's hold-to-see-the-name behaviour.
+pub const WEAPON_TAP_MAX_TICKS: u32 = 70;
 
 /// A Rust-only touch convenience (John: weapon change is "only one touch" on a phone): during
 /// play, a quick tap on WEAPON on its own steps to the next weapon.

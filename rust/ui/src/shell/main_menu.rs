@@ -1,7 +1,17 @@
 //! The main menu (`MainMenu`, `mainMenu.hpp:9-25`; items `gfx.cpp:505-521`; design §3.3). T7 adds
 //! `MainMenuState`.
 
-use crate::menu::{Menu, MenuItem, PlainModel};
+use render::bitmap::Rect;
+use render::font::Font;
+
+use super::MenuWorld;
+use super::settings_menu::SettingsModel;
+use crate::keys::{
+    DK_DOWN, DK_ESCAPE, DK_F1, DK_F2, DK_F3, DK_F5, DK_F6, DK_F7, DK_F8, DK_F9, DK_KP_ENTER,
+    DK_LEFT, DK_PGDN, DK_PGUP, DK_RETURN, DK_RIGHT, DK_UP, K_DOWN, K_FIRE, K_JUMP, K_LEFT, K_RIGHT,
+    K_UP, reset_left_right,
+};
+use crate::menu::{Menu, MenuCx, MenuItem, PlainModel};
 
 /// `MainMenu` item ids (`mainMenu.hpp:9-25`).
 pub const MA_RESUME_GAME: i32 = 0;
@@ -53,6 +63,206 @@ pub fn main_menu() -> Menu {
 /// `MainMenu::GetItemBehavior` (`mainMenu.cpp:6-10`): every item is the base behavior;
 /// `MainMenuState::Update` intercepts them all.
 pub type MainModel = PlainModel;
+
+/// What `MainMenuState` may touch: the menu world (C++ `Gfx` members), the font, whether the
+/// current controller `Running()`, and this frame's sound log. No path to the sim (LD 3, §4.9).
+pub struct MenuCtx<'a> {
+    pub w: &'a mut MenuWorld,
+    pub font: &'a Font,
+    pub running: bool,
+    pub sounds: &'a mut Vec<i32>,
+}
+
+fn play(sounds: &mut Vec<i32>, hook: i32) {
+    if hook >= 0 {
+        sounds.push(hook);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuPhase {
+    Active,
+    FadingOut,
+}
+
+/// C++ `MainMenuState` (`mainMenuState.hpp`, `mainMenuState.cpp:95-626`). In 4½d the main menu
+/// always has focus (`cur_menu == &main_menu`); 4½e adds the settings focus.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MainMenuState {
+    phase: MenuPhase,
+    selected: i32,
+    start_item_id: i32,
+}
+
+impl Default for MainMenuState {
+    fn default() -> Self {
+        MainMenuState::new()
+    }
+}
+
+impl MainMenuState {
+    pub fn new() -> MainMenuState {
+        MainMenuState {
+            phase: MenuPhase::Active,
+            selected: -1,
+            start_item_id: 0,
+        }
+    }
+
+    /// `Selection()`: the item chosen this menu, or -1.
+    pub fn selection(&self) -> i32 {
+        self.selected
+    }
+
+    pub fn is_fading_out(&self) -> bool {
+        self.phase == MenuPhase::FadingOut
+    }
+
+    /// `Enter` (`mainMenuState.cpp:95-148`) after its `Flip` at fade 0 — the caller presents that
+    /// black frame. The copyright bar goes through whatever palette the last draw left in
+    /// `w.pal32` (finding 12); `Process()` (`:105`) has nothing left to poll.
+    pub fn enter(&mut self, cx: &mut MenuCtx) {
+        let w = &mut *cx.w;
+        w.fade = 0;
+        w.surface.clip = Rect::new(0, 0, w.surface.w, w.surface.h);
+        w.surface.fill_rect(0, 151, 160, 7, 0, &w.pal32);
+        cx.font
+            .draw_string(&mut w.surface, &w.pal32, &w.tc.copyright2, 2, 152, 19, 1);
+        let m = &mut w.main_menu;
+        if cx.running {
+            m.set_visibility(MA_RESUME_GAME, true);
+            m.item_from_id_mut(MA_RESUME_GAME).expect("RESUME").string = "RESUME GAME (F1)".into();
+            m.item_from_id_mut(MA_NEW_GAME).expect("NEW GAME").string = "NEW GAME".into();
+            self.start_item_id = MA_RESUME_GAME;
+        } else {
+            m.set_visibility(MA_RESUME_GAME, false);
+            m.item_from_id_mut(MA_NEW_GAME).expect("NEW GAME").string = "NEW GAME (F1)".into();
+            self.start_item_id = MA_NEW_GAME;
+        }
+        m.item_from_id_mut(MA_TC).expect("TC").string = format!("TC ({})", w.settings.tc);
+        m.move_to_first_visible();
+        w.settings_menu.move_to_first_visible();
+        w.settings_menu.update_items(&mut SettingsModel {
+            settings: &mut w.settings,
+            tc: &w.tc,
+            setup_name: &w.setup_name,
+        });
+        w.fade = 0;
+        w.frozen.pixels.copy_from_slice(&w.surface.pixels);
+        w.menu_cycles = 0;
+        self.selected = -1;
+        self.phase = MenuPhase::Active;
+    }
+
+    /// `Update` (`mainMenuState.cpp:152-612`): the fade-out, else the keys in C++ source order.
+    pub fn update(&mut self, cx: &mut MenuCtx) -> bool {
+        let MenuCtx { w, sounds, .. } = cx;
+        if self.phase == MenuPhase::FadingOut {
+            if w.fade > 0 {
+                w.fade -= 1;
+                return true;
+            }
+            return false;
+        }
+        let hooks = w.tc.hooks;
+        let ws = &w.settings.worm_settings;
+        // :171-179 (Esc, or any keyboard player's jump): the cursor to QUIT TO OS.
+        if w.keys.test_once(DK_ESCAPE) || w.keys.test_control_once(ws, K_JUMP) {
+            w.main_menu.move_to_id(MA_QUIT);
+        }
+        // :181-192: Up plays MenuMoveDown, Down plays MenuMoveUp. `||` short-circuits (finding 15).
+        if w.keys.test_once(DK_UP) || w.keys.test_control_once(ws, K_UP) {
+            play(sounds, hooks.move_down);
+            w.main_menu.movement(-1);
+        }
+        if w.keys.test_once(DK_DOWN) || w.keys.test_control_once(ws, K_DOWN) {
+            play(sounds, hooks.move_up);
+            w.main_menu.movement(1);
+        }
+        // :194-270.
+        if w.keys.test_once(DK_RETURN)
+            || w.keys.test_once(DK_KP_ENTER)
+            || w.keys.test_control_once(ws, K_FIRE)
+        {
+            play(sounds, hooks.select);
+            match w.main_menu.selected_id() {
+                id @ (MA_RESUME_GAME | MA_NEW_GAME | MA_QUIT) => self.selected = id, // `default:`
+                // Their second MenuSelect (:234, :248, :254); inert until Step 5 (plan fact 2).
+                MA_JOIN_GAME | MA_HOST_ONLINE | MA_JOIN_ONLINE => play(sounds, hooks.select),
+                // Inert placeholders (§5, Q2): MATCH SETUP (4½e), LEFT/RIGHT PLAYER (4½f), OPTIONS
+                // (4½g), NETWORK PLAYER / HOST LAN (Step 5), REPLAYS / TC (deferred).
+                _ => {}
+            }
+        }
+        // :432-436.
+        if w.keys.test_once(DK_F1) {
+            w.main_menu.move_to_id(self.start_item_id);
+            self.selected = self.start_item_id;
+        }
+        // :437-461 and the F8 easter egg (:463): consumed as C++ does, inert in 4½d (§5).
+        for k in [DK_F2, DK_F3, DK_F5, DK_F6, DK_F7, DK_F9, DK_F8] {
+            w.keys.test_once(k);
+        }
+        let mut mcx = MenuCx {
+            menu_cycles: w.menu_cycles,
+            hooks,
+            sounds,
+        };
+        // :581-592: held; a behavior returning false releases Left/Right (never, on MainModel).
+        if (w.keys.test(DK_LEFT) || w.keys.test_control(ws, K_LEFT))
+            && !w.main_menu.on_left_right(&mut PlainModel, -1, &mut mcx)
+        {
+            reset_left_right(&mut w.keys, ws);
+        }
+        if (w.keys.test(DK_RIGHT) || w.keys.test_control(ws, K_RIGHT))
+            && !w.main_menu.on_left_right(&mut PlainModel, 1, &mut mcx)
+        {
+            reset_left_right(&mut w.keys, ws);
+        }
+        // :594-602.
+        if w.keys.test_once(DK_PGUP) {
+            mcx.play(hooks.move_down);
+            w.main_menu.movement_page(-1);
+        }
+        if w.keys.test_once(DK_PGDN) {
+            mcx.play(hooks.move_up);
+            w.main_menu.movement_page(1);
+        }
+        // :604-609: start the fade-out.
+        if self.selected >= 0 {
+            self.phase = MenuPhase::FadingOut;
+            w.fade = 32;
+        }
+        true
+    }
+
+    /// `Draw` (`mainMenuState.cpp:614-626`): `DrawBasicMenu` (`gfx.cpp:1699-1704`), then — the main
+    /// menu having focus — the settings menu, disabled. `DrawSpectatorInfo` draws into the
+    /// spectator renderer only (finding 2).
+    pub fn draw(&self, cx: &mut MenuCtx) {
+        let w = &mut *cx.w;
+        w.surface.pixels.copy_from_slice(&w.frozen.pixels);
+        w.surface.clip = Rect::new(0, 0, w.surface.w, w.surface.h);
+        w.main_menu.draw(
+            &PlainModel,
+            &mut w.surface,
+            &w.pal32,
+            cx.font,
+            false,
+            -1,
+            true,
+        );
+        w.settings_menu.draw(
+            &PlainModel,
+            &mut w.surface,
+            &w.pal32,
+            cx.font,
+            true,
+            -1,
+            false,
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

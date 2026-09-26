@@ -8,8 +8,9 @@
 //! call that finds it at 0 ends the match (`:185-194`) — 180 more simulated frames.
 //! `fade_value` is also the C++ renderer fade (`:211`); 4½d draws it. Since 4½c the flow
 //! starts in the weapon-selection phase (`with_weapon_selection`; `LocalController::Focus`,
-//! `:112-119`) unless selection is skipped. Seams: 4½d the Esc fade (`OnKey`, `:82-85`), 4½g
-//! routes `Finished` to the stats screen.
+//! `:112-119`) unless selection is skipped. Since 4½d: the Esc fade (`esc`, `OnKey` `:82-85`),
+//! `focus` (RESUME) and one shared `tail` for every phase; 4½g routes `Finished` to the stats
+//! screen.
 
 use sim::state::SimState;
 
@@ -68,14 +69,6 @@ impl MatchFlow {
         }
     }
 
-    /// One weapon-selection `Process` (`localController.cpp:195-199`): the fade counts up to 33.
-    pub fn weapsel_frame(&mut self) {
-        debug_assert_eq!(self.phase, MatchPhase::WeaponSelection);
-        if self.fade_value < FADE_IN_MAX {
-            self.fade_value += 1;
-        }
-    }
-
     /// `ChangeState(kStateGame)` from weapon selection (`:284-287`): fade 33; the next tick is
     /// match tick 0.
     pub fn enter_game(&mut self) {
@@ -92,9 +85,24 @@ impl MatchFlow {
         self.fade_value
     }
 
-    /// Call once per tick AFTER `process_frame` (the C++ order: `ProcessFrame`, then
-    /// `IsGameOver`, then the fade bookkeeping).
-    pub fn after_frame(&mut self, state: &SimState) -> FlowStep {
+    /// `LocalController::OnKey(kDkEscape, _)` (`localController.cpp:82-85`): a key-down OR a
+    /// key-up of Esc (finding 9) starts the 32-frame return to the menu, unless already leaving.
+    pub fn esc(&mut self) {
+        if !self.going_to_menu {
+            self.fade_value = 31;
+            self.going_to_menu = true;
+        }
+    }
+
+    /// The flow half of `LocalController::Focus` (`localController.cpp:100-120`): after game over
+    /// straight back to the menu; otherwise fade in from 0.
+    pub fn focus(&mut self) {
+        self.going_to_menu = self.phase == MatchPhase::GameEnded;
+        self.fade_value = 0;
+    }
+
+    /// After a match tick: `IsGameOver` → `ChangeState(kStateGameEnded)` (`:177-179`, `:277-282`).
+    pub fn check_game_over(&mut self, state: &SimState) {
         debug_assert_ne!(
             self.phase,
             MatchPhase::WeaponSelection,
@@ -107,6 +115,11 @@ impl MatchFlow {
                 self.going_to_menu = true;
             }
         }
+    }
+
+    /// The tail of every `LocalController::Process` (`localController.cpp:185-199`), in every
+    /// phase: leaving counts down and finishes at 0; otherwise the fade counts up to 33.
+    pub fn tail(&mut self) -> FlowStep {
         if self.going_to_menu {
             if self.fade_value > 0 {
                 self.fade_value -= 1;
@@ -120,6 +133,23 @@ impl MatchFlow {
             }
             FlowStep::Continue
         }
+    }
+
+    /// One match tick's bookkeeping: [`check_game_over`](Self::check_game_over) then
+    /// [`tail`](Self::tail) (the C++ order).
+    pub fn after_frame(&mut self, state: &SimState) -> FlowStep {
+        self.check_game_over(state);
+        self.tail()
+    }
+
+    pub fn going_to_menu(&self) -> bool {
+        self.going_to_menu
+    }
+
+    /// `LocalController::Running` (`:304`) for a started controller: false only after game over
+    /// (the shell has no `kStateInitial` controller: the boot has no `Match`).
+    pub fn running(&self) -> bool {
+        self.phase != MatchPhase::GameEnded
     }
 }
 
@@ -206,7 +236,7 @@ mod tests {
             (MatchPhase::WeaponSelection, 0)
         );
         for n in 1..=40 {
-            f.weapsel_frame();
+            assert_eq!(f.tail(), FlowStep::Continue);
             assert_eq!(f.fade_value(), n.min(FADE_IN_MAX));
         }
         f.enter_game();
@@ -217,7 +247,7 @@ mod tests {
     fn entering_the_game_mid_fade_jumps_to_33() {
         let mut f = MatchFlow::with_weapon_selection();
         for _ in 0..3 {
-            f.weapsel_frame();
+            assert_eq!(f.tail(), FlowStep::Continue);
         }
         f.enter_game();
         assert_eq!(f.fade_value(), FADE_IN_MAX);
@@ -242,5 +272,69 @@ mod tests {
         s.worms[0].timer = 5;
         f.after_frame(&s);
         assert_eq!(f.phase(), MatchPhase::GameEnded);
+    }
+
+    #[test]
+    fn esc_fades_out_over_31_presented_frames_then_finishes() {
+        // localController.cpp:82-85 (fade 31, going_to_menu) + :185-194 (the tail).
+        let mut f = MatchFlow::new();
+        f.esc();
+        assert!(f.going_to_menu());
+        for want in (0..=30).rev() {
+            assert_eq!(f.tail(), FlowStep::Continue);
+            assert_eq!(f.fade_value(), want);
+        }
+        assert_eq!(f.tail(), FlowStep::Finished, "the 32nd call: the pop frame");
+    }
+
+    #[test]
+    fn esc_is_ignored_while_already_leaving() {
+        let mut f = MatchFlow::new();
+        let mut dead = state(); // `SimState` is not `Clone`
+        dead.worms[1].lives = 0;
+        f.after_frame(&dead);
+        let fade = f.fade_value();
+        f.esc();
+        assert_eq!(
+            f.fade_value(),
+            fade,
+            "`!going_to_menu` guard (localController.cpp:82)"
+        );
+    }
+
+    #[test]
+    fn done_during_an_esc_fade_restarts_it_at_33() {
+        // ChangeState(kStateGame) sets fade 33 even while going_to_menu (:284-287, design §3.7).
+        let mut f = MatchFlow::with_weapon_selection();
+        f.esc();
+        f.tail();
+        f.enter_game();
+        assert_eq!(f.tail(), FlowStep::Continue);
+        assert_eq!((f.fade_value(), f.going_to_menu()), (32, true));
+    }
+
+    #[test]
+    fn focus_fades_back_in_from_zero_unless_the_game_ended() {
+        let mut f = MatchFlow::new();
+        f.esc();
+        for _ in 0..5 {
+            f.tail();
+        }
+        f.focus();
+        assert_eq!(
+            (f.going_to_menu(), f.fade_value()),
+            (false, 0),
+            "localController.cpp:118-119"
+        );
+        assert_eq!(f.tail(), FlowStep::Continue);
+        assert_eq!(f.fade_value(), 1);
+        let mut dead = state();
+        dead.worms[0].lives = 0;
+        let mut g = MatchFlow::new();
+        g.after_frame(&dead);
+        assert!(!g.running(), "Running(): not after game over (:304)");
+        g.focus();
+        assert_eq!((g.going_to_menu(), g.fade_value()), (true, 0), ":101-105");
+        assert_eq!(g.tail(), FlowStep::Finished);
     }
 }

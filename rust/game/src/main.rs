@@ -93,6 +93,11 @@ struct Demo {
     viewports: [Viewport; 2],
     scene: SceneData,
     surface: Bitmap,
+    /// Step 4½d: the selection's frozen screen (the shell's shared one; here per-run) and the
+    /// selection's `menu_cycles`, from 0 per selection as in 4½c (T11 retires both for the
+    /// default match).
+    frozen: Bitmap,
+    weapsel_cycles: u32,
     tick: u32,
     /// Step 4½a-1: the match lifecycle (`LocalController`'s game → game-ended tail) —
     /// `Some` in `Mode::Live` only. Scripted loops its golden and Replay plays a fixed
@@ -592,6 +597,8 @@ fn setup(
         viewports,
         scene,
         surface,
+        frozen: Bitmap::new(SURFACE_W as i32, SURFACE_H as i32),
+        weapsel_cycles: 0,
         tick: 0,
         flow: (*mode == Mode::Live).then(|| {
             if select {
@@ -806,7 +813,7 @@ fn tick_and_render(
         let events: Vec<SoundEvent> = sounds.into_iter().map(SoundEvent::one_shot).collect();
         audio.0.drain(&events);
         if let Some(flow) = demo.flow.as_mut() {
-            flow.weapsel_frame();
+            flow.tail();
             if done {
                 flow.enter_game();
             }
@@ -973,13 +980,18 @@ fn render_and_upload(
     demo.hud.apply(&mut scene);
     match demo.selection.as_mut().filter(|s| s.is_active()) {
         // Step 4½c: the weapon-selection screen over a frozen `frame::draw` (render::weapsel).
-        Some(sel) => sel.render(
-            &mut demo.surface,
-            sim,
-            &scene,
-            &demo.scene.weapsel_texts,
-            &demo.level_file,
-        ),
+        Some(sel) => {
+            sel.render(
+                &mut demo.surface,
+                &mut demo.frozen,
+                sim,
+                &scene,
+                &demo.scene.weapsel_texts,
+                &demo.level_file,
+                demo.weapsel_cycles,
+            );
+            demo.weapsel_cycles = demo.weapsel_cycles.wrapping_add(1);
+        }
         None => render::frame::draw(&mut demo.surface, sim, &mut demo.viewports, &scene),
     }
 
@@ -1026,6 +1038,7 @@ fn restart_match(
         // A scenario start keeps its seed, so its restart stays deterministic.
         sel.begin(sim)
             .expect("the live config selects over the 40-weapon TC");
+        demo.weapsel_cycles = 0;
         demo.latch.arm(held);
         demo.flow = Some(MatchFlow::with_weapon_selection());
         publish_phase("weapsel");

@@ -10,7 +10,9 @@
 //!
 //! Step 4½e-2 (T3): the file tree and the two selectors (`files`; `Screen::LevelSelect`,
 //! `Screen::SetupSelect`, tops `L`/`P`), their `Picked` continuation, and the store in
-//! `MenuCtx`.
+//! `MenuCtx`. T4: LEVEL, LOAD SETUP and SAVE SETUP AS… live — the Save-As chain (the reserved
+//! box and its reopen), LOAD SETUP (fresh settings, the name, the detach), picks written back
+//! only while the match is attached.
 pub mod files;
 pub mod level_path;
 pub mod level_slot;
@@ -36,16 +38,17 @@ use render::menu::menu_palette;
 use scenario::SceneData;
 use scenario::build::apply_live_settings;
 use scenario::settings::Settings;
+use scenario::settings_toml::{settings_from_toml, settings_to_toml};
 use scenario::storage::{self, ConfigStore};
 use sim::state::{ControlState, SimState};
 
 use crate::keys::{DK_ESCAPE, KeyLatch, TypedKey};
 use crate::menu::Menu;
-use crate::text::UiTc;
+use crate::text::{UiTc, dos_display, dos_to_text};
 use files::{Picked, SelectorView};
 use level_slot::{LevelSlot, SeedSource};
 use main_menu::{MA_NEW_GAME, MA_QUIT, MA_RESUME_GAME, MainMenuState, MenuCtx, main_menu};
-use overlay::{InfoPurpose, InputPurpose, RefusalGate};
+use overlay::{InfoBoxState, InfoPurpose, InputPurpose, InputStringState, RefusalGate};
 use playing::{Match, StartOptions};
 use settings_menu::{SettingsModel, settings_menu};
 use stack::{AfterUpdate, Screen, ScreenStack};
@@ -165,6 +168,9 @@ pub struct FrameOut {
     /// The screen after the frame.
     pub phase: Phase,
     pub routed: Option<Route>,
+    /// Rust-only messages for the glue to log (Step 4½e-2): a SAVE SETUP AS… write error, a
+    /// LOAD SETUP file that does not parse (plan D7, D8).
+    pub notes: Vec<String>,
 }
 
 impl FrameOut {
@@ -177,8 +183,17 @@ impl FrameOut {
             upd,
             phase: upd,
             routed: None,
+            notes: Vec::new(),
         }
     }
+}
+
+/// The keyboard a phone raises for the `InputStringState` on top (Step 4½e-2, plan D11): number
+/// entry has a digit filter, SAVE SETUP AS…'s name box none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextMode {
+    Numeric,
+    Text,
 }
 
 /// `Gfx::cur_menu` (`gfx.hpp:321`; plan fact 1): which menu has focus. 4½f adds the player
@@ -215,7 +230,7 @@ pub struct MenuWorld {
 }
 
 /// Test-only switches (plan T4 Step 8; T8's counterfactual witnesses): each `false` skips the
-/// step it names. Both are `true` by default, which is the C++ behaviour.
+/// step it names. All are `true` by default, which is the C++ behaviour.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShellDebug {
@@ -223,6 +238,9 @@ pub struct ShellDebug {
     pub resume_sync: bool,
     /// The three `DrawTextSmall` labels in a match's draw.
     pub small_labels: bool,
+    /// LOAD SETUP's detach of the current match (Step 4½e-2, plan D17): `false` keeps it
+    /// attached, so RESUME resyncs it to the loaded setup.
+    pub load_detach: bool,
 }
 
 impl Default for ShellDebug {
@@ -230,6 +248,7 @@ impl Default for ShellDebug {
         ShellDebug {
             resume_sync: true,
             small_labels: true,
+            load_detach: true,
         }
     }
 }
@@ -253,6 +272,21 @@ fn atoi(b: &[u8]) -> i64 {
         i += 1;
     }
     if neg { -v } else { v }
+}
+
+/// `MakeSaveAsState("Setups", ".cfg", initial, x, y, …)` (`mainMenuState.cpp:69-91`): the name
+/// box, 30 bytes, no filter, no prefix, not centred.
+pub(crate) fn save_as_box(initial: &[u8], x: i32, y: i32) -> Screen {
+    Screen::InputString(InputStringState::new(
+        initial,
+        30,
+        x,
+        y,
+        None,
+        "",
+        false,
+        InputPurpose::SaveSetupAs { x, y },
+    ))
 }
 
 /// C++ `Gfx` driving `StateStack` (design §4.1, §4.7): one [`Shell::frame`] per
@@ -506,7 +540,7 @@ impl Shell {
         }
         // A selector's `OnSelected` is the last thing its `Update` does (plan D4, fact 9).
         if let Some(p) = picked {
-            self.apply_picked(p);
+            self.apply_picked(p, &mut out);
         }
         match self.stack.finish_update(keep) {
             AfterUpdate::Popped { empty: true } => {
@@ -569,7 +603,8 @@ impl Shell {
 
     /// The close half of an overlay's `Update` (`inputState.cpp:75-84`, `:186-198`), before its
     /// pop. `InputStringState`: `MenuSelect`, `ClearKeys`, the continuation. `InfoBoxState`:
-    /// `ClearKeys`, the optional `Fill(bmp, 0)`, `on_dismiss` (none in e-1).
+    /// `ClearKeys`, the optional `Fill(bmp, 0)`, `on_dismiss` (only the reserved-name box has
+    /// one).
     fn close(&mut self, c: Closing, out: &mut FrameOut) {
         match c {
             Closing::Input(purpose, accepted, buffer) => {
@@ -578,7 +613,7 @@ impl Shell {
                     out.menu_sounds.push(select);
                 }
                 self.world.keys.clear();
-                self.input_done(purpose, accepted, &buffer);
+                self.input_done(purpose, accepted, &buffer, out);
             }
             Closing::Info(purpose, clear_screen) => {
                 self.world.keys.clear();
@@ -587,13 +622,24 @@ impl Shell {
                 }
                 match purpose {
                     InfoPurpose::NoWeapons | InfoPurpose::Refused(_) => {}
+                    // `mainMenuState.cpp:81-84`: the name box again, on what was typed; the
+                    // replacement wins over the box's pop (`state.hpp:101-105`, fact 15).
+                    InfoPurpose::Reserved { typed, x, y } => {
+                        self.stack.schedule_replace_top(save_as_box(&typed, x, y));
+                    }
                 }
             }
         }
     }
 
     /// An `InputStringState`'s callback (`callback_(accepted_, buffer_)`).
-    fn input_done(&mut self, purpose: InputPurpose, accepted: bool, buffer: &[u8]) {
+    fn input_done(
+        &mut self,
+        purpose: InputPurpose,
+        accepted: bool,
+        buffer: &[u8],
+        out: &mut FrameOut,
+    ) {
         match purpose {
             // `integerBehavior.cpp:56-76` (plan fact 13): on accept with a non-empty result,
             // `atoi`, clamp to the displayed range, store `val * div`; then ALWAYS rewrite the
@@ -623,30 +669,91 @@ impl Shell {
                 item.value = value;
                 item.has_value = true;
             }
+            InputPurpose::SaveSetupAs { x, y } => self.save_setup_as(accepted, buffer, x, y, out),
         }
     }
 
-    /// A selector's `OnSelected` (plan D4). `LevelSelectorState::OnSelected`
-    /// (`fileSelectorState.cpp:95-103`): `[RANDOM]` sets `random_level` and clears `level_file`;
-    /// a file sets `level_file` to its `full_path`; then `settings_menu.UpdateItems`.
-    fn apply_picked(&mut self, p: Picked) {
-        let w = &mut self.world;
-        match p {
-            Picked::Random => {
-                w.settings.random_level = true;
-                w.settings.level_file.clear();
-            }
-            Picked::Level(path) => {
-                w.settings.random_level = false;
-                w.settings.level_file = path;
-            }
-            // LOAD SETUP's continuation is 4½e-2 T4's; nothing pushes the options selector
-            // before it.
-            Picked::Setup { .. } => {
-                debug_assert!(false, "LOAD SETUP's continuation lands with T4");
+    /// `MakeSaveAsState`'s callback and SAVE SETUP AS…'s `on_complete` (`mainMenuState.cpp:
+    /// 69-91`, `:295-306`; plan facts 12, 15, D7). An accepted non-empty name whose leaf the
+    /// store refuses — a shipped or reserved name, or (Rust only) one it cannot place — schedules
+    /// the black `NAME '<leaf>' IS RESERVED` box, with no sound and no completion. Otherwise
+    /// the completion: a non-empty accepted name saves the settings to `Setups/<name>.cfg` and
+    /// becomes the setup's name (a write error is a note and keeps the name); then, always,
+    /// `MenuSelect` + `UpdateItems`.
+    fn save_setup_as(&mut self, accepted: bool, buffer: &[u8], x: i32, y: i32, out: &mut FrameOut) {
+        if accepted && !buffer.is_empty() {
+            let name = dos_to_text(buffer);
+            let leaf = format!("{name}.cfg");
+            if self.store.shadows_system("Setups", &leaf) || !storage::placeable_leaf(&leaf) {
+                let text = format!("NAME '{}.cfg' IS RESERVED", dos_display(buffer));
+                self.stack
+                    .schedule_replace_top(Screen::InfoBox(InfoBoxState::new(
+                        &text,
+                        160,
+                        100,
+                        true,
+                        InfoPurpose::Reserved {
+                            typed: buffer.to_vec(),
+                            x,
+                            y,
+                        },
+                    )));
                 return;
             }
+            let toml = settings_to_toml(&self.world.settings);
+            match self.store.write(&format!("Setups/{leaf}"), toml.as_bytes()) {
+                Ok(()) => self.world.setup_name = name,
+                Err(e) => out.notes.push(format!("SAVE SETUP AS: Setups/{leaf}: {e}")),
+            }
         }
+        let w = &mut self.world;
+        main_menu::play(&mut out.menu_sounds, w.tc.hooks.select);
+        w.settings_menu.update_items(&mut SettingsModel {
+            settings: &mut w.settings,
+            tc: &w.tc,
+            setup_name: &w.setup_name,
+        });
+    }
+
+    /// A selector's `OnSelected` (plan D4), then `settings_menu.UpdateItems`.
+    /// - `LevelSelectorState::OnSelected` (`fileSelectorState.cpp:95-103`): `[RANDOM]` sets
+    ///   `random_level` and clears `level_file`; a file sets `level_file` to its `full_path`.
+    /// - `OptionsSelectorState::OnSelected` (`:222-226` → `Gfx::LoadSettings`, `gfx.cpp:
+    ///   1693-1697`; plan fact 13, D8, D17): a fresh `Settings` from the file and the setup's
+    ///   name. The current match keeps the old settings object — it is detached (T0 P8). A file
+    ///   that does not parse is a note and changes nothing (C++ swaps in a half-read object).
+    fn apply_picked(&mut self, p: Picked, out: &mut FrameOut) {
+        match p {
+            Picked::Random => {
+                self.world.settings.random_level = true;
+                self.world.settings.level_file.clear();
+            }
+            Picked::Level(path) => {
+                self.world.settings.random_level = false;
+                self.world.settings.level_file = path;
+            }
+            Picked::Setup { rel, name } => {
+                let parsed = self
+                    .store
+                    .read(&rel)
+                    .ok_or_else(|| "cannot be read".to_string())
+                    .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
+                    .and_then(|t| settings_from_toml(&t).map_err(|e| e.to_string()));
+                match parsed {
+                    Ok(s) => {
+                        self.world.settings = s;
+                        self.world.setup_name = name;
+                        if self.debug.load_detach
+                            && let Some(m) = self.current.as_mut()
+                        {
+                            m.detach();
+                        }
+                    }
+                    Err(e) => out.notes.push(format!("LOAD SETUP: {rel}: {e}")),
+                }
+            }
+        }
+        let w = &mut self.world;
         w.settings_menu.update_items(&mut SettingsModel {
             settings: &mut w.settings,
             tc: &w.tc,
@@ -742,7 +849,9 @@ impl Shell {
     /// the level (reused as played, or generated from the seed), a new `Match` — already focused,
     /// its `WeaponSelection` constructed — and the router's only write to the sim: replace it.
     fn new_game(&mut self, sim: &mut SimState, input: &ShellInput) -> u32 {
-        if let Some(old) = self.current.take() {
+        // The old selection's picks are the menu's only while the match shares its settings: after
+        // LOAD SETUP they belong to the old settings object (plan fact 17).
+        if let Some(old) = self.current.take().filter(Match::attached) {
             old.write_back_picks(&mut self.world.settings);
         }
         let seed = self.seeds.next_match(input.fresh_seed);
@@ -949,10 +1058,31 @@ impl Shell {
         match self.stack.top() {
             Some(Screen::InfoBox(b)) => match &b.purpose {
                 InfoPurpose::Refused(r) => Some(r),
-                InfoPurpose::NoWeapons => None,
+                InfoPurpose::NoWeapons | InfoPurpose::Reserved { .. } => None,
             },
             _ => None,
         }
+    }
+
+    /// The keyboard the top `InputStringState` wants on a phone, if one is on top (plan D11).
+    pub fn text_mode(&self) -> Option<TextMode> {
+        match self.stack.top() {
+            Some(Screen::InputString(s)) if s.filter.is_some() => Some(TextMode::Numeric),
+            Some(Screen::InputString(_)) => Some(TextMode::Text),
+            _ => None,
+        }
+    }
+
+    /// `GetBasename(GetLeaf(settings_node.FullPath()))`: the setup SAVE SETUP AS… shows (Step
+    /// 4½e-2).
+    pub fn setup_name(&self) -> &str {
+        &self.world.setup_name
+    }
+
+    /// Whether the level the router holds — the boot level, or the last NEW GAME's — was read
+    /// from the settings' level file rather than generated (Step 4½e-2; `LevelSlot::from_file`).
+    pub fn level_from_file(&self) -> bool {
+        self.level.from_file
     }
 
     /// The config store (Step 4½e-1).
@@ -1998,7 +2128,12 @@ mod tests {
                 SI_MAP => ('M', s.map != before.map),
                 LOAD_CHANGE => ('M', s.load_change != before.load_change),
                 SI_REGENERATE_LEVEL => ('M', s.regenerate_level != before.regenerate_level),
-                // Sound only: blood (allow_entry = false), a time, and the e-2 pushes (D6).
+                // The e-2 pushes (Step 4½e-2 T4): the level selector, the options selector and
+                // SAVE SETUP AS…'s name box.
+                SI_LEVEL => ('L', s == before),
+                LOAD_OPTIONS => ('P', s == before),
+                SAVE_OPTIONS => ('I', s == before),
+                // Sound only: blood (allow_entry = false) and a time.
                 _ => ('M', s == before),
             };
             assert_eq!(sh.top_char(), top, "item {id}");
@@ -2417,7 +2552,7 @@ mod tests {
         tap(&mut sh, &mut sim, 57);
         assert_eq!(sim.cycles, cycles, "the match never ticked");
         // Detached, the paused match keeps its own settings: RESUME goes through.
-        sh.current.as_mut().unwrap().detach_for_test();
+        sh.current.as_mut().unwrap().detach();
         let outs = until_routed(&mut sh, &mut sim, DK_F1);
         assert_eq!(outs.last().unwrap().routed, Some(Route::Resume));
         assert_eq!(sim.game_mode, scenario::settings::GM_KILL_EM_ALL);
@@ -2485,7 +2620,7 @@ mod tests {
             start_match(&mut sh, &mut sim);
             to_menu(&mut sh, &mut sim);
             if detach {
-                sh.current.as_mut().unwrap().detach_for_test();
+                sh.current.as_mut().unwrap().detach();
             } else {
                 sh.debug_mut().resume_sync = false;
             }
@@ -2837,5 +2972,471 @@ mod tests {
         assert_eq!(view(&sh), ('P', "./user".into(), 2));
         let o = tap(&mut sh, &mut sim, DK_ESCAPE);
         assert_eq!((sh.top_char(), o.menu_sounds.len()), ('M', 0));
+    }
+
+    // Step 4½e-2 (T4 Step 6): LEVEL, SAVE SETUP AS… and LOAD SETUP live, through their Enter
+    // arms, on the `Fs::install()` system layer (root label `./user`).
+
+    fn data_file(rel: &str) -> Vec<u8> {
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../data")
+                .join(rel),
+        )
+        .unwrap()
+    }
+
+    const WATER_REL: &str = "TC/openliero/Levels/water_stage.lev";
+
+    /// Boot on `store` with the menu faded in (main focus).
+    fn boot_on(store: MemoryStore) -> (Shell, SimState) {
+        let seeds = SeedSource::Scripted {
+            boot: 11,
+            matches: VecDeque::from([21, 22, 23]),
+        };
+        let (mut sh, mut sim, _) = Shell::boot(
+            tc(),
+            Settings::default(),
+            Box::new(store),
+            seeds,
+            0,
+            StartOptions::default(),
+        );
+        idle(&mut sh, &mut sim, 40);
+        (sh, sim)
+    }
+
+    fn taps(sh: &mut Shell, sim: &mut SimState, dos: u32, n: usize) {
+        for _ in 0..n {
+            tap(sh, sim, dos);
+        }
+    }
+
+    /// From the root of a fresh level selector on the install tree to `water_stage` (row 4 of
+    /// Levels) and Return.
+    fn pick_water(sh: &mut Shell, sim: &mut SimState) -> FrameOut {
+        assert_eq!(view(sh), ('L', "./user".into(), 0), "the root, on [RANDOM]");
+        taps(sh, sim, DK_DOWN, 4);
+        taps(sh, sim, DK_RIGHT, 3);
+        taps(sh, sim, DK_DOWN, 4);
+        assert_eq!(view(sh), ('L', "./user/TC/openliero/Levels".into(), 4));
+        tap(sh, sim, DK_RETURN)
+    }
+
+    #[test]
+    fn level_picks_a_file_that_new_game_plays_from_either_layer() {
+        // `both`: the gated both-layers layout (plan D1.1); otherwise the level is in the system
+        // layer only, where C++ plays random and Rust plays the file (Q4, D1.2).
+        let select = hooks().hooks.select;
+        for both in [true, false] {
+            let store = files::tests::install();
+            if both {
+                store.write(WATER_REL, &data_file(WATER_REL)).unwrap();
+            }
+            let (mut sh, mut sim) = boot_store(store);
+            let o = tap(&mut sh, &mut sim, DK_RETURN);
+            assert_eq!(
+                (o.menu_sounds, o.phase, sh.top_char()),
+                (vec![select], Phase::Menu, 'L'),
+                "LEVEL: MenuSelect + push"
+            );
+            let o = pick_water(&mut sh, &mut sim);
+            assert_eq!((o.menu_sounds, sh.top_char()), (vec![select], 'M'));
+            assert_eq!(sh.settings().level_file, WATER_PATH);
+            assert_eq!(level_value(&sh).0, "\"water_stage\"");
+            // Reopen: the cursor is restored.
+            tap(&mut sh, &mut sim, DK_RETURN);
+            assert_eq!(view(&sh), ('L', "./user/TC/openliero/Levels".into(), 4));
+            tap(&mut sh, &mut sim, DK_ESCAPE);
+            tap(&mut sh, &mut sim, DK_ESCAPE);
+            assert_eq!((sh.top_char(), sh.cur_menu()), ('M', CurMenu::Main));
+            let outs = until_routed(&mut sh, &mut sim, DK_F1);
+            assert_eq!(
+                outs.last().unwrap().routed,
+                Some(Route::NewGame { seed: 21 })
+            );
+            assert!(sh.level_from_file(), "both {both}: the file is played");
+            let file = level_path::read_level(sh.store(), tc(), WATER_PATH, true)
+                .expect("water_stage is accepted");
+            let want = generate_level(tc(), sh.settings(), Some(file), 21);
+            assert_eq!(sim.level.material_id, want.material_id, "both {both}");
+            let random = generate_level(tc(), &Settings::default(), None, 21);
+            assert_ne!(want.material_id, random.material_id);
+        }
+    }
+
+    #[test]
+    fn a_random_pick_after_a_file_level_generates_at_new_game() {
+        let (mut sh, mut sim) = boot_store(files::tests::install());
+        tap(&mut sh, &mut sim, DK_RETURN);
+        pick_water(&mut sh, &mut sim);
+        tap(&mut sh, &mut sim, DK_ESCAPE);
+        until_routed(&mut sh, &mut sim, DK_F1);
+        assert!(sh.level_from_file());
+        to_menu(&mut sh, &mut sim); // from the selection: the pause menu
+        tap(&mut sh, &mut sim, DK_F7);
+        enter_on(&mut sh, &mut sim, SI_LEVEL);
+        assert_eq!(view(&sh), ('L', "./user/TC/openliero/Levels".into(), 4));
+        taps(&mut sh, &mut sim, DK_LEFT, 3);
+        assert_eq!(view(&sh), ('L', "./user".into(), 4), "the root, on TC");
+        tap(&mut sh, &mut sim, DK_PGUP);
+        tap(&mut sh, &mut sim, DK_RETURN);
+        assert!(sh.settings().random_level);
+        tap(&mut sh, &mut sim, DK_ESCAPE);
+        sh.main_menu_mut().move_to_id(MA_NEW_GAME);
+        let outs = until_routed(&mut sh, &mut sim, DK_RETURN);
+        assert_eq!(
+            outs.last().unwrap().routed,
+            Some(Route::NewGame { seed: 22 })
+        );
+        assert!(!sh.level_from_file());
+        let want = generate_level(tc(), sh.settings(), None, 22);
+        assert_eq!(sim.level.material_id, want.material_id, "generated");
+    }
+
+    fn input_state(sh: &Shell) -> &overlay::InputStringState {
+        match sh.stack.top() {
+            Some(Screen::InputString(s)) => s,
+            _ => panic!("an entry is on top, not {}", sh.top_char()),
+        }
+    }
+
+    /// Backspace ×`n` (OS repeats), then `t` one char per event, then Return; the Return frame.
+    fn retype(sh: &mut Shell, sim: &mut SimState, n: usize, t: &str) -> FrameOut {
+        for _ in 0..n {
+            let rep = KeyEvent {
+                repeat: true,
+                ..ev(DK_BACKSPACE, true)
+            };
+            step(sh, sim, &[rep], [0, 0]);
+        }
+        type_str(sh, sim, t);
+        tap(sh, sim, DK_RETURN)
+    }
+
+    #[test]
+    fn save_setup_as_refuses_reserved_names_reopens_on_them_and_saves_the_rest() {
+        let select = hooks().hooks.select;
+        let (mut sh, mut sim) = boot_store(files::tests::install());
+        let o = enter_on(&mut sh, &mut sim, SAVE_OPTIONS);
+        let m = sh.settings_menu();
+        let (x, y) = m
+            .item_position(m.index_from_id(SAVE_OPTIONS) as usize)
+            .unwrap();
+        assert_eq!(
+            (o.menu_sounds, o.phase, sh.text_mode()),
+            (vec![select], Phase::Text, Some(TextMode::Text))
+        );
+        let e = input_state(&sh);
+        assert_eq!(
+            (e.buffer.as_slice(), e.max_len, e.x, e.y, e.filter.is_none()),
+            (&b"liero"[..], 30, 280, y, true),
+            "the name box at 178 + 100 + 2"
+        );
+        assert_eq!(
+            (x, e.purpose.clone()),
+            (178, InputPurpose::SaveSetupAs { x: 280, y })
+        );
+        // A bare Return: the reserved box replaces the entry and is presented on the Return
+        // frame (T0 P5): black, through the exepal.
+        let o = step(&mut sh, &mut sim, &[ev(DK_RETURN, true)], [0, 0]);
+        let exe = render::palette::pack_pal32(&hooks().exepal);
+        assert_eq!((sh.top_char(), *sh.pal32()), ('B', exe));
+        assert_eq!(o.present, Some(Present::Frame { fade: 32 }));
+        assert_eq!(sh.surface().get_pixel(0, 0), exe[0]);
+        step(&mut sh, &mut sim, &[ev(DK_RETURN, false)], [0, 0]);
+        let b = top_box(&sh);
+        assert_eq!(
+            (
+                o.menu_sounds,
+                o.upd,
+                o.phase,
+                b.text.as_str(),
+                b.clear_screen
+            ),
+            (
+                vec![select],
+                Phase::Text,
+                Phase::Menu,
+                "NAME 'liero.cfg' IS RESERVED",
+                true
+            ),
+            "one MenuSelect: the entry's own; no completion"
+        );
+        assert_eq!((b.x, b.y, sh.text_mode()), (160, 100, None));
+        assert_eq!(sh.top_refusal(), None);
+        // Any key: the entry again, on what was typed, on the dismissing frame.
+        let o = step(&mut sh, &mut sim, &[ev(57, true)], [0, 0]);
+        assert_eq!(
+            (o.menu_sounds.len(), o.upd, o.phase, sh.top_char()),
+            (0, Phase::Menu, Phase::Text, 'I')
+        );
+        assert_eq!(sh.text_mode(), Some(TextMode::Text));
+        step(&mut sh, &mut sim, &[ev(57, false)], [0, 0]);
+        assert_eq!(input_state(&sh).buffer, b"liero");
+        assert_eq!(
+            input_state(&sh).purpose,
+            InputPurpose::SaveSetupAs { x: 280, y }
+        );
+        // `mine`: saved; two MenuSelects; the value reads `mine`.
+        let o = retype(&mut sh, &mut sim, 5, "mine");
+        assert_eq!((o.menu_sounds, sh.top_char()), (vec![select, select], 'M'));
+        let store = sh.store();
+        assert_eq!(
+            store.read("Setups/mine.cfg"),
+            Some(scenario::settings_toml::settings_to_toml(sh.settings()).into_bytes())
+        );
+        assert_eq!(
+            (sh.setup_name(), item_value(&sh, SAVE_OPTIONS).as_str()),
+            ("mine", "mine")
+        );
+        // `orbmit` is shipped: the box, then the entry on `orbmit`; Esc cancels with two
+        // MenuSelects and saves nothing.
+        enter_on(&mut sh, &mut sim, SAVE_OPTIONS);
+        assert_eq!(input_state(&sh).buffer, b"mine");
+        let o = retype(&mut sh, &mut sim, 4, "orbmit");
+        assert_eq!(
+            (o.menu_sounds, top_box(&sh).text.as_str()),
+            (vec![select], "NAME 'orbmit.cfg' IS RESERVED")
+        );
+        tap(&mut sh, &mut sim, 57);
+        assert_eq!(input_state(&sh).buffer, b"orbmit");
+        let o = tap(&mut sh, &mut sim, DK_ESCAPE);
+        assert_eq!(
+            (o.menu_sounds, sh.top_char(), sh.setup_name()),
+            (vec![select, select], 'M', "mine")
+        );
+        assert_eq!(
+            sh.store().read("Setups/orbmit.cfg"),
+            Some(data_file("Setups/orbmit.cfg"))
+        );
+        // Rust only (D7): a name the store cannot place gets the same box.
+        enter_on(&mut sh, &mut sim, SAVE_OPTIONS);
+        let o = retype(&mut sh, &mut sim, 4, "a/b");
+        assert_eq!(
+            (o.menu_sounds, top_box(&sh).text.as_str()),
+            (vec![select], "NAME 'a/b.cfg' IS RESERVED")
+        );
+        tap(&mut sh, &mut sim, 57);
+        assert_eq!(input_state(&sh).buffer, b"a/b");
+        // An empty Return completes like a cancel.
+        let o = retype(&mut sh, &mut sim, 3, "");
+        assert_eq!(
+            (o.menu_sounds, sh.top_char(), sh.setup_name()),
+            (vec![select, select], 'M', "mine")
+        );
+        let saved: Vec<String> = sh
+            .store()
+            .list("Setups")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(saved, ["liero.cfg", "mine.cfg", "orbmit.cfg"]);
+    }
+
+    #[test]
+    fn number_entry_raises_the_numeric_keyboard() {
+        let (mut sh, mut sim) = settings_focus();
+        assert_eq!(sh.text_mode(), None);
+        enter_on(&mut sh, &mut sim, SI_LIVES);
+        assert_eq!(sh.text_mode(), Some(TextMode::Numeric));
+    }
+
+    #[test]
+    fn the_single_layer_store_refuses_only_the_reserved_name() {
+        // The C++ web build (plan D9): `orbmit` is no separate layer to shadow.
+        let store = MemoryStore::single_layer([
+            ("Setups/liero.cfg", data_file("Setups/liero.cfg")),
+            ("Setups/orbmit.cfg", data_file("Setups/orbmit.cfg")),
+        ])
+        .with_root_label("./user");
+        let (mut sh, mut sim) = boot_store(store);
+        enter_on(&mut sh, &mut sim, SAVE_OPTIONS);
+        tap(&mut sh, &mut sim, DK_RETURN);
+        assert_eq!(top_box(&sh).text, "NAME 'liero.cfg' IS RESERVED");
+        tap(&mut sh, &mut sim, 57);
+        retype(&mut sh, &mut sim, 5, "orbmit");
+        assert_eq!((sh.top_char(), sh.setup_name()), ('M', "orbmit"));
+        assert_eq!(
+            sh.store().read("Setups/orbmit.cfg"),
+            Some(scenario::settings_toml::settings_to_toml(sh.settings()).into_bytes())
+        );
+    }
+
+    fn orbmit() -> Settings {
+        let text = String::from_utf8(data_file("Setups/orbmit.cfg")).unwrap();
+        scenario::settings_toml::settings_from_toml(&text).unwrap()
+    }
+
+    /// F7 (or the settings focus already), LOAD SETUP, Down ×`downs` inside Setups, Return; the
+    /// Return frame.
+    fn load_setup(sh: &mut Shell, sim: &mut SimState, downs: usize) -> FrameOut {
+        tap(sh, sim, DK_F7);
+        let o = enter_on(sh, sim, LOAD_OPTIONS);
+        assert_eq!(
+            (o.menu_sounds, sh.top_char()),
+            (vec![hooks().hooks.select], 'P')
+        );
+        assert_eq!(view(sh), ('P', "./user/Setups".into(), 0), "inside Setups");
+        taps(sh, sim, DK_DOWN, downs);
+        tap(sh, sim, DK_RETURN)
+    }
+
+    #[test]
+    fn load_setup_replaces_the_settings_and_the_name() {
+        let (mut sh, mut sim) = boot_on(files::tests::install());
+        let o = load_setup(&mut sh, &mut sim, 1);
+        assert_eq!(
+            (o.menu_sounds, o.upd, sh.top_char()),
+            (vec![hooks().hooks.select], Phase::Menu, 'M'),
+            "one MenuSelect; the state pops that frame (T0 P4)"
+        );
+        assert_eq!(*sh.settings(), orbmit());
+        assert_eq!(
+            (sh.settings().lives, sh.settings().loading_time),
+            (9, 20),
+            "T0 P4"
+        );
+        assert_eq!(
+            (sh.setup_name(), item_value(&sh, SAVE_OPTIONS).as_str()),
+            ("orbmit", "orbmit")
+        );
+        assert_eq!(item_value(&sh, SI_LIVES), "9", "UpdateItems");
+        assert!(o.notes.is_empty());
+    }
+
+    #[test]
+    fn load_setup_of_a_file_that_does_not_parse_is_a_note_and_changes_nothing() {
+        let store = files::tests::install();
+        store.write("Setups/bad.cfg", b"settings = [[[").unwrap();
+        let (mut sh, mut sim) = boot_on(store);
+        edited(sh.settings_mut());
+        let before = sh.settings().clone();
+        let o = load_setup(&mut sh, &mut sim, 0);
+        assert_eq!(sh.top_char(), 'M');
+        assert_eq!(*sh.settings(), before);
+        assert_eq!(sh.setup_name(), "liero");
+        assert_eq!(o.notes.len(), 1, "{:?}", o.notes);
+        assert!(o.notes[0].starts_with("LOAD SETUP: Setups/bad.cfg: "));
+    }
+
+    #[test]
+    fn load_setup_detaches_a_paused_match_unless_the_switch_is_off() {
+        for detach in [true, false] {
+            let (mut sh, mut sim) = boot_on(files::tests::install());
+            sh.debug_mut().load_detach = detach;
+            start_match(&mut sh, &mut sim);
+            to_menu(&mut sh, &mut sim);
+            let before = live_fields(&sim);
+            let kept = sh.current().unwrap().settings().clone();
+            load_setup(&mut sh, &mut sim, 1);
+            assert_eq!(sh.current().unwrap().attached(), !detach);
+            assert_eq!(live_fields(&sim), before, "the menu never touches the sim");
+            let outs = until_routed(&mut sh, &mut sim, DK_F1);
+            assert_eq!(outs.last().unwrap().routed, Some(Route::Resume));
+            let o = orbmit();
+            let loaded = (
+                o.max_bonuses,
+                o.weap_table.iter().map(|&v| v as i32).collect(),
+                o.game_mode,
+                o.time_to_lose,
+                o.blood,
+                o.loading_time,
+                o.load_change,
+                o.shadow,
+            );
+            assert_ne!(loaded, before);
+            if detach {
+                assert_eq!(
+                    live_fields(&sim),
+                    before,
+                    "the paused game kept its settings (P8)"
+                );
+                assert_eq!(*sh.current().unwrap().settings(), kept);
+            } else {
+                assert_eq!(live_fields(&sim), loaded, "the counterfactual resyncs");
+            }
+        }
+    }
+
+    #[test]
+    fn new_game_after_load_setup_keeps_the_loaded_picks() {
+        // Plan fact 17: the old selection's picks belong to the old settings once detached.
+        let (mut sh, mut sim) = boot_on(files::tests::install());
+        until_routed(&mut sh, &mut sim, DK_RETURN);
+        step(&mut sh, &mut sim, &[], [2, 0]); // P1 Down: the cursor onto weapon slot 1
+        step(&mut sh, &mut sim, &[], [0, 0]);
+        step(&mut sh, &mut sim, &[], [8, 0]); // P1 Right: slot 1's pick cycles
+        let moved = sh.settings().worm_settings[0].weapons;
+        let loaded = orbmit().worm_settings.each_ref().map(|w| w.weapons);
+        assert_ne!(moved, loaded[0]);
+        to_menu(&mut sh, &mut sim);
+        load_setup(&mut sh, &mut sim, 1);
+        assert_eq!(
+            sh.settings().worm_settings.each_ref().map(|w| w.weapons),
+            loaded
+        );
+        tap(&mut sh, &mut sim, DK_ESCAPE);
+        sh.main_menu_mut().move_to_id(MA_NEW_GAME);
+        let outs = until_routed(&mut sh, &mut sim, DK_RETURN);
+        assert_eq!(
+            outs.last().unwrap().routed,
+            Some(Route::NewGame { seed: 22 })
+        );
+        assert_eq!(
+            sh.settings().worm_settings.each_ref().map(|w| w.weapons),
+            loaded,
+            "the menu's picks are the loaded setup's, not the old selection's"
+        );
+        assert!(
+            sh.current().unwrap().attached(),
+            "the new match shares them"
+        );
+    }
+
+    /// A store whose writes fail (a read-only user folder).
+    struct ReadOnly(MemoryStore);
+
+    impl ConfigStore for ReadOnly {
+        fn read(&self, rel: &str) -> Option<Vec<u8>> {
+            self.0.read(rel)
+        }
+        fn write(&self, _rel: &str, _bytes: &[u8]) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "read-only"))
+        }
+        fn shadows_system(&self, subdir: &str, leaf: &str) -> bool {
+            self.0.shadows_system(subdir, leaf)
+        }
+        fn root_label(&self) -> &str {
+            self.0.root_label()
+        }
+        fn list(&self, rel: &str) -> Vec<storage::DirEntry> {
+            self.0.list(rel)
+        }
+    }
+
+    #[test]
+    fn a_save_setup_as_write_error_is_a_note_and_keeps_the_name() {
+        let select = hooks().hooks.select;
+        let seeds = SeedSource::Fixed(3);
+        let (mut sh, mut sim, _) = Shell::boot(
+            tc(),
+            Settings::default(),
+            Box::new(ReadOnly(files::tests::install())),
+            seeds,
+            0,
+            StartOptions::default(),
+        );
+        idle(&mut sh, &mut sim, 40);
+        tap(&mut sh, &mut sim, DK_F7);
+        enter_on(&mut sh, &mut sim, SAVE_OPTIONS);
+        let o = retype(&mut sh, &mut sim, 5, "mine");
+        assert_eq!(
+            (o.menu_sounds, sh.top_char(), sh.setup_name()),
+            (vec![select, select], 'M', "liero"),
+            "the completion's MenuSelect + UpdateItems still run"
+        );
+        assert_eq!(o.notes.len(), 1, "{:?}", o.notes);
+        assert!(o.notes[0].starts_with("SAVE SETUP AS: Setups/mine.cfg: "));
     }
 }

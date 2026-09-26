@@ -143,7 +143,7 @@ pub struct Match {
     /// `sound_hook[SoundBegin]` (`game.cpp:500-503`).
     begin: i32,
     /// Whether the menu's settings are this match's settings (C++: the game holds the same
-    /// `gfx.settings` pointer; plan D7). Set at NEW GAME; e-2's LOAD SETUP clears it.
+    /// `gfx.settings` pointer; plan D7). Set at NEW GAME; LOAD SETUP clears it ([`Match::detach`]).
     attached: bool,
 }
 
@@ -234,9 +234,10 @@ impl Match {
         self.attached
     }
 
-    /// The false arm of [`Match::attached`] before 4½e-2's LOAD SETUP exists.
-    #[doc(hidden)]
-    pub fn detach_for_test(&mut self) {
+    /// LOAD SETUP (Step 4½e-2; finding 1's other half, T0 P8): C++ `LoadSettings` swaps a fresh
+    /// `Settings` into `gfx.settings`, and this match's game keeps the old object. From here on
+    /// RESUME hands it nothing, its selection's picks stay its own, and NEW GAME writes none back.
+    pub fn detach(&mut self) {
         self.attached = false;
     }
 

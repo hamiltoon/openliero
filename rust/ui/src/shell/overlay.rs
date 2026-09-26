@@ -1,7 +1,7 @@
 //! Step 4½e-1 — the two C++ `inputState.cpp` sub-states the settings menu pushes (design §3.3,
-//! §4.5; plan facts 6-9, 12): `InputStringState` (number entry now, SAVE SETUP AS… in 4½e-2), the
-//! only overlay, and `InfoBoxState` (WEAPON OPTIONS' "no weapons" box, the Rust-only refusal
-//! boxes). C++ hands each a lambda capturing `gfx`; Rust tags each with a purpose, and the shell
+//! §4.5; plan facts 6-9, 12): `InputStringState` (number entry; SAVE SETUP AS…'s name, 4½e-2),
+//! the only overlay, and `InfoBoxState` (WEAPON OPTIONS' "no weapons" box, the Rust-only refusal
+//! boxes, SAVE SETUP AS…'s reserved-name box). C++ hands each a lambda capturing `gfx`; Rust tags each with a purpose, and the shell
 //! runs the continuation inside the overlay's update step (`ui::shell::Shell::frame`).
 
 use std::fmt;
@@ -20,13 +20,17 @@ use super::main_menu::{MA_NEW_GAME, MA_RESUME_GAME};
 use super::selection::new_game_config;
 use crate::keys::{DK_BACKSPACE, DK_ESCAPE, DK_KP_ENTER, DK_RETURN};
 use crate::menu::ValueEntry;
-use crate::text::utf8_to_dos;
+use crate::text::{dos_display, utf8_to_dos};
 
-/// What an `InputStringState` edits: C++'s callback, as data. 4½e-2 adds `SaveSetupAs`.
+/// What an `InputStringState` edits: C++'s callback, as data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputPurpose {
     /// `IntegerBehavior::OnEnter`'s entry (`integerBehavior.cpp:36-80`).
     IntegerEntry(ValueEntry),
+    /// SAVE SETUP AS…'s name box (`MakeSaveAsState("Setups", ".cfg", …)`,
+    /// `mainMenuState.cpp:69-91`, `:287-311`; Step 4½e-2): its field's `(x, y)`, which the
+    /// reserved box's reopen reuses.
+    SaveSetupAs { x: i32, y: i32 },
 }
 
 /// `FilterDigits` (`integerBehavior.cpp:34`): `isdigit(k) ? k : 0`.
@@ -126,14 +130,7 @@ impl InputStringState {
     /// 0x80 is itself; every byte `Utf8ToDos` makes above it is a lone UTF-8 continuation byte,
     /// which C++ decodes to U+FFFD (drawn as nothing).
     pub fn display(&self) -> String {
-        let mut s = self.prefix.clone();
-        s.extend(
-            self.buffer
-                .iter()
-                .map(|&b| if b < 0x80 { b as char } else { '\u{FFFD}' }),
-        );
-        s.push('_');
-        s
+        format!("{}{}_", self.prefix, dos_display(&self.buffer))
     }
 
     /// `Draw` (`inputState.cpp:86-97`): restore the strip under the field from `frozen` — the
@@ -217,14 +214,16 @@ impl RefusalGate {
     }
 }
 
-/// What an `InfoBoxState` reports. Neither e-1 purpose has an `on_dismiss` (4½e-2's
-/// `Reserved` chains back into SAVE SETUP AS…).
+/// What an `InfoBoxState` reports. Only `Reserved` has an `on_dismiss`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InfoPurpose {
     /// `WeaponMenuState`'s close refusal (`weaponMenuState.cpp:108`).
     NoWeapons,
     /// A Rust-only refusal box (plan D5).
     Refused(Refusal),
+    /// SAVE SETUP AS…'s `NAME '<leaf>' IS RESERVED` box (`mainMenuState.cpp:79-85`; Step 4½e-2):
+    /// its `on_dismiss` schedules the name box again, on what was `typed`, at `(x, y)`.
+    Reserved { typed: Vec<u8>, x: i32, y: i32 },
 }
 
 /// C++ `InfoBoxState` (`inputState.cpp:166-217`; fact 12). Not an overlay: it draws alone, over

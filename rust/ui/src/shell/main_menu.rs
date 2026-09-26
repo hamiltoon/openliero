@@ -5,6 +5,7 @@ use render::bitmap::Rect;
 use render::font::Font;
 use scenario::storage::ConfigStore;
 
+use super::files::{LevelSelectorState, SetupSelectorState};
 use super::overlay::{
     InfoBoxState, InfoPurpose, InputPurpose, InputStringState, RefusalGate, filter_digits,
 };
@@ -13,7 +14,7 @@ use super::settings_menu::{
 };
 use super::stack::Screen;
 use super::weapon_options::WeaponMenuState;
-use super::{CurMenu, MenuWorld};
+use super::{CurMenu, MenuWorld, save_as_box};
 use crate::keys::{
     DK_DOWN, DK_ESCAPE, DK_F1, DK_F2, DK_F3, DK_F5, DK_F6, DK_F7, DK_F8, DK_F9, DK_KP_ENTER,
     DK_LEFT, DK_PGDN, DK_PGUP, DK_RETURN, DK_RIGHT, DK_UP, K_DOWN, K_FIRE, K_JUMP, K_LEFT, K_RIGHT,
@@ -286,9 +287,30 @@ impl MainMenuState {
                         play(sounds, hooks.select);
                         push = Some(Screen::WeaponOptions(WeaponMenuState::new()));
                     }
-                    // :272-274, :280-311: MenuSelect, then the level selector, the options
-                    // selector and the Save-As entry — 4½e-2's screens; Rust-inert until then (D6).
-                    SI_LEVEL | LOAD_OPTIONS | SAVE_OPTIONS => play(sounds, hooks.select),
+                    // :272-275, :282-285 (Step 4½e-2): MenuSelect + push the level selector or
+                    // the options selector (LOAD SETUP).
+                    SI_LEVEL => {
+                        play(sounds, hooks.select);
+                        push = Some(Screen::LevelSelect(LevelSelectorState::new()));
+                    }
+                    LOAD_OPTIONS => {
+                        play(sounds, hooks.select);
+                        push = Some(Screen::SetupSelect(SetupSelectorState::new()));
+                    }
+                    // :287-311: MenuSelect, then — only while `ItemPosition` finds the item in
+                    // view — the name box on the setup's name at the item's value column
+                    // (`MakeSaveAsState`, :69-91).
+                    SAVE_OPTIONS => {
+                        play(sounds, hooks.select);
+                        let m = &w.settings_menu;
+                        let idx = m.index_from_id(SAVE_OPTIONS);
+                        if let Some((x, y)) =
+                            usize::try_from(idx).ok().and_then(|i| m.item_position(i))
+                        {
+                            let x = x + m.value_offset_x + 2;
+                            push = Some(save_as_box(w.setup_name.as_bytes(), x, y));
+                        }
+                    }
                     // :313-315: the behavior plays its own MenuSelect (plan fact 2); an
                     // IntegerBehavior pushes its number entry (integerBehavior.cpp:56-78).
                     _ => {

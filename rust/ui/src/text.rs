@@ -68,6 +68,49 @@ pub fn utf8_to_dos(s: &str) -> u8 {
     }
 }
 
+/// A DOS byte string as `Font::DrawString` decodes it (e-1 plan fact 8): a byte below 0x80 is
+/// itself; every byte `Utf8ToDos` makes above it is a lone UTF-8 continuation byte, which C++
+/// decodes to U+FFFD (drawn as nothing).
+pub fn dos_display(b: &[u8]) -> String {
+    b.iter()
+        .map(|&c| if c < 0x80 { c as char } else { '\u{FFFD}' })
+        .collect()
+}
+
+/// `cp437.cpp:11-44` `kHighHalf`: the Unicode codepoint of each CP437 byte 0x80..=0xFF (the
+/// table `render::font` draws with).
+#[rustfmt::skip]
+const CP437_HIGH: [char; 128] = [
+    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å',
+    'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ',
+    'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»',
+    '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
+    '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
+    '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀',
+    'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩',
+    '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', '\u{A0}',
+];
+
+/// An entry buffer as a file name (Step 4½e-2, SAVE SETUP AS…; plan D7, design §4.8): a buffer
+/// that is valid UTF-8 as it stands — ASCII, or the untouched initial name — is kept; any other
+/// is decoded byte by byte, ASCII as-is and bytes ≥ 0x80 through CP437 (what `Utf8ToDos` typed).
+/// Rust only: C++ uses the bytes as the path.
+pub fn dos_to_text(b: &[u8]) -> String {
+    match std::str::from_utf8(b) {
+        Ok(s) => s.to_string(),
+        Err(_) => b
+            .iter()
+            .map(|&c| {
+                if c < 0x80 {
+                    c as char
+                } else {
+                    CP437_HIGH[usize::from(c - 0x80)]
+                }
+            })
+            .collect(),
+    }
+}
+
 /// C++ `'0' + n` stored into a `char` (`text.cpp`): the digit for 0..=9, and the same byte
 /// arithmetic (wrapping) outside it.
 fn digit(n: i32) -> char {
@@ -259,6 +302,23 @@ impl UiTc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dos_bytes_decode_for_display_and_for_file_names() {
+        assert_eq!(dos_display(b"ab"), "ab");
+        assert_eq!(dos_display(&[b'a', 0x86]), "a\u{FFFD}");
+        for t in ["å", "ä", "ö", "Å", "Ä", "Ö"] {
+            assert_eq!(dos_to_text(&[utf8_to_dos(t)]), t, "Utf8ToDos round trip");
+        }
+        assert_eq!(dos_to_text(&[b'm', 0x94, b'r', b'k']), "mörk");
+        assert_eq!(
+            dos_to_text("mörk".as_bytes()),
+            "mörk",
+            "valid UTF-8 is kept"
+        );
+        assert_eq!(dos_to_text(&[0x80, 0xE1, 0xFF]), "Çß\u{A0}");
+        assert_eq!(dos_to_text(b"mine"), "mine");
+    }
 
     #[test]
     fn time_to_string_is_minutes_colon_seconds() {

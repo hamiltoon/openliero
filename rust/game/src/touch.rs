@@ -159,6 +159,44 @@ impl TouchKeys {
     }
 }
 
+/// Ticks between two digs while DIG is held ([`DigRepeat`]): one dig every 8 ticks, about 9 a
+/// second, about the speed of a keyboard player tapping.
+pub const DIG_REPEAT_TICKS: u32 = 8;
+
+/// A Rust-only touch convenience (John: "the DIG button isn't working"): during play, holding
+/// DIG keeps digging.
+///
+/// C++ digs once per Left+Right press: `able_to_dig` re-arms only after a tick without both
+/// (`worm.cpp:887-951`). A keyboard player tunnels by holding one direction and tapping the
+/// other, so a held DIG button made one bite and then nothing. While DIG is held, the button's
+/// Left+Right chord is sent on the press tick and then every [`DIG_REPEAT_TICKS`]th tick. The
+/// ticks in between carry the rest of the mask without DIG, so `able_to_dig` re-arms and a held
+/// pad direction walks. DIG + pad right therefore digs a tunnel, as the tapping keyboard player
+/// does. The sim sees ordinary [`ControlState`] words. Outside `game` the mask passes through
+/// untouched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DigRepeat {
+    /// Ticks DIG has been held (0 on the press tick); `None` while it is up.
+    held: Option<u32>,
+}
+
+impl DigRepeat {
+    /// This tick's touch mask for sampling, from the (already [`WeaponTap`]-adjusted) mask `now`.
+    pub fn apply(&mut self, now: u32, phase: Phase) -> u32 {
+        if phase != Phase::Game || now & TOUCH_DIG == 0 {
+            self.held = None;
+            return now;
+        }
+        let t = self.held.map_or(0, |t| t + 1);
+        self.held = Some(t);
+        if t.is_multiple_of(DIG_REPEAT_TICKS) {
+            now
+        } else {
+            now & !TOUCH_DIG
+        }
+    }
+}
+
 /// The longest WEAPON press (in ticks, 1 s) that still counts as a tap for [`WeaponTap`]. It was
 /// 0.3 s at first, but a deliberate phone press often takes 0.3-0.45 s. The headless walk
 /// measured presses of 390-420 ms being dropped. Only a press held longer than this keeps the
@@ -739,5 +777,62 @@ mod tests {
         assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('B', ""));
         shell_tap(&mut sh, sim, DK_ESCAPE);
         assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('I', "text"));
+    }
+
+    #[test]
+    fn a_held_dig_digs_on_the_press_and_every_8th_tick_and_walks_between() {
+        // John: holding DIG made one bite, then nothing (C++ digs once per Left+Right press).
+        let mut dig = DigRepeat::default();
+        let seq: Vec<u32> = (0..17)
+            .map(|_| dig.apply(TOUCH_DIG | TOUCH_RIGHT, Phase::Game))
+            .collect();
+        for (t, m) in seq.iter().enumerate() {
+            let chord = touch_state(*m);
+            let both = chord.get(ControlState::LEFT) && chord.get(ControlState::RIGHT);
+            assert_eq!(both, t % DIG_REPEAT_TICKS as usize == 0, "tick {t}");
+            assert!(
+                chord.get(ControlState::RIGHT),
+                "tick {t}: the pad keeps walking right"
+            );
+        }
+        // Released: plain pass-through, and the next press digs at once.
+        assert_eq!(dig.apply(0, Phase::Game), 0);
+        assert_eq!(dig.apply(TOUCH_DIG, Phase::Game), TOUCH_DIG);
+    }
+
+    #[test]
+    fn a_held_dig_rearms_cpp_able_to_dig_between_digs() {
+        // Model worm.cpp:887-951's gate over the edge-applied words: a dig needs Left+Right with
+        // able_to_dig set, which a tick without both re-arms. A 3 s hold digs about 26 times.
+        let (mut dig, mut prev, mut cur) = (
+            DigRepeat::default(),
+            ControlState::new(),
+            ControlState::new(),
+        );
+        let (mut able, mut digs) = (true, 0);
+        for _ in 0..210 {
+            let now = touch_state(dig.apply(TOUCH_DIG, Phase::Game));
+            cur = ui::keys::apply_key_edges(prev, now, cur);
+            prev = now;
+            if cur.get(ControlState::LEFT) && cur.get(ControlState::RIGHT) {
+                if able {
+                    able = false;
+                    digs += 1;
+                }
+            } else {
+                able = true;
+            }
+        }
+        assert_eq!(digs, 210 / DIG_REPEAT_TICKS as usize + 1);
+    }
+
+    #[test]
+    fn dig_repeat_is_only_for_play() {
+        for phase in [Phase::Menu, Phase::Text, Phase::Weapsel, Phase::Quit] {
+            let mut dig = DigRepeat::default();
+            for _ in 0..10 {
+                assert_eq!(dig.apply(TOUCH_DIG, phase), TOUCH_DIG, "{phase:?}");
+            }
+        }
     }
 }

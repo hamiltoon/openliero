@@ -183,6 +183,9 @@ struct ShellRes {
     /// A quick lone WEAPON tap during play steps one weapon (`game::touch::WeaponTap`).
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the browser has touch
     weapon_tap: game::touch::WeaponTap,
+    /// Holding DIG during play keeps digging (`game::touch::DigRepeat`).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the browser has touch
+    dig_repeat: game::touch::DigRepeat,
     refusal_shown: bool,
     saved: bool,
 }
@@ -575,6 +578,7 @@ fn setup(
             stopped: false,
             touch: game::touch::TouchKeys::default(),
             weapon_tap: game::touch::WeaponTap::default(),
+            dig_repeat: game::touch::DigRepeat::default(),
             refusal_shown: false,
             saved: false,
         });
@@ -1255,7 +1259,8 @@ fn tick_shell(
             0,
             keys,
             Mode::Live,
-            sh.weapon_tap.apply(page_touch(), sh.phase),
+            sh.dig_repeat
+                .apply(sh.weapon_tap.apply(page_touch(), sh.phase), sh.phase),
         ),
         fresh_seed: fresh_seed(),
         now_ms: time.elapsed().as_millis() as u64,

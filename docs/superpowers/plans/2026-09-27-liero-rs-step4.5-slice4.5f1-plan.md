@@ -716,3 +716,185 @@ Batch 1 also reports the addendum's verdicts. The final report (Batch 9) surface
 - the Chromium lines (phone real flow, phone death/respawn with the pinned seed, desktop `?cpu=1|2`, the e-2 phone regression);
 - the Xvfb PNG paths;
 - the audit sweep: 38 `A`, 0 `M`; the two dumpers; the one frozen-file line; `cargo tree` 0 bevy; reproducibility byte-identical.
+
+---
+
+## Addendum T0 (probe results)
+
+Run 2026-09-27 on `claude/cpp-oracle-vcpkg-assets-chcwcm` at `277b4a1`, with the real `Gfx::RunOneFrame` in a temporarily patched `oracle_dump_shell` and the real `Worm::Process` in a temporarily patched `oracle_dump_sim_physics`. Every artefact is in `$S/t0f1/`. Nothing but this addendum is committed.
+
+**Verdict.**
+- P1–P7 are **confirmed**. No contradiction rule fired, so no task text changes (§"Changes to later tasks").
+- **P2 took the "the fill moves `state8`" branch: D5 is necessary**, and it is more than a formality. The C++ garbage is non-zero in most runs, it depends on ASLR in the release build, and the checked build fills it with `0xBEBEBEBE`. Without the fill, a CPU match's `d` lines are not reproducible run to run, and the release and checked builds disagree. With the fill, they agree byte for byte.
+- Two findings sharpen later tasks without changing a rule:
+  - the boot controller also builds a `DumbLieroAI` (never processed);
+  - two KEEP bots finalise selection on the first `W` frame.
+
+  Both are in the notes below.
+
+### Method
+
+- **The patch** is `$S/t0f1/probe_patch.diff` (split as `shell_probe.diff` and `sim_probe.diff`). It lived in the working tree only.
+  - `oracle_dump_shell`:
+    - `#include "ai/predictive_ai.hpp"` and `"worm.hpp"`;
+    - `DetailLine` prints `P` for `cur_menu == &gfx.player_menu`;
+    - after every `d` line, a probe-only `x <frame> ws=<InWeaponSelection> cyc=<cycles>` line, then per worm of `CurrentGame()`: `ctl ai(0 none | 1 dumb | 2 follow) fresh(rand == Rand()) last(%08x) rs(FNV-1a-64 of rand.serialize()) reacts cs(%02x Pack) vis hp=<health>/<settings->health> lives wpn x y`;
+    - in intervention 3's block, after `game.rand.Seed`: every worm's `reacts` is recorded as `|| raw w0=… w1=…` on that frame's `x` line, then zeroed only under `PROBE_ZERO_REACTS=1`.
+  - `oracle_dump_sim_physics`:
+    - under `PROBE_HP=1`: the RNG draws of each `worm->Process` are counted by stepping a copy of the pre-call engine until it equals `game.rand.engine`;
+    - after each `dump`: `H <t> <w> <health> <max> <lives> <visible> <draws> <cs> <bonuses>` to stderr;
+    - under `PROBE_PASSIVE=<w>`: worm `w`'s word becomes Fire only while it is invisible and 0 while visible, so it respawns but never fires (a clean blood-gate signal).
+- **Build:** `source $S/env.sh && cmake --build build/linux-x64 --config Release --target oracle_dump_shell oracle_dump_sim_physics`, and `cmake --build $S/build-chk --target oracle_dump_shell oracle_dump_sim_physics` with the same patch.
+- **Fixtures:**
+  - `$S/t0f1/gen.py` writes the shell scripts and setups:
+    - setups: `keep.cfg`, `random.cfg` and `pick.cfg` are `data/Setups/liero.cfg` with `[player2] controller = 1` and `selectBotWeapons` 2 / 0 / 1; `both.cfg` has both players on 1 with KEEP; `def.cfg` is the shipped file;
+    - every script has `setup <cfg>`, `boot_seed 7` and `detail`, and ends by QUIT (Esc, 35 frames, Esc, Return);
+    - taps: down at *t*, up at *t*+2, the next key at *t*+3.
+  - `$S/t0f1/gensim.py` writes the P7 scenarios: `settings` + `generate <level_seed>` (504×350) + 4½a fuzz (`mt19937(input_seed)() & 0x7f`, worm 0 then worm 1; its seed-4545 stream reproduces `sim_slice4_5a_scales_scenario.txt`'s `input` lines).
+  - `$S/t0f1/scan.py` is a seed scan of Kill'em All, P1 50 / P2 300, MAX BONUSES 10, 3,000 ticks. Its log is `scan.log` / `scan2.log`.
+- **Runs:**
+  - `build/linux-x64/Release/oracle_dump_shell $S/t0f1/<s>.txt $S/t0f1/<s>.out [--ppm-dir …]`;
+  - checked: `ASAN_OPTIONS=detect_leaks=0 $S/build-chk/oracle_dump_shell …`;
+  - `PROBE_HP=1 [PROBE_PASSIVE=w] build/linux-x64/Release/oracle_dump_sim_physics $S/t0f1/<c>.txt $S/t0f1/<c>.out 2> $S/t0f1/<c>.h`.
+- **Analysis:** `p1.py` (the AI-RNG freshness per frame class), `anh.py` (P7 events) and `scan.py` (P7 bands). The PNGs are in `$S/t0f1/png/`.
+
+### P1: the AI seed (`s_seed`, `s_both`): CONFIRMED
+
+`s_seed` (P2 CPU, KEEP, `match_seed 1101, 1102`):
+- **NEW GAME 1:**
+  - F1 at f 40; the new controller at **f 73** (upd `M`, `ws=1`).
+  - P2 is `ai=1 fresh=1 last=00000000 rs=80fdc060c80f19ce` on f 73 and on every `W` frame (74–77).
+  - It stays so on the finalise frame **f 78** (P1's LCTRL; `ws=0`, `lives=15`).
+  - The first `G` tick (**f 79**, `cycles` 1) changes it to `last=2af09813`.
+- **NEW GAME 2** (Down, Return at f 419/422, over the freed first controller):
+  - the new controller at **f 455**, `fresh=1 last=00000000`, the same `rs` as a fresh `Rand()`;
+  - the same through the `W` frames and the finalise frame f 460;
+  - the first tick (f 461) again gives `last=2af09813`.
+- **Both release runs and the checked run** agree on every `last` / `rs` value (the AI's draws do not depend on `reacts`; see P2).
+
+**Two CPUs** (`s_both`, both KEEP):
+- On f 73 both are `fresh=1`, with equal `rs`.
+- From the first tick both carry **identical, separate** streams: `2af09813`, `5fcd70c1`, `3e6cd695`, …, equal on every tick. A shared RNG would put one worm a draw ahead.
+
+**Also observed** (no rule; notes for Batch 4):
+- The **boot controller** (`InitFrameStepping`, the menu background) also builds a `DumbLieroAI` for a controller-1 player: f 0–72 show `ai=1 fresh=1`. It is never processed, and it is replaced at NEW GAME, so D14's "every frame that made a controller" check is the right scope.
+- With **two KEEP bots, selection finalises on f 74**, the first frame after the NEW GAME frame, with no key.
+
+### P2: `reacts` (`s_seed` ×2 release, ×1 checked, each with and without `PROBE_ZERO_REACTS`): the fill MOVES `state8`, so D5 is CONFIRMED AS NECESSARY
+
+**What the new controller's worms held** (`raw`, on the new-controller frame; unchanged on the finalise frame without the fill; `r0,r1,r2,r3` = Down, Left, Up, Right):
+
+| Run | NEW GAME 1 (f 73 / finalise f 78), P2 | NEW GAME 2 (f 455 / f 460), P2 | P1 (human) |
+|---|---|---|---|
+| release, twice (identical) | `0,0,0,0` | `1919958048,1852142437,540963700,1701998652` (`0x72703c20 …`: bytes of the dumper's own `# f … <presents>` header text, from the reused heap) | NG1 `0,0,0,0`; NG2 `0,0,1331314944,4279119` |
+| checked (ASan) | `-1094795586` ×4 (`0xBEBEBEBE`, ASan's malloc fill) | the same | the same |
+| release, other scripts (NG1) | `s_keep` `0,0,668206608,21953`; `s_pick` `0,0,-1038300864,22016`; `s_hp` `-170268880,22035,-170259344,22035`; `s_rgb`, `s_rgb0`, `s_both` `0,0,0,0` | — | pointer halves (`21953` = `0x55c1`, `22016` = `0x5600`: **ASLR-dependent**, different on every run) |
+
+**The effect** (f/d lines, without vs with the fill):
+- Release NEW GAME 1 held 0 and matches.
+- Release NEW GAME 2: the first `state8` difference is **f 611 = its tick 150**. On f 610 P2 is placed for its first spawn (`x=468 y=191`, still `vis=0`), so its AI walks. The garbage `reacts[kRfRight]` / `[kRfDown] > 0` then presses Right: P2's word is **`0d`** (Up+Left+Right) against **`05`** with the fill (`worm.cpp:680-686`).
+- Checked NEW GAME 1: the first difference is **f 229 = tick 150**. P2's word is **`49`** (Up+Right+Jump, because `reacts[kRfDown]` is negative) against **`09`**.
+- **With the fill, the release and checked outputs are byte-identical** on every `f`/`d` line. Without it they differ from f 229.
+
+So:
+- The stale read happens in the **placed-but-invisible** window before the first spawn (and after every death), exactly where D5's persisted Rust `reacts` (0 from `from_init`, then last visible tick's value) is read.
+- **No `reacts` write before the first AI read was found**: the value on the finalise frame equals the constructor's garbage, so fact 2 stands.
+- **Human worms:** `s_rgb` and `s_rgb0` hold different P1 garbage (`0,0,945293472,21861` vs `-699465776,21920,-697395120,21920`) and give **equal `state8` on all 558 frames** (two idle visible humans for about 330 ticks). This is consistent with fact 2 ("no human path reads it stale") and with D5's claim that intervention 3′ is a no-op on every existing case, which T5 Step 4 proves.
+
+### P3: CPU weapon selection (`s_random`, `s_keep`, `s_pick`): CONFIRMED
+
+- **RANDOM** fails on its NEW GAME frame: `frame 73: the WeaponSelection constructor drew the RNG (intervention 3's precondition)`. D2's premise holds.
+- **KEEP** runs to `end` (276 frames). P2 needs no key: selection finalises on P1's DONE (f 78). With two KEEP bots it finalises on f 74 with no key (P1).
+- **PICK** (P2's keys: Down f 75, Right f 78, Up f 81 and f 84, Right Ctrl f 87; then P1's R at f 90 and LCTRL at f 93):
+  - selection finalises only at **f 93**;
+  - the f 86 PNG (`png/pick_f0086.png`) shows P2's WEAPON 1 changed from BAZOOKA to **BIG NUKE**, with the cursor on **DONE!**;
+  - P2's `cs` on `W` frames is `00`, except **`10` on f 87–88** (Right Ctrl held). The arrows are consumed by `PressedOnce` / `Release`, so they never show on a post-frame word;
+  - P2's AI is `fresh=1 last=0` on every `W` frame and on f 93;
+  - the first draw is on the first `G` tick, f 94 (`last=2af09813`).
+
+  So the AI does not run in selection, and P2's keys drive a PICK bot's menu (facts 5, 6).
+
+### P4 (desk + a real boot): no generated names: CONFIRMED
+
+- `Settings::GenerateName`'s body is `#if 0` (`settings.cpp:165-207`).
+- **A real boot:** `data/` was copied to `$S/t0f1/p4root` without `Setups/`, then `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout 8 build/linux-x64/Release/openliero --config-root $S/t0f1/p4root` (exit 124). The boot saved the defaults with `name = ''` and `randomName = true` for all three players.
+- That file, with `recordReplays = true` → `false` (intervention 6), hashes to **`bc29c9d5ce487a40`**. This is byte-for-byte the committed `shell_cfg_default.txt` line `file Setups/liero.cfg bc29c9d5ce487a40`, and the `cfg16` of the shipped `liero.cfg` in the probes' `d` lines. Fact 21 holds.
+
+### P5: HEALTH reaches RESUME (`s_hp`, `s_hp0`; `match_seed 1501`): CONFIRMED
+
+- **The fixture.** A first attempt pressed only P1's DONE, and with a human P2 the match stayed in selection. The committed fixture presses `R`+`UP` then `LCTRL`+`RCTRL` (both DONE, f 75/78).
+- **The path:** play f 79–280 → Esc f 281 → F5 f 319 (`d` cur `P`) → Down ×3 → Return f 331 (top `I`) → Backspace ×3, `3`, `0` → Return f 352 → Esc → F1 f 361.
+- **While paused,** P1's `settings->health` reads **30** (from f 352) and its `health` stays 100.
+- **The first resumed tick is f 395** (`cycles` 234 → 235): P1 `hp=30/30`. `s_hp0` keeps `100/100`.
+- `state8` is equal through f 394 and **differs from f 395 on** (200 `G` frames differ, 235 equal).
+- So T3 Step 2 (`apply_live_settings` writes `max_health`) and the next tick's clamp are right.
+
+### P6: the colour reaches the palette at RESUME (`s_rgb`, `s_rgb0`; `match_seed 1601`): CONFIRMED
+
+- **The path:** F5 f 319 → Down ×4 (Red) → Left held f 334–374 (`cfg16` changes at f 337, 370, 373) → Esc → F1 f 380.
+- **`state8` is equal on all 558 frames,** and the `x` lines are equal except the `reacts` garbage.
+- **The presented frames:**
+  - equal up to the edit;
+  - different on f 337–376 (the Red bar);
+  - **equal again on f 377–413**: the main menu after Esc still shows the old palette;
+  - **different on every `G` frame from f 414** (the first presented game frame after RESUME) to f 512: 31–32 pixels of P1's worm, e.g. (33, 133) `1a2a66` vs `2a2a66`, the red channel only (`png/rgb_f0420.png` vs `png/rgb0_f0420.png`);
+  - equal on f 513–514 (fade 0, black);
+  - different again in the menu from f 515.
+- So `Game::Focus` re-applies the ramps at RESUME and not before, and D9 stands.
+
+### P7: per-worm health in the sim: CONFIRMED
+
+**`hp_scales`** (Scales, P1 30, P2 200, lives 5, `seed 5`, `generate 9701`, input seed 4545, 1,500 ticks):
+- Neither worm ever exceeds its own max (peaks 30 / 200).
+- **Wraps into an extra life:**
+  - P1 at 30: t202 30 → 11, lives 5 → 6; also t278, t509, t701, t934, t1362, t1438;
+  - P2 at 200: t229 200 → 1, lives 5 → 6; also t394, t613, t796, t1054, t1305.
+- **Deaths re-add the dying worm's own max:** P1 t219 (→ 30); P2 t278 1 → 190 (−10 + 200).
+- **Scales respawns keep the health** (`worm.cpp:795` resets only outside Scales): for example, P1 respawns at 11, 20 and 8.
+
+**`hp_bonus`** (Kill'em All, P1 50, P2 300, MAX BONUSES 10):
+- The clamp holds (peaks 50 / 300).
+- **Respawns restore each worm's own max** (P1 50 at t180, t592 and t948; P2 300 at t215).
+- No pickup happened in 1,500 ticks, nor in 3,000 with a passive worm, so a seed scan was run (`scan.py`, 120 seeds × 3,000 ticks, P1 50 / P2 300).
+
+**The health bonus scales by the picking worm's max** (`(rand(51) + 10) * max / 100`: 5..30 for 50, 30..180 for 300, and 10..60 if it used 100):
+- P2 unclamped:
+  - seed 46: 221 → 290 (+69);
+  - seed 91: 194 → 284 (+90);
+  - seed 94: 190 → 262 (+72) and 258 → 300;
+  - seed 97: 207 → 285 (+78);
+  - seed 61: 174 → 300 (≥ 126).
+
+  Every one is a multiple of 3 and above 60.
+- P1:
+  - seed 37: 14 → 29 (+15 = 30 × 50 / 100);
+  - seed 107: 21 → 29 (+8);
+  - seed 10: 28 → 50 (clamped).
+
+**The low-health blood gate is `health < own max / 4`.** On visible ticks without Fire, a pickup, a life change or a bonus change:
+- every tick below the worm's own quarter drew (0 non-drawing ticks in 120 runs);
+- **P2 at 25 ≤ health < 75:** every such tick drew, in all 8 seeds that reached the band (1,775 of 1,775 ticks; seed 5 alone 786). A gate at 100 / 4 would draw on none of them;
+- **P1 at 12 ≤ health < 25:** about 90 % drew nothing (for example seed 0: 568 vs 62). The ~10 % is the same background rate as above the band (730 vs 79), from other draws. A gate at 100 / 4 would draw on all of them.
+
+**Also recorded for Batch 2's tests** (the source, no rule): Scales `DoDamage` has two arms (`game.cpp:566-589`):
+- unattributed or self damage splits the amount among the other worms: `DoHealingDirect(*other, k_)`;
+- damage by another worm heals **that attacker** by the full amount: `DoHealingDirect(*worms[by_idx], amount)`.
+
+Both arms wrap at the healed worm's own max. With two worms, "heals worm 1 against worm 1's max" holds in both.
+
+### Restore
+
+- `git checkout -- src/tools/oracle_dump/shell_dump.cpp src/tools/oracle_dump/sim_physics_dump.cpp`, then both targets were rebuilt in `build/linux-x64` (Release) and in `$S/build-chk`. `git status --short src` is empty.
+- **The restored binaries are byte-identical** (`cmp`) to the goldens, under both builds: `shell_boot_idle.txt`, `shell_milestone.txt`, `sim_slice4_5e_small.txt` and `sim_slice4_5e_tall.txt`. `git status --porcelain rust/oracle-tests/golden` is empty.
+- No Xvfb was started. No `/tmp/oracle_shell_fs_*` remains. The PPM dirs and `p4root` were deleted.
+
+### Changes to later tasks (the contradiction rules applied; these supersede the task text above)
+
+**None.** No probe contradicted the plan: P2 took its "D5 confirmed as necessary" branch. D1–D17 and T1–T10 stand as written.
+
+Notes for the batches (clarifications, not rule changes):
+1. **Batch 4, T5 Step 5 smoke 1** (the scratch build without intervention 3′): expect **different** `d` lines under the checked build from the CPU's first placement (tick 150), and ASLR-dependent results under release. Record it as P2 did. A release run that happens to match proves nothing.
+2. **Batch 4, T4:** the `ai` directive's `reacts` fill is load-bearing for the checked `CHECKED_DUMPER` `cmp` in T6 Step 3. Without it the checked dumper would write different bytes (`0xBEBEBEBE`).
+3. **Batch 4, T5 check 3″:** scoped to controllers made by a NEW GAME, as D14 says. The boot controller's never-processed `DumbLieroAI` needs no check.
+4. **Batch 7, T8 `cpu_vs_cpu`:** with two KEEP bots, selection finalises on the first frame after the NEW GAME frame with no key (f 74 here), so the match starts at once.
+5. **Batch 2, T1 / T2:** the AI's first stale `reacts` read comes at the CPU's first placement (about tick 150, pos set, `visible` false). Rust's `reacts` must be 0 there (from `from_init`) and must not be reset on death or respawn (pitfall 12). The P7 blood-gate and bonus bands above are the numbers to pin in T1 Step 2's tests.

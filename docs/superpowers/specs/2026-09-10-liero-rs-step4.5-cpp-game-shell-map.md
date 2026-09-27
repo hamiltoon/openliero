@@ -294,6 +294,16 @@ but it counts `enabled_weaps` once, in its constructor (`:35-39`), and never aga
 - The `Randomize` menu item re-rolls all 5 in the same rejection loop (`weapsel.cpp:316-337`).
 - `enabled_weaps` counts `weap_table[i] == 0` (`weapsel.cpp:35-39`).
 - Bots auto-ready: `is_ready[i] = (ws.controller != 0 && select_bot_weapons != 1)` (`weapsel.cpp:95`).
+- (**4½f-1**, plan facts 6–8; T0 P1, P3.) BOT WEAPONS is **one global** setting (`hiddenMenu.cpp:10`, `:34`):
+  0 RANDOM draws all five picks of every bot with `game.rand(1, 41)` in the constructor (`:57-61`), 1 PICK leaves
+  the bot unready, 2 KEEP readies it with its saved picks. The C++ default is `select_bot_weapons{true}` = 1 = PICK
+  (`settings.hpp:24`), and both shipped setups say `selectBotWeapons = 1`. A PICK bot's menu is driven by **the keys
+  bound to that player** (`FindControlForKey` never reads `controller`, `game.cpp:87-106`); no AI runs in selection
+  (T0 P3: the CPU's `rand` is untouched through every `W` frame and the finalise frame). With two KEEP bots the
+  selection finalises on the first frame after NEW GAME, with no key. `Finalize` runs `InitWeapons` then
+  `game.ReleaseControls()` (`weapsel.cpp:350-358`, `game.cpp:110-118`), so a CPU starts its first tick from an
+  empty word. A RANDOM bot draws in the constructor, so it cannot appear in an `oracle_dump_shell` case
+  (intervention 3's precondition); G-AI `ai_vs_ai` gates RANDOM through the sim dumper's `weapsel` instead.
 
 **Therefore the number of RNG draws consumed before frame 0 depends on the players' saved weapon
 picks, `weap_table`, and `select_bot_weapons` — this must be ported bit-exact.** Confirmed by the
@@ -467,7 +477,13 @@ Other pickers: replays (`.LRP`, `<config>/Replays`, `fileSelectorState.cpp:160-1
 - `kSelectableWeapons=5`, `kZoneCaptureTime=70`, `kNumWormSettings=3` (0=left, 1=right, **2=network**), `kNetworkPlayerIdx=2`, `kConfigVersion=6`.
 - Constructor defaults (`settings.cpp:23-60`): worm colours 32 / 41 / 32; default DOS scancodes `{0x13,0x21,0x20,0x22,0x1D,0x2A,0x38}` (P1) and `{0xA0,0xA8,0xA3,0xA5,0x75,0x90,0x36}` (P2); default RGB `{104,104,252}` / `{60,172,60}`.
 
-`WormSettings : WormSettingsExtensions` — `src/game/worm.hpp:85` / `:44`: `health=100`, `controller`
+`WormSettings : WormSettingsExtensions` — `src/game/worm.hpp:85` / `:44`: `health=100` (**each worm's own max
+health, read live by the sim** — 4½f design finding 6, 4½f-1 plan fact 11: `game.cpp:158` (`ResetWorms`), `:558-563`
+(`DoHealingDirect`), `:607` (`DoHealing`); `worm.cpp:213` (the clamp), `:292-296` (the health bonus, scaled by the
+picker's own max), `:355` (low-health blood: `health < own max / 4`), `:386` (Scales' extra life), `:795` (respawn);
+`viewport.cpp:85` (the lifebar). Scales heals the *other* worm against *its own* max (`game.cpp:566-589`). Shared
+through `shared_ptr<WormSettings>`, so a HEALTH edit reaches a paused match at RESUME (T0 P5). `oracle_dump_sim_physics`
+already starts each worm at its own health on the `settings` path, plan fact 14), `controller`
 (0 human / 1 DumbAI / 2 FollowAI), `controls[7]`, `controls_ex[8]` (adds DIG), `gamepad_controls[8]`
 (encoding: 0..99 = SDL button, `100 + axis*2 (+1)` = axis pos/neg, `worm.hpp:74-77`), `input_device`,
 `gamepad_name`/`gamepad_serial`, `weapons[5]`, `name`, `rgb[3]` (0..255), `random_name`, `color`,
@@ -555,6 +571,13 @@ Wired at controller construction (`localController.cpp:38`, `:45`); ticked in
 `LocalController::Process` *before* `game.ProcessFrame()`, alternating worm order by
 `game.cycles % 2` (`localController.cpp:155-165`), with wall-clock timing fed to
 `stats_recorder->AiProcessTime` (`:162-163`).
+(**4½f-1**, plan fact 5.) Only in `kStateGame` / `kStateGameEnded`, per sim step: `kPhase = game.cycles % 2`, then
+worm `(i + kPhase) % size` runs its AI if it has one, then `RecordFrame`, then `game.ProcessFrame()`. Weapon selection
+never runs an AI, and the frame that finalises it runs no tick (`if … else if`, `:123-153`); the Esc fade and the
+180-frame post-mortem are `kStateGame` / `kStateGameEnded`, so the AI runs on every tick the match processes. Human
+key events arrive in `Gfx::ProcessEvent` before `Process`, and **a CPU still receives the key events bound to it**
+(plan fact 6), so the AI starts from the post-key word. The boot controller (`InitFrameStepping`, the menu
+background) builds a `DumbLieroAI` for a controller-1 player too, but it is never processed (T0 P1).
 
 **`DumbLieroAI::Process`** — `src/game/worm.cpp:477-696` (~220 LOC). Faithful port of the original:
 picks the nearest worm, computes a max engagement distance from the current weapon's
@@ -562,6 +585,30 @@ picks the nearest worm, computes a max engagement distance from the current weap
 `common.ai_params.k[state][control]` (from `tc.cfg`), and aims by scanning the 128-entry
 `cossin_table` for the direction closest to the normalised delta (`worm.cpp:543-556`; note the
 comment about the original's `0xC000` bug).
+(**4½f-1**, plan facts 3, 4; ported line for line as `sim::ai::DumbLieroAi`, gated by G-AI.) The draws of one call, in
+order: **Fire** `rand(k[fire][kFire])` **only** when `real_dist < max_dist || !visible` (`:513-518`), otherwise, if
+visible, `Release(kFire)` and no draw; **Jump** one draw, always; **Change** one draw, always; the **fallback** `rand(16)`
+only when the scan found nothing and the quadrant arm is one of the six `64/80/96/48/32/12 + rand(16)` arms (the other
+four — `80`, `116`, `48`, `12`, where `real_dist == 0` lands — draw nothing, `:557-593`); then, **when Change is
+pressed** (read again after its toggle, `:622`), Left then Right (one draw each) and, with the rope out and attached,
+Up then Down, else `Release(kUp/kDown)`; otherwise walk / aim / the two `reacts` arms with no draw. Every `rand(k)`
+draws whatever `k` is (`rand(0)`, `rand(1)` return 0 after drawing). The target is the other worm with the smallest
+`x*x + y*y` of the `Ftoi` positions (first or strictly closer); `max_dist = (time_to_explo - time_to_explo_v / 2) *
+speed / 130` when `0 < time_to_explo < 500`, else `speed - gravity / 10`, then `max(…, 90)`; `real_dist =
+VectorLength(Ftoi(delta))` (integer square root); `delta /= real_dist` truncates toward zero per component
+(`math/rect.hpp:41-45`), `Zero()` at 0; the scan is `dir` in `1..128` (index 128 is never read). The TC's `ai_params`
+are `k[1]` = on, `k[0]` = off: up/down 20/120, left/right 20/50, fire 80/80, change 60/300, jump 1/400 (so a pressed
+jump always releases next tick). A dead CPU toggles Fire, and the dead arm's `PressedOnce(kFire)` readies it: it
+respawns by itself.
+**`Worm::reacts` is uninitialised, and only the AI reads it stale** (4½f design finding 2, plan fact 2, T0 P2):
+`int reacts[4]` has no initialiser (`worm.hpp:260`) and `make_shared<Worm>()` does not zero it;
+`CalculateReactionForce` rewrites it only inside `Worm::Process`'s visible branch (`worm.cpp:135-144`, `:218-280`),
+while `DumbLieroAI::Process` reads it (`:680-694`) from the CPU's first placed-but-invisible tick (and after every
+death). T0 saw release-build heap garbage (ASLR-dependent pointer halves, bytes of the dumper's own text) and ASan's
+`0xBEBEBEBE`, which changed the CPU's word from tick 150 (`0d` vs `05`, `49` vs `09`). It is snapshotted but **not
+hashed** (`stateHash.hpp:19-50`). Rust keeps `WormState::reacts` between ticks from 0; both dumpers zero C++'s copy
+where no code under test has run (`oracle_dump_sim_physics`'s `ai` fill, `oracle_dump_shell`'s intervention 3′) — a
+documented divergence only where C++ is UB.
 
 **`FollowAI`** — `predictive_ai.cpp` (898 LOC) + `.hpp` (365) + `dijkstra.hpp` (258) +
 `work_queue.hpp` (130). A predictive planner: generates candidate input plans from a weighted model
@@ -571,8 +618,9 @@ comment about the original's `0xC000` bug).
 
 ### RNG / determinism notes
 
-- **Both AIs use their own `Rand` member**, not `game.rand`: `DumbLieroAI::rand` (`worm.hpp:133`), `FollowAI::rand` (`predictive_ai.hpp:342`). They never disturb the sim RNG stream — but their *outputs are worm control states*, so they are fully sim-affecting via input. (How `DumbLieroAI::rand` is seeded must be pinned down in the 4½f design — the dumper needs a fixed seed.)
+- **Both AIs use their own `Rand` member**, not `game.rand`: `DumbLieroAI::rand` (`worm.hpp:133`), `FollowAI::rand` (`predictive_ai.hpp:342`). They never disturb the sim RNG stream — but their *outputs are worm control states*, so they are fully sim-affecting via input. (How `DumbLieroAI::rand` is seeded must be pinned down in the 4½f design — the dumper needs a fixed seed.) **Answered (4½f design finding 1, 4½f-1 plan fact 1, T0 P1):** a default-constructed `Rand` — `std::mt19937 engine{0x1337U}`, `last = 0` (`rand.hpp:15-16`) — made fresh per CPU player per NEW GAME and never reseeded. The only `Seed` calls are `game.rand` and `gfx.rand` from the clock (`game.cpp:42`, `gameEntry.cpp:23`) and the F8 weapon randomiser's *local* `Rand r; r.Seed(14)` (`mainMenuState.cpp:465-470`), which is not an AI. Two CPUs in one match draw identical but separate streams; no dumper seed override is needed.
 - `Worm::ai` is a `shared_ptr<WormAI>` explicitly **excluded from snapshots** ("transient, rebuilt on load", `cereal_types.hpp:329`); its RNG state is not serialised. Consequently AI is single-player only.
+- (**4½f-1**, plan facts 15, 16.) Three committed sim setups (`golden/sim_slice4_5a_{killemall,gametag,scales}_setup.cfg`) have a controller-2 player 2; the sim dumper never creates an AI, so they play as two humans, which is why Rust refuses FollowAI (John's Q2) only at the menu's NEW GAME, never in `build::validate` and never at RESUME (CONTROLLER does not reach a running match: the AI objects are made in the `LocalController` constructor only).
 - Netplay force-disables it: `RollbackController::Focus` sets `w->settings->controller = 0` for all worms before weapon select (`controller/rollbackController.cpp:401`).
 - `HiddenMenu::kSelectBotWeapons` (RANDOM/PICK/KEEP) controls the weapsel interaction: RANDOM(0) re-rolls bot weapons from `game.rand`, PICK(1) leaves the bot not ready, its menu driven by the keys bound to that worm (the AI never runs during selection; 4½c design finding 2), KEEP(2) auto-readies with saved picks (`weapsel.cpp:57`, `:95`).
 

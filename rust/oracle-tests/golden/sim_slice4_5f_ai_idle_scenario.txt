@@ -1,0 +1,21 @@
+# Step 4½f-1 T6 — G-AI `ai_idle` (504x350): P2 the CPU against an idle human P1 (no input), default picks, Kill'em All lives 3; 3000 ticks (or a game over + 200). Read by BOTH
+# the C++ dumper (oracle_dump_sim_physics: `generate` = the REAL
+# Level::GenerateFromSettings over its own Rand seeded 45101; `settings` = the real
+# Settings::FromToml + the LocalController start state; `ai` = a REAL DumbLieroAI per
+# controller-1 player, run in LocalController's order before each tick) and the Rust gate
+# (sim_slice4_5f_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5f1_sim -- gen ai_idle 143 4501 <this file>
+# level_seed 45101 (fixed per case); seed = the game seed.
+# LEDGER (Rust, driven state): never over
+# LEDGER ai: runs 3000 per worm; fire draws 1895; fallback 12:150; change 621; rope-attached 144; reacts presses L 74 R 0; max_dist arms explo 503 speed 2497 floored 0; deaths 0 1; respawns 0 1
+# LEDGER detail: CPU worms w1; walk 962; fire in range 1415; min real_dist (both visible) 149; CPU weapons held BAZOOKA, GRASSHOPPER; tick-1 rand.last - 2af09813; the two AI streams first differ at -; tick-0 rng 00000000
+# LEDGER detail: w1 picks BAZOOKA (tte 0, speed 200), BAZOOKA (tte 0, speed 200), BAZOOKA (tte 0, speed 200), BAZOOKA (tte 0, speed 200), BAZOOKA (tte 0, speed 200)
+# LEDGER detail: deaths at t2067/w1 by w1
+# LEDGER detail: respawns at t2340/w1 at 100
+# Inputs: per tick Rand(input_seed).next_u32() & 0x7f, worm 0 then worm 1 (zero pairs
+# omitted); a CPU's and an idle human's word is 0.
+seed 143
+generate 45101
+ticks 3000
+settings sim_slice4_5f_ai_idle_setup.cfg
+ai

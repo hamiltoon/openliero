@@ -1,13 +1,13 @@
 // Generates the C++ side of the Rust shell gates G2 (Step 4½, slice 4½d; design §6.2-§6.6), G2e-1
-// (slice 4½e-1) and G2e-2 (slice 4½e-2; rust/oracle-tests/tests/shell_golden.rs). The REAL
-// Gfx::RunOneFrame runs headlessly — the REAL StateStack, MainMenuState (and its settings focus),
-// WeaponMenuState, InputStringState, InfoBoxState, LevelSelectorState, OptionsSelectorState,
-// GamePlayState, LocalController (weapon selection with its 12/3 repeat, the Esc fade, game over),
-// Game::ProcessFrame / Draw, UpdateMenuPalettes, DrawBasicMenu and Flip -> Gfx::Draw -> ScaleDraw
-// into a 320x200 ARGB surface through a software renderer. Each frame the dumper pushes that
-// frame's script events (SDL_PushEvent: key events and text events, in file order within the
-// frame) and calls RunOneFrame; it writes a `boot` line after InitFrameStepping, one `f` line per
-// frame and an `end` line (formats: docs/superpowers/plans/
+// (slice 4½e-1), G2e-2 (slice 4½e-2) and G2f-1 (slice 4½f-1; rust/oracle-tests/tests/
+// shell_golden.rs). The REAL Gfx::RunOneFrame runs headlessly — the REAL StateStack, MainMenuState
+// (and its settings focus), WeaponMenuState, InputStringState, InfoBoxState, LevelSelectorState,
+// OptionsSelectorState, GamePlayState, LocalController (weapon selection with its 12/3 repeat, its
+// DumbLieroAI CPU players, the Esc fade, game over), Game::ProcessFrame / Draw, UpdateMenuPalettes,
+// DrawBasicMenu and Flip -> Gfx::Draw -> ScaleDraw into a 320x200 ARGB surface through a software
+// renderer. Each frame the dumper pushes that frame's script events (SDL_PushEvent: key events and
+// text events, in file order within the frame) and calls RunOneFrame; it writes a `boot` line after
+// InitFrameStepping, one `f` line per frame and an `end` line (formats: docs/superpowers/plans/
 // 2026-09-26-liero-rs-step4.5-slice4.5d-plan.md, Task 8; the tops O/I/B and the opt-in lines:
 // docs/superpowers/plans/2026-09-26-liero-rs-step4.5-slice4.5e1-plan.md, §Formats pinned; the
 // tops L/P: docs/superpowers/plans/2026-09-26-liero-rs-step4.5-slice4.5e2-plan.md, §Formats
@@ -20,7 +20,16 @@
 //   3. game seed: after a frame that made a new controller, its Game's rand.Seed(<that seed>). The
 //      Game ctor seeds from time(nullptr) and GamePlayState::Enter already ran the
 //      WeaponSelection constructor: the reseed is exact only if it drew nothing, which is CHECKED
-//      (the rand must still equal a fresh Rand seeded with a time value of that frame);
+//      (the rand must still equal a fresh Rand seeded with a time value of that frame).
+//      In the same block (4½f-1): intervention 3′ zeroes every worm's `reacts` — `int reacts[4]`
+//      is uninitialised (worm.hpp:260) and DumbLieroAI::Process reads it stale (worm.cpp:680-694)
+//      from the CPU's first placed-but-invisible tick, so the heap garbage (ASLR-dependent in
+//      release, 0xBEBEBEBE under ASan) would steer the CPU; the Rust WormState starts it at 0 and
+//      no human path reads it stale (design finding 2). Check 3″ fails a case unless every new
+//      DumbLieroAI's rand equals a fresh Rand() (mt19937(0x1337), last 0: nothing seeds or draws
+//      the AI RNG before the first tick), and the FollowAI guard fails a case whose NEW GAME has
+//      a controller-2 player (FollowAI is unported; 4½f Q2). The boot controller's AIs are never
+//      processed and need neither;
 //   4. no stats screen: that Game's stats_recorder becomes the base StatsRecorder, so game over
 //      pops to the menu (gamePlayState.cpp:57-71, :93); 4½g drops this;
 //   5. pacing: gfx.last_frame = 0 before each frame; Flip adds 14 per present
@@ -97,6 +106,7 @@
 #include <utility>
 #include <vector>
 
+#include "ai/predictive_ai.hpp"
 #include "common.hpp"
 #include "controller/controller.hpp"
 #include "fileSelectorState.hpp"
@@ -117,6 +127,7 @@
 #include "stats_recorder.hpp"
 #include "weaponMenuState.hpp"
 #include "weapsel_drive.hpp"
+#include "worm.hpp"
 
 namespace {
 
@@ -807,7 +818,7 @@ int main(int argc, char** argv) {
     std::time_t const kT1 = std::time(nullptr);
     std::string const kAt = "frame " + std::to_string(frame) + ": ";
     if (gfx.controller.get() != kBefore) {
-      // A NEW GAME made a controller: interventions 3 and 4.
+      // A NEW GAME made a controller: interventions 3, 3′ and 4, check 3″ and the FollowAI guard.
       if (next_seed >= kCase.match_seeds.size()) {
         Fail(kAt + "a NEW GAME with no match_seed left");
       }
@@ -829,6 +840,16 @@ int main(int argc, char** argv) {
         Fail(kAt + "the WeaponSelection constructor drew the RNG (intervention 3's precondition)");
       }
       game.rand.Seed(kCase.match_seeds[next_seed++]);
+      for (auto const& w : game.worms) {
+        if (dynamic_cast<FollowAI const*>(w->ai.get()) != nullptr) {
+          Fail(kAt + "a FollowAI player (unported; 4½f Q2): make it Human or CPU");
+        }
+        auto const* const kDumb = dynamic_cast<DumbLieroAI const*>(w->ai.get());
+        if (kDumb != nullptr && kDumb->rand != Rand()) {
+          Fail(kAt + "a new DumbLieroAI's RNG is not mt19937(0x1337) (D14)");  // check 3″
+        }
+        std::ranges::fill(w->reacts, 0);  // intervention 3′
+      }
       game.stats_recorder = std::make_shared<StatsRecorder>();
     } else if (kTop == 'M' && kBefore != nullptr && TopOf(gfx.state_stack.Top()) == 'G' &&
                gfx.settings->game_mode == Settings::kGmHoldazone) {

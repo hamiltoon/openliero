@@ -25,6 +25,11 @@
 //! P1's controls and repeat in phase `menu`, Left/Right open and leave folders, FIRE picks, JUMP
 //! or MENU leave); the text field's keyboard is chosen per box from [`Hooks::text_mode`], and
 //! [`hooks`] is everything the page and the headless walk read back.
+//!
+//! Step 4½f-1 (John's Q3): on a touch-only page player 2 is the real CPU (`sim::ai`, run by
+//! `ui::shell::playing::Match`), which fights and respawns by itself, so the 4½c stand-in that
+//! pressed FIRE for it is gone; [`waiting_to_respawn`] now serves player 1's banner alone, and
+//! [`worm_hooks`] lets the headless walk watch both worms.
 
 use sim::state::ControlState;
 use ui::keys::{DK_BACKSPACE, DK_RETURN, TypedKey};
@@ -163,41 +168,11 @@ impl TouchKeys {
 /// showing"). C++ respawns a worm only once its player presses FIRE while dead: the dead arm's
 /// `PressedOnce(kFire)` sets `ready` (`worm.cpp:435-436`), and `DoRespawning` waits for it
 /// (`:755-790`). Until then the camera shows the spawn point with no worm. The page shows
-/// "FIRE to respawn" while this is true for player 1.
+/// "FIRE to respawn" while this is true for a human player 1 (Step 4½f-1, plan D15: a CPU
+/// presses FIRE itself, since `DumbLieroAI` toggles FIRE while its worm is not visible,
+/// `worm.cpp:513-518`).
 pub fn waiting_to_respawn(worm: &sim::state::WormState) -> bool {
     !worm.visible && !worm.ready
-}
-
-/// The touch-only page's player-2 stand-in (Q8: a bot that readies at once, until 4½f's
-/// DumbLieroAI) has no input, so once killed it never pressed FIRE and never came back. While
-/// its worm is [`waiting_to_respawn`] during play, FIRE is pressed on every other tick. Each
-/// press is a fresh edge, so C++'s `PressedOnce(kFire)` sees it through the key edges. It stops
-/// as soon as `ready` is set, so the respawned worm does not fire. Otherwise the word passes
-/// through. Rust-only, and sampled input like any other, so it records and replays.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct BotRespawn {
-    tick: u32,
-}
-
-impl BotRespawn {
-    /// Player 2's sampled word for this tick.
-    pub fn apply(
-        &mut self,
-        word: ControlState,
-        worm: &sim::state::WormState,
-        phase: Phase,
-    ) -> ControlState {
-        if phase != Phase::Game || !waiting_to_respawn(worm) {
-            self.tick = 0;
-            return word;
-        }
-        self.tick += 1;
-        let mut out = word;
-        if self.tick % 2 == 1 {
-            out.set(ControlState::FIRE, true);
-        }
-        out
-    }
 }
 
 /// Ticks between two digs while DIG is held ([`DigRepeat`]): one dig every 8 ticks, about 9 a
@@ -365,6 +340,13 @@ pub struct Hooks {
     /// `window.lieroTextMode`: the text box's keyboard — `numeric` (number entry) or `text`
     /// (SAVE SETUP AS…); empty when no text box is up (Q5).
     pub text_mode: &'static str,
+    /// `window.lieroControllers` (Step 4½f-1, plan D16): the settings' controllers of players 1
+    /// and 2 (0 human, 1 CPU, 2 "AI").
+    pub controllers: [u32; 2],
+    /// `window.lieroWeapsel` (Step 4½f-1, for the walk): each player's weapon-selection cursor
+    /// (0 Randomize, 1..=5 the slots, 6 DONE!) and ready flag while a selection runs, else
+    /// `None` (`null`).
+    pub weapsel: Option<[(u8, bool); 2]>,
 }
 
 /// The [`Hooks`] of `shell` as it stands.
@@ -387,7 +369,42 @@ pub fn hooks(shell: &Shell) -> Hooks {
             Some(TextMode::Text) => "text",
             None => "",
         },
+        controllers: [0, 1].map(|i| shell.settings().worm_settings[i].controller),
+        weapsel: shell
+            .current()
+            .and_then(|m| m.weapon_selection())
+            .map(|ws| [0, 1].map(|i| (ws.player(i).cursor, ws.player(i).ready))),
     }
+}
+
+/// One worm as `window.lieroWorms[i]` (Step 4½f-1, plan D16): a read-only view for the headless
+/// walk, published on every presented frame of play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WormHook {
+    /// The position in level pixels (`ftoi`).
+    pub x: i32,
+    pub y: i32,
+    pub visible: bool,
+    /// The worm's control word after the tick (`ControlState::pack`: FIRE is bit 4).
+    pub word: u32,
+    pub health: i32,
+    pub lives: i32,
+}
+
+/// Both worms of `sim` as [`WormHook`]s (worm 0 is player 1).
+pub fn worm_hooks(sim: &sim::state::SimState) -> [WormHook; 2] {
+    use sim_core::fixed::ftoi;
+    [0, 1].map(|i| {
+        let w = &sim.worms[i];
+        WormHook {
+            x: ftoi(w.pos.x),
+            y: ftoi(w.pos.y),
+            visible: w.visible,
+            word: w.control_states.pack(),
+            health: w.health,
+            lives: w.lives,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -766,6 +783,8 @@ mod tests {
                 level,
                 mode: 0,
                 text_mode: "",
+                controllers: [0, 0],
+                weapsel: None,
             }
         );
         shell_tap(&mut sh, sim, DK_F7);
@@ -818,6 +837,49 @@ mod tests {
         assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('B', ""));
         shell_tap(&mut sh, sim, DK_ESCAPE);
         assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('I', "text"));
+    }
+
+    #[test]
+    fn the_weapsel_hook_shows_a_phones_cpu_ready_and_a_desktop_cpu_picking() {
+        // John's rulings: RANDOM (ready at once) on a phone; `?cpu=1` on a desktop keeps the
+        // setup's PICK, so the CPU waits for player 2's keys.
+        use ui::shell::level_slot::SeedSource;
+        use ui::shell::playing::StartOptions;
+        for (query, touch_only) in [("", true), ("?cpu=1", false)] {
+            let store = crate::config::browser_store();
+            let mut settings = crate::config::load_settings(&store);
+            crate::web_params::MatchParams::parse(query).apply_cpu(&mut settings, touch_only);
+            let (mut sh, mut sim, _) = Shell::boot(
+                std::path::Path::new(scenario::paths::TC_ROOT),
+                settings,
+                Box::new(store),
+                SeedSource::Fixed(5),
+                0,
+                StartOptions {
+                    touch_only,
+                    ..StartOptions::default()
+                },
+            );
+            let sim = &mut sim;
+            for _ in 0..40 {
+                shell_step(&mut sh, sim, &[]);
+            }
+            assert_eq!(hooks(&sh).weapsel, None, "the menu");
+            assert_eq!(hooks(&sh).controllers, [0, 1]);
+            shell_tap(&mut sh, sim, DK_RETURN); // NEW GAME, after the menu's fade
+            for _ in 0..100 {
+                if sh.phase() == Phase::Weapsel {
+                    break;
+                }
+                shell_step(&mut sh, sim, &[]);
+            }
+            assert_eq!(sh.phase(), Phase::Weapsel);
+            assert_eq!(
+                hooks(&sh).weapsel,
+                Some([(0, false), (0, touch_only)]),
+                "{query:?}: the CPU is ready at once only on a phone"
+            );
+        }
     }
 
     #[test]
@@ -895,30 +957,163 @@ mod tests {
     }
 
     #[test]
-    fn the_touch_bot_presses_fire_until_it_is_ready_to_respawn() {
-        // John: after a death nothing came back; C++ needs FIRE (worm.cpp:435-436).
-        let (mut bot, mut w) = (BotRespawn::default(), test_worm());
-        let idle = ControlState::new();
-        assert_eq!(bot.apply(idle, &w, Phase::Game), idle, "alive: no input");
+    fn the_worm_hooks_read_each_worm() {
+        use sim_core::vec::Vec2;
+        let tc = std::path::Path::new(scenario::paths::TC_ROOT);
+        let scn = scenario::Scenario::parse(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scenarios/default_match.txt"
+        )))
+        .unwrap();
+        let mut sim = scenario::load(tc, &scn).state;
+        sim.worms[1] = test_worm();
+        sim.worms[1].pos = Vec2::new((123 << 16) | 0xffff, 45 << 16);
+        sim.worms[1].health = 37;
+        sim.worms[1].control_states.set(ControlState::FIRE, true);
+        let h = worm_hooks(&sim);
+        assert_eq!(
+            h[1],
+            WormHook {
+                x: 123,
+                y: 45,
+                visible: true,
+                word: 16,
+                health: 37,
+                lives: 5,
+            }
+        );
+        let w0 = &sim.worms[0];
+        assert_eq!(
+            (h[0].x, h[0].y, h[0].visible, h[0].lives),
+            (w0.pos.x >> 16, w0.pos.y >> 16, w0.visible, w0.lives)
+        );
+    }
+
+    #[test]
+    fn only_a_dead_worm_that_has_not_pressed_fire_waits_to_respawn() {
+        let mut w = test_worm();
+        assert!(!waiting_to_respawn(&w), "alive");
         w.visible = false;
         w.ready = false;
         assert!(waiting_to_respawn(&w));
-        let fires: Vec<bool> = (0..4)
-            .map(|_| bot.apply(idle, &w, Phase::Game).get(ControlState::FIRE))
-            .collect();
-        assert_eq!(
-            fires,
-            [true, false, true, false],
-            "a fresh press every other tick"
-        );
-        // Through C++ OnKey's edges, the first press reaches the sim's PressedOnce.
-        let first = BotRespawn::default().apply(idle, &w, Phase::Game);
-        let applied = ui::keys::apply_key_edges(idle, first, idle);
-        assert!(applied.get(ControlState::FIRE));
-        // Ready (or outside play): nothing more.
         w.ready = true;
-        assert_eq!(bot.apply(idle, &w, Phase::Game), idle);
-        w.ready = false;
-        assert_eq!(bot.apply(idle, &w, Phase::Menu), idle);
+        assert!(!waiting_to_respawn(&w), "FIRE pressed: respawning");
+    }
+
+    /// The page's CPU walk (plan D17): `query` through [`crate::web_params::MatchParams`] on the
+    /// browser store's settings, as `main.rs`'s `setup` builds the boot (`apply_level`,
+    /// `apply_cpu`, the skip route), then `ticks` match ticks with no input at all. The CPUs the
+    /// match made, and one [`WormHook`] pair per tick.
+    fn cpu_walk(query: &str, touch_only: bool, ticks: usize) -> ([bool; 2], Vec<[WormHook; 2]>) {
+        use scenario::storage::ConfigStore;
+        use ui::shell::level_slot::SeedSource;
+        use ui::shell::playing::StartOptions;
+        let p = crate::web_params::MatchParams::parse(query);
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert!(p.skips_menu());
+        let store = crate::config::browser_store();
+        let mut settings = crate::config::load_settings(&store);
+        p.apply_level(&mut settings, store.root_label());
+        p.apply_cpu(&mut settings, touch_only);
+        let (mut sh, mut sim, _) = Shell::boot_playing(
+            std::path::Path::new(scenario::paths::TC_ROOT),
+            settings,
+            Box::new(store),
+            p.seed.map_or(SeedSource::Fresh, SeedSource::Fixed),
+            0,
+            StartOptions {
+                skip_selection: p.skips_weapon_selection(),
+                loadout: p.weapons.clone(),
+                touch_only,
+            },
+        );
+        let m = sh.current().expect("the skip route plays");
+        let cpus = [m.is_cpu(0), m.is_cpu(1)];
+        let walk = (0..ticks)
+            .map(|_| {
+                let o = sh.frame(&mut sim, &ui::shell::ShellInput::idle());
+                assert!(o.sim_ticked && o.phase == Phase::Game);
+                worm_hooks(&sim)
+            })
+            .collect();
+        (cpus, walk)
+    }
+
+    /// The first tick by which worm `w` was visible, then not, then visible again.
+    fn respawned_by(walk: &[[WormHook; 2]], w: usize) -> Option<usize> {
+        let mut phase = 0;
+        walk.iter().position(|h| {
+            phase = match (phase, h[w].visible) {
+                (0 | 1, true) => 1,
+                (1 | 2, false) => 2,
+                (2, true) => 3,
+                (p, _) => p,
+            };
+            phase == 3
+        })
+    }
+
+    /// The Chromium walk's pinned phone match (plan D17): `?touch=1&seed=CPU_WALK_SEED&weapons=
+    /// CPU_WALK_WEAPONS`. Found by `search_cpu_walk_seeds` over seeds 1..=60 with no input at
+    /// all: 30 of them bring the CPU back within 1,500 ticks, and 8 is the earliest (back on
+    /// tick 770). The headless browser runs a few ticks a second, so the earlier the better.
+    const CPU_WALK_SEED: u32 = 8;
+    const CPU_WALK_WEAPONS: &str = "BIG%20NUKE,MINI%20NUKE,DOOMSDAY,CRACKLER,NAPALM";
+
+    #[test]
+    fn the_phones_cpu_dies_and_respawns_by_itself() {
+        // John's Q3: no stand-in presses FIRE any more; the CPU does (worm.cpp:513-518).
+        let q = format!("?touch=1&seed={CPU_WALK_SEED}&weapons={CPU_WALK_WEAPONS}");
+        let (cpus, walk) = cpu_walk(&q, true, 1500);
+        assert_eq!(cpus, [false, true], "player 2 is the CPU");
+        let back = respawned_by(&walk, 1).expect("the CPU is visible, dies, and is back");
+        let seen: Vec<(i32, i32)> = walk[..=back]
+            .iter()
+            .filter(|h| h[1].visible)
+            .map(|h| (h[1].x, h[1].y))
+            .collect();
+        assert!(seen.windows(2).any(|p| p[0] != p[1]), "the CPU moves");
+        assert!(
+            walk.iter().any(|h| h[1].visible && h[1].word & 16 != 0),
+            "the CPU fires"
+        );
+        assert!(walk.iter().all(|h| h[0].word == 0), "player 1 has no input");
+        assert_eq!(back, 770, "the pinned walk (the search's number)");
+    }
+
+    #[test]
+    fn with_cpu_2_both_worms_play_by_themselves() {
+        // The desktop walk's `?cpu=2&seed=…&weapons=…`: both players are CPUs, no input at all.
+        let q = format!("?cpu=2&seed={CPU_WALK_SEED}&weapons={CPU_WALK_WEAPONS}");
+        let (cpus, walk) = cpu_walk(&q, false, 600);
+        assert_eq!(cpus, [true, true]);
+        for w in 0..2 {
+            let seen: Vec<(i32, i32)> = walk
+                .iter()
+                .filter(|h| h[w].visible)
+                .map(|h| (h[w].x, h[w].y))
+                .collect();
+            assert!(seen.windows(2).any(|p| p[0] != p[1]), "worm {w} moves");
+            assert!(walk.iter().any(|h| h[w].word != 0), "worm {w} presses keys");
+        }
+    }
+
+    #[test]
+    #[ignore = "the seed search behind CPU_WALK_SEED (run by hand)"]
+    fn search_cpu_walk_seeds() {
+        let hs: Vec<_> = (0..4u32)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    for seed in (1..=60u32).filter(|s| s % 4 == t) {
+                        let q = format!("?touch=1&seed={seed}&weapons={CPU_WALK_WEAPONS}");
+                        let (_, walk) = cpu_walk(&q, true, 1500);
+                        println!("seed {seed}: back {:?}", respawned_by(&walk, 1));
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
     }
 }

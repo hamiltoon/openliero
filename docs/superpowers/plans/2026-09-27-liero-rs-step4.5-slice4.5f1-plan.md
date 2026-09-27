@@ -898,3 +898,11 @@ Notes for the batches (clarifications, not rule changes):
 3. **Batch 4, T5 check 3″:** scoped to controllers made by a NEW GAME, as D14 says. The boot controller's never-processed `DumbLieroAI` needs no check.
 4. **Batch 7, T8 `cpu_vs_cpu`:** with two KEEP bots, selection finalises on the first frame after the NEW GAME frame with no key (f 74 here), so the match starts at once.
 5. **Batch 2, T1 / T2:** the AI's first stale `reacts` read comes at the CPU's first placement (about tick 150, pos set, `visible` false). Rust's `reacts` must be 0 there (from `from_init`) and must not be reset on death or respawn (pitfall 12). The P7 blood-gate and bonus bands above are the numbers to pin in T1 Step 2's tests.
+
+## Addendum T9 (John's ruling on `?cpu=`, 2026-09-27)
+
+The plan left open whether `?cpu=` should also make the CPU's weapons pick themselves on a keyboard. **John's ruling:** `?cpu=` keeps the original's weapon picking.
+- `?cpu=` only switches players to the CPU (`WormSettings::controller`). BOT WEAPONS follows the setup: PICK by default, as in C++ (`settings.hpp:24`, both shipped setups). So on a keyboard you pick the CPU's weapons with player 2's keys: the arrows, then Right Ctrl on DONE!.
+- The preview comment says so, and so does the page's Player 2 key help.
+- The plan's other defaults stand (D4): `?cpu=0` makes both players human, `1` makes player 2 the CPU, `2` makes both CPUs. A touch-only page with no `?cpu=` acts as `1`. `?cpu=` does not skip the menu. On a touch-only page LOAD SETUP sets player 2 back to the CPU (T7).
+- T9 follows this. `MatchParams::apply_cpu` leaves `select_bot_weapons` alone; only a touch-only page's NEW GAME sets RANDOM (D3).

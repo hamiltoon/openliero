@@ -49,7 +49,6 @@ fn focus_palette(scene: &mut SceneData, settings: &Settings) {
 /// - Holdazone is built as Kill'em All — the sim's Holdazone arm is unported — and only
 ///   `state.game_mode` (read by the HUD's timer arm) carries the 2 (Step 4½d G2
 ///   `shell_holdazone_boot`).
-/// - Unequal healths both take player 1's (the refusal still holds; 4½f-1 T3 lifts it).
 /// - Any other `validate_for_selection` refusal takes that field from `Settings::default()`.
 ///
 /// The refusal box comes at NEW GAME (plan T4 Step 5), not here.
@@ -78,7 +77,12 @@ fn bootable(settings: &Settings) -> Settings {
             seed: 0,
         };
         match validate_for_selection(&cfg, WEAP_TABLE_LEN) {
-            Ok(()) | Err(BuildError::TooManyWeapons(_)) => break,
+            // `FollowAiUnsupported` is `refuse_follow_ai`'s only (the NEW GAME gate), never
+            // `validate_for_selection`'s: a FollowAI player boots (4½f-1 D1).
+            Ok(())
+            | Err(BuildError::TooManyWeapons(_) | BuildError::FollowAiUnsupported { .. }) => {
+                break;
+            }
             Err(BuildError::HoldazoneUnsupported | BuildError::InvalidGameMode(_)) => {
                 s.game_mode = defaults.game_mode;
             }
@@ -89,7 +93,6 @@ fn bootable(settings: &Settings) -> Settings {
                     }
                 }
             }
-            Err(BuildError::AsymmetricHealth { p1, .. }) => s.worm_settings[1].health = p1,
             Err(BuildError::InvalidWeapon { worm, slot, .. }) => {
                 s.worm_settings[worm].weapons[slot] = defaults.worm_settings[worm].weapons[slot];
             }

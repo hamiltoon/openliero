@@ -441,10 +441,10 @@ mod tests {
     }
 
     #[test]
-    fn a_cpp_liero_cfg_with_unequal_health_boots_refuses_and_is_saved_back() {
-        // Q3: Rust boots from the C++ user's liero.cfg. Unequal health must not crash the boot
-        // (plan fact 21); NEW GAME shows the refusal box instead; the exit save writes the
-        // user layer only.
+    fn a_cpp_liero_cfg_with_unequal_health_boots_plays_and_is_saved_back() {
+        // Q3: Rust boots from the C++ user's liero.cfg. Unequal health boots with each worm at
+        // its own max and NEW GAME starts the match (4½f-1 T3: the refusal is gone); the exit
+        // save writes the user layer only.
         use ui::shell::level_slot::SeedSource;
         use ui::shell::playing::StartOptions;
         use ui::shell::{InputEvent, KeyEvent, Shell, ShellInput};
@@ -499,17 +499,19 @@ mod tests {
         }
         sh_frame(&mut sh, &mut sim, &[key(ui::keys::DK_RETURN, true)]);
         sh_frame(&mut sh, &mut sim, &[key(ui::keys::DK_RETURN, false)]);
-        assert_eq!(sh.top_char(), 'B');
-        assert_eq!(
-            sh.top_refusal(),
-            Some(&ui::shell::overlay::Refusal::Build(
-                scenario::build::BuildError::AsymmetricHealth { p1: 100, p2: 50 }
-            ))
-        );
-        for _ in 0..40 {
+        assert_eq!(sh.top_refusal(), None, "no refusal");
+        for _ in 0..300 {
+            if sh.current().is_some() {
+                break;
+            }
             sh_frame(&mut sh, &mut sim, &[]);
-            assert!(sh.current().is_none(), "no match started");
         }
+        assert!(sh.current().is_some(), "the match started");
+        assert_eq!(
+            (sim.worms[0].max_health, sim.worms[1].max_health),
+            (100, 50),
+            "each worm at its own max"
+        );
 
         sh.settings_mut().lives = 11;
         sh.save_on_exit().unwrap();

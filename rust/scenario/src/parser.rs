@@ -36,6 +36,10 @@
 //!                                                 # the level is GenerateFromSettings with a
 //!                                                 # `Rand` seeded `level_seed` (a u32) — see
 //!                                                 # [`Scenario::generate`]
+//! ai                                             # Step 4½f-1; oracle-only, needs `settings`, no
+//!                                                 # argument, at most once: the setup's
+//!                                                 # controller-1 players are CPUs — see
+//!                                                 # [`Scenario::ai`]
 //! ```
 //!
 //! `pos_x`/`pos_y` are 16.16 fixed-point; `visible` is `0`/`1`. A worm's input
@@ -99,6 +103,11 @@ pub struct Scenario {
     /// Needs `settings`; replaces `level` (exactly one of the two). `None` on every other
     /// scenario, and [`crate::load`] refuses it (it refuses every `settings` scenario).
     generate: Option<u32>,
+    /// Step-4½f-1 `ai` — the oracle-only CPU directive (plan §Formats, D10): the setup's
+    /// controller-1 players are driven by a real `DumbLieroAI` (C++) / `sim::ai::DumbLieroAi`
+    /// (Rust) each tick. Needs `settings`, so [`crate::load`] refuses it; the setup-dependent
+    /// refusals are [`Scenario::check_ai_players`].
+    ai: bool,
     /// Sparse per-tick input overrides: `tick -> (worm0_7bit, worm1_7bit)`.
     inputs: HashMap<u32, (u32, u32)>,
     /// Per-slot weapon overrides: `slot -> weapon_name`.
@@ -152,6 +161,7 @@ impl Scenario {
         let mut render_live = false;
         let mut settings: Option<String> = None;
         let mut generate: Option<u32> = None;
+        let mut ai = false;
         let mut game_mode_given = false;
         let mut max_bonuses_given = false;
         let mut render_given = false;
@@ -262,6 +272,15 @@ impl Scenario {
                         return Err(format!("line {n}: duplicate `generate`"));
                     }
                 }
+                "ai" => {
+                    // Step 4½f-1: no argument, once (the C++ dumper's `ai` arm, word for word).
+                    if !nums.is_empty() {
+                        return Err(format!("line {n}: `ai` takes no argument"));
+                    }
+                    if std::mem::replace(&mut ai, true) {
+                        return Err(format!("line {n}: duplicate `ai`"));
+                    }
+                }
                 "worm" => {
                     expect_args(n, key, &nums, 7)?;
                     let visible = match parse_at(6)? {
@@ -349,6 +368,9 @@ impl Scenario {
         if !weapsel.is_empty() && settings.is_none() {
             return Err("`weapsel` is oracle-only: it needs a `settings` directive".to_string());
         }
+        if ai && settings.is_none() {
+            return Err("`ai` is oracle-only: it needs a `settings` directive".to_string());
+        }
         if generate.is_some() {
             if settings.is_none() {
                 return Err(
@@ -371,6 +393,7 @@ impl Scenario {
             settings,
             weapsel,
             generate,
+            ai,
             inputs,
             weapons,
             weapon_ammo,
@@ -386,6 +409,44 @@ impl Scenario {
     /// names its `level`.
     pub fn generate(&self) -> Option<u32> {
         self.generate
+    }
+
+    /// Step 4½f-1: whether the scenario has the oracle-only `ai` directive.
+    pub fn ai(&self) -> bool {
+        self.ai
+    }
+
+    /// Step 4½f-1: the `ai` refusals that need the setup (plan §Formats; the parser checks only
+    /// the syntax), in the C++ dumper's order and words: a FollowAI (`controller == 2`) in player
+    /// 0 or 1, no CPU (`controller == 1`) among them, then the first `input` tick (ascending)
+    /// whose word for a CPU worm is non-zero. `Ok` without `ai`. For the Rust harness.
+    pub fn check_ai_players(&self, s: &crate::settings::Settings) -> Result<(), String> {
+        if !self.ai {
+            return Ok(());
+        }
+        let players = &s.worm_settings[..2];
+        if let Some(i) = players.iter().position(|ws| ws.controller == 2) {
+            return Err(format!(
+                "ai: player {i} is a FollowAI (controller 2), which is unported"
+            ));
+        }
+        let cpu = [players[0].controller == 1, players[1].controller == 1];
+        if !cpu.contains(&true) {
+            return Err("ai needs a CPU player (controller = 1) in the setup".to_string());
+        }
+        let mut ticks: Vec<u32> = self.inputs.keys().copied().collect();
+        ticks.sort_unstable();
+        for tick in ticks {
+            let (w0, w1) = self.inputs[&tick];
+            for (idx, word) in [w0, w1].into_iter().enumerate() {
+                if cpu[idx] && word != 0 {
+                    return Err(format!(
+                        "input {tick}: worm {idx} is a CPU (ai), so its word must be 0"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The 7-bit input for `worm` (0 or 1) at `tick`. Returns `0` for any tick
@@ -497,7 +558,13 @@ impl Scenario {
         match &self.settings {
             // A settings scenario carries mode/bonuses in its setup; the parser rejects
             // the two directives alongside `settings`.
-            Some(path) => out.push_str(&format!("settings {path}\n")),
+            Some(path) => {
+                out.push_str(&format!("settings {path}\n"));
+                // Step 4½f-1: `ai` needs `settings`, so it is written right after it.
+                if self.ai {
+                    out.push_str("ai\n");
+                }
+            }
             None => {
                 out.push_str(&format!("max_bonuses {}\n", self.max_bonuses));
                 out.push_str(&format!("game_mode {}\n", self.game_mode));
@@ -1186,6 +1253,111 @@ settings g_setup.cfg
             "{out}"
         );
         assert_eq!(Scenario::parse(&out).unwrap(), s);
+    }
+
+    // ---- Step 4½f-1: the `ai` directive (plan §Formats, D10) ---------------------------
+
+    const AI: &str = "\
+seed 5
+generate 77
+ticks 50
+settings a_setup.cfg
+ai   # the setup's controller-1 players are CPUs
+input 3 16 0
+";
+
+    #[test]
+    fn ai_parses_and_defaults_absent() {
+        let s = Scenario::parse(AI).expect("parses");
+        assert!(s.ai());
+        assert!(!Scenario::parse(GENERATE).unwrap().ai());
+        assert!(!Scenario::parse(SETTINGS_SCN).unwrap().ai());
+        assert!(!Scenario::parse(SAMPLE).unwrap().ai());
+        let level = "seed 5\nlevel Levels/a.lev\nticks 5\nsettings s.cfg\nai\n";
+        assert!(Scenario::parse(level).unwrap().ai(), "with `level` too");
+        let sel = format!("{AI}weapsel 2 0 0\n");
+        assert!(Scenario::parse(&sel).unwrap().ai(), "with `weapsel` too");
+    }
+
+    #[test]
+    fn ai_rejects_an_argument_a_duplicate_and_a_missing_settings() {
+        for (bad, why) in [
+            ("ai 1", "no argument"),
+            ("ai x y", "no argument"),
+            ("ai\nai", "duplicate `ai`"),
+        ] {
+            let text = format!("seed 5\ngenerate 77\nticks 50\nsettings g.cfg\n{bad}\n");
+            let e = Scenario::parse(&text).unwrap_err();
+            assert!(e.contains(why), "{bad:?}: {e}");
+        }
+        let e = Scenario::parse("seed 5\nlevel a.lev\nticks 5\nai\n").unwrap_err();
+        assert!(e.contains("`ai`") && e.contains("settings"), "{e}");
+    }
+
+    #[test]
+    fn ai_round_trips_through_to_text_after_settings() {
+        let s = Scenario::parse(&format!("{AI}weapsel 1 8 0\n")).unwrap();
+        let out = s.to_text();
+        let set = out.find("settings a_setup.cfg\n").unwrap();
+        let ai = out.find("\nai\n").expect("written") + 1;
+        let sel = out.find("weapsel 1 8 0").unwrap();
+        assert!(set < ai && ai < sel, "{out}");
+        assert_eq!(Scenario::parse(&out).unwrap(), s);
+        let plain = Scenario::parse(GENERATE).unwrap().to_text();
+        assert!(!plain.lines().any(|l| l == "ai"), "absent => not written");
+    }
+
+    #[test]
+    fn check_ai_players_mirrors_the_dumpers_setup_refusals() {
+        use crate::settings::Settings;
+        let s = Scenario::parse(AI).unwrap();
+        let cpu = |c0: u32, c1: u32| {
+            let mut st = Settings::default();
+            st.worm_settings[0].controller = c0;
+            st.worm_settings[1].controller = c1;
+            st
+        };
+        assert_eq!(s.check_ai_players(&cpu(0, 1)), Ok(()));
+        let e = s.check_ai_players(&cpu(0, 0)).unwrap_err();
+        assert!(e.contains("needs a CPU player"), "{e}");
+        let e = s.check_ai_players(&cpu(1, 2)).unwrap_err();
+        assert!(e.contains("player 1 is a FollowAI"), "{e}");
+        let e = s.check_ai_players(&cpu(2, 1)).unwrap_err();
+        assert!(e.contains("player 0 is a FollowAI"), "{e}");
+        // `input 3 16 0`: worm 0's word is non-zero, so worm 0 may not be a CPU.
+        for c in [cpu(1, 0), cpu(1, 1)] {
+            let e = s.check_ai_players(&c).unwrap_err();
+            assert!(e.contains("input 3: worm 0 is a CPU"), "{e}");
+        }
+        let quiet = Scenario::parse(&AI.replace("input 3 16 0", "input 3 0 0")).unwrap();
+        assert_eq!(
+            quiet.check_ai_players(&cpu(1, 1)),
+            Ok(()),
+            "a zero word is fine"
+        );
+        // The network player never plays.
+        let mut net = cpu(0, 1);
+        net.worm_settings[2].controller = 2;
+        assert_eq!(s.check_ai_players(&net), Ok(()));
+        // Without `ai` there is nothing to check.
+        let plain = Scenario::parse(GENERATE).unwrap();
+        assert_eq!(plain.check_ai_players(&cpu(2, 2)), Ok(()));
+    }
+
+    #[test]
+    #[should_panic(expected = "settings")]
+    fn scenario_load_refuses_an_ai_scenario() {
+        // `ai` needs `settings`, and `crate::load` refuses every `settings` scenario (D10).
+        let s =
+            Scenario::parse("seed 5\nlevel Levels/render_stage.lev\nticks 5\nsettings s.cfg\nai\n")
+                .unwrap();
+        let _ = crate::loader::load(
+            std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../data/TC/openliero"
+            )),
+            &s,
+        );
     }
 
     #[test]

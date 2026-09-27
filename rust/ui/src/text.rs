@@ -26,15 +26,16 @@ pub const ONOFF: [&str; 2] = ["OFF", "ON"];
 /// WEAPON OPTIONS values (Step 4½e-1).
 pub const WEAP_STATES: [&str; 3] = ["Menu", "Bonus", "Banned"];
 
-/// The Rust-only refusal boxes' texts (plan D5; Q2), drawn at (160, 100) without clearing. A NUL
-/// breaks the line, as in the TC's own texts. Zero enabled weapons reuses the TC's `NoWeaps`.
+/// The Rust-only refusal boxes' texts (plan D5; Q2; 4½f Q2 for FollowAI), drawn at (160, 100)
+/// without clearing. A NUL breaks the line, as in the TC's own texts. Zero enabled weapons reuses
+/// the TC's `NoWeaps`.
 pub fn refusal_text(r: &Refusal, tc: &UiTc) -> String {
     match r {
         Refusal::Build(BuildError::HoldazoneUnsupported) => {
             "HOLDAZONE IS NOT\0SUPPORTED YET".into()
         }
-        Refusal::Build(BuildError::AsymmetricHealth { .. }) => {
-            "BOTH PLAYERS NEED\0THE SAME HEALTH".into()
+        Refusal::Build(BuildError::FollowAiUnsupported { .. }) => {
+            "AI PLAYERS ARE NOT\0SUPPORTED YET".into()
         }
         Refusal::Weapsel(WeapselError::NoWeaponsEnabled) => tc.no_weaps.clone(),
         _ => "THIS SETUP CANNOT\0BE PLAYED YET".into(),
@@ -487,13 +488,12 @@ mod tests {
             t(Refusal::Build(BuildError::HoldazoneUnsupported)),
             "HOLDAZONE IS NOT\0SUPPORTED YET"
         );
-        assert_eq!(
-            t(Refusal::Build(BuildError::AsymmetricHealth {
-                p1: 100,
-                p2: 50
-            })),
-            "BOTH PLAYERS NEED\0THE SAME HEALTH"
-        );
+        for worm in 0..2 {
+            assert_eq!(
+                t(Refusal::Build(BuildError::FollowAiUnsupported { worm })),
+                "AI PLAYERS ARE NOT\0SUPPORTED YET"
+            );
+        }
         assert_eq!(
             t(Refusal::Weapsel(WeapselError::NoWeaponsEnabled)),
             tc.no_weaps

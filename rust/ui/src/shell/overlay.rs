@@ -179,10 +179,12 @@ pub struct RefusalGate {
 impl RefusalGate {
     /// The Rust-only refusal of main-menu item `selected` under `settings` (Q2, D5), or `None`.
     ///
-    /// - NEW GAME: `build::validate_for_selection` (`build::validate` on the skip route), then
+    /// - NEW GAME: `build::refuse_follow_ai` (4½f Q2; 4½f-1 D1), then
+    ///   `build::validate_for_selection` (`build::validate` on the skip route), then
     ///   `WeaponSelection::validate` over the selection config NEW GAME would build.
     /// - RESUME of an attached match: `validate_for_selection`, whose first check is Holdazone. A
-    ///   detached match keeps the settings it started with, so nothing is checked.
+    ///   detached match keeps the settings it started with, so nothing is checked. FollowAI is
+    ///   never refused here: CONTROLLER does not reach a running match (design finding 7).
     /// - Anything else (QUIT): never refused.
     pub fn refusal(&self, settings: &Settings, selected: i32) -> Option<Refusal> {
         let cfg = MatchConfig {
@@ -191,6 +193,9 @@ impl RefusalGate {
         };
         match selected {
             MA_NEW_GAME => {
+                if let Err(e) = build::refuse_follow_ai(settings) {
+                    return Some(Refusal::Build(e));
+                }
                 let built = if self.skip_selection {
                     build::validate(&cfg, self.n_weapons)
                 } else {

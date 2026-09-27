@@ -2518,7 +2518,97 @@ mod tests {
     }
 
     #[test]
-    fn new_game_refuses_zero_weapons_and_unequal_healths() {
+    fn new_game_and_f1_refuse_a_follow_ai_player_with_a_box_and_the_menu_stays() {
+        // 4½f Q2 (John): an "AI" (FollowAI, controller 2) player is refused at NEW GAME, the
+        // Holdazone way (4½f-1 D1).
+        let select = hooks().hooks.select;
+        for worm in 0..2 {
+            for (key, sounds) in [(DK_RETURN, vec![select]), (DK_F1, vec![])] {
+                let (mut sh, mut sim, o) =
+                    refused_new_game(|s| s.worm_settings[worm].controller = 2, key);
+                let refusal =
+                    overlay::Refusal::Build(scenario::build::BuildError::FollowAiUnsupported {
+                        worm,
+                    });
+                assert_eq!(o.menu_sounds, sounds);
+                assert_eq!((sh.top_char(), sh.menu_fading()), ('B', false));
+                assert_eq!(sh.top_refusal(), Some(&refusal));
+                let b = top_box(&sh);
+                assert_eq!(
+                    (b.text.as_str(), b.x, b.y, b.clear_screen),
+                    ("AI PLAYERS ARE NOT\0SUPPORTED YET", 160, 100, false)
+                );
+                assert_eq!(b.purpose, InfoPurpose::Refused(refusal));
+                assert!(
+                    idle(&mut sh, &mut sim, 40)
+                        .iter()
+                        .all(|o| o.routed.is_none()),
+                    "never routed"
+                );
+                assert!(sh.current().is_none(), "no match started");
+                tap(&mut sh, &mut sim, 57);
+                assert_eq!((sh.top_char(), sh.main_selection()), ('M', MA_NEW_GAME));
+                // A CPU (or a human) starts.
+                sh.settings_mut().worm_settings[worm].controller = 1;
+                let outs = until_routed(&mut sh, &mut sim, DK_RETURN);
+                assert_eq!(
+                    outs.last().unwrap().routed,
+                    Some(Route::NewGame { seed: 21 })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resume_never_refuses_a_follow_ai_player() {
+        // CONTROLLER never reaches a running match (design finding 7): a paused, attached match
+        // whose settings now say controller 2 resumes (4½f-1 D1).
+        let (mut sh, mut sim, _) = boot();
+        start_match(&mut sh, &mut sim);
+        to_menu(&mut sh, &mut sim);
+        assert!(sh.current().unwrap().attached());
+        sh.settings_mut().worm_settings[1].controller = 2;
+        let outs = until_routed(&mut sh, &mut sim, DK_F1);
+        assert_eq!(outs.last().unwrap().routed, Some(Route::Resume));
+        assert_eq!(sh.top_refusal(), None);
+        let cycles = sim.cycles;
+        idle(&mut sh, &mut sim, 3);
+        assert!(sim.cycles > cycles, "the match ticks again");
+    }
+
+    #[test]
+    fn unequal_healths_boot_start_and_play_at_each_worms_own_max() {
+        // 4½f-1 T3: no refusal, and the boot no longer copies player 1's health.
+        let mut settings = Settings::default();
+        settings.worm_settings[0].health = 70;
+        settings.worm_settings[1].health = 250;
+        let seeds = SeedSource::Scripted {
+            boot: 11,
+            matches: VecDeque::from([21]),
+        };
+        let (mut sh, mut sim, _) = Shell::boot(
+            tc(),
+            settings,
+            Box::new(MemoryStore::new()),
+            seeds,
+            0,
+            StartOptions::default(),
+        );
+        assert_eq!(
+            (sim.worms[0].max_health, sim.worms[1].max_health),
+            (70, 250),
+            "the boot game"
+        );
+        start_match(&mut sh, &mut sim);
+        assert_eq!(
+            (sim.worms[0].max_health, sim.worms[1].max_health),
+            (70, 250)
+        );
+        assert_eq!((sim.worms[0].health, sim.worms[1].health), (70, 250));
+    }
+
+    #[test]
+    fn new_game_refuses_zero_weapons_and_blood_max_but_not_unequal_healths() {
         let (sh, _, _) = refused_new_game(|s| s.weap_table = [2; 40], DK_RETURN);
         assert_eq!(
             (top_box(&sh).text.as_str(), &top_box(&sh).purpose),
@@ -2529,10 +2619,18 @@ mod tests {
                 ))
             )
         );
-        let (sh, _, _) = refused_new_game(|s| s.worm_settings[1].health = 50, DK_RETURN);
-        assert_eq!(top_box(&sh).text, "BOTH PLAYERS NEED\0THE SAME HEALTH");
         let (sh, _, _) = refused_new_game(|s| s.blood_particle_max = 0, DK_RETURN);
         assert_eq!(top_box(&sh).text, "THIS SETUP CANNOT\0BE PLAYED YET");
+        let (mut sh, mut sim, o) = refused_new_game(|s| s.worm_settings[1].health = 50, DK_RETURN);
+        assert_eq!(sh.top_refusal(), None, "4½f-1 T3: unequal healths play");
+        let mut routed = o.routed;
+        for _ in 0..300 {
+            if routed.is_some() {
+                break;
+            }
+            routed = step(&mut sh, &mut sim, &[], [0, 0]).routed;
+        }
+        assert_eq!(routed, Some(Route::NewGame { seed: 21 }));
     }
 
     #[test]
@@ -2571,6 +2669,13 @@ mod tests {
         s.map = false;
         s.names_on_bonuses = true;
         s.lives = 3;
+        s.worm_settings[0].health = 30;
+        s.worm_settings[1].health = 250;
+    }
+
+    /// Both worms' `max_health` (4½f-1: HEALTH is live, `apply_live_settings`).
+    fn maxes(sim: &SimState) -> [i32; 2] {
+        [sim.worms[0].max_health, sim.worms[1].max_health]
     }
 
     fn live_fields(sim: &SimState) -> (i32, Vec<i32>, u32, i32, i32, i32, bool, bool) {
@@ -2592,9 +2697,12 @@ mod tests {
         start_match(&mut sh, &mut sim);
         to_menu(&mut sh, &mut sim);
         let before = live_fields(&sim);
+        assert_eq!(maxes(&sim), [100, 100]);
         edited(sh.settings_mut());
         assert_eq!(live_fields(&sim), before, "the menu never touches the sim");
+        assert_eq!(maxes(&sim), [100, 100]);
         until_routed(&mut sh, &mut sim, DK_F1);
+        assert_eq!(maxes(&sim), [30, 250], "RESUME brings both maxes (T0 P5)");
         let st = sh.settings();
         let want = (
             st.max_bonuses,
@@ -2629,6 +2737,7 @@ mod tests {
             edited(sh.settings_mut());
             until_routed(&mut sh, &mut sim, DK_F1);
             assert_eq!(live_fields(&sim), before, "detach {detach}");
+            assert_eq!(maxes(&sim), [100, 100], "detach {detach}");
             assert_eq!(*sh.current().unwrap().settings(), settings);
         }
     }
@@ -2713,8 +2822,8 @@ mod tests {
                 "HOLDAZONE IS NOT\0SUPPORTED YET",
             ),
             (
-                |s| s.worm_settings[0].health = 70,
-                "BOTH PLAYERS NEED\0THE SAME HEALTH",
+                |s| s.worm_settings[1].controller = 2,
+                "AI PLAYERS ARE NOT\0SUPPORTED YET",
             ),
             (
                 |s| s.blood_particle_max = 0,

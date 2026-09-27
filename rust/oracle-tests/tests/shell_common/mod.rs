@@ -6,6 +6,13 @@
 //! the tops `L`/`P`, [`B::type_chars`], the `fs` manifest builder [`Fs`], the Q4 twin
 //! ([`Opts::q4_twin`], plan D1.2) and the e-2 ledger fields and validators; e-1's D6 validator is
 //! gone (the Enter arms push screens now).
+//!
+//! Step 4½f-1 (plan T8): the CPU ledger — per frame which players are CPUs
+//! ([`Ledger::cpu`]), the AI step's [`AiTrace`]s (`Match::ai_traces`, behaviour-free) and each
+//! AI's `rand.last`, per worm deaths and respawns, whether a key bound to player 2 was pressed in
+//! a match phase ([`Ledger::p2_keys`]), both worms' words and selection cursors after every frame
+//! a controller ran; the FollowAI validator (the dumper's guard's mirror, plan D1); and the
+//! switches [`Opts::ais`] (the negative control) and [`Opts::p2_human`] (`cpu_pick`'s twin).
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
@@ -16,6 +23,7 @@ use render::hash::{hash_frame, FNV_OFFSET, FNV_PRIME};
 use scenario::settings::{Settings, GM_HOLDAZONE};
 use scenario::settings_toml::{settings_from_toml, settings_to_toml};
 use scenario::storage::{load_setup, placeable_leaf, ConfigStore, MemoryStore, NativeStore};
+use sim::ai::AiTrace;
 use sim::hash::hash_game_state;
 use sim::state::{ControlState, SimState};
 use ui::keys::TypedKey;
@@ -495,7 +503,8 @@ const LEVEL_FILE_SETUP: &str =
 const GAMETAG_SETUP: &str = "[settings]\nversion = 6\ngameMode = 1\n";
 const HOLDAZONE_SETUP: &str = "[settings]\nversion = 6\ngameMode = 2\n";
 const REGENERATE_SETUP: &str = "[settings]\nversion = 6\nregenerateLevel = true\n";
-// Both players' health 1: the Rust builder refuses asymmetric health (`BuildError::AsymmetricHealth`).
+// Both players' health 1 (4½d, when the Rust builder refused unequal healths; 4½f-1 removed that
+// refusal, and this committed golden's input stays as it is).
 const GAME_OVER_SETUP: &str =
     "[player1]\nhealth = 1\n\n[player2]\nhealth = 1\n\n[settings]\nversion = 6\nlives = 1\n";
 
@@ -1005,6 +1014,12 @@ pub struct Opts {
     /// Step 4½e-2 (plan D1.2): the Q4 twin's fixture drops; with them on, the Q4 validator
     /// records ([`Ledger::q4_hits`]) instead of refusing.
     pub q4_twin: Twin,
+    /// Step 4½f-1: the match's AI step (`ShellDebug::ais`; off only for the G2f-1 negative
+    /// control).
+    pub ais: bool,
+    /// Step 4½f-1: player 2 is made Human in the loaded settings (`cpu_pick`'s twin: a PICK
+    /// CPU's selection frames are a human's on the same keys).
+    pub p2_human: bool,
 }
 
 impl Default for Opts {
@@ -1014,6 +1029,8 @@ impl Default for Opts {
             small_labels: true,
             load_detach: true,
             q4_twin: Twin::Off,
+            ais: true,
+            p2_human: false,
         }
     }
 }
@@ -1045,6 +1062,9 @@ pub struct WormSnap {
     pub control_states: u32,
     pub current_weapon: i32,
     pub rope_out: bool,
+    /// Step 4½f-1: the worm's own max health (`settings->health`).
+    pub max_health: i32,
+    pub lives: i32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1101,6 +1121,29 @@ pub struct Ledger {
     pub level_from_file: Vec<bool>,
     /// The Q4 validator's hits in a twin run (plan D1.2).
     pub q4_hits: u32,
+    /// Step 4½f-1: per frame, which players the current match runs as CPUs (`Match::is_cpu`;
+    /// `[false; 2]` with no match).
+    pub cpu: Vec<[bool; 2]>,
+    /// Per frame, the AI step of a frame the controller ran (`Match::ai_traces`; `ran == false`
+    /// for a human, in selection and on every other frame).
+    pub ai_traces: Vec<[AiTrace; 2]>,
+    /// Per frame, each CPU's `rand.last` after it.
+    pub ai_last: Vec<[Option<u32>; 2]>,
+    /// Per frame whose top after it is `G` (selection or match): both worms' `control_states`.
+    pub words: Vec<Option<[u32; 2]>>,
+    /// Per frame whose top after it is `G` in selection: both players' cursors.
+    pub sel_cursor: Vec<Option<[u8; 2]>>,
+    /// Per worm, match frames on which it went visible → invisible (a death) and invisible →
+    /// visible (a spawn after the first).
+    pub deaths: [u32; 2],
+    pub respawns: [u32; 2],
+    /// The match frames of each death, per worm.
+    pub death_frames: [Vec<u32>; 2],
+    /// A key bound to player 2 (`controls_ex`) went down, repeated or up on a frame whose
+    /// controller ran a match tick (`upd` G outside selection).
+    pub p2_keys: bool,
+    /// The first match frame after which `is_game_over` holds, per NEW GAME.
+    pub game_over_frames: Vec<u32>,
 }
 
 pub struct Run {
@@ -1186,6 +1229,8 @@ fn snaps(sim: &SimState) -> [WormSnap; 2] {
             control_states: w.control_states.pack(),
             current_weapon: w.current_weapon,
             rope_out: w.ninjarope.out,
+            max_health: w.max_health,
+            lives: w.lives,
         }
     })
 }
@@ -1295,6 +1340,9 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
         }
     };
     settings.record_replays = false; // intervention 6's mirror
+    if opts.p2_human {
+        settings.worm_settings[1].controller = 0;
+    }
     let tc = UiTc::load(Path::new(TC_ROOT));
     let select = tc.hooks.select;
     let seeds = SeedSource::Scripted {
@@ -1312,6 +1360,7 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
     sh.debug_mut().resume_sync = opts.resume_sync;
     sh.debug_mut().small_labels = opts.small_labels;
     sh.debug_mut().load_detach = opts.load_detach;
+    sh.debug_mut().ais = opts.ais;
     let (p, _) = present_fields(&sh, out.present);
     let mut run = Run {
         boot: format!("boot {p} {}", tail(&sh)),
@@ -1338,6 +1387,16 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
         .flat_map(|w| w.controls_ex.iter().copied())
         .filter(|&k| k != 0)
         .collect();
+    // Step 4½f-1: player 2's bound keys, and the last match frame's visibility (deaths,
+    // respawns).
+    let p2_controls: BTreeSet<u32> = settings.worm_settings[1]
+        .controls_ex
+        .iter()
+        .copied()
+        .filter(|&k| k != 0)
+        .collect();
+    let mut last_visible: Option<[bool; 2]> = None;
+    let mut game_over_seen = false;
     // Step 4½e-2: the boot's level checks, the LEVEL value, the preview rectangle.
     let user_dir = fixture.as_ref().map(|r| r.join("user"));
     let q4_twin = opts.q4_twin != Twin::Off;
@@ -1381,6 +1440,8 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
         };
         let cur0 = sh.cur_menu();
         let weap0 = sh.settings().weap_table;
+        // Step 4½f-1: a frame whose controller runs a match tick (not selection).
+        let match_frame = top0 == 'G' && sh.phase() == Phase::Game;
         let mut seen = BTreeSet::new();
         let mut events = Vec::new();
         let mut downs = 0;
@@ -1418,6 +1479,9 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 );
             }
             let (dos, typed) = key_of(&k.name);
+            if match_frame && p2_controls.contains(&dos) {
+                run.ledger.p2_keys = true;
+            }
             if !seen.insert(dos) {
                 v(
                     &mut run,
@@ -1674,6 +1738,19 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 if sh.settings().game_mode == GM_HOLDAZONE {
                     v(&mut run, frame, "a Holdazone match (unported)".into());
                 }
+                // Step 4½f-1 (plan D1): the dumper's FollowAI guard fails this frame.
+                if sh.settings().worm_settings[..2]
+                    .iter()
+                    .any(|w| w.controller == 2)
+                {
+                    v(
+                        &mut run,
+                        frame,
+                        "a NEW GAME with a FollowAI player (unported; 4½f Q2)".into(),
+                    );
+                }
+                last_visible = None;
+                game_over_seen = false;
                 // Step 4½e-2.
                 run.ledger.level_from_file.push(sh.level_from_file());
                 if sim.level.height < 342 {
@@ -1780,9 +1857,49 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 }
             }
             run.worms.push(Some(snaps(&sim)));
+            let vis = [sim.worms[0].visible, sim.worms[1].visible];
+            if let Some(last) = last_visible {
+                for i in 0..2 {
+                    if last[i] && !vis[i] {
+                        run.ledger.deaths[i] += 1;
+                        run.ledger.death_frames[i].push(frame);
+                    } else if !last[i] && vis[i] && run.ledger.deaths[i] > 0 {
+                        run.ledger.respawns[i] += 1;
+                    }
+                }
+            }
+            last_visible = Some(vis);
+            let over = sim::game_over::is_game_over(&sim);
+            if over && !game_over_seen {
+                run.ledger.game_over_frames.push(frame);
+            }
+            game_over_seen = over;
         } else {
             run.worms.push(None);
         }
+        // Step 4½f-1: the CPU ledger.
+        let cur = sh.current();
+        run.ledger
+            .cpu
+            .push(cur.map_or([false; 2], |m| [m.is_cpu(0), m.is_cpu(1)]));
+        run.ledger.ai_traces.push(match cur {
+            Some(m) if top0 == 'G' => *m.ai_traces(),
+            _ => [AiTrace::default(); 2],
+        });
+        run.ledger.ai_last.push(cur.map_or([None; 2], |m| {
+            [0, 1].map(|i| m.ai(i).map(|a| a.rand.last()))
+        }));
+        run.ledger.words.push((top1 == 'G').then(|| {
+            [
+                sim.worms[0].control_states.pack(),
+                sim.worms[1].control_states.pack(),
+            ]
+        }));
+        run.ledger.sel_cursor.push(
+            cur.filter(|_| top1 == 'G')
+                .and_then(|m| m.weapon_selection())
+                .map(|ws| [ws.player(0).cursor, ws.player(1).cursor]),
+        );
         if let (Some((a, b)), Some(f)) = (keep, fade) {
             if (a..=b).contains(&frame) {
                 run.shots.push((frame, sh.surface().clone(), f));

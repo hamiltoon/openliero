@@ -1,0 +1,14 @@
+# Step 4½f-1 G2f-1 case cpu_vs_cpu (plan Task 8) — written by gen_slice4_5f1_shell.
+# Rust ledger: 4059 frames, end `end 4058 quit`, NEW GAME 1, RESUME 0, back-to-menu 1, CPU match frames [3923, 3923], deaths [2, 0], respawns [1, 0], game over [3817], P2 keys in a match false, file lines 0
+setup shell_cpu_vs_cpu_setup.cfg
+boot_seed 72
+match_seed 7204
+frames 4068
+expect quit
+detail
+key 40 down RETURN
+key 42 up RETURN
+key 4017 down ESC
+key 4019 up ESC
+key 4025 down RETURN
+key 4027 up RETURN

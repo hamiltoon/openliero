@@ -1,14 +1,17 @@
-// Generates the C++ side of the Rust shell gates G2 (Step 4½, slice 4½d; design §6.2-§6.6) and
-// G2e-1 (slice 4½e-1; rust/oracle-tests/tests/shell_golden.rs). The REAL Gfx::RunOneFrame runs
-// headlessly — the REAL StateStack, MainMenuState (and its settings focus), WeaponMenuState,
-// InputStringState, InfoBoxState, GamePlayState, LocalController (weapon selection with its 12/3
-// repeat, the Esc fade, game over), Game::ProcessFrame / Draw, UpdateMenuPalettes, DrawBasicMenu
-// and Flip -> Gfx::Draw -> ScaleDraw into a 320x200 ARGB surface through a software renderer.
-// Each frame the dumper pushes that frame's script events (SDL_PushEvent: key events and text
-// events, in file order within the frame) and calls RunOneFrame; it writes a `boot` line after
-// InitFrameStepping, one `f` line per frame and an `end` line (formats: docs/superpowers/plans/
+// Generates the C++ side of the Rust shell gates G2 (Step 4½, slice 4½d; design §6.2-§6.6), G2e-1
+// (slice 4½e-1) and G2e-2 (slice 4½e-2; rust/oracle-tests/tests/shell_golden.rs). The REAL
+// Gfx::RunOneFrame runs headlessly — the REAL StateStack, MainMenuState (and its settings focus),
+// WeaponMenuState, InputStringState, InfoBoxState, LevelSelectorState, OptionsSelectorState,
+// GamePlayState, LocalController (weapon selection with its 12/3 repeat, the Esc fade, game over),
+// Game::ProcessFrame / Draw, UpdateMenuPalettes, DrawBasicMenu and Flip -> Gfx::Draw -> ScaleDraw
+// into a 320x200 ARGB surface through a software renderer. Each frame the dumper pushes that
+// frame's script events (SDL_PushEvent: key events and text events, in file order within the
+// frame) and calls RunOneFrame; it writes a `boot` line after InitFrameStepping, one `f` line per
+// frame and an `end` line (formats: docs/superpowers/plans/
 // 2026-09-26-liero-rs-step4.5-slice4.5d-plan.md, Task 8; the tops O/I/B and the opt-in lines:
-// docs/superpowers/plans/2026-09-26-liero-rs-step4.5-slice4.5e1-plan.md, §Formats pinned).
+// docs/superpowers/plans/2026-09-26-liero-rs-step4.5-slice4.5e1-plan.md, §Formats pinned; the
+// tops L/P: docs/superpowers/plans/2026-09-26-liero-rs-step4.5-slice4.5e2-plan.md, §Formats
+// pinned).
 //
 // Interventions, each at a point where no real code runs:
 //   1. boot seed: gfx.rand.Seed(boot_seed) before InitFrameStepping (C++ seeds from the clock);
@@ -22,18 +25,27 @@
 //      pops to the menu (gamePlayState.cpp:57-71, :93); 4½g drops this;
 //   5. pacing: gfx.last_frame = 0 before each frame; Flip adds 14 per present
 //      (gfx.cpp:1176-1189), so presents = last_frame / 14;
-//   6. no replays: settings->record_replays = false (localController.cpp:237); it also reaches the
-//      d lines' cfg16 and the exit save, which the Rust harness mirrors;
+//   6. no replays: settings->record_replays = false (localController.cpp:237) at boot and (6′,
+//      4½e-2) again right after every RunOneFrame, before the d line: LOAD SETUP swaps in a fresh
+//      Settings object whose shipped recordReplays is true, which would make the next match write
+//      a wall-clock user/Replays/*.lrp. It also reaches the d lines' cfg16 and the exit save, which
+//      the Rust harness mirrors (after every Shell::frame, before its d line);
 //   7. sounds: gfx.sound_player is a RecordingSoundPlayer (every Game installs it globally);
 //   8. the frames run with CWD = data/TC/openliero, so a TC-relative level_file resolves as the
 //      Rust port's read_asset does (level.cpp:401-411); a setup whose level file does not open
 //      from there is refused. Common, the menus and the setup are loaded before the chdir. An `fs`
-//      case instead runs with CWD = its fixture, with the same refusal from there;
+//      case instead runs with CWD = its fixture under the Q4 guard (4½e-2 plan D3), at boot and
+//      after every frame that made a controller: a file level that does not open from the CWD
+//      but exists in the merged config view (the config node / each part after its FullPath())
+//      is refused, because C++ plays random there while Rust plays the level (finding 2; the
+//      case must copy the level into user/); a level missing from both layers passes (both
+//      sides fall back to random);
 //   9. the exit save: when an `fs` case ends by quit, gfx.settings->save(user config node /
 //      "Setups" / "liero.cfg", gfx.rand) — gameEntry.cpp:78 verbatim, which the dumper never
 //      reaches (the Rust side is Shell::save_on_exit).
 //
-// Opt-in script directives (4½e-1; a script without them writes the 4½d output byte-identically):
+// Opt-in script directives (4½e-1; a script without them writes the 4½d output byte-identically;
+// 4½e-2 adds the tops L = LevelSelectorState and P = OptionsSelectorState, and no directive):
 //   text <frame> <hex>  one SDL_EVENT_TEXT_INPUT whose string is the (lowercase, 2..8 digit) hex
 //                       bytes; the strings live for the whole run. Key names gain BACKSPACE.
 //   detail              a `d <frame> <cur> <ssel> <cfg16> <state8|->` line after every f line: cur
@@ -50,11 +62,13 @@
 //                       does. After the end line (and intervention 9) it writes `file <rel>
 //                       <fnv16>` for every regular file under user/, rel sorted bytewise, then
 //                       removes the fixture.
-// The search-gap check (plan D4): C++'s WeaponMenu search clears its prefix after 1500 ms of
+// The search-gap check (plan D4): C++'s menu search clears its prefix after 1500 ms of
 // SDL_GetTicks() (menu.cpp:21-24) and the Rust harness passes now_ms = 0, so a case fails when two
-// frames of one WeaponMenuState visit (InfoBox interludes included) carry printable key-downs
-// >= 1000 ms apart. InputStringState::Enter's SDL_StartTextInput(nullptr window) fails harmlessly
-// headless; the pushed text events still arrive.
+// frames of one visit carry printable key-downs >= 1000 ms apart. A visit is one continuous stretch
+// of the same WeaponMenuState (InfoBox interludes included), LevelSelectorState or
+// OptionsSelectorState on top (the selectors push nothing). InputStringState::Enter's
+// SDL_StartTextInput(nullptr window) fails harmlessly headless; the pushed text events still
+// arrive.
 // Usage (from the repo root): oracle_dump_shell <script.txt> <out.txt> [--ppm-dir <dir>]
 // Built via OPENLIERO_BUILD_ORACLE_DUMP (rust/oracle-tests/gen_shell_golden.sh). Not part of the
 // default build.
@@ -85,6 +99,7 @@
 
 #include "common.hpp"
 #include "controller/controller.hpp"
+#include "fileSelectorState.hpp"
 #include "filesystem.hpp"
 #include "game.hpp"
 #include "gamePlayState.hpp"
@@ -426,7 +441,13 @@ char TopOf(AppState* s) {
   if (dynamic_cast<InfoBoxState*>(s) != nullptr) {
     return 'B';
   }
-  Fail("a state 4½e-1 does not model is on the stack");
+  if (dynamic_cast<LevelSelectorState*>(s) != nullptr) {
+    return 'L';
+  }
+  if (dynamic_cast<OptionsSelectorState*>(s) != nullptr) {
+    return 'P';
+  }
+  Fail("a state 4½e-2 does not model is on the stack");
 }
 
 // The fields every line shares: bmp16 fade menu_cycles top sel.
@@ -548,7 +569,7 @@ std::string FileLines(std::filesystem::path const& user) {
   return out;
 }
 
-// Interventions 8 (and its fs form): a file level must open from the CWD, as level.cpp:401-411
+// Intervention 8 (non-fs cases): a file level must open from the CWD, as level.cpp:401-411
 // opens it; the dumper never lets GenerateFromSettings fall back to random silently.
 void CheckLevelFile(std::string const& where) {
   if (gfx.settings->random_level) {
@@ -562,6 +583,47 @@ void CheckLevelFile(std::string const& where) {
     (void)FsNode(path).ToReader();
   } catch (std::runtime_error const&) {
     Fail("the setup's level file " + path + " does not open from " + where);
+  }
+}
+
+// Intervention 8's fs form, the Q4 guard (4½e-2 plan D3): C++ opens a file level from the CWD
+// only (level.cpp:401-411), so a level that lives in the system layer alone is played as random
+// (finding 2), where Rust reads it through the merged view and plays it. Refuse that case.
+void CheckLevelQ4(std::string const& where) {
+  if (gfx.settings->random_level) {
+    return;
+  }
+  std::string path = gfx.settings->level_file;
+  if (!path.contains('.')) {
+    path += ".LEV";
+  }
+  bool opens = true;
+  try {
+    (void)FsNode(path).ToReader();
+  } catch (std::runtime_error const&) {
+    opens = false;
+  }
+  if (opens) {
+    return;
+  }
+  FsNode node = gfx.GetConfigNode();
+  std::string const kPrefix = node.FullPath() + "/";
+  if (!path.starts_with(kPrefix)) {
+    return;
+  }
+  std::string_view rest(path);
+  rest.remove_prefix(kPrefix.size());
+  while (node) {
+    std::size_t const kSlash = rest.find('/');
+    node = node / std::string(rest.substr(0, kSlash));
+    if (kSlash == std::string_view::npos) {
+      break;
+    }
+    rest.remove_prefix(kSlash + 1);
+  }
+  if (node.Exists()) {
+    Fail(where + ": Q4 — C++ plays random where Rust plays " + path +
+         "; copy the level into user/ (plan D1)");
   }
 }
 
@@ -644,7 +706,7 @@ int main(int argc, char** argv) {
       gfx.SaveSettings(gfx.GetUserConfigNode() / "Setups" / "liero.cfg");
     }
   }
-  gfx.settings->record_replays = false;  // intervention 6
+  gfx.settings->record_replays = false;  // intervention 6 (boot: the boot d state, the defaults)
   ColorMode const kMode = gfx.settings->modern_colors ? ColorMode::kModern : ColorMode::kClassic;
   gfx.play_renderer.mode = kMode;
   gfx.single_screen_renderer.mode = kMode;
@@ -672,7 +734,7 @@ int main(int argc, char** argv) {
     std::filesystem::current_path("data/TC/openliero");  // intervention 8
     CheckLevelFile("data/TC/openliero");
   } else {
-    CheckLevelFile("the fs fixture");
+    CheckLevelQ4("boot");  // intervention 8, fs form
   }
 
   std::string out = "# oracle_dump_shell " + kScript +
@@ -695,9 +757,11 @@ int main(int argc, char** argv) {
   std::size_t next_ev = 0;
   int end = kCase.frames;
   bool quit = false;
-  // The search-gap check (plan D4): the WeaponMenuState of the current visit, and the frame and
-  // SDL_GetTicks() of its latest search key.
+  // The search-gap check (plan D4): the WeaponMenuState, LevelSelectorState or
+  // OptionsSelectorState of the current visit, its top, and the frame and SDL_GetTicks() of its
+  // latest search key.
   AppState const* search_menu = nullptr;
+  char search_top = '-';
   int search_frame = -1;
   uint64_t search_ms = 0;
   for (int frame = 0; frame < kCase.frames; ++frame) {
@@ -710,16 +774,19 @@ int main(int argc, char** argv) {
     if (kTop == 'G') {
       upd = gfx.controller->InWeaponSelection() ? 'W' : 'G';
     }
-    if (kTop == 'O' && kTopState != search_menu) {
+    bool const kSearchable = kTop == 'O' || kTop == 'L' || kTop == 'P';
+    if (kSearchable && kTopState != search_menu) {
       search_menu = kTopState;
+      search_top = kTop;
       search_frame = -1;
-    } else if (kTop != 'O' && kTop != 'B') {
+    } else if (!kSearchable && (kTop != 'B' || search_top != 'O')) {  // B continues an O visit
       search_menu = nullptr;
+      search_top = '-';
       search_frame = -1;
     }
     bool search_key = false;
     while (next_ev < kCase.events.size() && kCase.events[next_ev].frame == frame) {
-      search_key = search_key || (kTop == 'O' && IsSearchKey(kCase.events[next_ev]));
+      search_key = search_key || (kSearchable && IsSearchKey(kCase.events[next_ev]));
       Push(kCase, kCase.events[next_ev++]);
     }
     if (search_key) {
@@ -736,6 +803,7 @@ int main(int argc, char** argv) {
     rec->played.clear();
     gfx.last_frame = 0;  // intervention 5
     bool const kGo = gfx.RunOneFrame();
+    gfx.settings->record_replays = false;  // intervention 6′
     std::time_t const kT1 = std::time(nullptr);
     std::string const kAt = "frame " + std::to_string(frame) + ": ";
     if (gfx.controller.get() != kBefore) {
@@ -746,6 +814,9 @@ int main(int argc, char** argv) {
       if (gfx.settings->game_mode == Settings::kGmHoldazone) {
         Fail(kAt +
              "a Holdazone match (unported in Rust): use Holdazone setups for boot cases only");
+      }
+      if (!kCase.fs.empty()) {
+        CheckLevelQ4("frame " + std::to_string(frame));  // intervention 8, fs form
       }
       Game& game = *gfx.controller->CurrentGame();
       bool untouched = false;

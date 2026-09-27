@@ -366,6 +366,20 @@ Already ported bit-exact in Step 1 (`assets::level::load`). Format probe order: 
 header → legacy 504×350 → optional `POWERLEVEL` palette (gated on `load_powerlevel_palette`) →
 optional `MODERNLV` display data → optional animation ramps → `materials[i] = common.materials[material_id[i]]`.
 
+(**4½e-2**, plan fact 11; T0 P10.) C++ is **stricter** than the Step-1 port about what it accepts: (a) `OLLEVEL2`
+needs its 5 header bytes and `1 ≤ w, h ≤ 4096`, else the file is legacy 504×350; (b) the material bytes must be
+complete; (c) with `load_powerlevel_palette` (default on) it `TryGet`s 10 bytes — `"POWERLEVEL"` needs 768 palette
+bytes and the `MODERNLV` probe then reads 8 fresh bytes, otherwise the ≥ 8 pre-read bytes' first 8 are the probe;
+(d) without (c) the probe is 8 fresh bytes; (e) after `"MODERNLV"`, `w·h·4` display bytes and `w·h` valid bytes must
+follow (the animation extension is lenient). `assets::level::load` keeps a truncated POWERLEVEL/MODERNLV block;
+C++ rejects the level (Rust now applies the rules: `ui::shell::level_path::cpp_accepts`). A rejection under
+(a)–(d), or a missing file, is a random level at NEW GAME and no preview. **A clause-(e) rejection is UB at NEW
+GAME:** `load` has already resized `display_data`/`display_valid` to w·h when the next read throws,
+`GenerateFromSettings` catches it and calls `GenerateRandom`, whose `Resize` resizes only `material_id` and
+`materials`, and every `SetPixel` then writes `display_valid[idx]` past the end (a crash in every build, an
+assertion in `stl_vector.h` with `_GLIBCXX_ASSERTIONS`). Previewing such a file is safe (the local `Level` is
+discarded).
+
 ### 4.4 The level file picker
 
 `LevelSelectorState` — `fileSelectorState.cpp:71-156`:
@@ -389,6 +403,51 @@ optional `MODERNLV` display data → optional animation ramps → `materials[i] 
 
 `FileSelector::Process` key handling (`fileSelector.hpp:251-300`): Up/Down, PgUp/PgDn, Esc/Jump =
 leave, Left = parent dir, Right = enter dir, plus substring type-search.
+
+(**4½e-2**, plan facts 1–10; confirmed by T0 P1–P3 through the real `Gfx::RunOneFrame`.)
+- **Titles and draw order.** `bmp ← frozen_screen`; the options selector's framed `"Select options:"` title; the
+  level selector's `DrawExtra` (the preview into `frozen_screen`, then its own framed `SelLevel` title — the same
+  pixels as `Font::DrawFramedText(…, 178, 20, 50)`); the parent pane only when the current node has a parent
+  (`"Parent directory"` framed at (28, 20), the parent's menu disabled at x = 28 with its selection shown); the
+  current menu at x = 178. Both titles are text + `' '` + the folder's `full_path` (nothing when it is empty), and
+  a long one is clipped at x = 320.
+- **Nodes.** Each `FileNode` has a `Menu(178, 28)` with `SetHeight(14)`, built on the first `GetMenu()` from the
+  children (`MenuItem(folder ? 47 : 48, 7, name)`, id -1, `MoveToFirstVisible`); an empty folder's menu is rebuilt
+  on every `GetMenu()`. `Fill` adds every directory and each file whose `filter(name, GetExtension(name))` holds
+  (`CiCompare` with `LEV`/`CFG`; no dot → ext `""` → rejected), named `GetBasename` (up to the last `.`), then
+  `ChildSort`: folders first, then `CiLess` (ASCII `toupper`, a proper prefix first; `std::ranges::sort`, unstable).
+- **`DirectoryListing`** skips only `.` and `..` (dotfiles are listed), `stat` follows symlinks, a broken link is
+  dropped, a name ending in `.zip` (case-sensitive) is a folder without the suffix; the config node's `Iter()` is
+  user entries then system entries, re-sorted bytewise and de-duplicated by name.
+- **RANDOM** is `FileNode(LS(Random), "", "", false, &root)` inserted at `children[0]` after the root's `Fill`; it
+  is colour 48 like a file. `OnSelected(RANDOM)`: `random_level = true`, `level_file` cleared; a file:
+  `random_level = false`, `level_file = full_path`; then `UpdateItems`; no sound but the Enter's `MenuSelect`.
+- **`Find`** matches on `CiCompare(full_path, path)` or recurses when `CiStartsWith(path, full_path)` — with no
+  separator check — filling folders on the way. A miss (random, a TC-relative path, another root) opens on
+  `[RANDOM]`. The options selector `Select`s `JoinPath(root, "Setups")`, a folder, so it opens inside `Setups`.
+- **`Update`/`Process`, in order:** Up (MoveDown) / Down (MoveUp) / PgUp / PgDn, each `TestSdlKeyOnce ||
+  TestControlOnce` (pages keyboard-only); Esc or any Jump leaves (no sound, no `ClearKeys`); once-Left `Exit`;
+  once-Right `Enter` (a folder, no sound); `OnKeys(key_buf, contains)`; then Return / KP Enter / any Fire plays
+  `MenuSelect` and `Enter`s — a file row goes to `OnSelected` and the state pops. Because `TestControlOnce` runs
+  before `OnKeys`, **R/F/D/G (P1's Up/Down/Left/Right) move instead of searching** (T0: a typed `d` left Levels).
+- **The preview** runs only for a file ≠ RANDOM that differs from `previewNode_`; it reads through the joined node
+  and `Level::load`s (an exception is caught); on success `FillRect(frozen, 134, 162, prev_cols, prev_rows, 0)`,
+  `DrawMiniature(frozen, 134, 162, sx, sy)` with `sx = max(ceil(w/52), 1)`, `sy = max(ceil(h/36), 1)`, then
+  `prev = ((w + sx/2)/sx, (h + sy/2)/sy)` (52×36 at `Enter`). `previewNode_` moves on **even when the load failed**.
+  `DrawMiniature` samples `pal32` — this frame's menu palette. Drawn into the frozen screen after the copy, it shows
+  **one frame late** (T0 P3: on each landing frame `frozen` changes while the presented surface still holds the old
+  preview), and it **persists into the main menu** until the next `MainMenuState::Enter`.
+- **T0's listings** (the `fs` fixture, root label `./user`): the root is `[RANDOM]:48 | Profiles | Replays |
+  Resources | Setups | TC` (all 47; user-only `Replays` merged in, `TC` listed once); `./user/TC/openliero` is
+  `Levels | nobjects | sobjects | sounds | sprites | weapons`; Levels lists `.hidden`, `alpha` (from `alpha.LEV`),
+  the shipped five, `tiny`, `Zeta`, and drops `notes.txt`. PgUp from row 8 lands on row 1 (`MovementPage`). Picking
+  `water_stage` pops with one `MenuSelect`; LEVEL again opens inside Levels on `water_stage` (P2). A 60×40 level
+  previews as a 30×20 footprint.
+- **The shipped-level bug in the dumper (T0 P6):** with `water_stage` in the system layer only, a picked
+  `./user/…/water_stage.lev` plays exactly what a `[RANDOM]` pick with REGENERATE LEVEL on plays (same seeds,
+  234/234 ticks), while `LEVEL` shows `"water_stage"` and the selection screen `Level: "water_stage"`. A plain
+  `[RANDOM]` pick is not a regeneration: the router reuses the menu's level when REGENERATE is off and the level
+  fields equal its `old_*` copies (`gfx.cpp:1512-1522`).
 
 Other pickers: replays (`.LRP`, `<config>/Replays`, `fileSelectorState.cpp:160-184`), profiles
 (`.TOML` → `<config>/Profiles`, `:188-206`), setups (`.CFG` → `<config>/Setups`, `:210-226`), TCs
@@ -445,6 +504,34 @@ Shipped examples: `data/Setups/liero.cfg`, `data/Profiles/{AI,Lefty,Righty,Joyst
 
 `paths::ShadowsSystem` (`filesystem.hpp:142`) rejects Save-As names that would shadow shipped files;
 `MakeSaveAsState` (`mainMenuState.cpp:69-91`) shows `NAME '<x>' IS RESERVED` and re-opens the input.
+
+(**4½e-2**, plan facts 12–16; confirmed by T0 P4, P5, P7, P8, P9.)
+- **SAVE SETUP AS…** plays `MenuSelect`, then — only while `ItemPosition` finds the item in view (always, from the
+  keyboard) — pushes `InputStringState(GetBasename(GetLeaf(settings_node.FullPath())), 30, item_x +
+  value_offset_x + 2 = 280, item_y, no filter, "", false, cb)`. `cb`: not accepted or empty → `on_complete("")`;
+  else `leaf = result + ".cfg"`, and when `ShadowsSystem(user, "Setups", leaf)` →
+  `ScheduleReplaceTop(InfoBoxState("NAME '" + leaf + "' IS RESERVED", 160, 100, clear, on_dismiss))`, whose
+  `on_dismiss` schedules the name box again on `result`; else `on_complete(result)`, which saves to `user / "Setups" /
+  (r + ".cfg")` when `r` is non-empty and then **always** plays `MenuSelect` + `UpdateItems`. Sounds on the close
+  frame: accept 2, cancel or empty 2, reserved 1. The box and the reopened entry are each **presented on the frame
+  that scheduled them** (T0 P5; the replacement wins over the pop, `state.hpp:101-105`); the box is black
+  (`exepal`).
+- **`ShadowsSystem`** (`filesystem.cpp:736-763`) consults `SystemDataRoot()` afresh, not the resolved layers: under
+  `--config-root <copy of data/>` with `OPENLIERO_DATADIR=data` it refuses `orbmit.cfg` (T0 P9: the file is
+  unchanged); with no system data it saves over it. The C++ web build (`--config-root /openliero`, whose
+  `SystemDataRoot()` falls through to `/`) refuses only the reserved `liero.cfg` (source-derived).
+- **`SaveSettings` / `LoadSettings`** (`gfx.cpp:1688-1697`) set `settings_node` first; `LoadSettings` then swaps in
+  a **fresh** `Settings`, even when the load fails (a half-read object). `OptionsSelectorState::OnSelected` =
+  `LoadSettings(node)` + `UpdateItems` (no `MoveToFirstVisible`). The shown name is `GetBasename(GetLeaf(…))` of the
+  **config-node** path (`./user/Setups/orbmit.cfg` although the file lives in the system layer; T0 P4). T0's LOAD
+  SETUP: `./user/Setups` = `liero | mine | orbmit`, the cursor on `liero`, the parent `./user` on `Setups`; loading
+  `orbmit` gives lives 9, loading 20, `max_bonuses` 0, blood 25 and `record_replays` 1.
+- **LOAD SETUP re-enables replays (P7):** both shipped setups have `recordReplays = true`, so a LOAD SETUP then NEW
+  GAME writes `user/Replays/<local date and time> <names>.lrp` (`localController.cpp:237-270`) — a wall-clock name
+  (the shell dumper's intervention 6′ resets `record_replays` after every frame).
+- **LOAD SETUP detaches a paused match (P8):** after NEW GAME, 234 ticks, Esc, a LOAD SETUP of `orbmit` (whose
+  `maxBonuses = 0` would change the `rand` draws of a shared object), then RESUME: the resumed match equals an
+  unloaded control on 201/201 ticks and presented frames. The paused game keeps the old settings object.
 
 ### 5.4 Controls binding UI
 

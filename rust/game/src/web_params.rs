@@ -26,8 +26,8 @@ use sim::state::NUM_WEAPONS;
 pub use ui::shell::loadout::apply_weapons;
 
 /// Levels a preview may pick: the stem of each `Levels/<stem>.lev` embedded in
-/// the wasm build (`scenario::assets`). `modern_test` (1.2 MB) is left out to
-/// keep the download small.
+/// the wasm build (`scenario::assets::EMBEDDED_LEVELS`, in its order; `config`'s tests pin
+/// it). `modern_test` (1.2 MB) is left out to keep the download small (ruling Q6).
 pub const LEVELS: [&str; 4] = [
     "render_stage",
     "water_stage",
@@ -101,18 +101,22 @@ impl MatchParams {
         p
     }
 
-    /// The TC-relative stock level file `level=` names (`Levels/<stem>.lev`), which the NEW
-    /// GAME start loads instead of generating a level (C++ `random_level = false` +
-    /// `level_file`). `None`: generate one.
-    pub fn level_file(&self) -> Option<String> {
-        self.level.as_ref().map(|stem| format!("Levels/{stem}.lev"))
+    /// The stock level file `level=` names, in the canonical config-root form the C++ level
+    /// selector saves (Step 4½e-2, design §7.5): `<root_label>/TC/openliero/Levels/<stem>.lev`,
+    /// which the NEW GAME start loads instead of generating a level (C++ `random_level = false`
+    /// + `level_file`) and LEVEL opens on. `None`: generate one.
+    pub fn level_file(&self, root_label: &str) -> Option<String> {
+        self.level
+            .as_ref()
+            .map(|stem| format!("{root_label}/TC/openliero/Levels/{stem}.lev"))
     }
 
     /// Step 4½e-1: `?level=` on the loaded settings (the in-memory copy only; URL parameters are
-    /// never saved, design §7.5): a stock level instead of a generated one, TC-relative
-    /// (`level_path` rule 3; 4½e-2 makes it the canonical root form).
-    pub fn apply_level(&self, s: &mut scenario::settings::Settings) {
-        if let Some(file) = self.level_file() {
+    /// never saved, design §7.5): a stock level instead of a generated one. Step 4½e-2: the path
+    /// is the canonical one under the store's `root_label` (`level_path` rule 1), so the level
+    /// selector's restore finds it.
+    pub fn apply_level(&self, s: &mut scenario::settings::Settings, root_label: &str) {
+        if let Some(file) = self.level_file(root_label) {
             s.random_level = false;
             s.level_file = file;
         }
@@ -169,7 +173,7 @@ mod tests {
         for q in ["", "?"] {
             let p = MatchParams::parse(q);
             assert_eq!(p, MatchParams::default());
-            assert_eq!((p.level_file(), p.seed), (None, None));
+            assert_eq!((p.level_file("/openliero"), p.seed), (None, None));
             assert!(!p.skips_weapon_selection());
         }
     }
@@ -183,7 +187,10 @@ mod tests {
         assert_eq!(p.seed, Some(7));
         assert!(p.demo);
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
-        assert_eq!(p.level_file().as_deref(), Some("Levels/water_stage.lev"));
+        assert_eq!(
+            p.level_file("/openliero").as_deref(),
+            Some("/openliero/TC/openliero/Levels/water_stage.lev")
+        );
     }
 
     #[test]
@@ -194,12 +201,103 @@ mod tests {
             ..Settings::default()
         };
         let mut s = loaded.clone();
-        MatchParams::parse("?seed=3").apply_level(&mut s);
+        MatchParams::parse("?seed=3").apply_level(&mut s, "/openliero");
         assert_eq!(s, loaded, "no ?level=: the loaded setup as it is");
-        MatchParams::parse("?level=water_stage").apply_level(&mut s);
+        MatchParams::parse("?level=water_stage").apply_level(&mut s, "/openliero");
         assert_eq!(
             (s.random_level, s.level_file.as_str(), s.lives),
-            (false, "Levels/water_stage.lev", 7)
+            (false, "/openliero/TC/openliero/Levels/water_stage.lev", 7),
+            "the canonical config-root path the C++ level selector saves (design §7.5)"
+        );
+    }
+
+    #[test]
+    fn the_canonical_level_reads_through_the_browser_store() {
+        use scenario::storage::ConfigStore;
+        let store = crate::config::browser_store();
+        let mut s = scenario::settings::Settings::default();
+        MatchParams::parse("?level=water_stage").apply_level(&mut s, store.root_label());
+        let tc = std::path::Path::new(scenario::paths::TC_ROOT);
+        let level = ui::shell::level_path::read_level(&store, tc, &s.level_file, false)
+            .expect("the embedded water_stage");
+        let shipped = std::fs::read(tc.join("Levels/water_stage.lev")).unwrap();
+        assert_eq!(level, assets::level::load(&shipped).unwrap());
+    }
+
+    #[test]
+    fn level_opens_on_the_url_level() {
+        // `?level=water_stage&menu=1`: the boot level is the file, and LEVEL opens in Levels
+        // with the cursor on it (the selector's restore, fileSelectorState.cpp:73-103).
+        use scenario::storage::ConfigStore;
+        use ui::keys::{DK_F7, DK_RETURN, TypedKey};
+        use ui::shell::level_slot::SeedSource;
+        use ui::shell::playing::StartOptions;
+        use ui::shell::{InputEvent, KeyEvent, Shell, ShellInput};
+
+        let p = MatchParams::parse("?level=water_stage&menu=1");
+        assert!(!p.skips_menu());
+        let store = crate::config::browser_store();
+        let mut settings = crate::config::load_settings(&store);
+        p.apply_level(&mut settings, store.root_label());
+        let (mut sh, mut sim, _) = Shell::boot(
+            std::path::Path::new(scenario::paths::TC_ROOT),
+            settings,
+            Box::new(store),
+            SeedSource::Fixed(5),
+            0,
+            StartOptions::default(),
+        );
+        assert!(
+            sh.level_from_file(),
+            "the boot level is water_stage, not generated"
+        );
+        let mut frame = |sh: &mut Shell, dos: Option<u32>| {
+            let events: Vec<InputEvent> = dos
+                .into_iter()
+                .map(|dos| {
+                    InputEvent::Key(KeyEvent {
+                        dos,
+                        down: true,
+                        repeat: false,
+                        typed: TypedKey::Sym(0),
+                    })
+                })
+                .collect();
+            sh.frame(
+                &mut sim,
+                &ShellInput {
+                    events: &events,
+                    ..ShellInput::idle()
+                },
+            );
+            if let Some(dos) = dos {
+                let up = [InputEvent::Key(KeyEvent {
+                    dos,
+                    down: false,
+                    repeat: false,
+                    typed: TypedKey::Sym(0),
+                })];
+                sh.frame(
+                    &mut sim,
+                    &ShellInput {
+                        events: &up,
+                        ..ShellInput::idle()
+                    },
+                );
+            }
+        };
+        for _ in 0..40 {
+            frame(&mut sh, None);
+        }
+        frame(&mut sh, Some(DK_F7));
+        sh.settings_menu_mut()
+            .move_to_id(ui::shell::settings_menu::SI_LEVEL);
+        frame(&mut sh, Some(DK_RETURN));
+        let view = sh.selector_view().expect("the level selector is up");
+        assert_eq!(
+            (view.top, view.folder.as_str(), view.selection),
+            ('L', "/openliero/TC/openliero/Levels", 3),
+            "physics_fall_test, render_stage, see_shadow_test, water_stage"
         );
     }
 

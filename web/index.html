@@ -68,6 +68,12 @@
         justify-content: center; background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 16px;
         text-align: center; padding: 16px; box-sizing: border-box; }
       #quit[hidden] { display: none; }
+      /* After a death the original waits for FIRE before the worm respawns (the camera shows the
+         spawn point meanwhile); this banner says so while window.lieroRespawn is true. */
+      #respawn { position: fixed; left: 50%; top: 38%; transform: translate(-50%, -50%); z-index: 15;
+        padding: 8px 14px; border-radius: 10px; background: rgba(0, 0, 0, 0.7); color: #fff;
+        font: bold 15px system-ui, sans-serif; pointer-events: none; white-space: nowrap; }
+      #respawn[hidden] { display: none; }
       /* The hint stays out of the canvas's top centre, where the weapon-selection title is:
          one short line above the game in portrait, a small block in the top-left gutter
          (beside the game, above the pad) in landscape. */
@@ -151,6 +157,7 @@
     -->
     <div id="status">Loading…</div>
     <div id="quit" hidden>Quit — tap or press a key to play again</div>
+    <div id="respawn" hidden></div>
     <div id="touch" aria-hidden="true">
       <div id="touch-hint"></div>
       <div id="tap-type" class="ctl" hidden>TAP TO TYPE</div>
@@ -180,6 +187,12 @@
       <kbd>←</kbd>/<kbd>→</kbd> makes a weapon Menu / Bonus / Banned, <kbd>Esc</kbd> closes ·
       <kbd>Esc</kbd> back to the main menu · edits reach a paused match at RESUME GAME
       <br />
+      <b>Level / Load setup</b>: <kbd>↑</kbd>/<kbd>↓</kbd> pick · <kbd>→</kbd> opens a folder ·
+      <kbd>←</kbd> goes back · <kbd>Enter</kbd> picks · type a name to jump to it (R/F/D/G are
+      player 1's keys and move instead) · LEVEL lists [RANDOM] and the stock levels in
+      TC/openliero/Levels · <b>Save setup as…</b>: type a name, <kbd>Enter</kbd> (liero is
+      reserved; kept until you reload the page)
+      <br />
       <b>Player 1</b>: <kbd>R</kbd>/<kbd>F</kbd> aim · <kbd>D</kbd>/<kbd>G</kbd> move ·
       <kbd>Left Ctrl</kbd> fire · hold <kbd>Left Shift</kbd> and tap <kbd>D</kbd>/<kbd>G</kbd> to
       change weapon · <kbd>Left Alt</kbd> jump
@@ -189,7 +202,9 @@
       change weapon · <kbd>Right Shift</kbd> jump
       <br />
       <b>Phone</b>: tap WEAPON for the next weapon (or hold it and tap the pad ←/→ as on a
-      keyboard; WEAPON + JUMP throws the rope)
+      keyboard; WEAPON + JUMP throws the rope) · hold DIG to keep digging, with the pad ←/→ to
+      tunnel · a number box opens the number keyboard, SAVE
+      SETUP AS… the letter keyboard
       <br />
       <b>Weapon selection</b> first, both players: aim up/down picks a line · move left/right
       changes the weapon · fire on <i>Randomize</i> re-rolls all five · fire on <i>DONE!</i>
@@ -380,8 +395,10 @@
       const HINTS = {
         menu: ['↑↓ pick', '←→ change', 'FIRE selects', 'MATCH SETUP: rules', 'JUMP: back'],
         text: ['Type, FIRE = OK', 'MENU = cancel'],
+        // Step 4½e-2 (Q5, plan D11): SAVE SETUP AS… (window.lieroTextMode 'text') takes a name.
+        name: ['Type a name, FIRE = OK', 'MENU = cancel'],
         weapsel: ['Pick ↑↓ ←→', 'FIRE on DONE!', 'You: blue worm', 'P2: a bot'],
-        game: ['MENU pauses', 'Tap WEAPON: next weapon', 'You: blue worm'],
+        game: ['MENU pauses', 'Tap WEAPON: next weapon', 'Hold DIG to dig', 'You: blue worm'],
       };
       const hint = document.getElementById('touch-hint');
       const quit = document.getElementById('quit');
@@ -392,7 +409,8 @@
       // Enter/Done as Return; then the sentinel is restored. The game drains window.lieroText
       // once per tick (rust/game/src/touch.rs page_text_events). FIRE confirms and MENU cancels
       // in the game itself. Android raises the keyboard on focus(); iOS only from a real tap,
-      // hence TAP TO TYPE.
+      // hence TAP TO TYPE. Step 4½e-2 (Q5, plan D11): the keyboard is chosen per box before each
+      // focus() — window.lieroTextMode is 'numeric' for a number and 'text' for SAVE SETUP AS….
       window.lieroText = [];
       const SENTINEL = '  ';
       const entry = document.getElementById('text-entry');
@@ -402,6 +420,7 @@
         try { entry.setSelectionRange(SENTINEL.length, SENTINEL.length); } catch (_) {}
       };
       const focusEntry = () => {
+        entry.inputMode = window.lieroTextMode === 'text' ? 'text' : 'numeric';
         resetEntry();
         entry.focus({ preventScroll: true });
       };
@@ -424,18 +443,25 @@
         });
       }
 
+      // The watcher keys on the phase and the text box's keyboard, so it also refocuses (with the
+      // right keyboard) when the box changes while the phase stays 'text' — e.g. the reserved-name
+      // box and the name entry reopening between two polls.
       let shownPhase = null;
       setInterval(() => {
         const phase = window.lieroPhase;
-        if (phase === shownPhase) return;
-        shownPhase = phase;
+        const shown = phase === 'text' ? 'text/' + window.lieroTextMode : phase;
+        if (shown === shownPhase) return;
+        shownPhase = shown;
         if (wantTouch) {
           const typing = phase === 'text';
           tapType.hidden = !typing;
-          if (typing) focusEntry();
-          else if (document.activeElement === entry) entry.blur();
+          if (typing) {
+            if (document.activeElement === entry) entry.blur(); // a new keyboard needs a new focus
+            focusEntry();
+          } else if (document.activeElement === entry) entry.blur();
         }
-        hint.replaceChildren(...(HINTS[phase] || []).map((t) => {
+        const hints = phase === 'text' && window.lieroTextMode === 'text' ? HINTS.name : HINTS[phase];
+        hint.replaceChildren(...(hints || []).map((t) => {
           const span = document.createElement('span');
           span.textContent = t;
           return span;
@@ -445,6 +471,20 @@
           // A key still held from selecting QUIT auto-repeats: only a fresh press reloads.
           window.addEventListener('keydown', (e) => { if (!e.repeat) location.reload(); });
           window.addEventListener('pointerdown', () => location.reload(), { once: true });
+        }
+      }, 200);
+
+      // After a death: "FIRE to respawn" while player 1's worm waits for it (window.lieroRespawn).
+      const respawn = document.getElementById('respawn');
+      respawn.textContent = wantTouch ? 'Tap FIRE to respawn' : 'Press Left Ctrl (fire) to respawn';
+      setInterval(() => {
+        respawn.hidden = !(window.lieroRespawn && window.lieroPhase === 'game');
+        const canvas = document.querySelector('canvas');
+        if (!respawn.hidden && canvas) {
+          // Over player 1's view: the left half of the game, above the status bar.
+          const r = canvas.getBoundingClientRect();
+          respawn.style.left = `${r.left + r.width / 4}px`;
+          respawn.style.top = `${r.top + r.height * 0.4}px`;
         }
       }, 200);
 

@@ -39,6 +39,10 @@ impl LevelProvenance {
 pub struct LevelSlot {
     pub level: LevelData,
     pub provenance: LevelProvenance,
+    /// Whether `level` came from the settings' level file (`read_level` accepted it); `false`
+    /// for a generated level, also the fallback for a missing or rejected file (Step 4½e-2,
+    /// `Shell::level_from_file`).
+    pub from_file: bool,
 }
 
 impl LevelSlot {
@@ -56,11 +60,18 @@ impl LevelSlot {
         let file = if settings.random_level {
             None
         } else {
-            read_level(store, tc_root, &settings.level_file)
+            read_level(
+                store,
+                tc_root,
+                &settings.level_file,
+                settings.load_powerlevel_palette,
+            )
         };
+        let from_file = file.is_some();
         LevelSlot {
             level: generate_level(tc_root, settings, file, seed),
             provenance: LevelProvenance::of(settings),
+            from_file,
         }
     }
 

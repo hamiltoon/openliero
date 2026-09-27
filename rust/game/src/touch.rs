@@ -20,10 +20,15 @@
 //! Step 4½e-1 (design §7.4, plan D9 and T10 step 5): [`TouchKeys`] adds the menu auto-repeat of a
 //! held pad Up/Down and FIRE-as-Return while a text box is up, and [`page_text_events`] turns the
 //! phone text field's entries (`window.lieroText`) into input events.
+//!
+//! Step 4½e-2 (plan D11, D12): the level and setup selectors need no new mapping (pad Up/Down are
+//! P1's controls and repeat in phase `menu`, Left/Right open and leave folders, FIRE picks, JUMP
+//! or MENU leave); the text field's keyboard is chosen per box from [`Hooks::text_mode`], and
+//! [`hooks`] is everything the page and the headless walk read back.
 
 use sim::state::ControlState;
 use ui::keys::{DK_BACKSPACE, DK_RETURN, TypedKey};
-use ui::shell::{InputEvent, KeyEvent, Phase};
+use ui::shell::{CurMenu, InputEvent, KeyEvent, Phase, Shell, TextMode};
 
 /// The page's bit layout (`TOUCH` in `web/index.html` must match).
 pub const TOUCH_UP: u32 = 1 << 0;
@@ -154,8 +159,90 @@ impl TouchKeys {
     }
 }
 
-/// The longest WEAPON press (in ticks, 0.3 s) that still counts as a tap for [`WeaponTap`].
-pub const WEAPON_TAP_MAX_TICKS: u32 = 21;
+/// A dead worm that has not pressed FIRE yet (John: "after getting killed the worm/screen isn't
+/// showing"). C++ respawns a worm only once its player presses FIRE while dead: the dead arm's
+/// `PressedOnce(kFire)` sets `ready` (`worm.cpp:435-436`), and `DoRespawning` waits for it
+/// (`:755-790`). Until then the camera shows the spawn point with no worm. The page shows
+/// "FIRE to respawn" while this is true for player 1.
+pub fn waiting_to_respawn(worm: &sim::state::WormState) -> bool {
+    !worm.visible && !worm.ready
+}
+
+/// The touch-only page's player-2 stand-in (Q8: a bot that readies at once, until 4½f's
+/// DumbLieroAI) has no input, so once killed it never pressed FIRE and never came back. While
+/// its worm is [`waiting_to_respawn`] during play, FIRE is pressed on every other tick. Each
+/// press is a fresh edge, so C++'s `PressedOnce(kFire)` sees it through the key edges. It stops
+/// as soon as `ready` is set, so the respawned worm does not fire. Otherwise the word passes
+/// through. Rust-only, and sampled input like any other, so it records and replays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BotRespawn {
+    tick: u32,
+}
+
+impl BotRespawn {
+    /// Player 2's sampled word for this tick.
+    pub fn apply(
+        &mut self,
+        word: ControlState,
+        worm: &sim::state::WormState,
+        phase: Phase,
+    ) -> ControlState {
+        if phase != Phase::Game || !waiting_to_respawn(worm) {
+            self.tick = 0;
+            return word;
+        }
+        self.tick += 1;
+        let mut out = word;
+        if self.tick % 2 == 1 {
+            out.set(ControlState::FIRE, true);
+        }
+        out
+    }
+}
+
+/// Ticks between two digs while DIG is held ([`DigRepeat`]): one dig every 8 ticks, about 9 a
+/// second, about the speed of a keyboard player tapping.
+pub const DIG_REPEAT_TICKS: u32 = 8;
+
+/// A Rust-only touch convenience (John: "the DIG button isn't working"): during play, holding
+/// DIG keeps digging.
+///
+/// C++ digs once per Left+Right press: `able_to_dig` re-arms only after a tick without both
+/// (`worm.cpp:887-951`). A keyboard player tunnels by holding one direction and tapping the
+/// other, so a held DIG button made one bite and then nothing. While DIG is held, the button's
+/// Left+Right chord is sent on the press tick and then every [`DIG_REPEAT_TICKS`]th tick. The
+/// ticks in between carry the rest of the mask without DIG, so `able_to_dig` re-arms and a held
+/// pad direction walks. DIG + pad right therefore digs a tunnel, as the tapping keyboard player
+/// does. The sim sees ordinary [`ControlState`] words. Outside `game` the mask passes through
+/// untouched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DigRepeat {
+    /// Ticks DIG has been held (0 on the press tick); `None` while it is up.
+    held: Option<u32>,
+}
+
+impl DigRepeat {
+    /// This tick's touch mask for sampling, from the (already [`WeaponTap`]-adjusted) mask `now`.
+    pub fn apply(&mut self, now: u32, phase: Phase) -> u32 {
+        if phase != Phase::Game || now & TOUCH_DIG == 0 {
+            self.held = None;
+            return now;
+        }
+        let t = self.held.map_or(0, |t| t + 1);
+        self.held = Some(t);
+        if t.is_multiple_of(DIG_REPEAT_TICKS) {
+            now
+        } else {
+            now & !TOUCH_DIG
+        }
+    }
+}
+
+/// The longest WEAPON press (in ticks, 1 s) that still counts as a tap for [`WeaponTap`]. It was
+/// 0.3 s at first, but a deliberate phone press often takes 0.3-0.45 s. The headless walk
+/// measured presses of 390-420 ms being dropped. Only a press held longer than this keeps the
+/// original's hold-to-see-the-name behaviour.
+pub const WEAPON_TAP_MAX_TICKS: u32 = 70;
 
 /// A Rust-only touch convenience (John: weapon change is "only one touch" on a phone): during
 /// play, a quick tap on WEAPON on its own steps to the next weapon.
@@ -255,6 +342,52 @@ pub fn page_text_events(entries: &[PageEntry]) -> Vec<InputEvent> {
         }
     }
     out
+}
+
+/// The page's read-only view of the shell after a frame (`window.liero*`; Step 4½e-1, 4½e-2 plan
+/// D11): what the page needs (the text field's keyboard) and what the headless walk checks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hooks {
+    /// `window.lieroTop`: `Shell::top_char` (`M`, `O`, `I`, `B`, `G`, `L`, `P`, `-`).
+    pub top: char,
+    /// `window.lieroSel`: the focused menu and its cursor — `L<n>` / `P<n>` for the level /
+    /// setup selector's current folder, else `M<n>` (the main menu) or `S<n>` (the settings).
+    pub sel: String,
+    /// `window.lieroFolder`: the selector's current folder (`full_path`, e.g. `/openliero` or
+    /// `/openliero/TC/openliero/Levels`); empty outside a selector.
+    pub folder: String,
+    /// `window.lieroSetup`: the setup name SAVE SETUP AS… shows (`liero`, `orbmit`, …).
+    pub setup: String,
+    /// `window.lieroLevel`: the settings' `level_file`.
+    pub level: String,
+    /// `window.lieroMode`: the settings' GAME MODE (0 Kill'em All … 3 Scales of Justice).
+    pub mode: u32,
+    /// `window.lieroTextMode`: the text box's keyboard — `numeric` (number entry) or `text`
+    /// (SAVE SETUP AS…); empty when no text box is up (Q5).
+    pub text_mode: &'static str,
+}
+
+/// The [`Hooks`] of `shell` as it stands.
+pub fn hooks(shell: &Shell) -> Hooks {
+    let view = shell.selector_view();
+    let sel = match (&view, shell.cur_menu()) {
+        (Some(v), _) => format!("{}{}", v.top, v.selection),
+        (None, CurMenu::Main) => format!("M{}", shell.main_selection()),
+        (None, CurMenu::Settings) => format!("S{}", shell.settings_menu().selection()),
+    };
+    Hooks {
+        top: shell.top_char(),
+        sel,
+        folder: view.map(|v| v.folder).unwrap_or_default(),
+        setup: shell.setup_name().to_string(),
+        level: shell.settings().level_file.clone(),
+        mode: shell.settings().game_mode,
+        text_mode: match shell.text_mode() {
+            Some(TextMode::Numeric) => "numeric",
+            Some(TextMode::Text) => "text",
+            None => "",
+        },
+    }
 }
 
 #[cfg(test)]
@@ -574,5 +707,218 @@ mod tests {
                 assert_eq!(tap.apply(m, phase), m, "{phase:?} passes the mask through");
             }
         }
+    }
+
+    /// One shell frame over `events` (the hooks test).
+    fn shell_step(sh: &mut Shell, sim: &mut sim::state::SimState, events: &[InputEvent]) {
+        sh.frame(
+            sim,
+            &ui::shell::ShellInput {
+                events,
+                ..ui::shell::ShellInput::idle()
+            },
+        );
+    }
+
+    /// A key press on one frame and its release on the next.
+    fn shell_tap(sh: &mut Shell, sim: &mut sim::state::SimState, dos: u32) {
+        for down in [true, false] {
+            let ev = InputEvent::Key(KeyEvent {
+                dos,
+                down,
+                repeat: false,
+                typed: TypedKey::Sym(0),
+            });
+            shell_step(sh, sim, &[ev]);
+        }
+    }
+
+    #[test]
+    fn the_hooks_follow_each_top() {
+        use ui::keys::{DK_DOWN, DK_ESCAPE, DK_F7};
+        use ui::shell::level_slot::SeedSource;
+        use ui::shell::playing::StartOptions;
+        use ui::shell::settings_menu::{LOAD_OPTIONS, SAVE_OPTIONS, SI_LEVEL, SI_LIVES};
+
+        let store = crate::config::browser_store();
+        let settings = crate::config::load_settings(&store);
+        let level = settings.level_file.clone();
+        let (mut sh, mut sim, _) = Shell::boot(
+            std::path::Path::new(scenario::paths::TC_ROOT),
+            settings,
+            Box::new(store),
+            SeedSource::Fixed(5),
+            0,
+            StartOptions::default(),
+        );
+        let sim = &mut sim;
+        for _ in 0..40 {
+            shell_step(&mut sh, sim, &[]);
+        }
+        let h = hooks(&sh);
+        assert_eq!(
+            h,
+            Hooks {
+                top: 'M',
+                sel: format!("M{}", sh.main_selection()),
+                folder: String::new(),
+                setup: "liero".into(),
+                level,
+                mode: 0,
+                text_mode: "",
+            }
+        );
+        shell_tap(&mut sh, sim, DK_F7);
+        assert_eq!(hooks(&sh).sel, "S0");
+        let enter_on = |sh: &mut Shell, sim: &mut sim::state::SimState, id| {
+            sh.settings_menu_mut().move_to_id(id);
+            shell_tap(sh, sim, DK_RETURN);
+        };
+
+        // LEVEL: the tree's root, `[RANDOM]` first.
+        enter_on(&mut sh, sim, SI_LEVEL);
+        let h = hooks(&sh);
+        assert_eq!(
+            (h.top, h.sel.as_str(), h.folder.as_str(), h.text_mode),
+            ('L', "L0", "/openliero", "")
+        );
+        shell_tap(&mut sh, sim, DK_ESCAPE);
+        assert_eq!((hooks(&sh).top, hooks(&sh).folder.as_str()), ('M', ""));
+
+        // LOAD SETUP: inside Setups; Down to orbmit, Enter loads it.
+        enter_on(&mut sh, sim, LOAD_OPTIONS);
+        let h = hooks(&sh);
+        assert_eq!(
+            (h.top, h.sel.as_str(), h.folder.as_str()),
+            ('P', "P0", "/openliero/Setups")
+        );
+        shell_tap(&mut sh, sim, DK_DOWN);
+        assert_eq!(hooks(&sh).sel, "P1");
+        shell_tap(&mut sh, sim, DK_RETURN);
+        let h = hooks(&sh);
+        assert_eq!((h.top, h.setup.as_str()), ('M', "orbmit"));
+
+        // A number box raises the numeric keyboard, SAVE SETUP AS… the text one.
+        enter_on(&mut sh, sim, SI_LIVES);
+        assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('I', "numeric"));
+        shell_tap(&mut sh, sim, DK_ESCAPE);
+        assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('M', ""));
+        enter_on(&mut sh, sim, SAVE_OPTIONS);
+        assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('I', "text"));
+        // The reserved name: the black box (no keyboard), then the entry again.
+        for _ in 0.."orbmit".len() {
+            shell_tap(&mut sh, sim, DK_BACKSPACE);
+        }
+        let typed: Vec<InputEvent> = "liero"
+            .chars()
+            .map(|c| InputEvent::Text(c.to_string()))
+            .collect();
+        shell_step(&mut sh, sim, &typed);
+        shell_tap(&mut sh, sim, DK_RETURN);
+        assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('B', ""));
+        shell_tap(&mut sh, sim, DK_ESCAPE);
+        assert_eq!((hooks(&sh).top, hooks(&sh).text_mode), ('I', "text"));
+    }
+
+    #[test]
+    fn a_held_dig_digs_on_the_press_and_every_8th_tick_and_walks_between() {
+        // John: holding DIG made one bite, then nothing (C++ digs once per Left+Right press).
+        let mut dig = DigRepeat::default();
+        let seq: Vec<u32> = (0..17)
+            .map(|_| dig.apply(TOUCH_DIG | TOUCH_RIGHT, Phase::Game))
+            .collect();
+        for (t, m) in seq.iter().enumerate() {
+            let chord = touch_state(*m);
+            let both = chord.get(ControlState::LEFT) && chord.get(ControlState::RIGHT);
+            assert_eq!(both, t % DIG_REPEAT_TICKS as usize == 0, "tick {t}");
+            assert!(
+                chord.get(ControlState::RIGHT),
+                "tick {t}: the pad keeps walking right"
+            );
+        }
+        // Released: plain pass-through, and the next press digs at once.
+        assert_eq!(dig.apply(0, Phase::Game), 0);
+        assert_eq!(dig.apply(TOUCH_DIG, Phase::Game), TOUCH_DIG);
+    }
+
+    #[test]
+    fn a_held_dig_rearms_cpp_able_to_dig_between_digs() {
+        // Model worm.cpp:887-951's gate over the edge-applied words: a dig needs Left+Right with
+        // able_to_dig set, which a tick without both re-arms. A 3 s hold digs about 26 times.
+        let (mut dig, mut prev, mut cur) = (
+            DigRepeat::default(),
+            ControlState::new(),
+            ControlState::new(),
+        );
+        let (mut able, mut digs) = (true, 0);
+        for _ in 0..210 {
+            let now = touch_state(dig.apply(TOUCH_DIG, Phase::Game));
+            cur = ui::keys::apply_key_edges(prev, now, cur);
+            prev = now;
+            if cur.get(ControlState::LEFT) && cur.get(ControlState::RIGHT) {
+                if able {
+                    able = false;
+                    digs += 1;
+                }
+            } else {
+                able = true;
+            }
+        }
+        assert_eq!(digs, 210 / DIG_REPEAT_TICKS as usize + 1);
+    }
+
+    #[test]
+    fn dig_repeat_is_only_for_play() {
+        for phase in [Phase::Menu, Phase::Text, Phase::Weapsel, Phase::Quit] {
+            let mut dig = DigRepeat::default();
+            for _ in 0..10 {
+                assert_eq!(dig.apply(TOUCH_DIG, phase), TOUCH_DIG, "{phase:?}");
+            }
+        }
+    }
+
+    fn test_worm() -> sim::state::WormState {
+        use sim::state::{NUM_WEAPONS, WeaponInit, WormInit, WormState};
+        use sim_core::vec::Vec2;
+        WormState::from_init(&WormInit {
+            index: 1,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit {
+                ty: Some(0),
+                ammo: 10,
+            }; NUM_WEAPONS],
+            start_pos: Vec2::zero(),
+            visible: true,
+        })
+    }
+
+    #[test]
+    fn the_touch_bot_presses_fire_until_it_is_ready_to_respawn() {
+        // John: after a death nothing came back; C++ needs FIRE (worm.cpp:435-436).
+        let (mut bot, mut w) = (BotRespawn::default(), test_worm());
+        let idle = ControlState::new();
+        assert_eq!(bot.apply(idle, &w, Phase::Game), idle, "alive: no input");
+        w.visible = false;
+        w.ready = false;
+        assert!(waiting_to_respawn(&w));
+        let fires: Vec<bool> = (0..4)
+            .map(|_| bot.apply(idle, &w, Phase::Game).get(ControlState::FIRE))
+            .collect();
+        assert_eq!(
+            fires,
+            [true, false, true, false],
+            "a fresh press every other tick"
+        );
+        // Through C++ OnKey's edges, the first press reaches the sim's PressedOnce.
+        let first = BotRespawn::default().apply(idle, &w, Phase::Game);
+        let applied = ui::keys::apply_key_edges(idle, first, idle);
+        assert!(applied.get(ControlState::FIRE));
+        // Ready (or outside play): nothing more.
+        w.ready = true;
+        assert_eq!(bot.apply(idle, &w, Phase::Game), idle);
+        w.ready = false;
+        assert_eq!(bot.apply(idle, &w, Phase::Menu), idle);
     }
 }

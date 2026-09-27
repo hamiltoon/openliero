@@ -1,6 +1,6 @@
 # Step 4½, Slice 4½e — the settings menu, weapon options, the level selector and setup files: design
 
-Status: **DESIGN — rulings in §14** · 2026-09-26 · branch `claude/cpp-oracle-vcpkg-assets-chcwcm` (on `liero-rs-step-4-5`; 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅ landed) · **4½e-1 LANDED** (plan `plans/2026-09-26-liero-rs-step4.5-slice4.5e1-plan.md`); 4½e-2 planned
+Status: **DESIGN — rulings in §14** · 2026-09-26 · branch `claude/cpp-oracle-vcpkg-assets-chcwcm` (on `liero-rs-step-4-5`; 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅ landed) · **4½e-1 and 4½e-2 LANDED** (plans `plans/2026-09-26-liero-rs-step4.5-slice4.5e1-plan.md`, `plans/2026-09-26-liero-rs-step4.5-slice4.5e2-plan.md`)
 Part of: `2026-09-10-liero-rs-step4.5-game-shell-overview.md` (the 4½e bullet, §4½h, §Deferrals, open Q5/Q6; cited **overview**)
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` §1–§5 (cited **cpp-map**) and
 `2026-09-10-liero-rs-step4.5-rust-baseline-map.md` (cited **rust-map**)
@@ -618,10 +618,24 @@ no case may play one. `cfg_boot` keeps a random level (the `fs` file-level path 
 | `setup_save` | SAVE SETUP AS… → `liero` (reserved, black `exepal` box) → any key → the input reopens on `liero` → Backspace ×5, `mine` → saved; the value shows `mine`; `orbmit` → shadows the shipped file → box; `file` lines |
 | `setup_load` | LOAD SETUP opens in `Setups` (liero, mine, orbmit) → orbmit → values change → a paused match is detached (RESUME keeps the old settings, state hash) → QUIT → `liero.cfg` holds orbmit's values |
 
+**As landed (4½e-2, `90b0692` / `4bb4609`):** 6 cases in `examples/gen_slice4_5e2_shell.rs` +
+`tests/shell_e2_cases/` — the five above plus the `setups_and_levels` milestone — 3,957 frames, 3,957 `d` lines and 18
+`file` lines, 22 golden files, bit-exact on the first run. `level_tree` searches `h`, `i` (not `stage`: `g` is P1's
+Right and `d` P1's Left, plan fact 24) and adds a user `Replays` folder, two water copies under other names, a
+dotfile, a `.txt` and a 60×40 `tiny.lev` (the preview footprint). `level_missing` also lists `broken.lev` (a README,
+rejected cleanly) and `trunc.lev` (a truncated MODERNLV block, previewed by neither side), and its second NEW GAME
+plays `broken` → random: a NEW GAME on `trunc.lev` is C++ UB (plan Addendum T0, P10), so no case plays it.
+`setup_save` also refuses the shipped `orbmit` and cancels. `setup_load` loads `orbmit` into a paused match (RESUME:
+detached), then the user's `mine` (Game of Tag) for a NEW GAME. Every case that plays a picked level has the level in
+both layers (plan D1.1); the Q4 twin in `shell_golden.rs` replays `level_pick` and the milestone with it in the
+system layer only (plan D1.2).
+
 ### 6.4 🎯 The milestones
 
 - **`shell_match_setup` (e-1).** The done-when-2 path in one script, about 1,100 frames, every line bit-exact.
-- **`shell_setups_and_levels` (e-2).** The done-when-7 path, about 900 frames.
+- **`shell_setups_and_levels` (e-2).** The done-when-7 path, about 900 frames (as landed: 761 frames — LEVEL →
+  water_stage → NEW GAME → LEVEL restore → SAVE SETUP AS… `liero` refused → `mine` → LOAD SETUP `orbmit` → NEW GAME
+  → QUIT).
 
 Both run in CI as ordinary `oracle-tests` tests (`shell_golden.rs` gains the fixture and the `d` / `file` lines).
 

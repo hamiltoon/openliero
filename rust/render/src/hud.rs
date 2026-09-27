@@ -347,9 +347,8 @@ pub fn draw_minimap(
     // boot game (Step 4½d G2 `shell_holdazone_boot`) — draws no marker.
 }
 
-/// Port of `Level::DrawMiniature` (`level.cpp:489-507`): step the material grid
-/// into a `map_x/map_y`-anchored block, sampling `AppearanceAt` (Classic:
-/// `pal32[material_id[idx]]`, `level.hpp:59-64`) per cell.
+/// Port of `Level::DrawMiniature` (`level.cpp:489-507`) for the HUD minimap: delegates to
+/// [`draw_miniature_ids`] over the level's material ids.
 fn draw_miniature(
     scr: &mut Bitmap,
     pal: &Pal32,
@@ -359,14 +358,44 @@ fn draw_miniature(
     step_x: i32,
     step_y: i32,
 ) {
+    draw_miniature_ids(
+        scr,
+        pal,
+        &level.material_id,
+        level.width,
+        level.height,
+        map_x,
+        map_y,
+        step_x,
+        step_y,
+    );
+}
+
+/// Port of `Level::DrawMiniature` (`level.cpp:489-507`) over raw material ids: step the
+/// `width`×`height` grid `ids` into a `map_x/map_y`-anchored block, sampling `AppearanceAt`
+/// (Classic: `pal32[material_id[idx]]`, `level.hpp:59-64`) per cell. `pub` for the level
+/// selector's preview (Step 4½e-2, `fileSelectorState.cpp:105-145`), which holds a level that
+/// is not a `LevelSim`.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_miniature_ids(
+    scr: &mut Bitmap,
+    pal: &Pal32,
+    ids: &[u8],
+    width: i32,
+    height: i32,
+    map_x: i32,
+    map_y: i32,
+    step_x: i32,
+    step_y: i32,
+) {
     // level.cpp:490 — start half a step in.
     let mut my = step_y / 2;
     // level.cpp:492-493 — round-division bounds (`(dim + step/2) / step`), NOT the
     // ceil-div used for the step itself.
-    let map_end_y = map_y + ((level.height + step_y / 2) / step_y);
-    let map_end_x = map_x + ((level.width + step_x / 2) / step_x);
+    let map_end_y = map_y + ((height + step_y / 2) / step_y);
+    let map_end_x = map_x + ((width + step_x / 2) / step_x);
 
-    let len = level.material_id.len();
+    let len = ids.len();
     let mut y = map_y;
     while y < map_end_y {
         // level.cpp:496
@@ -374,7 +403,7 @@ fn draw_miniature(
         let mut x = map_x;
         while x < map_end_x {
             // level.cpp:498 — kIdx = mx + my*width as unsigned int.
-            let kidx = (mx + my * level.width) as u32 as usize;
+            let kidx = (mx + my * width) as u32 as usize;
             // level.cpp:499 — `kIdx < material_id.size() && clip.Inside(x,y)`
             // (that exact order). The unsigned cast makes a negative index wrap
             // huge and fail the bound, matching C++.
@@ -384,7 +413,7 @@ fn draw_miniature(
                 // ARGB. Classic AppearanceAt is `pal32[material_id[kIdx]]`
                 // (level.hpp:59-64); Modern is deferred. The clip was already
                 // checked above, so the direct pixel write is safe.
-                let argb = pal[level.material_id[kidx] as usize];
+                let argb = pal[ids[kidx] as usize];
                 scr.pixels[(y * scr.pitch + x) as usize] = argb;
             }
             // level.cpp:503
@@ -817,5 +846,30 @@ mod tests {
             SENTINEL,
             "reloading text gated off (cycles%20<=10)"
         );
+    }
+
+    #[test]
+    fn draw_miniature_ids_steps_a_60x40_grid_into_a_30x20_block() {
+        // Step 4½e-2: the level selector's preview of a 60×40 level at step 2×2 (the P3
+        // `tiny` footprint) — 30×20 cells at (134, 162), sampling ids[(1 + 2x) + (1 + 2y)*60].
+        let pal = ramp_pal();
+        let (w, h) = (60, 40);
+        let ids: Vec<u8> = (0..w * h)
+            .map(|i| ((i % w + i / w) % 64 + 160) as u8)
+            .collect();
+        let mut b = filled(320, 200);
+        draw_miniature_ids(&mut b, &pal, &ids, w, h, 134, 162, 2, 2);
+        for y in 0..200 {
+            for x in 0..320 {
+                let got = b.pixels[(y * b.pitch + x) as usize];
+                if (134..164).contains(&x) && (162..182).contains(&y) {
+                    let (mx, my) = (1 + 2 * (x - 134), 1 + 2 * (y - 162));
+                    let want = 0xFF00_0000 | u32::from(ids[(mx + my * w) as usize]);
+                    assert_eq!(got, want, "cell ({x}, {y})");
+                } else {
+                    assert_eq!(got, SENTINEL, "outside the footprint ({x}, {y})");
+                }
+            }
+        }
     }
 }

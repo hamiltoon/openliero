@@ -1,0 +1,18 @@
+# Step 4½e-2 G2e-2 setups_and_levels (the milestone): the install's system layer and
+# a user copy of water_stage.lev (plan D1.1).
+dir sys Profiles
+dir sys Resources
+file sys Setups/liero.cfg data/Setups/liero.cfg
+file sys Setups/orbmit.cfg data/Setups/orbmit.cfg
+file sys TC/openliero/tc.cfg data/TC/openliero/tc.cfg
+file sys TC/openliero/Levels/modern_test.lev data/TC/openliero/Levels/modern_test.lev
+file sys TC/openliero/Levels/physics_fall_test.lev data/TC/openliero/Levels/physics_fall_test.lev
+file sys TC/openliero/Levels/render_stage.lev data/TC/openliero/Levels/render_stage.lev
+file sys TC/openliero/Levels/see_shadow_test.lev data/TC/openliero/Levels/see_shadow_test.lev
+file sys TC/openliero/Levels/water_stage.lev data/TC/openliero/Levels/water_stage.lev
+dir sys TC/openliero/nobjects
+dir sys TC/openliero/sobjects
+dir sys TC/openliero/sounds
+dir sys TC/openliero/sprites
+dir sys TC/openliero/weapons
+file user TC/openliero/Levels/water_stage.lev data/TC/openliero/Levels/water_stage.lev

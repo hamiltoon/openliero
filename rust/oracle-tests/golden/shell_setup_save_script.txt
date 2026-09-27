@@ -1,0 +1,106 @@
+# Step 4½e-2 G2e-2 case setup_save (plan Task 5) — written by gen_slice4_5e2_shell.
+# Rust ledger: 237 frames, end `end 236 quit`, NEW GAME 0, RESUME 0, back-to-menu 0, tops -BIM, previews 0, level picks 0, reserved boxes 2, saves 1, loads 0, file lines 2
+setup default
+boot_seed 64
+frames 246
+expect quit
+detail
+fs shell_setup_save_fs.txt
+key 40 down F7
+key 42 up F7
+key 43 down DOWN
+key 45 up DOWN
+key 46 down DOWN
+key 48 up DOWN
+key 49 down DOWN
+key 51 up DOWN
+key 52 down DOWN
+key 54 up DOWN
+key 55 down DOWN
+key 57 up DOWN
+key 58 down DOWN
+key 60 up DOWN
+key 61 down DOWN
+key 63 up DOWN
+key 64 down DOWN
+key 66 up DOWN
+key 67 down DOWN
+key 69 up DOWN
+key 70 down DOWN
+key 72 up DOWN
+key 73 down DOWN
+key 75 up DOWN
+key 76 down DOWN
+key 78 up DOWN
+key 79 down DOWN
+key 81 up DOWN
+key 82 down RETURN
+key 84 up RETURN
+key 88 down RETURN
+key 90 up RETURN
+key 94 down SPACE
+key 96 up SPACE
+key 100 down BACKSPACE
+key 102 up BACKSPACE
+key 103 down BACKSPACE
+key 105 up BACKSPACE
+key 106 down BACKSPACE
+key 108 up BACKSPACE
+key 109 down BACKSPACE
+key 111 up BACKSPACE
+key 112 down BACKSPACE
+key 114 up BACKSPACE
+key 115 down M
+text 115 6d
+key 117 up M
+key 118 down I
+text 118 69
+key 120 up I
+key 121 down N
+text 121 6e
+key 123 up N
+key 124 down E
+text 124 65
+key 126 up E
+key 127 down RETURN
+key 129 up RETURN
+key 134 down RETURN
+key 136 up RETURN
+key 140 down BACKSPACE
+key 142 up BACKSPACE
+key 143 down BACKSPACE
+key 145 up BACKSPACE
+key 146 down BACKSPACE
+key 148 up BACKSPACE
+key 149 down BACKSPACE
+key 151 up BACKSPACE
+key 152 down O
+text 152 6f
+key 154 up O
+key 155 down R
+text 155 72
+key 157 up R
+key 158 down B
+text 158 62
+key 160 up B
+key 161 down M
+text 161 6d
+key 163 up M
+key 164 down I
+text 164 69
+key 166 up I
+key 167 down T
+text 167 74
+key 169 up T
+key 170 down RETURN
+key 172 up RETURN
+key 176 down SPACE
+key 178 up SPACE
+key 182 down ESC
+key 184 up ESC
+key 189 down ESC
+key 191 up ESC
+key 195 down ESC
+key 197 up ESC
+key 203 down RETURN
+key 205 up RETURN

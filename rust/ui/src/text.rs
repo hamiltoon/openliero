@@ -68,6 +68,49 @@ pub fn utf8_to_dos(s: &str) -> u8 {
     }
 }
 
+/// A DOS byte string as `Font::DrawString` decodes it (e-1 plan fact 8): a byte below 0x80 is
+/// itself; every byte `Utf8ToDos` makes above it is a lone UTF-8 continuation byte, which C++
+/// decodes to U+FFFD (drawn as nothing).
+pub fn dos_display(b: &[u8]) -> String {
+    b.iter()
+        .map(|&c| if c < 0x80 { c as char } else { '\u{FFFD}' })
+        .collect()
+}
+
+/// `cp437.cpp:11-44` `kHighHalf`: the Unicode codepoint of each CP437 byte 0x80..=0xFF (the
+/// table `render::font` draws with).
+#[rustfmt::skip]
+const CP437_HIGH: [char; 128] = [
+    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å',
+    'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ',
+    'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»',
+    '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
+    '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
+    '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀',
+    'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩',
+    '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', '\u{A0}',
+];
+
+/// An entry buffer as a file name (Step 4½e-2, SAVE SETUP AS…; plan D7, design §4.8): a buffer
+/// that is valid UTF-8 as it stands — ASCII, or the untouched initial name — is kept; any other
+/// is decoded byte by byte, ASCII as-is and bytes ≥ 0x80 through CP437 (what `Utf8ToDos` typed).
+/// Rust only: C++ uses the bytes as the path.
+pub fn dos_to_text(b: &[u8]) -> String {
+    match std::str::from_utf8(b) {
+        Ok(s) => s.to_string(),
+        Err(_) => b
+            .iter()
+            .map(|&c| {
+                if c < 0x80 {
+                    c as char
+                } else {
+                    CP437_HIGH[usize::from(c - 0x80)]
+                }
+            })
+            .collect(),
+    }
+}
+
 /// C++ `'0' + n` stored into a `char` (`text.cpp`): the digit for 0..=9, and the same byte
 /// arithmetic (wrapping) outside it.
 fn digit(n: i32) -> char {
@@ -124,11 +167,74 @@ pub fn leaf_basename(path: &str) -> &str {
     leaf.rsplit_once('.').map_or(leaf, |(b, _)| b)
 }
 
+/// `SafeToUpper` (`text.cpp:51`): `std::toupper` in the "C" locale over the unsigned byte —
+/// ASCII only.
+fn ci_upper(b: u8) -> u8 {
+    b.to_ascii_uppercase()
+}
+
+/// `CiCompare(a, b)` (`text.cpp:53-65`): equal lengths and equal bytes under `ci_upper`.
+pub fn ci_compare(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .all(|(x, y)| ci_upper(x) == ci_upper(y))
+}
+
+/// `CiStartsWith(text, starts_with)` (`text.cpp:67-79`).
+pub fn ci_starts_with(text: &str, starts_with: &str) -> bool {
+    starts_with.len() <= text.len()
+        && text
+            .bytes()
+            .zip(starts_with.bytes())
+            .all(|(x, y)| ci_upper(x) == ci_upper(y))
+}
+
+/// `CiLess(a, b)` (`text.cpp:81-96`): byte by byte under `ci_upper` (unsigned), a proper
+/// prefix first (plan fact 4).
+pub fn ci_less(a: &str, b: &str) -> bool {
+    let b = b.as_bytes();
+    for (i, &x) in a.as_bytes().iter().enumerate() {
+        let Some(&y) = b.get(i) else {
+            return false;
+        };
+        let (x, y) = (ci_upper(x), ci_upper(y));
+        if x != y {
+            return x < y;
+        }
+    }
+    b.len() > a.len()
+}
+
+/// `JoinPath(root, leaf)` (`filesystem.cpp:283-288`): a `/` between them unless `root` is empty
+/// or already ends in `/` or `\`.
+pub fn join_path(root: &str, leaf: &str) -> String {
+    if !root.is_empty() && !root.ends_with(['/', '\\']) {
+        format!("{root}/{leaf}")
+    } else {
+        format!("{root}{leaf}")
+    }
+}
+
+/// `GetBasename(path)` (`filesystem.cpp:47-54`): up to the last `.` (the whole path without one).
+pub fn get_basename(path: &str) -> &str {
+    path.rsplit_once('.').map_or(path, |(b, _)| b)
+}
+
+/// `GetExtension(path)` (`filesystem.cpp:56-63`): after the last `.`, or `""` without one.
+pub fn get_extension(path: &str) -> &str {
+    path.rsplit_once('.').map_or("", |(_, e)| e)
+}
+
 /// What the menus read from the TC: `common.s[..]` strings (`tc.cfg [texts]`), `common.c[..]`
 /// constants, and `common.sound_hook[..]` as sample ids (`tc.cfg [sounds]`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiTc {
     pub copyright2: String,
+    /// Step 4½e-2: `LS(Random)` (`"[RANDOM]"`, `tc.cfg:239`), the level selector's first row,
+    /// and `LS(SelLevel)` (`"Select level:"`, `tc.cfg:255`), its title.
+    pub random: String,
+    pub sel_level: String,
     pub random2: String,
     pub regen_level: String,
     pub reload_level: String,
@@ -165,6 +271,8 @@ impl UiTc {
                 .collect(),
             weap_order,
             copyright2: tc.texts.Copyright2.clone(),
+            random: tc.texts.Random.clone(),
+            sel_level: tc.texts.SelLevel.clone(),
             random2: tc.texts.Random2.clone(),
             regen_level: tc.texts.RegenLevel.clone(),
             reload_level: tc.texts.ReloadLevel.clone(),
@@ -194,6 +302,23 @@ impl UiTc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dos_bytes_decode_for_display_and_for_file_names() {
+        assert_eq!(dos_display(b"ab"), "ab");
+        assert_eq!(dos_display(&[b'a', 0x86]), "a\u{FFFD}");
+        for t in ["å", "ä", "ö", "Å", "Ä", "Ö"] {
+            assert_eq!(dos_to_text(&[utf8_to_dos(t)]), t, "Utf8ToDos round trip");
+        }
+        assert_eq!(dos_to_text(&[b'm', 0x94, b'r', b'k']), "mörk");
+        assert_eq!(
+            dos_to_text("mörk".as_bytes()),
+            "mörk",
+            "valid UTF-8 is kept"
+        );
+        assert_eq!(dos_to_text(&[0x80, 0xE1, 0xFF]), "Çß\u{A0}");
+        assert_eq!(dos_to_text(b"mine"), "mine");
+    }
 
     #[test]
     fn time_to_string_is_minutes_colon_seconds() {
@@ -230,6 +355,34 @@ mod tests {
     }
 
     #[test]
+    fn the_cpp_string_helpers() {
+        // text.cpp:51-96 (plan fact 4): ASCII toupper per byte, a proper prefix first.
+        assert!(ci_less("a", "B") && !ci_less("B", "a"));
+        assert!(!ci_less("ab", "a") && ci_less("a", "ab"));
+        assert!(ci_less("", "a") && !ci_less("", "") && !ci_less("a", "A"));
+        assert!(
+            ci_less("Z", "_") && ci_less("z", "_"),
+            "0x5F sorts after 'Z'"
+        );
+        assert!(ci_less("Zeta", "\u{e4}"), "bytes >= 0x80 compare unsigned");
+        assert!(ci_compare("alpha.LEV", "ALPHA.lev") && !ci_compare("a", "ab"));
+        assert!(ci_compare("", ""));
+        assert!(ci_starts_with("./user/TC", "./USER") && ci_starts_with("x", ""));
+        assert!(!ci_starts_with("./us", "./user"));
+        // filesystem.cpp:47-63, :283-288.
+        assert_eq!(join_path("./user", "TC"), "./user/TC");
+        assert_eq!(join_path("/", "x"), "/x");
+        assert_eq!(join_path("C:\\", "x"), "C:\\x");
+        assert_eq!(join_path("", "x"), "x");
+        assert_eq!(get_basename("a.b.lev"), "a.b");
+        assert_eq!(get_basename("noext"), "noext");
+        assert_eq!(get_basename(".hidden.lev"), ".hidden");
+        assert_eq!(get_extension("noext"), "");
+        assert_eq!(get_extension("alpha.LEV"), "LEV");
+        assert_eq!(get_extension("a.b.lev"), "lev");
+    }
+
+    #[test]
     fn ui_tc_is_read_from_the_tc() {
         let tc = UiTc::load(std::path::Path::new(scenario::paths::TC_ROOT));
         assert_eq!(
@@ -245,6 +398,11 @@ mod tests {
             ("Random", "REGENERATE LEVEL", "RELOAD LEVEL")
         );
         assert_eq!((tc.blood_limit, tc.blood_step_up), (500, 25));
+        assert_eq!(
+            (tc.random.as_str(), tc.sel_level.as_str()),
+            ("[RANDOM]", "Select level:"),
+            "tc.cfg:239, :255"
+        );
         assert_eq!(
             (
                 tc.hooks.move_up,

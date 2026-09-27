@@ -3,6 +3,7 @@
 //! The stack is plain data; `Shell` runs `enter` before `push` (`Push` calls `Enter`,
 //! `state.hpp:50-54`). No screen has a `Leave`. Step 4½e-1 adds the settings menu's sub-screens.
 
+use super::files::{LevelSelectorState, SetupSelectorState};
 use super::main_menu::MainMenuState;
 use super::overlay::{InfoBoxState, InputStringState};
 use super::weapon_options::WeaponMenuState;
@@ -17,6 +18,10 @@ pub enum Screen {
     InputString(InputStringState),
     /// `InfoBoxState` (4½e-1): WEAPON OPTIONS' "no weapons" box, the refusal boxes.
     InfoBox(InfoBoxState),
+    /// `LevelSelectorState` (4½e-2): LEVEL's file tree, over the main menu (top `L`).
+    LevelSelect(LevelSelectorState),
+    /// `OptionsSelectorState` (4½e-2): LOAD SETUP's file tree, over the main menu (top `P`).
+    SetupSelect(SetupSelectorState),
 }
 
 impl Screen {
@@ -99,6 +104,11 @@ impl ScreenStack {
 
     pub fn screens(&self) -> &[Screen] {
         &self.stack
+    }
+
+    /// Step 4½e-2: the selectors' draw mutates them (`previewNode_`, the lazy `GetMenu`).
+    pub fn screens_mut(&mut self) -> &mut [Screen] {
+        &mut self.stack
     }
 
     /// `StateStack::Draw`'s bottom (`state.hpp:117-125`): walk down past overlays.
@@ -194,9 +204,15 @@ mod tests {
     #[test]
     fn only_the_input_string_is_an_overlay_and_only_play_skips_the_menu_flip() {
         let weapons = Screen::WeaponOptions(WeaponMenuState::default());
+        let level = Screen::LevelSelect(LevelSelectorState::default());
+        let setup = Screen::SetupSelect(SetupSelectorState::default());
         assert!(input().is_overlay());
         assert!(!info().is_overlay() && !weapons.is_overlay() && !menu().is_overlay());
-        for sc in [menu(), weapons, input(), info()] {
+        assert!(
+            !level.is_overlay() && !setup.is_overlay(),
+            "the selectors draw alone"
+        );
+        for sc in [menu(), weapons, input(), info(), level, setup] {
             assert!(sc.wants_menu_flip());
         }
         let mut s = ScreenStack::default();

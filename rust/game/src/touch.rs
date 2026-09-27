@@ -159,6 +159,47 @@ impl TouchKeys {
     }
 }
 
+/// A dead worm that has not pressed FIRE yet (John: "after getting killed the worm/screen isn't
+/// showing"). C++ respawns a worm only once its player presses FIRE while dead: the dead arm's
+/// `PressedOnce(kFire)` sets `ready` (`worm.cpp:435-436`), and `DoRespawning` waits for it
+/// (`:755-790`). Until then the camera shows the spawn point with no worm. The page shows
+/// "FIRE to respawn" while this is true for player 1.
+pub fn waiting_to_respawn(worm: &sim::state::WormState) -> bool {
+    !worm.visible && !worm.ready
+}
+
+/// The touch-only page's player-2 stand-in (Q8: a bot that readies at once, until 4½f's
+/// DumbLieroAI) has no input, so once killed it never pressed FIRE and never came back. While
+/// its worm is [`waiting_to_respawn`] during play, FIRE is pressed on every other tick. Each
+/// press is a fresh edge, so C++'s `PressedOnce(kFire)` sees it through the key edges. It stops
+/// as soon as `ready` is set, so the respawned worm does not fire. Otherwise the word passes
+/// through. Rust-only, and sampled input like any other, so it records and replays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BotRespawn {
+    tick: u32,
+}
+
+impl BotRespawn {
+    /// Player 2's sampled word for this tick.
+    pub fn apply(
+        &mut self,
+        word: ControlState,
+        worm: &sim::state::WormState,
+        phase: Phase,
+    ) -> ControlState {
+        if phase != Phase::Game || !waiting_to_respawn(worm) {
+            self.tick = 0;
+            return word;
+        }
+        self.tick += 1;
+        let mut out = word;
+        if self.tick % 2 == 1 {
+            out.set(ControlState::FIRE, true);
+        }
+        out
+    }
+}
+
 /// Ticks between two digs while DIG is held ([`DigRepeat`]): one dig every 8 ticks, about 9 a
 /// second, about the speed of a keyboard player tapping.
 pub const DIG_REPEAT_TICKS: u32 = 8;
@@ -834,5 +875,50 @@ mod tests {
                 assert_eq!(dig.apply(TOUCH_DIG, phase), TOUCH_DIG, "{phase:?}");
             }
         }
+    }
+
+    fn test_worm() -> sim::state::WormState {
+        use sim::state::{NUM_WEAPONS, WeaponInit, WormInit, WormState};
+        use sim_core::vec::Vec2;
+        WormState::from_init(&WormInit {
+            index: 1,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit {
+                ty: Some(0),
+                ammo: 10,
+            }; NUM_WEAPONS],
+            start_pos: Vec2::zero(),
+            visible: true,
+        })
+    }
+
+    #[test]
+    fn the_touch_bot_presses_fire_until_it_is_ready_to_respawn() {
+        // John: after a death nothing came back; C++ needs FIRE (worm.cpp:435-436).
+        let (mut bot, mut w) = (BotRespawn::default(), test_worm());
+        let idle = ControlState::new();
+        assert_eq!(bot.apply(idle, &w, Phase::Game), idle, "alive: no input");
+        w.visible = false;
+        w.ready = false;
+        assert!(waiting_to_respawn(&w));
+        let fires: Vec<bool> = (0..4)
+            .map(|_| bot.apply(idle, &w, Phase::Game).get(ControlState::FIRE))
+            .collect();
+        assert_eq!(
+            fires,
+            [true, false, true, false],
+            "a fresh press every other tick"
+        );
+        // Through C++ OnKey's edges, the first press reaches the sim's PressedOnce.
+        let first = BotRespawn::default().apply(idle, &w, Phase::Game);
+        let applied = ui::keys::apply_key_edges(idle, first, idle);
+        assert!(applied.get(ControlState::FIRE));
+        // Ready (or outside play): nothing more.
+        w.ready = true;
+        assert_eq!(bot.apply(idle, &w, Phase::Game), idle);
+        w.ready = false;
+        assert_eq!(bot.apply(idle, &w, Phase::Menu), idle);
     }
 }

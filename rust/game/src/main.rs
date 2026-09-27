@@ -186,6 +186,9 @@ struct ShellRes {
     /// Holding DIG during play keeps digging (`game::touch::DigRepeat`).
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the browser has touch
     dig_repeat: game::touch::DigRepeat,
+    /// The touch-only page's player-2 stand-in presses FIRE to respawn (`game::touch::BotRespawn`).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the browser has touch
+    bot_respawn: game::touch::BotRespawn,
     refusal_shown: bool,
     saved: bool,
 }
@@ -579,6 +582,7 @@ fn setup(
             touch: game::touch::TouchKeys::default(),
             weapon_tap: game::touch::WeaponTap::default(),
             dig_repeat: game::touch::DigRepeat::default(),
+            bot_respawn: game::touch::BotRespawn::default(),
             refusal_shown: false,
             saved: false,
         });
@@ -1252,16 +1256,24 @@ fn tick_shell(
         matches!(e, ui::shell::InputEvent::Key(k)
             if k.dos == ui::keys::DK_F5 && k.down && !k.repeat)
     });
+    #[allow(unused_mut)] // only the wasm build adds the touch bot's FIRE
+    let mut sampled = sample_inputs_touch(
+        source,
+        0,
+        keys,
+        Mode::Live,
+        sh.dig_repeat
+            .apply(sh.weapon_tap.apply(page_touch(), sh.phase), sh.phase),
+    );
+    #[cfg(target_arch = "wasm32")]
+    if touch_only()
+        && let Some(bot) = sim.worms.get(1)
+    {
+        sampled[1] = sh.bot_respawn.apply(sampled[1], bot, sh.phase);
+    }
     let input = ShellInput {
         events: &events,
-        sampled: sample_inputs_touch(
-            source,
-            0,
-            keys,
-            Mode::Live,
-            sh.dig_repeat
-                .apply(sh.weapon_tap.apply(page_touch(), sh.phase), sh.phase),
-        ),
+        sampled,
         fresh_seed: fresh_seed(),
         now_ms: time.elapsed().as_millis() as u64,
         restart,
@@ -1306,6 +1318,13 @@ fn tick_shell(
         if out.phase == Phase::Game {
             publish_weapon(sim.worms[0].current_weapon);
         }
+        publish_respawn(
+            out.phase == Phase::Game
+                && sim
+                    .worms
+                    .first()
+                    .is_some_and(game::touch::waiting_to_respawn),
+        );
     }
     if out.quit {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1485,6 +1504,13 @@ fn drain_page_text() -> Vec<game::touch::PageEntry> {
                 .map(PageEntry::Key),
         })
         .collect()
+}
+
+/// Player 1's worm is dead and waiting for FIRE (`game::touch::waiting_to_respawn`), as
+/// `window.lieroRespawn`: the page shows "FIRE to respawn" while it is true.
+#[cfg(target_arch = "wasm32")]
+fn publish_respawn(waiting: bool) {
+    let _ = js_sys::Reflect::set(&js_sys::global(), &"lieroRespawn".into(), &waiting.into());
 }
 
 /// Step 4½e-1: player 1's current weapon slot as `window.lieroWeapon` while a match plays — a

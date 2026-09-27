@@ -115,7 +115,7 @@ struct RunDiag {
     death_tick: usize,
     begin_respawn_tick: usize,
     reborn_tick: usize,
-    settings_health: i32,
+    max_health: i32,
     worm1_start_lives: i32,
     worm1_final_lives: i32,
     worm1_final_health: i32,
@@ -217,7 +217,7 @@ fn build_state(scenario: &Scenario) -> SimState {
 /// driven-state diagnostics for the coverage guards.
 fn drive(scenario: &Scenario, golden: Option<&[GoldenTick]>) -> RunDiag {
     let mut state = build_state(scenario);
-    let settings_health = state.settings_health;
+    let max_health = state.worms[1].max_health;
 
     let assert_tick = |state: &SimState, g: &GoldenTick| {
         let check = |name: &str, got: u32, want: u32| {
@@ -309,7 +309,7 @@ fn drive(scenario: &Scenario, golden: Option<&[GoldenTick]>) -> RunDiag {
         death_tick,
         begin_respawn_tick,
         reborn_tick,
-        settings_health,
+        max_health,
         worm1_start_lives,
         worm1_final_lives: *worm1_lives.last().unwrap(),
         worm1_final_health: *worm1_health.last().unwrap(),
@@ -374,7 +374,7 @@ fn run_variant(v: &Variant) -> RunDiag {
 
     // ---- Single-variant death -> respawn coverage (from the driven state) ----------
     assert!(!worm1_reborn_before_death(&d), "internal ordering sanity");
-    assert_eq!(d.worm1_final_health, d.settings_health, "{}: health restored to settings_health", v.name);
+    assert_eq!(d.worm1_final_health, d.max_health, "{}: health restored to max_health", v.name);
     assert_eq!(d.worm1_final_lives, d.worm1_start_lives - 1, "{}: exactly one life lost", v.name);
     assert_eq!(d.worm0_max_kills, 1, "{}: killer scores exactly one kill", v.name);
     assert!(d.saw_type6_blood, "{}: death spray includes type-6 blood nobjects", v.name);

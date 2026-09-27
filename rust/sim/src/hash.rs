@@ -247,8 +247,8 @@ mod tests {
             bobj_gravity: 0,
             laser_weapon: 0,
             wobject_consts: crate::weapon::WObjectConsts::default(),
-            settings_health: 100,
             game_mode: 0,
+            ai_params: [[0; 7]; 2],
             time_to_lose: 600,
             shadow: false,
             last_killed_idx: -1,
@@ -414,6 +414,8 @@ mod tests {
             // Slice 3b T0 render-only hotspots — not hashed; defaults suffice.
             hotspot_x: 0,
             hotspot_y: 0,
+            reacts: [0; 4],
+            max_health: 100,
         }
     }
 

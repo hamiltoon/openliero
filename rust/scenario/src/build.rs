@@ -43,8 +43,8 @@ pub enum BuildError {
     InvalidGameMode(u32),
     /// A playing worm's `health < 1` (C++ divides by it and loops on it in Scales).
     InvalidHealth(i32),
-    /// The two players' healths differ: the sim carries one `settings_health` (design
-    /// §1.3 finding 4); lifted with the player-menu HEALTH item in 4½f.
+    /// The two players' healths differ (design §1.3 finding 4); the sim carries a per-worm
+    /// `max_health` since 4½f-1 T1, and this refusal goes in T3.
     AsymmetricHealth { p1: i32, p2: i32 },
     /// A weapon pick outside `1..=weap_order.len()` (`worm.cpp:704` indexes unchecked) — or, in
     /// front of a selection ([`new_match`]), outside `0..=weap_order.len()`.
@@ -232,11 +232,17 @@ fn new_match_with(
     state.bonus_explode_risk = tc.constants.BonusExplodeRisk;
     state.h_bonus_reload_only = tc.hacks.BonusReloadOnly;
     state.sound_hooks = tc.sound_hooks.clone();
+    // Step 4½f-1 (D11): the CPU player's toggle odds. Unhashed, read only by `sim::ai`.
+    state.ai_params = crate::loader::ai_params(&tc);
 
     // Settings (design §4.2): the live-read set through the one choke point RESUME shares
     // (Step 4½e-1). The blood pool is `enter_game`'s (StartGame, game.cpp:513).
     apply_live_settings(&mut state, s);
-    state.settings_health = s.worm_settings[0].health; // == [1] (validated); per-worm, 4½f
+    // Each worm's own max health (`Worm::settings->health`, 4½f-1 D6). The refusal still
+    // makes the two equal until 4½f-1 T3 removes it.
+    for (worm, ws) in state.worms.iter_mut().zip(&s.worm_settings) {
+        worm.max_health = ws.health;
+    }
 
     // Palette (design §4.1): the level's POWERLEVEL palette only when
     // load_powerlevel_palette (level.cpp:281-294), else exepal == small.tga's palette
@@ -286,7 +292,7 @@ fn new_match_with(
 /// | `game.cpp:159` | `lives` | kStateGame only (`ResetWorms` is Rollback-only; `LocalController` reads it once, `localController.cpp:234`: [`enter_game`]) |
 /// | `game.cpp:513` | `blood_particle_max` | kStateGame / `StartGame` only ([`enter_game`]) |
 /// | `game.cpp:427-432`, `:499` | `zone_timeout` | Holdazone (unported) |
-/// | `game.cpp:158`, `:558-563`, `:607`; `worm.cpp:213`, `:292-296`, `:355`, `:386`, `:795`; `viewport.cpp:85` | `worm.settings->health` | per-worm (4½f; `SimState::settings_health`, set by [`new_match`] only) |
+/// | `game.cpp:158`, `:558-563`, `:607`; `worm.cpp:213`, `:292-296`, `:355`, `:386`, `:795`; `viewport.cpp:85` | `worm.settings->health` | per-worm (4½f-1; `WormState::max_health`, set by [`new_match`] only) |
 /// | `game.cpp:63-96`; `worm.cpp:704`; `viewport.cpp:135-139`, `:261`, `:265` | `worm.settings->{input_device, controls, weapons, name, color}` | per-worm (input / `InitWeapons` / names; not live sim settings) |
 pub fn apply_live_settings(state: &mut SimState, s: &Settings) {
     state.settings_max_bonuses = s.max_bonuses;
@@ -499,9 +505,15 @@ mod tests {
         assert_eq!(st.settings_max_bonuses, 6);
         assert_eq!(st.weap_table.len(), 40);
         assert_eq!(st.weap_table[5], 2);
+        assert_eq!((st.worms[0].max_health, st.worms[1].max_health), (150, 150));
+        assert_eq!((st.game_mode, st.time_to_lose), (3, 99));
         assert_eq!(
-            (st.settings_health, st.game_mode, st.time_to_lose),
-            (150, 3, 99)
+            st.ai_params,
+            [
+                [120, 120, 50, 50, 80, 300, 400],
+                [20, 20, 20, 20, 80, 60, 1]
+            ],
+            "the openliero TC's aiparams (D11)"
         );
         assert!(!st.shadow);
         assert_eq!(st.bobjects.capacity(), 300);
@@ -676,7 +688,6 @@ mod tests {
         assert_ne!(e.shadow, d.shadow);
 
         let worms_before = state.worms.clone();
-        let settings_health = state.settings_health;
         apply_live_settings(&mut state, &e);
 
         assert_eq!(state.settings_max_bonuses, e.max_bonuses);
@@ -694,7 +705,6 @@ mod tests {
         // Nothing else: the worms (lives, health), the per-worm health, the rand, the level,
         // the cycles and the pools, and the state hash (none of the eight is hashed).
         assert_eq!(state.worms, worms_before);
-        assert_eq!(state.settings_health, settings_health);
         assert_eq!((state.rand.draws(), state.rand.last()), before_rand);
         assert!(state.level == before_level);
         assert_eq!(state.cycles, 0);

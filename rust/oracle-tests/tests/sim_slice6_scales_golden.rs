@@ -231,7 +231,8 @@ fn sim_slice6_scales_redistribution_match_cpp_oracle() {
     state.small_sprites = load_small_sprites();
     state.game_mode = scenario.game_mode as u32;
     assert_eq!(
-        state.settings_health, 100,
+        (state.worms[0].max_health, state.worms[1].max_health),
+        (100, 100),
         "DoHealingDirect cap = WormSettings::health 100"
     );
 

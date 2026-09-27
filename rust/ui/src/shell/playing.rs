@@ -49,7 +49,7 @@ fn focus_palette(scene: &mut SceneData, settings: &Settings) {
 /// - Holdazone is built as Kill'em All — the sim's Holdazone arm is unported — and only
 ///   `state.game_mode` (read by the HUD's timer arm) carries the 2 (Step 4½d G2
 ///   `shell_holdazone_boot`).
-/// - Unequal healths both take player 1's (the sim carries one `settings_health`).
+/// - Unequal healths both take player 1's (the refusal still holds; 4½f-1 T3 lifts it).
 /// - Any other `validate_for_selection` refusal takes that field from `Settings::default()`.
 ///
 /// The refusal box comes at NEW GAME (plan T4 Step 5), not here.

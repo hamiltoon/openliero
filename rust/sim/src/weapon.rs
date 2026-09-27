@@ -384,7 +384,6 @@ pub fn wobject_process(
     cossin: &[Vec2; 128],
     blood: i32,
     game_mode: u32,
-    settings_health: i32,
     consts: WObjectConsts,
     rand: &mut Rand,
 ) -> WObjectOutcome {
@@ -422,7 +421,6 @@ pub fn wobject_process(
             cossin,
             blood,
             game_mode,
-            settings_health,
             consts,
             rand,
         );
@@ -509,7 +507,6 @@ fn wobject_pass(
     cossin: &[Vec2; 128],
     blood: i32,
     game_mode: u32,
-    settings_health: i32,
     consts: WObjectConsts,
     rand: &mut Rand,
 ) -> WObjectOutcome {
@@ -644,7 +641,6 @@ fn wobject_pass(
             sobject_types,
             blood,
             game_mode,
-            settings_health,
             rand,
         );
     }
@@ -848,7 +844,7 @@ fn wobject_pass(
 
             // :294 DoDamage(worm, hit_damage, owner_idx) — RNG-free wound; the Scales
             // (game_mode 3) redistribution heals the other worm(s) (T5).
-            do_damage(worms, w_idx, weapon.hit_damage, obj.owner_idx, game_mode, settings_health);
+            do_damage(worms, w_idx, weapon.hit_damage, obj.owner_idx, game_mode);
             // :295-298 DamageDealt/Hit stats — no-op (has_hit unported).
 
             // :301-306 BLOOD FAN FIRST. kBloodAmount = blood_on_hit * blood / 100
@@ -977,7 +973,6 @@ pub fn blow_up(
     bonuses: &mut Pool<Bonus>,
     blood: i32,
     game_mode: u32,
-    settings_health: i32,
     rand: &mut Rand,
 ) {
     // :89-92 create-on-explosion — BEFORE the dart's own dirt_effect (the order
@@ -1004,7 +999,6 @@ pub fn blow_up(
             sobject_types,
             blood,
             game_mode,
-            settings_health,
             rand,
         );
     }
@@ -1645,7 +1639,6 @@ mod tests {
             &cossin,
             100,
             0,
-            100,
             WObjectConsts::default(),
             rand,
         )
@@ -1693,7 +1686,6 @@ mod tests {
             cossin,
             blood,
             0,
-            100,
             WObjectConsts::default(),
             rand,
         )
@@ -2434,7 +2426,6 @@ mod tests {
             &mut Pool::<Bonus>::new(1),
             100,
             0,
-            100,
             &mut rand,
         );
 
@@ -2511,7 +2502,6 @@ mod tests {
             &mut Pool::<Bonus>::new(1),
             100,
             0,
-            100,
             &mut rand,
         );
 
@@ -2701,7 +2691,6 @@ mod tests {
             &mut Pool::<Bonus>::new(1),
             100,
             0,
-            100,
             &mut rand,
         );
 
@@ -2796,7 +2785,6 @@ mod tests {
             &mut Pool::<Bonus>::new(1),
             100,
             0,
-            100,
             &mut rand,
         );
 
@@ -2885,7 +2873,6 @@ mod tests {
             &mut Pool::<Bonus>::new(1),
             100,
             0,
-            100,
             &mut rand,
         );
 
@@ -2951,7 +2938,6 @@ mod tests {
             &mut Pool::<Bonus>::new(1),
             100,
             0,
-            100,
             &mut rand,
         );
 
@@ -3002,7 +2988,6 @@ mod tests {
             &mut Pool::<Bonus>::new(1),
             100,
             0,
-            100,
             &mut rand,
         );
 
@@ -3525,7 +3510,6 @@ mod tests {
             cossin,
             100,
             0,
-            100,
             WObjectConsts::default(),
             rand,
         )
@@ -3698,7 +3682,6 @@ mod tests {
             &cossin,
             100,
             0,
-            100,
             WObjectConsts::default(),
             rand,
         )
@@ -3960,7 +3943,6 @@ mod tests {
             &cossin,
             100,
             0,
-            100,
             consts,
             &mut rand,
         );
@@ -4077,7 +4059,6 @@ mod tests {
             &cossin,
             100,
             0,
-            100,
             trail_consts(),
             rand,
         )

@@ -14,6 +14,12 @@
 //! Two configs feed it: [`new_game_config`] (the NEW GAME start, `game::new_game`: the
 //! `Settings` picks, as C++ does) and [`live_config`] (a native `--live <scenario>` match: the
 //! scenario's launched loadout as the saved picks, design §7.3 / Q7).
+//!
+//! The touch rule (4½c Q8, split in 4½f-1 D3 after John's Q3): a touch-only page has no input for
+//! player 2, so the **settings** make it the CPU ([`touch_settings`]: `game` applies it at boot,
+//! the shell again after LOAD SETUP), and NEW GAME's **selection config** sets BOT WEAPONS to
+//! RANDOM ([`new_game_config`]), so the CPU gets random weapons every match. BOT WEAPONS is the
+//! one global C++ setting, so RANDOM applies to every bot, as it would in C++.
 
 use render::bitmap::{Bitmap, Pal32, Rect};
 use render::frame::Scene;
@@ -25,9 +31,18 @@ use sim::weapsel::{WEAPON_COUNT, WeaponSelection, WeapselConfig, WeapselError, w
 
 /// `WormSettings::controller` DumbLieroAI (`localController.cpp:20`).
 pub const CONTROLLER_BOT: u32 = 1;
+/// `Settings::select_bot_weapons` RANDOM (`hiddenMenu.cpp:10`): a bot draws its five picks in the
+/// `WeaponSelection` constructor (`weapsel.cpp:57-61`) and readies at once (`:95`).
+pub const BOT_WEAPONS_RANDOM: u32 = 0;
 /// `Settings::select_bot_weapons` KEEP (`hiddenMenu.cpp:10`): a bot keeps its saved picks and
 /// readies at once (`weapsel.cpp:95`).
 pub const BOT_WEAPONS_KEEP: u32 = 2;
+
+/// The touch rule's settings half (4½f-1 D3; John's Q3): on a touch-only page player 2 is the
+/// CPU. Rust-only; a desktop never calls it.
+pub fn touch_settings(s: &mut Settings) {
+    s.worm_settings[1].controller = CONTROLLER_BOT;
+}
 
 /// The 1-based `weap_order` picks that reproduce worm `worm`'s launched loadout (design §7.3,
 /// Q7): the inverse of `Worm::InitWeapons`. The default-match fixture launches DART + four
@@ -46,27 +61,31 @@ pub fn loadout_picks(state: &SimState, worm: usize) -> [u32; NUM_WEAPONS] {
 
 /// What a scenario-started live match (native `--live <scenario>`) selects from (design §7.3):
 /// `Settings::default()` (every weapon enabled, bots PICK, both human) with each worm's launched
-/// loadout as its saved picks, plus the touch rule ([`apply_touch_rule`]).
+/// loadout as its saved picks, plus the 4½c touch rule ([`live_touch_rule`]).
 pub fn live_config(state: &SimState, touch_only: bool) -> WeapselConfig {
     let mut cfg = weapsel_config(&Settings::default());
     for (i, p) in cfg.players.iter_mut().enumerate() {
         p.weapons = loadout_picks(state, i);
     }
-    apply_touch_rule(&mut cfg, touch_only);
+    live_touch_rule(&mut cfg, touch_only);
     cfg
 }
 
 /// What the NEW GAME start selects from: the `Settings` as C++ passes them to
-/// `WeaponSelection` (`weapsel.cpp:28-97`), plus the touch rule ([`apply_touch_rule`]).
+/// `WeaponSelection` (`weapsel.cpp:28-97`). On a touch-only page BOT WEAPONS is RANDOM (the touch
+/// rule's selection half, 4½f-1 D3); player 2's controller is the settings' ([`touch_settings`]).
 pub fn new_game_config(settings: &Settings, touch_only: bool) -> WeapselConfig {
     let mut cfg = weapsel_config(settings);
-    apply_touch_rule(&mut cfg, touch_only);
+    if touch_only {
+        cfg.select_bot_weapons = BOT_WEAPONS_RANDOM;
+    }
     cfg
 }
 
-/// John's Q8 ruling: on a touch-only page player 2 has no input, so it becomes a bot with
-/// `select_bot_weapons = KEEP`, ready at once. Until 4½f it idles in the match as before.
-fn apply_touch_rule(cfg: &mut WeapselConfig, touch_only: bool) {
+/// John's Q8 ruling (4½c), kept for [`live_config`] alone (its only caller is the native
+/// `--live <scenario>` path, where `touch_only` is always false; plan fact 10): player 2 becomes
+/// a bot with `select_bot_weapons = KEEP`, ready at once.
+fn live_touch_rule(cfg: &mut WeapselConfig, touch_only: bool) {
     if touch_only {
         cfg.players[1].controller = CONTROLLER_BOT;
         cfg.select_bot_weapons = BOT_WEAPONS_KEEP;
@@ -290,19 +309,35 @@ mod tests {
 
     #[test]
     fn the_new_game_config_is_the_settings_plus_the_touch_rule() {
-        let s = Settings::default();
+        // 4½f-1 D3: the touch rule's selection half is BOT WEAPONS = RANDOM only; the
+        // controllers are the settings' (the settings half is `touch_settings`).
+        let mut s = Settings::default();
         assert_eq!(new_game_config(&s, false), weapsel_config(&s));
-        let touch = new_game_config(&s, true);
-        assert_eq!(touch.players[0], weapsel_config(&s).players[0]);
-        assert_eq!(
-            (
-                touch.players[1].controller,
-                touch.select_bot_weapons,
-                touch.players[1].weapons
-            ),
-            (CONTROLLER_BOT, BOT_WEAPONS_KEEP, [1; 5]),
-            "Settings(): the saved picks are [1; 5] (settings.cpp, data/Setups/liero.cfg)"
-        );
+        for p2 in [0, CONTROLLER_BOT] {
+            s.worm_settings[1].controller = p2;
+            let touch = new_game_config(&s, true);
+            let mut want = weapsel_config(&s);
+            want.select_bot_weapons = BOT_WEAPONS_RANDOM;
+            assert_eq!(touch, want, "player 2's controller {p2}");
+            assert_eq!(
+                (
+                    touch.players[1].controller,
+                    touch.select_bot_weapons,
+                    touch.players[1].weapons
+                ),
+                (p2, 0, [1; 5]),
+                "Settings(): the saved picks are [1; 5] (settings.cpp, data/Setups/liero.cfg)"
+            );
+        }
+    }
+
+    #[test]
+    fn the_touch_settings_make_player_two_the_cpu_and_nothing_else() {
+        let mut s = Settings::default();
+        touch_settings(&mut s);
+        let mut want = Settings::default();
+        want.worm_settings[1].controller = 1;
+        assert_eq!(s, want);
     }
 
     #[test]

@@ -538,6 +538,11 @@ fn setup(
         let store = shell_store(&config_root);
         let mut settings = game::config::load_settings(&*store);
         preview.0.apply_level(&mut settings, store.root_label());
+        // Step 4½f-1 D3: on a touch-only page player 2 is the CPU (the settings half of the
+        // touch rule; `Shell` re-applies it after LOAD SETUP).
+        if touch_only() {
+            game::selection::touch_settings(&mut settings);
+        }
         let seeds = preview.0.seed.map_or(SeedSource::Fresh, SeedSource::Fixed);
         let options = StartOptions {
             skip_selection: preview.0.skips_weapon_selection(),

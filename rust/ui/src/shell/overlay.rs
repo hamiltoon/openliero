@@ -1,8 +1,9 @@
 //! Step 4½e-1 — the two C++ `inputState.cpp` sub-states the settings menu pushes (design §3.3,
 //! §4.5; plan facts 6-9, 12): `InputStringState` (number entry; SAVE SETUP AS…'s name, 4½e-2),
 //! the only overlay, and `InfoBoxState` (WEAPON OPTIONS' "no weapons" box, the Rust-only refusal
-//! boxes, SAVE SETUP AS…'s reserved-name box). C++ hands each a lambda capturing `gfx`; Rust tags each with a purpose, and the shell
-//! runs the continuation inside the overlay's update step (`ui::shell::Shell::frame`).
+//! boxes, SAVE SETUP AS…'s reserved-name box). C++ hands each a lambda capturing `gfx`; Rust tags
+//! each with a purpose, and the shell runs the continuation inside the overlay's update step
+//! (`ui::shell::Shell::frame`).
 
 use std::fmt;
 

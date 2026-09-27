@@ -197,9 +197,10 @@ pub fn read_asset(tc_root: &Path, rel: &str) -> Vec<u8> {
 /// backend loads: the three `sprites/` TGAs, the three object-config dirs
 /// (`weapons/`, `nobjects/`, `sobjects/` — ids are dynamic, driven by
 /// `tc.types`, so the whole dir must be present), `tc.cfg`, the four small levels
-/// ([`EMBEDDED_LEVELS`], Step 4½e-2), and `sounds/` (31 WAVs, ~505 KB raw — the whole dir, not curated to the demo
-/// scenario's reachable set, so a future live-wasm build stays correct without
-/// re-touching this file, design §8 "wasm embed decision"). The big
+/// ([`EMBEDDED_LEVELS`], Step 4½e-2), and `sounds/` (31 WAVs, ~505 KB raw — the
+/// whole dir, not curated to the demo scenario's reachable set, so a future
+/// live-wasm build stays correct without re-touching this file, design §8 "wasm
+/// embed decision"). The big
 /// `modern_test.lev` is still deliberately excluded. `tc_root` is ignored. A miss is
 /// `None` (Step 4½e-1); [`read_asset`] turns it into the `panic!` — the key set is
 /// build-time-known, so a miss there is a bug, mirroring the native `read {rel}: {e}`.

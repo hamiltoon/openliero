@@ -64,7 +64,8 @@ pub fn settings_menu() -> Menu {
 }
 
 /// `SettingsMenu`'s virtuals over the live `Settings` (C++ `gfx.settings`). `setup_name` is
-/// `GetBasename(GetLeaf(gfx.settings_node.FullPath()))`: `"liero"` until 4½e-2's LOAD SETUP.
+/// `GetBasename(GetLeaf(gfx.settings_node.FullPath()))`: `"liero"` at boot, then the name a
+/// SAVE SETUP AS… saved or a LOAD SETUP loaded (Step 4½e-2).
 pub struct SettingsModel<'a> {
     pub settings: &'a mut Settings,
     pub tc: &'a UiTc,

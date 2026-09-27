@@ -365,8 +365,8 @@ fn setup_load() -> Case {
     // NEW GAME (F1), 300 ticks, Esc. F7 → LOAD SETUP (Down ×14; opens in Setups on `liero`) →
     // Down ×2 → Left (the root, on Setups) → Right (Setups, the cursor kept on `orbmit`) →
     // pick `orbmit` → Esc → RESUME (F1): the paused match is detached and keeps its settings;
-    // 300 ticks; Esc. F7 → LOAD SETUP (Down ×14 again) → `mine` → NEW GAME (Game of Tag from `mine`); 200 ticks;
-    // Esc; QUIT (`liero.cfg` holds `mine`'s values).
+    // 300 ticks; Esc. F7 → LOAD SETUP (Down ×14 again) → `mine` → NEW GAME (Game of Tag from
+    // `mine`); 200 ticks; Esc; QUIT (`liero.cfg` holds `mine`'s values).
     let b = B::new(None, 65).fs(&m).detail().idle(40);
     let b = new_game_f1(b, 6501, 300)
         .idle(10)

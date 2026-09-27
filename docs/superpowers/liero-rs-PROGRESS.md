@@ -8,7 +8,61 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-09-26 · **🗡️ 4½e-1 (the settings menu, WEAPON OPTIONS, number entry,
+> **Last updated:** 2026-09-27 · **🗡️ 4½e-2 (the level selector, SAVE SETUP AS… / LOAD SETUP, the
+> shipped-level fix, the browser level catalogue) LANDED — 4½e is COMPLETE. 🎯 LEVEL, LOAD SETUP and
+> SAVE SETUP AS… work like C++: LEVEL → the config tree (`[RANDOM]` first, folders first, the parent
+> pane, type-to-search) → Levels → the minimap preview (one frame late, persisting into the menu) →
+> pick → LEVEL again reopens on it; SAVE SETUP AS… → a reserved or shipped name gives the black `NAME
+> '<leaf>' IS RESERVED` box and reopens the entry, any other name is saved; LOAD SETUP → `Setups` →
+> the picked file replaces the settings and detaches a paused match; every presented frame, every
+> `d` line and every saved file bit-exact against the REAL C++ `Gfx::RunOneFrame`.** `ui::shell`
+> gained `files` (an arena `FileNode` tree filled lazily through the store; `FileSelector` with
+> `Fill`/`ChildSort`/`CiLess`, `Find`/`Select`, `Process` in `fileSelector.hpp` order;
+> `LevelSelectorState` with RANDOM, the restore and the late preview; `SetupSelectorState`), the
+> `L`/`P` screens, the selectors' `Picked` continuation, the Save-As chain through e-1's scheduled
+> replacement (`InputPurpose::SaveSetupAs`, `InfoPurpose::Reserved`), LOAD SETUP (fresh settings,
+> the setup name, `Match::detach`), `level_path::cpp_accepts` (C++ `Level::load`'s accept rules,
+> for reads and previews), `FrameOut::notes` and `Shell::text_mode`. `scenario` gained
+> `ConfigStore::list` (C++ `DirectoryListing` over the merged layers), `MemoryStore` directories
+> and a single-layer mode, `NativeStore::with_shadow_root` (C++ `ShadowsSystem` consults the
+> install's data even under `--config-root`), `placeable_leaf` and the embedded level catalogue;
+> `render` only `hud::draw_miniature_ids` (hash-neutral). **John's Q4 (the one intended
+> difference):** a picked shipped level is played, where a default C++ install plays random
+> (finding 2). It is proven, never gated as a mismatch: every G2e-2 case that plays a picked level
+> has it in both layers (C++ opens the user copy), and the **Q4 twin** re-drives `level_pick` and
+> the milestone with the level in the system layer only — every `f`/`d` line still equals the C++
+> golden of the both-layers run (its broken twin, with the system copy gone too, fails on the
+> Levels listing at `level_pick` frame 75). T0 P6 recorded C++'s side: the system-only layout plays
+> exactly a `[RANDOM]` pick with REGENERATE LEVEL on (same seeds), 234/234 ticks. **🎯 G2e-2:**
+> `oracle_dump_shell` grew the `L`/`P` tops, the search-gap check for them, **intervention 6′**
+> (`record_replays = false` after every frame: LOAD SETUP swaps in a shipped setup whose
+> `recordReplays = true`, which would write a wall-clock `.lrp`) and **the Q4 guard** (an `fs` case
+> may never NEW GAME into C++'s shipped-level bug); 6 generator-validated cases — `level_tree` (221
+> frames), `level_pick` (814), `level_missing` (649), `setup_save` (237), `setup_load` (1,275) and
+> the milestone **`setups_and_levels` (761)** — **3,957 frames + 3,957 `d` lines + 18 saved-file
+> lines bit-exact on the first run, no Rust fix needed**; all 28 shell cases green; the ASan /
+> `_GLIBCXX_ASSERTIONS` C++ build writes the same bytes for all 28. Counterfactual: without LOAD
+> SETUP's detach the `setup_load` state hash diverges 1 tick after RESUME. **The live game** (`game`
+> is glue): the browser store is the C++ web build's `--config-root /openliero` (the setups, the 4
+> small levels, `tc.cfg` and the object `.cfg`s, the 11 `data/` folders; no `modern_test`, Q6),
+> `?level=<stem>` stores the canonical `/openliero/TC/openliero/Levels/<stem>.lev` (so LEVEL reopens
+> on it), a phone raises the number keyboard for a number box and the letter keyboard for SAVE
+> SETUP AS… (`window.lieroTextMode`, Q5), new read-only hooks (`lieroFolder`, `lieroSetup`,
+> `lieroLevel`, `L<n>`/`P<n>`), `--config-root` keeps C++'s shadow check, and a WEAPON press up to
+> 1 s now counts as a phone tap (was 0.3 s: headless presses of 390–420 ms were dropped). **The C++
+> comparison ran in this cloud session:** the dumpers headless, and the real `openliero
+> --config-root <copy of data/>` under Xvfb + xdotool vs the Rust browser bundle on the same keys —
+> 14 C++ | Rust side-by-sides of the level tree, Levels with the preview, the search, the pick with
+> the preview persisting, the restore, SAVE SETUP AS… with the reserved box and its reopen, the
+> save, LOAD SETUP and the loaded values (identical except the root label, the level list (5 vs 4,
+> Q6) and so the first preview, the boot level/seed and the blink phase of the cursor; not
+> committed); headless Chromium desktop 32/32, phone 90/90, the e-1 phone walk 74/74. Audit: 22 `A`
+> golden files, 0 `M`; C++ changes only in `shell_dump.cpp`; every shell golden regenerates
+> byte-identically; `sim`, `sim-core` and `assets` untouched; `ui` has no Bevy; `sim-core` has no
+> dependencies. Step 4½ now: **4½a ✅ 4½b ✅ 4½c-0 ✅ 4½c ✅ 4½d ✅ 4½e ✅ (e-1 + e-2)**; 4½f…4½h are
+> planned (next: 4½f — the player menu, profiles and DumbLieroAI).
+>
+> Prior (2026-09-26): **🗡️ 4½e-1 (the settings menu, WEAPON OPTIONS, number entry,
 > `liero.cfg`, the small labels) LANDED. 🎯 MATCH SETUP works like C++: F7 → edit every setting
 > (held Left/Right, typed numbers) → WEAPON OPTIONS (Menu / Bonus / Banned, the `NoWeaps` box) →
 > NEW GAME → play → Esc → edit → RESUME with the edits live → QUIT → `liero.cfg` saved; every
@@ -578,7 +632,10 @@ run → main menu → NEW GAME → weapon selection → play → Esc → menu �
 bit-exact vs the real C++ `Gfx::RunOneFrame`) and **4½e-1** (the settings menu, WEAPON OPTIONS,
 number entry, `liero.cfg` at boot/exit and the small labels, bit-exact vs the real
 `Gfx::RunOneFrame` including every saved byte; the sim bit-exact on four generated levels that are
-not 504×350) are done; 4½e-2 and 4½f…4½h are planned. Step 5 (netplay) is not started.
+not 504×350) and **4½e-2** (the level selector, SAVE SETUP AS… / LOAD SETUP and the shipped-level
+fix, every frame, `d` line and saved file bit-exact vs the real `Gfx::RunOneFrame`; the browser
+level catalogue) are done — 4½e is complete; 4½f…4½h are planned. Step 5 (netplay) is not
+started.
 
 The % was re-based on 2026-09-10: the denominator is now **steps 0–5 plus Step 4½** (~10 k C++
 LOC of shell, ~1.5 k of it sim-affecting), so the same finished work (steps 0–4) reads ~70%
@@ -592,7 +649,7 @@ REWRITE (steg 0–5, incl. 4½)                                ~70%
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
 ├─ ✅ Step 3  Bevy rendering / window (reproduce the SDL3 view) DONE — 3a–3f shipped (PR #4)
 ├─ ✅ Step 4  input + replay (.lrp) + audio                     COMPLETE — 4a–4g shipped (4e-phase2 bounded follow-on)
-├─ 🟡 Step 4½ game shell (menus, weapsel, level select/gen,     4½a ✅ 4½b ✅ 4½c-0 ✅ 4½c ✅ 4½d ✅ (milestone) 4½e-1 ✅, rest planned  ◀── YOU ARE HERE
+├─ 🟡 Step 4½ game shell (menus, weapsel, level select/gen,     4½a ✅ 4½b ✅ 4½c-0 ✅ 4½c ✅ 4½d ✅ (milestone) 4½e ✅ (e-1 + e-2), rest planned  ◀── YOU ARE HERE
 │             settings/profiles, DumbLieroAI, match end + stats)
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
@@ -919,7 +976,7 @@ TWO input formats by design (Rust-native round-trip artifact ≠ foreign `.lrp`)
 
 ---
 
-### Step 4½ — Game shell (🟡 IN PROGRESS — 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅ — the Step 4½ milestone reached — 4½e-1 ✅ · branch `liero-rs-step-4-5`, PR #7)
+### Step 4½ — Game shell (🟡 IN PROGRESS — 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅ — the Step 4½ milestone reached — 4½e-1 ✅, 4½e-2 ✅ · branch `liero-rs-step-4-5`, PR #7)
 
 Turn "plays a hard-coded match" into a complete game, close to or exactly like openliero: bare
 `cargo run -p game` opens the main menu over a generated level; a match is configured, weapon-
@@ -976,10 +1033,13 @@ fact maps: `specs/2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++) and
 │          root, --config-root) + the three DrawTextSmall labels + RESUME live settings (finding 1);
 │          safe edges (Addendum G3); 🎯 G2e-1 11 shell cases (6,099 frames + d lines + saved bytes)
 │          bit-exact vs the real headless RunOneFrame + G3 4 generated-level sim goldens    COMPLETE
-├─ ⬜ 4½e-2 level selector (file picker, RANDOM node, minimap preview, cursor restore) + LOAD SETUP /
-│          SAVE SETUP AS… + the shipped-level fix (Q4, C++-gated) + the wasm level catalogue;
-│          still open: move settings/settings_toml/toml_fmt/storage into rust/settings (design
-│          §2.2; plan D12 — not in e-1)                        (parallel with 4½f)   not started
+├─ ✅ 4½e-2 level selector (file tree, RANDOM node, the one-frame-late minimap preview, cursor
+│          restore) + LOAD SETUP (detaches a paused match) / SAVE SETUP AS… (the reserved box) +
+│          the shipped-level fix (Q4: proven by the Q4 twin, never gated as a mismatch) + the
+│          browser level catalogue, ?level= canonical, the per-box phone keyboard; 🎯 G2e-2 6 shell
+│          cases (3,957 frames + d lines + 18 saved files) bit-exact vs the real headless
+│          RunOneFrame, first run; still open: move settings/settings_toml/toml_fmt/storage into
+│          rust/settings (design §2.2; e-2 plan D15)                                   COMPLETE
 ├─ ⬜ 4½f  player menu (name, health, RGB bar, key bindings, weapons via Levenshtein,
 │          controller Human/DumbAI) + profiles + DumbLieroAI port (own Rand). Gate: fixed-seed
 │          AI control-state stream, bit-exact                    (parallel with 4½e)   not started
@@ -1105,9 +1165,9 @@ Also open for John (4½e-1):
   `record_regression` green); Scripted / `--replay` are unchanged.
 - **Deferred:** the shipped-level fix (Q4) — `level_path` already reads a C++ config-root
   `level_file` through the merged view (a `liero.cfg` naming a shipped level plays it, where C++
-  plays random), but the picker that reaches it from the menu and its C++ gate are e-2's; the
-  `rust/settings` crate move (D12) is still open; Holdazone stays refused (the sim's arm is
-  unported).
+  plays random), but the picker that reaches it from the menu and its C++ gate are e-2's (landed
+  in 4½e-2); the `rust/settings` crate move (D12) is still open; Holdazone stays refused (the sim's
+  arm is unported).
 - **A pre-existing C++ UB, not 4½e-1's:** `gen_sim_slice5prime_pickup_weapon_golden.sh` hangs on
   this machine. Its scenario gives worm 0 `aiming_angle 0, direction 1` → `Itof(128)`, and after
   the RIFLE (laser sight) pickup `ProcessSight` reads `cossin_table[128]`, one past the end; here
@@ -1119,6 +1179,68 @@ Also open for John (4½e-1):
   path. Headless Chromium runs at ~10 fps, where a one-frame press can outlast 12 ticks and trip
   weapon selection's key repeat (4½d's known note); the walk re-presses until the cursor sits on
   DONE!. The native `game` still cannot run here (no GPU adapter).
+Also open for John (4½e-2):
+- **The design facts that turned out wrong or sharper against the source** (plan-time facts 1, 5,
+  8, 11, 13, 14, 16, 17; the source won): the level selector draws its own framed title in
+  `DrawExtra` (the options selector uses the base `"Select options:"`), both as text + `' '` + the
+  folder's `full_path`, and a long title is clipped at x = 320; `DirectoryListing` lists dotfiles,
+  follows symlinks, drops a broken link and shows a `.zip` as a folder, and the merged listing is
+  bytewise-sorted and de-duplicated before `ChildSort` (folders first, then `CiLess`); `Find` has no
+  separator check, and a miss (random, a TC-relative path, another root) opens on `[RANDOM]`, while
+  LOAD SETUP opens *inside* `Setups`; C++ `Level::load` rejects a truncated POWERLEVEL or MODERNLV
+  block that Rust's Step-1 loader kept (now ported as `level_path::cpp_accepts`, plan D6: no
+  preview, a random level at NEW GAME); `LoadSettings` swaps in a fresh `Settings` even when the
+  load fails; `ShadowsSystem` consults `SystemDataRoot()` afresh, so `--config-root <copy>` still
+  refuses the install's shipped names (T0 P9) while the C++ web build refuses only `liero.cfg`; a
+  LOAD SETUP brings back `record_replays = true` (both shipped setups have it), hence intervention
+  6′; and Rust's NEW GAME wrote the old selection's picks back unconditionally — **a leak across
+  LOAD SETUP, fixed**: the picks go back only while the match is attached (fact 17).
+- **T0** (probes through the real `Gfx::RunOneFrame`, plan Addendum T0): P1–P9 confirmed — the
+  listings, the filter and sort, the parent pane, the one-frame-late preview drawn into the frozen
+  screen through this frame's menu palette (it persists into the main menu), the cursor restore,
+  LOAD SETUP, the Save-As chain (the replacement box and the reopened entry each present on the
+  frame that scheduled them), P7 (a LOAD SETUP then NEW GAME writes a wall-clock `.lrp`) and P8
+  (LOAD SETUP detaches: the resumed match equals an unloaded control on 201/201 ticks). **P6:** C++'s
+  shipped-level bug reproduced in the dumper — the system-only layout plays exactly a `[RANDOM]`
+  pick with REGENERATE LEVEL on (same seeds), 234/234 ticks; a plain `[RANDOM]` pick instead reuses
+  the menu's level (the router's reuse test). **P10 partly contradicted:** a file that passes the
+  `MODERNLV` magic and then is truncated is **C++ UB at NEW GAME** (`Level::load` sizes
+  `display_valid` to w·h, the next read throws, the random fallback resizes only the material
+  arrays, and `SetPixel` writes past the end — a crash in every build). `trunc.lev` is therefore
+  preview-only in the corpus; Rust falls back to random there, a documented divergence only where
+  C++ is UB, and `level_missing` plays `broken` (a README, rejected cleanly) instead. Fact 24's
+  example letters were wrong (`d` is P1's Left); the corpus searches with `h`, `i`.
+- **How Q4 is shown (plan D1):** gated bit-exact with the level in both layers; the Q4 twin
+  (Rust-only, against the same C++ golden) with the level in the system layer only; C++'s side
+  documented by P6; self-policed by the dumper's Q4 guard and the generator's validator, so no
+  golden records a divergence.
+- **The dumper's interventions** grew two, each at a point where no code under test runs: 6′
+  (`record_replays = false` after every frame and before the `d` line, mirrored by the harness)
+  and the Q4 guard (at boot and after every frame that made a controller, an `fs` case whose level
+  opens only through the merged view is refused). Both were proven no-ops on the 22 earlier cases.
+- **A fact the corpus pinned:** the settings cursor returns to GAME MODE whenever the menu comes
+  back from a match (`MainMenuState::Enter`), and is kept when a selector or a box pops.
+- **Rust-only, by design (not gated):** a SAVE SETUP AS… name the store cannot place (a control
+  byte, `/`, `\`, `:`) gets the same `RESERVED` box (D7; C++ would create folders or leave the
+  root); a write error is a `console.warn` / stderr note and keeps the name; LOAD SETUP of a file
+  that does not parse keeps the current settings and name with a note (D8; C++ swaps in a
+  half-read object and crashes at the next NEW GAME).
+- **The browser (D9, D10):** like the C++ web build, it may save over a shipped name other than
+  `liero` (kept until the page reloads; 4½h adds localStorage), and natively `--config-root` keeps
+  C++'s shadow check against the install's data.
+- **Recorded, not built:** no type-to-search on phones (no keyboard is up outside a text box,
+  D12); a `.zip` lists as a folder whose contents are empty (zip reading is unported, D13); names
+  go through `to_string_lossy`, the user layer wins among equal names and equal-`CiLess` names keep
+  the byte order (D14); the `rust/settings` crate move (e-1 D12) is still open (D15).
+- **Outside the plan:** a phone WEAPON press up to 1 s now counts as a tap (`8912422`; was 0.3 s:
+  the headless walk measured deliberate presses of 390–420 ms being dropped; 10/10 after). Only a
+  longer hold keeps the original's hold-to-see-the-name behaviour.
+- **Eyeball artefacts:** the real `openliero --config-root <copy of data/>` (with
+  `OPENLIERO_DATADIR=data`, so the shadow check refuses the shipped names) under Xvfb + xdotool vs
+  the browser bundle on the same keys — 14 pairs, not committed. Differences, all expected: the
+  root label (the copy's path vs `/openliero`), the Levels rows (5 vs 4, Q6) and so the first
+  preview (`modern_test` vs `physics_fall_test`), the boot level (seed), and the cursor's colour
+  cycle (timing). The native `game` still cannot run here (no GPU adapter).
 
 ---
 

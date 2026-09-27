@@ -720,7 +720,7 @@ Everything the plan read from the source for e-2 is probed with the **real** `Gf
   - `upd` and `top` grow `L`/`P` through `top_char()`, with no code change.
   - `B::type_chars(s)`: per char, `key down <UPPER>` + `text <hex>` on one frame and `key up` two frames later.
   - `Fs::install()` and the user-line builders (§Formats).
-  - `Opts.q4_twin: bool`. `make_fixture` then skips each `file user TC/openliero/Levels/<x>` line whose `<x>` also has a `file sys` line, the Q4 validator records instead of refusing, and the run reports the count (D1.2).
+  - `Opts.q4_twin: bool` *(as landed: `Opts.q4_twin: Twin`, `Twin::{Off, UserCopies, Both}`, where `Both` drops the system copy too for the negative twin)*. `make_fixture` then skips each `file user TC/openliero/Levels/<x>` line whose `<x>` also has a `file sys` line, the Q4 validator records instead of refusing, and the run reports the count (D1.2).
   - **Ledger fields:**
     - `selector: Vec<Option<SelectorView>>` per frame;
     - `previews: Vec<(u32, String)>`: frames whose `frozen` preview rectangle changed, with the node;
@@ -767,7 +767,7 @@ Everything the plan read from the source for e-2 is probed with the **real** `Gf
      - F7 → LEVEL reopens on `water_stage` → Esc;
      - SAVE SETUP AS… → Return (`liero` refused) → key → Backspace ×5 → `mine` → Return;
      - LOAD SETUP → `orbmit`;
-     - Esc (focus main) → the cursor to NEW GAME → Return → selection → DONE → 100 ticks → Esc → QUIT.
+     - Esc (focus main) → the cursor to NEW GAME → Return → selection → DONE → 100 ticks → Esc → QUIT. *(As landed: 120 ticks; 761 frames in all.)*
      - The `file` lines are `Setups/liero.cfg` (orbmit's values), `Setups/mine.cfg` (the `water_stage` settings) and the `water_stage` copy.
 - [ ] **Step 4: witnesses** (the generator prints each case's ledger; `write` refuses a case that lacks its own). Every case needs no violations.
 
@@ -802,7 +802,7 @@ Everything the plan read from the source for e-2 is probed with the **real** `Gf
     - `the_e2_milestone_is_bit_exact` (`setups_and_levels`, with its ledger asserted: 2 NEW GAMEs, 1 reserved box, 1 save, 1 load, quit, 3 `file` lines);
     - `every_g2e2_case_is_bit_exact`;
     - **`the_q4_fix_plays_a_system_only_level`** (D1.2), for `level_pick` and `setups_and_levels`: `drive_with(…, Opts { q4_twin: true, .. })`. Every `f` and `d` line must equal the committed golden, the `file` lines must equal the golden's minus `TC/openliero/Levels/water_stage.lev`, and `q4_hits ≥ 1`;
-    - `#[should_panic] the_q4_twin_sees_a_missing_level`: the twin with the system copy dropped too, so Rust plays random. It must fail, which shows the twin is not vacuous.
+    - `#[should_panic] the_q4_twin_sees_a_missing_level`: the twin with the system copy dropped too, so Rust plays random. It must fail, which shows the twin is not vacuous. *(As landed: it fails earlier than pictured, on the Levels listing — `water_stage` is gone from the rows — at `level_pick` frame 75 (G2 line 75), before any NEW GAME.)*
 - [ ] **Step 2: the fix loop.**
   - Run `cargo test --manifest-path rust/Cargo.toml -p oracle-tests --test shell_golden`.
   - On the first mismatch, get PPMs of both sides around it. Rust: `SHELL_RUST_PPM_DIR=$S/g2r`. C++: `SHELL_PPM_DIR=$S/g2c bash rust/oracle-tests/gen_shell_golden.sh`, which rewrites the same bytes (the golden status stays empty).
@@ -869,7 +869,7 @@ Everything the plan read from the source for e-2 is probed with the **real** `Gf
     - MENU leaves a selector;
     - an info box closes on any button.
   - Report `ok`/`FAIL` lines, with screenshots in `$S/e2shots/`.
-- [ ] **Step 7: commit** `game(4.5e-2): the browser level catalogue (the C++ web tree minus modern_test), ?level= stores the canonical path, the phone keyboard per box (numeric / text), selector hooks, the --config-root shadow check; the page`.
+- [ ] **Step 7: commit** *(landed as `a5d8f45`: desktop 32/32, phone 90/90, the e-1 phone walk 74/74; a follow-up `8912422`, outside this plan, counts a phone WEAPON press up to 1 s as a tap, because the walk measured 390–420 ms presses being dropped at 0.3 s)* `game(4.5e-2): the browser level catalogue (the C++ web tree minus modern_test), ?level= stores the canonical path, the phone keyboard per box (numeric / text), selector hooks, the --config-root shadow check; the page`.
 
 **Done when:** the `game` tests and the wasm check pass, the Chromium walk is all `ok`, and the non-shell paths are unchanged (`round_trip` and `record_regression` green).
 
@@ -895,7 +895,7 @@ Everything the plan read from the source for e-2 is probed with the **real** `Gf
     - `source $S/env.sh && bash rust/oracle-tests/gen_shell_golden.sh`;
     - then `git status --porcelain rust/oracle-tests/golden` → empty;
     - then the `$S/build-chk` loop → 28 `SAME`.
-- [ ] **Step 3: Xvfb side-by-side** (eyeball only).
+- [ ] **Step 3: Xvfb side-by-side** (eyeball only). *(As landed: the orchestrator ran the real `openliero --config-root <copy of data/>` with `OPENLIERO_DATADIR=data` — the P9 layout, so the shadow check refuses the shipped names — instead of the two-layer root below, on the key path of `$S/e2x/drive_cpp.sh` / `rust.mjs`: 14 pairs in `$S/e2_side_by_side/`, identical except the root label, the Levels rows (5 vs 4) and so the first preview, the boot level and the cursor's colour cycle.)*
   - Build a two-layer root:
     - `U=$S/x14/user`; `mkdir -p $U/TC/openliero/Levels`;
     - `cp data/TC/openliero/Levels/water_stage.lev $U/TC/openliero/Levels/`.

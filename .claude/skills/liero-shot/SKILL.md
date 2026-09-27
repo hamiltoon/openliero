@@ -167,6 +167,25 @@ gates are `shell_*` G2e-1 (11 cases with `d` lines and the saved `liero.cfg` byt
 C++ side-by-side, run the real `openliero --config-root <copy of data/>` under Xvfb and the
 browser bundle with the same keys (the native `game` needs a GPU).
 
+**Levels and setup files (Step 4½e-2).** LEVEL opens the C++ level selector over the whole config
+tree: `[RANDOM]` first, folders (colour 47) before files, the parent pane, Right into a folder,
+Left back, Up/Down/PgUp/PgDn, type-to-search (`contains`; R/F/D/G are P1's keys and move instead),
+Enter or Fire picks, Esc or Jump leaves. It reopens on the current `level_file` (cursor restore),
+and the minimap preview of the highlighted file lands one frame late and stays in the main menu
+(C++ draws it into the frozen screen). SAVE SETUP AS… types a name into `Setups/<name>.cfg`; a
+reserved or shipped name gives the black `NAME '<leaf>' IS RESERVED` box, and any key reopens the
+entry on what was typed. LOAD SETUP opens the options selector in `Setups` and loads the pick,
+which also detaches a paused match (it keeps its own settings, as in C++). A picked shipped level
+is played where a default C++ install plays random (John's Q4). The browser lists `/openliero`:
+the setups and the 4 small levels (no `modern_test`); `?level=<stem>` stores the canonical
+`/openliero/TC/openliero/Levels/<stem>.lev`; a phone raises the number keyboard for a number box
+and the letter keyboard for SAVE SETUP AS… (`window.lieroTextMode`, plus read-only
+`lieroFolder` / `lieroSetup` / `lieroLevel`; `lieroSel` is `L<n>` / `P<n>` in a selector). The gates
+are `shell_*` G2e-2 (6 `fs` cases with every frame, `d` line and saved file vs the real
+`Gfx::RunOneFrame`; `gen_slice4_5e2_shell -- check|write`, `gen_shell_golden.sh`, 28 cases) and the
+Q4 twin in `shell_golden.rs` (`level_pick` and the milestone re-driven with the level only in the
+system layer, played exactly as C++ plays a user copy).
+
 ```
 cargo run --manifest-path rust/Cargo.toml -p game -- --live [name]
 ```

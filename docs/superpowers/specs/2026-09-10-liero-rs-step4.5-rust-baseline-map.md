@@ -146,6 +146,28 @@ user layer then system layer, which is John's Q4 fix; else an absolute path nati
 `?level=` convention; plan fact 27 pulled it forward from 4½e-2), and `generate_level` takes the file as
 `Option<LevelData>` — a missing file falls back to a random level, as C++ does, instead of panicking.
 
+**Storage and the file tree (4½e-2):** `ConfigStore::list(rel) -> Vec<DirEntry>` is C++ `DirectoryListing` over
+the merged layers (user entries then system entries, sorted bytewise and de-duplicated, the user's kept; dotfiles
+listed; `stat` follows links and drops broken ones; `x.zip` is a folder `x`). `MemoryStore` knows directories (key
+prefixes plus explicit `with_dirs`) and has a `single_layer` mode — the browser's store is the C++ web build's
+`--config-root /openliero`: `scenario::assets::browser_system_files()` (the setups, `EMBEDDED_LEVELS` — the 4 small
+levels, also what the wasm `try_read_asset` reads — `tc.cfg` and the object `.cfg`s) plus `EMBEDDED_DIRS` (the 11
+`data/` folders), refusing only the reserved name. `NativeStore::with_shadow_root` keeps C++ `ShadowsSystem`'s
+`SystemDataRoot()` under `--config-root`; `storage::placeable_leaf` is the Rust-only Save-As name rule.
+`ui::shell::files` is the C++ `FileNode`/`FileSelector` as an arena filled lazily through the store (`Fill`,
+`ChildSort`/`CiLess`, `Find`/`Select`, `CurSel`, `Enter`, `Exit`, `Process`, `Draw`), with `LevelSelectorState`
+(`[RANDOM]`, the restore, the one-frame-late preview through `render::hud::draw_miniature_ids`) and
+`SetupSelectorState` (C++ `OptionsSelectorState`). They are `Screen::LevelSelect` / `Screen::SetupSelect` (G2 tops
+`L`/`P`); a pick is a `files::Picked` that `Shell::frame` applies after the update and before the pop (C++
+`OnSelected`). `MenuCtx` carries `store: &dyn ConfigStore`, and the stack's draw walks the screens mutably (the
+preview and the lazy `GetMenu`). `level_path::cpp_accepts` is C++ `Level::load`'s accept rules, applied by
+`read_level` (which now takes `load_powerlevel_palette`) and the preview. SAVE SETUP AS… is
+`InputPurpose::SaveSetupAs` → `InfoPurpose::Reserved` (its `on_dismiss` schedules the name box again); LOAD SETUP
+replaces the settings, sets `setup_name` and calls `Match::detach` (`ShellDebug::load_detach` is the counterfactual
+switch), and NEW GAME writes the old picks back only while the match is `attached`. `FrameOut::notes` carries the
+Rust-only messages (a failed save, a setup that does not parse) for the glue to log; `Shell::text_mode`,
+`setup_name`, `selector_view` and `level_from_file` feed `game::touch::hooks` (`window.liero*`).
+
 **Level paths / `data/` layout**: TC root = `concat!(CARGO_MANIFEST_DIR, "/../../data/TC/openliero")`
 (`main.rs:36`, duplicated in `input.rs:791`, `shot`, tests). `Levels/` has only 5 test fixtures.
 There is no shipped stock-level corpus for a level picker, and only one TC.

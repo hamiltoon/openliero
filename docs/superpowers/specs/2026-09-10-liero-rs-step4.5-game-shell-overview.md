@@ -1,6 +1,6 @@
 # Step 4½ — Game shell: overview / altitude decisions
 
-Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, **4½c LANDED**, **4½d LANDED (the Step 4½ milestone)**, **4½e-1 LANDED** (4½e-2 planned), 4½f–4½h planned
+Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, **4½c LANDED**, **4½d LANDED (the Step 4½ milestone)**, **4½e LANDED** (4½e-1 + 4½e-2), 4½f–4½h planned (next: 4½f)
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 4½ — Game shell" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++ map, cited as **cpp-map §N**)
@@ -359,7 +359,7 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   John's Q1): **4½e-1 ✅** the settings menu (the settings focus, every `SettingsMenu` item, number
   entry through `InputStringState`), WEAPON OPTIONS with its `InfoBoxState`, `liero.cfg` at boot and
   exit (the C++ config root natively, `--config-root`), the three `DrawTextSmall` labels and
-  edits reaching a paused match; **⬜ 4½e-2** the level selector (RANDOM node, preview, cursor
+  edits reaching a paused match; **4½e-2 ✅** the level selector (RANDOM node, preview, cursor
   restore), LOAD SETUP / SAVE SETUP AS… and the shipped-level fix (Q4).
   **4½e-1 landed** (plan `plans/2026-09-26-liero-rs-step4.5-slice4.5e1-plan.md`). The gate became
   C++-oracle gates, not self-goldens: G2e-1 (11 shell cases, 6,099 frames with their `d` lines —
@@ -379,6 +379,25 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   behaviour), so the "first non-504×350 sim golden" uses 96×344 instead of 96×64, and John ruled
   **safe edges**: Rust reads an out-of-array material as rock (a documented divergence only where
   C++ is UB).
+  **4½e-2 landed** (plan `plans/2026-09-26-liero-rs-step4.5-slice4.5e2-plan.md`): the level
+  selector (the config tree through a new `ConfigStore::list`, `[RANDOM]`, the parent pane,
+  type-to-search, the cursor restore, the minimap preview), SAVE SETUP AS… (the reserved-name box
+  and its reopen) and LOAD SETUP (which detaches a paused match), the browser level catalogue (the
+  C++ web build's `/openliero` tree minus `modern_test`), `?level=` in the canonical config-root
+  form and the per-box phone keyboard. Gate G2e-2: 6 shell cases, 3,957 frames with their `d`
+  lines and 18 saved files, bit-exact vs the real headless `Gfx::RunOneFrame` on the first run
+  (🎯 `shell_setups_and_levels`). Corrections: (1) **finding 2 fixed per Q4** — a picked shipped
+  level is played where a default C++ install plays random; proven without gating a mismatch: the
+  gated cases keep the level in both layers (C++ opens the user copy), and the Q4 twin re-drives
+  them with the level in the system layer only and still equals the C++ golden; the dumper's T0
+  probe P6 recorded C++'s side (random, equal to a `[RANDOM]` pick with REGENERATE LEVEL on);
+  (2) **finding 5 confirmed by T0** — C++ previews no RANDOM row, no folder and no rejected file,
+  and draws the preview into the frozen screen, so it shows one frame late and stays in the menu;
+  (3) C++ `Level::load` is stricter than Rust's Step-1 loader (a truncated POWERLEVEL / MODERNLV
+  block), now ported for reads and previews — and a truncated MODERNLV level is C++ UB at NEW
+  GAME, so the corpus only previews it; (4) LOAD SETUP swaps in a fresh settings object, so a
+  paused match keeps its own (finding 1's other half) and the old selection's picks are no longer
+  written back into the loaded setup.
 - **4½f — Player menu, profiles, DumbLieroAI.** The `PlayerMenu` (`gfx.cpp:459-483`, `:1362-1428`):
   NAME (with `GenerateName` for an empty name, `mainMenuState.cpp:323-347`), HEALTH, R/G/B with the
   classic 0..252-step-4 `display_div=4` picker (`gfx.cpp:1376-1388`) and the colour-bar overlay
@@ -507,7 +526,7 @@ depends on a+b+c. 4½g depends on 4½a's `IsGameOver`. 4½h is last by nature.*
    4½** — random generation is bit-exact-gated in 4½b and makes the picker meaningful on its own —
    with (a) as a follow-up if John wants the original level pack.
    **Ruled (John, 2026-09-26, 4½e design Q6 → A): today's level set** — RANDOM, the 5 test levels
-   on desktop, the 4 small ones on the web; that is option (b) here.
+   on desktop, the 4 small ones on the web; that is option (b) here. (Landed in 4½e-2.)
 
 ---
 

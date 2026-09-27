@@ -914,4 +914,51 @@ mod tests {
             (l.material_flags[0] & sim::state::MAT_BACKGROUND) != 0
         );
     }
+
+    // ---- 4½f-1 T2 Step 3: the CPU smoke (sim::ai over a real match) --------------------
+
+    /// Two CPUs, fed only by `sim::ai::run_ais` (D8's flow: last tick's post-tick words, no
+    /// key edges), on a generated 504 x 350 level for 2,000 ticks. Returns every tick's state
+    /// hash, whether each worm was ever visible, and whether each word was ever non-zero.
+    fn cpu_smoke() -> (Vec<u32>, [bool; 2], [bool; 2]) {
+        use sim::ai::{run_ais, DumbLieroAi};
+        let (s, level) = generated(504, 350, 4501);
+        let c = MatchConfig {
+            settings: s,
+            seed: 4502,
+        };
+        let mut st = build_match(Path::new(TC_ROOT), &c, &level)
+            .expect("the default setup builds")
+            .state;
+        let mut ais = [Some(DumbLieroAi::new()), Some(DumbLieroAi::new())];
+        let (mut visible, mut pressed) = ([false; 2], [false; 2]);
+        let mut hashes = Vec::with_capacity(2000);
+        for _ in 0..2000 {
+            let mut inputs = [st.worms[0].control_states, st.worms[1].control_states];
+            run_ais(&mut ais, &st, &mut inputs);
+            st.process_frame(&inputs);
+            for i in 0..2 {
+                pressed[i] |= inputs[i].pack() != 0;
+                visible[i] |= st.worms[i].visible;
+            }
+            hashes.push(sim::hash::hash_game_state(&st));
+        }
+        (hashes, visible, pressed)
+    }
+
+    #[test]
+    fn two_cpus_play_2000_ticks_deterministically() {
+        let (a, visible, pressed) = cpu_smoke();
+        assert_eq!(
+            visible,
+            [true, true],
+            "both CPUs spawned (they press Fire while dead)"
+        );
+        assert_eq!(pressed, [true, true], "both CPUs pressed something");
+        let (b, _, _) = cpu_smoke();
+        assert_eq!(
+            a, b,
+            "the same seeds give the same state hash on every tick"
+        );
+    }
 }

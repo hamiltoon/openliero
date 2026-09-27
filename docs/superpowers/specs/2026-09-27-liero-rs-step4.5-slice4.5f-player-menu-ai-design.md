@@ -795,3 +795,13 @@ so the keyboard no longer moves it (the original does the same when no gamepad i
   player back to Keyboard.
 - **B:** Treat a gamepad player as a keyboard player until gamepad support arrives; the INPUT row still shows the
   gamepad.
+
+## Rulings (John, 2026-09-27)
+
+All five recommendations were accepted:
+
+- **Q1 → A, two parts, the CPU first.** 4½f-1: DumbLieroAI (`sim::ai`), the phone's player 2 as the real CPU, per-worm health, persisted `reacts`, `?cpu=`. 4½f-2: the LEFT/RIGHT PLAYER menus, profiles, key capture with the full DIG rule, names. Each part has its own milestone, PR and preview.
+- **Q2 → A.** Starting a match with an "AI" (FollowAI) player shows an "AI PLAYERS ARE NOT SUPPORTED YET" box and stays in the menu, with the menu unchanged from C++ (the same approach as Holdazone).
+- **Q3 → A.** On a phone, player 2 starts as the real CPU, gets random weapons each match, and fights back. The RIGHT PLAYER menu shows it and it can be changed. The stand-in (`BotRespawn`) is removed.
+- **Q4 → A.** Fix the C++ DIG-binding overflow: DIG gets the key and WEAPON 1 is unchanged. This is an intended divergence only where C++ is undefined behaviour.
+- **Q5 → A.** Joystick profiles behave as in the original: the INPUT row shows the gamepad, the keyboard no longer moves that player, and Enter on INPUT switches it back to Keyboard.

@@ -1,6 +1,6 @@
 # Step 4½, Slice 4½f — the player menu, profiles and DumbLieroAI: design
 
-Status: **DESIGN — awaiting John's rulings (§13)** · 2026-09-27 · branch `claude/cpp-oracle-vcpkg-assets-chcwcm` (on `liero-rs-step-4-5` at `c2d58fe`; 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅, 4½e-1 ✅, 4½e-2 ✅ landed)
+Status: **DESIGN — John's rulings recorded at the end** · 2026-09-27 · branch `claude/cpp-oracle-vcpkg-assets-chcwcm` (on `liero-rs-step-4-5` at `c2d58fe`; 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅, 4½e-1 ✅, 4½e-2 ✅ landed)
 Part of: `2026-09-10-liero-rs-step4.5-game-shell-overview.md` (the 4½f bullet, Hard gate 4, open Q3, §4½h Mobile; cited **overview**)
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` §2.4, §5.4, §6 (cited **cpp-map**) and
 `2026-09-10-liero-rs-step4.5-rust-baseline-map.md` (cited **rust-map**)

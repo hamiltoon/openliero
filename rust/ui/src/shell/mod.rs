@@ -42,7 +42,7 @@ use scenario::settings_toml::{settings_from_toml, settings_to_toml};
 use scenario::storage::{self, ConfigStore};
 use sim::state::{ControlState, SimState};
 
-use crate::keys::{DK_ESCAPE, KeyLatch, TypedKey};
+use crate::keys::{DK_ESCAPE, DK_F5, DosHeld, INPUT_KEYBOARD, KeyLatch, TypedKey, clean_words};
 use crate::menu::Menu;
 use crate::text::{UiTc, dos_display, dos_to_text};
 use files::{Picked, SelectorView};
@@ -90,23 +90,33 @@ pub enum InputEvent {
     Text(String),
 }
 
-/// One frame's input: its events in order, the sim's sampled control words (the 4½c sampler plus
-/// touch — C++ key events reach the worms at the frame boundary, the 4½c equivalence), a fresh
-/// seed for `SeedSource::Fresh`, the type-to-search clock, and the Rust-only F5 restart (Q5).
+/// One frame's input: its events in order, the physical keyboard's held DOS keys and the touch
+/// word (Step 4½f-2, design RD-1: the `Shell` turns them into the worms' clean words through the
+/// running match's bindings — C++ key events reach the worms at the frame boundary, the 4½c
+/// equivalence), a fresh seed for `SeedSource::Fresh`, the type-to-search clock, and the
+/// Rust-only F5 restart (Q5).
 #[derive(Clone, Copy, Debug)]
 pub struct ShellInput<'a> {
     pub events: &'a [InputEvent],
-    pub sampled: [ControlState; 2],
+    /// The held DOS keys (the harness's held set; natively and on wasm Bevy's
+    /// `ButtonInput<KeyCode>` through `dos_of_keycode`).
+    pub held: &'a DosHeld,
+    /// The Rust-only phone overlay, OR-ed into player 1's word whatever its input device (Q6).
+    pub touch: ControlState,
     pub fresh_seed: u32,
     pub now_ms: u64,
     pub restart: bool,
 }
 
+/// [`ShellInput::idle`]'s keyboard: nothing held.
+static NO_KEYS: DosHeld = DosHeld::new();
+
 impl ShellInput<'static> {
     pub fn idle() -> ShellInput<'static> {
         ShellInput {
             events: &[],
-            sampled: [ControlState::new(); 2],
+            held: &NO_KEYS,
+            touch: ControlState::new(),
             fresh_seed: 0,
             now_ms: 0,
             restart: false,
@@ -244,6 +254,9 @@ pub struct ShellDebug {
     /// The match's AI step (4½f-1 D8): `false` leaves a CPU worm's word as its keys made it
     /// (the G2f-1 negative control).
     pub ais: bool,
+    /// The live words from the running match's bindings (4½f-2 D1): `false` reads
+    /// `Settings::default()`'s bindings instead (the G2f-2 negative control).
+    pub live_bindings: bool,
 }
 
 impl Default for ShellDebug {
@@ -253,6 +266,7 @@ impl Default for ShellDebug {
             small_labels: true,
             load_detach: true,
             ais: true,
+            live_bindings: true,
         }
     }
 }
@@ -413,14 +427,19 @@ impl Shell {
             return out;
         }
         if input.restart && matches!(self.stack.top(), Some(Screen::Playing)) {
-            let seed = self.new_game(sim, input);
-            out.routed = Some(Route::NewGame { seed });
+            match self.restart_refusal() {
+                None => {
+                    let seed = self.new_game(sim, input);
+                    out.routed = Some(Route::NewGame { seed });
+                }
+                Some(why) => out.notes.push(format!("F5 restart ignored: {why}")),
+            }
         }
         // :1473-1485 — every event, in order, reaches the top's `HandleEvent`: `ProcessEvent`
         // (dos_keys, key_buf; it ignores text) for every screen; while Playing a non-repeat
         // key-down or any key-up also reaches LocalController::OnKey, whose only non-worm effect
-        // is Esc (finding 9) — worm keys reach the sim as `sampled`; then the overlays' own arms
-        // (`inputState.cpp:27-72`, `:177-183`).
+        // is Esc (finding 9) — worm keys reach the sim as the held keys' clean words; then the
+        // overlays' own arms (`inputState.cpp:27-72`, `:177-183`).
         self.world.keys.begin_frame();
         let playing = matches!(self.stack.top(), Some(Screen::Playing));
         for ev in input.events {
@@ -455,6 +474,12 @@ impl Shell {
             .map_or((-1, false), |s| (s.selection(), s.is_fading_out()));
         let running = self.current.as_ref().is_some_and(Match::running);
         let gate = self.gate();
+        // 4½f-2 RD-2: the worms' words from the running match's own settings copy (the menu's
+        // while attached — RESUME resyncs it —, the old bindings after LOAD SETUP).
+        let words = self
+            .current
+            .as_ref()
+            .map(|m| self.words(input.held, input.touch, m.settings()));
         let mut pushes = Vec::new();
         let mut closing = None;
         let mut picked = None;
@@ -476,8 +501,8 @@ impl Shell {
             }
             Screen::Playing => {
                 let m = self.current.as_mut().expect("Playing has a match");
-                let (keep, ticked) =
-                    m.process(sim, input.sampled, self.debug.ais, &mut out.menu_sounds);
+                let words = words.expect("Playing has a match");
+                let (keep, ticked) = m.process(sim, words, self.debug.ais, &mut out.menu_sounds);
                 out.sim_ticked = ticked;
                 keep
             }
@@ -826,9 +851,14 @@ impl Shell {
                         apply_live_settings(sim, &self.world.settings);
                         m.resync(&self.world.settings);
                     }
+                    // The latch over the keys held now, through the match's bindings after the
+                    // resync (attached) or its old ones (detached; 4½f-2 D1).
+                    let m = self.current.as_ref().expect("resumed");
+                    let held = self.words(input.held, input.touch, m.settings());
+                    let m = self.current.as_mut().expect("resumed");
                     // `Game::Focus` rewrites the renderer's worm ramps (4½f-1 D9), which the
                     // menus draw with too (T0 P6: the menu after the resumed play shows them).
-                    m.focus(&input.sampled);
+                    m.focus(&held);
                     self.world.origpal = m.origpal().clone();
                     out.routed = Some(Route::Resume);
                 }
@@ -867,6 +897,9 @@ impl Shell {
             old.write_back_picks(&mut self.world.settings);
         }
         let seed = self.seeds.next_match(input.fresh_seed);
+        // The latch over the keys held now, through the new match's bindings: the menu's
+        // settings, which `Match::start` copies (4½f-2 D1).
+        let held = self.words(input.held, input.touch, &self.world.settings);
         if self.level.reusable(&self.world.settings) {
             self.level.take_played(&sim.level);
         } else {
@@ -880,7 +913,7 @@ impl Shell {
             seed,
             &self.options,
             self.world.tc.begin,
-            &input.sampled,
+            &held,
         );
         self.world.origpal = m.origpal().clone();
         *sim = state;
@@ -960,6 +993,44 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// The worms' clean words this frame (4½f-2 D1, design RD-1): C++ `FindControlForKey` over
+    /// every held key through `settings`' bindings ([`clean_words`]; `Settings::default()`'s with
+    /// `ShellDebug::live_bindings == false`), then the Rust-only touch word OR-ed into player 1
+    /// whatever its input device (Q6). `settings` is the running match's copy for its
+    /// `process` and RESUME's latch, the menu's for NEW GAME's latch.
+    pub fn words(&self, held: &DosHeld, touch: ControlState, settings: &Settings) -> [u8; 2] {
+        let mut w = if self.debug.live_bindings {
+            clean_words(held, &settings.worm_settings)
+        } else {
+            clean_words(held, &Settings::default().worm_settings)
+        };
+        w[0] |= touch.pack() as u8;
+        w
+    }
+
+    /// Why the Rust-only F5 restart must not run now (design R-11, RD-6; plan D8), or `None`:
+    /// F5 is a keyboard binding of player 1 or 2 in the running match (C++ has no restart to
+    /// collide with: the key acts as that control), or NEW GAME would be refused over the menu's
+    /// settings (the gate `MainMenuState` runs, so a FollowAI player never reaches
+    /// `Match::start`).
+    fn restart_refusal(&self) -> Option<String> {
+        if let Some(m) = self.current.as_ref() {
+            for (i, w) in m.settings().worm_settings[..2].iter().enumerate() {
+                if w.input_device == INPUT_KEYBOARD
+                    && let Some(c) = w.controls_ex.iter().position(|&k| k == DK_F5)
+                {
+                    const NAMES: [&str; 8] = [
+                        "UP", "DOWN", "LEFT", "RIGHT", "FIRE", "CHANGE", "JUMP", "DIG",
+                    ];
+                    return Some(format!("F5 is player {}'s {} key", i + 1, NAMES[c]));
+                }
+            }
+        }
+        self.gate()
+            .refusal(&self.world.settings, MA_NEW_GAME)
+            .map(|r| r.to_string())
     }
 
     /// What `MainMenuState` needs for the Rust-only refusals (plan T4 Step 5).
@@ -1199,15 +1270,44 @@ mod tests {
         step_ev(sh, sim, &events, words)
     }
 
+    /// One frame with `words` held (4½f-2 plan fact 14): each bit `c` of worm `i`'s word holds
+    /// `Settings::default().worm_settings[i].controls_ex[c]`, so the shell's clean words over the
+    /// default bindings are `words` again. A test that rebinds passes explicit keys
+    /// ([`step_held`]).
     fn step_ev(
         sh: &mut Shell,
         sim: &mut SimState,
         events: &[InputEvent],
         words: [u32; 2],
     ) -> FrameOut {
+        step_held(sh, sim, events, &default_keys(words))
+    }
+
+    /// The default bindings' DOS keys of `words` (see [`step_ev`]).
+    fn default_keys(words: [u32; 2]) -> DosHeld {
+        let d = Settings::default();
+        let mut held = DosHeld::default();
+        for (i, w) in words.into_iter().enumerate() {
+            assert!(w < 0x80, "a 7-bit word");
+            for c in 0..7 {
+                if w & (1 << c) != 0 {
+                    held.set(d.worm_settings[i].controls_ex[c], true);
+                }
+            }
+        }
+        held
+    }
+
+    /// One frame with the DOS keys `held` held.
+    fn step_held(
+        sh: &mut Shell,
+        sim: &mut SimState,
+        events: &[InputEvent],
+        held: &DosHeld,
+    ) -> FrameOut {
         let input = ShellInput {
             events,
-            sampled: words.map(ControlState::unpack),
+            held,
             ..ShellInput::idle()
         };
         sh.frame(sim, &input)
@@ -4109,6 +4209,285 @@ mod tests {
             for h in hs {
                 h.join().unwrap();
             }
+        }
+    }
+
+    /// Step 4½f-2 T2 (plan D1, D8; design RD-1, RD-2, RD-6): the live words from the bindings,
+    /// DIG in play, the latch, the touch word, the F5 restart gate, through `Shell::frame`.
+    mod live_input {
+        use sim::hash::hash_game_state;
+
+        use super::*;
+        use crate::keys::{CLEAN_DIG, DK_LCTRL, DK_RCTRL, K_DIG, K_FIRE};
+
+        const KEY_K: u32 = 37;
+        const KEY_Q: u32 = 16;
+        const KEY_D: u32 = 32;
+        const FIRE: u8 = 1 << ControlState::FIRE;
+        const LEFT: u32 = 1 << ControlState::LEFT;
+        const RIGHT: u32 = 1 << ControlState::RIGHT;
+
+        fn boot_with(settings: Settings) -> (Shell, SimState) {
+            let seeds = SeedSource::Scripted {
+                boot: 11,
+                matches: VecDeque::from([21, 22, 23]),
+            };
+            let (sh, sim, _) = Shell::boot(
+                tc(),
+                settings,
+                Box::new(MemoryStore::new()),
+                seeds,
+                0,
+                StartOptions::default(),
+            );
+            (sh, sim)
+        }
+
+        fn m(sh: &Shell) -> &Match {
+            sh.current().expect("a match")
+        }
+
+        fn keys(k: &[u32]) -> DosHeld {
+            DosHeld::from_keys(k.iter().copied())
+        }
+
+        /// `n` frames with `k` held; each must tick the match.
+        fn hold(sh: &mut Shell, sim: &mut SimState, k: &[u32], n: usize) {
+            for _ in 0..n {
+                assert!(step_held(sh, sim, &[], &keys(k)).sim_ticked);
+            }
+        }
+
+        /// A match, paused; `edit` runs on the menu's settings (and `detach` first detaches the
+        /// match, as LOAD SETUP does); then RESUME.
+        fn paused_edit(detach: bool, edit: impl FnOnce(&mut Settings)) -> (Shell, SimState) {
+            let (mut sh, mut sim, _) = boot();
+            start_match(&mut sh, &mut sim);
+            idle(&mut sh, &mut sim, 3);
+            to_menu(&mut sh, &mut sim);
+            if detach {
+                sh.current.as_mut().unwrap().detach();
+            }
+            edit(sh.settings_mut());
+            let outs = until_routed(&mut sh, &mut sim, DK_F1);
+            assert_eq!(outs.last().unwrap().routed, Some(Route::Resume));
+            (sh, sim)
+        }
+
+        #[test]
+        fn a_rebind_while_paused_acts_from_the_first_resumed_tick_when_attached() {
+            let (mut sh, mut sim) =
+                paused_edit(false, |s| s.worm_settings[0].controls_ex[K_FIRE] = KEY_K);
+            hold(&mut sh, &mut sim, &[KEY_K], 1);
+            assert_eq!(m(&sh).words(), [FIRE, 0], "K is P1's Fire");
+            assert!(
+                m(&sh).inputs()[0].get(ControlState::FIRE),
+                "the tick's input"
+            );
+            hold(&mut sh, &mut sim, &[], 1);
+            hold(&mut sh, &mut sim, &[DK_LCTRL], 2);
+            assert_eq!(m(&sh).words(), [0, 0], "LCTRL no longer fires P1");
+        }
+
+        #[test]
+        fn a_rebind_after_load_setup_never_reaches_the_detached_match() {
+            // RD-2, T0 P7 `l_det`: the detached match keeps the old bindings.
+            let (mut sh, mut sim) =
+                paused_edit(true, |s| s.worm_settings[0].controls_ex[K_FIRE] = KEY_K);
+            hold(&mut sh, &mut sim, &[KEY_K], 2);
+            assert_eq!(m(&sh).words(), [0, 0], "K does nothing");
+            hold(&mut sh, &mut sim, &[], 1);
+            hold(&mut sh, &mut sim, &[DK_LCTRL], 1);
+            assert_eq!(m(&sh).words(), [FIRE, 0], "LCTRL still fires P1");
+        }
+
+        #[test]
+        fn a_key_bound_to_both_players_is_the_first_players() {
+            // T0 P4 `p_first`: P1 FIRE = RCTRL (P2's FIRE too) → only P1's clean Fire.
+            let (mut sh, mut sim) =
+                paused_edit(false, |s| s.worm_settings[0].controls_ex[K_FIRE] = DK_RCTRL);
+            for _ in 0..3 {
+                hold(&mut sh, &mut sim, &[DK_RCTRL], 1);
+                assert_eq!(m(&sh).words(), [FIRE, 0]);
+                assert!(!m(&sh).inputs()[1].get(ControlState::FIRE));
+            }
+        }
+
+        fn dig_settings() -> Settings {
+            let mut s = Settings::default();
+            s.worm_settings[0].controls_ex[K_DIG] = KEY_Q;
+            s.worm_settings[0].weapons[0] = 16;
+            s
+        }
+
+        #[test]
+        fn dig_in_play_follows_both_arms_of_the_dig_rule() {
+            // Finding 9, T0 P4 `p_dig`: `cs` 0c / 0c / 0c / 0c / 04 / 00, two ticks each.
+            let (mut sh, mut sim) = boot_with(dig_settings());
+            start_match(&mut sh, &mut sim);
+            idle(&mut sh, &mut sim, 3);
+            let lrf = LEFT | RIGHT | (1 << ControlState::FIRE);
+            for (held, want) in [
+                (&[KEY_Q][..], LEFT | RIGHT),
+                (&[KEY_Q, DK_LCTRL][..], lrf),
+                (&[KEY_Q][..], LEFT | RIGHT),
+                (&[KEY_Q, KEY_D][..], LEFT | RIGHT),
+                (&[KEY_D][..], LEFT),
+                (&[][..], 0),
+            ] {
+                for tick in 0..2 {
+                    hold(&mut sh, &mut sim, held, 1);
+                    // The Fire press readies the dead worm on its event tick, which consumes it
+                    // (`PressedOnce(kFire)`, as T0 P4's `cs` 0c on frame 227).
+                    let mask = if tick == 0 { lrf } else { LEFT | RIGHT };
+                    assert_eq!(
+                        m(&sh).inputs()[0].pack() & mask,
+                        want & mask,
+                        "{held:?} tick {tick}"
+                    );
+                    assert_eq!(m(&sh).words()[1], 0);
+                }
+            }
+            assert_eq!(sh.settings().worm_settings[0].weapons[0], 16, "Q4 = A");
+        }
+
+        #[test]
+        fn a_dig_key_held_at_new_game_is_latched_until_released() {
+            let (mut sh, mut sim) = boot_with(dig_settings());
+            idle(&mut sh, &mut sim, 40);
+            let q = keys(&[KEY_Q]);
+            step_held(
+                &mut sh,
+                &mut sim,
+                &[InputEvent::Key(ev(DK_RETURN, true))],
+                &q,
+            );
+            step_held(
+                &mut sh,
+                &mut sim,
+                &[InputEvent::Key(ev(DK_RETURN, false))],
+                &q,
+            );
+            let mut n = 0;
+            while sh.phase() != Phase::Weapsel {
+                step_held(&mut sh, &mut sim, &[], &q);
+                n += 1;
+                assert!(n < 300, "never routed");
+            }
+            let menu = |sh: &Shell| *m(sh).weapon_selection().unwrap().player(0);
+            let at = menu(&sh);
+            for _ in 0..20 {
+                step_held(&mut sh, &mut sim, &[], &q);
+                assert_eq!(m(&sh).words(), [0, 0], "Q latched at NEW GAME");
+            }
+            assert_eq!(menu(&sh), at, "no Left/Right reached the selection");
+            step_held(&mut sh, &mut sim, &[], &keys(&[]));
+            step_held(&mut sh, &mut sim, &[], &q);
+            assert_eq!(
+                m(&sh).words(),
+                [CLEAN_DIG, 0],
+                "released, then pressed: it passes"
+            );
+        }
+
+        #[test]
+        fn a_pad_player_1_ignores_the_keyboard_but_not_the_touch_word() {
+            let (mut sh, mut sim) = paused_edit(false, |s| s.worm_settings[0].input_device = 1);
+            hold(&mut sh, &mut sim, &[19, 33, 32, 34, DK_LCTRL], 2);
+            assert_eq!(m(&sh).words(), [0, 0], "R/F/D/G/LCTRL: a pad player's keys");
+            let input = ShellInput {
+                touch: ControlState::unpack(u32::from(FIRE)),
+                ..ShellInput::idle()
+            };
+            assert!(sh.frame(&mut sim, &input).sim_ticked);
+            assert_eq!(m(&sh).words(), [FIRE, 0], "Q6: touch drives player 1");
+            assert!(m(&sh).inputs()[0].get(ControlState::FIRE));
+        }
+
+        #[test]
+        fn the_same_held_key_script_gives_the_same_states() {
+            let script = |f: usize| -> Vec<u32> {
+                let mut k = Vec::new();
+                if (40..43).contains(&f) {
+                    k.push(DK_RETURN);
+                }
+                if f > 100 && f % 7 < 3 {
+                    k.push(DK_LCTRL);
+                }
+                if f > 100 && f % 11 < 5 {
+                    k.push(19);
+                }
+                if f > 100 && f % 13 < 6 {
+                    k.extend([DK_UP, DK_RCTRL]);
+                }
+                k
+            };
+            let run = || {
+                let (mut sh, mut sim) = boot_with(Settings::default());
+                let mut prev = DosHeld::default();
+                let mut hashes = Vec::new();
+                let mut ticks = 0;
+                for f in 0..600 {
+                    let now = keys(&script(f));
+                    let events: Vec<InputEvent> = (1..crate::keys::MAX_DOS_KEY)
+                        .filter(|&k| prev.is_down(k) != now.is_down(k))
+                        .map(|k| InputEvent::Key(ev(k, now.is_down(k))))
+                        .collect();
+                    let o = step_held(&mut sh, &mut sim, &events, &now);
+                    ticks += usize::from(o.sim_ticked);
+                    hashes.push(hash_game_state(&sim));
+                    prev = now;
+                }
+                (hashes, ticks)
+            };
+            let (a, ticks) = run();
+            assert!(ticks > 300, "{ticks} match ticks");
+            assert_eq!(a, run().0);
+        }
+
+        #[test]
+        fn f5_restart_is_ignored_when_new_game_would_be_refused() {
+            // R-11: CONTROLLER = AI while paused; RESUME never refuses it, F5 must not start it.
+            let (mut sh, mut sim) = paused_edit(false, |s| s.worm_settings[1].controller = 2);
+            let cycles = sim.cycles;
+            let o = sh.frame(
+                &mut sim,
+                &ShellInput {
+                    restart: true,
+                    ..ShellInput::idle()
+                },
+            );
+            assert_eq!((o.routed, sh.top_char()), (None, 'G'));
+            assert_eq!(o.notes.len(), 1, "{:?}", o.notes);
+            assert!(
+                o.notes[0].starts_with("F5 restart ignored: "),
+                "{:?}",
+                o.notes
+            );
+            assert_eq!(sim.cycles, cycles + 1, "the same match ticked on");
+        }
+
+        #[test]
+        fn a_bound_f5_fires_its_control_and_never_restarts() {
+            let (mut sh, mut sim) =
+                paused_edit(false, |s| s.worm_settings[0].controls_ex[K_FIRE] = DK_F5);
+            let f5 = keys(&[DK_F5]);
+            let events = [InputEvent::Key(ev(DK_F5, true))];
+            let o = sh.frame(
+                &mut sim,
+                &ShellInput {
+                    events: &events,
+                    held: &f5,
+                    restart: true,
+                    ..ShellInput::idle()
+                },
+            );
+            assert_eq!((o.routed, sh.top_char()), (None, 'G'));
+            assert_eq!(
+                o.notes,
+                ["F5 restart ignored: F5 is player 1's FIRE key".to_string()]
+            );
+            assert_eq!(m(&sh).words(), [FIRE, 0], "F5 is P1's Fire");
         }
     }
 }

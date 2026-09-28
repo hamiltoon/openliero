@@ -824,7 +824,9 @@ pub(crate) mod tests {
         MenuWorld {
             main_menu: main_menu(),
             settings_menu: settings_menu(),
+            player_menu: crate::shell::player_menu::player_menu(),
             cur_menu: CurMenu::Settings,
+            profiles: Default::default(),
             settings: Settings::default(),
             origpal: tc.exepal.clone(),
             tc,

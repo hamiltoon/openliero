@@ -1,5 +1,6 @@
 //! The main menu (`MainMenu`, `mainMenu.hpp:9-25`; items `gfx.cpp:505-521`; design §3.3). T7 adds
-//! `MainMenuState`.
+//! `MainMenuState`. Step 4½f-2 (T3): the player-menu focus (`CurMenu::Player`), its Enter arms,
+//! F5 / F6 / F9 in C++ order, and its draw.
 
 use render::bitmap::Rect;
 use render::font::Font;
@@ -7,7 +8,12 @@ use scenario::storage::ConfigStore;
 
 use super::files::{LevelSelectorState, SetupSelectorState};
 use super::overlay::{
-    InfoBoxState, InfoPurpose, InputPurpose, InputStringState, RefusalGate, filter_digits,
+    EntryTarget, InfoBoxState, InfoPurpose, InputPurpose, InputStringState, KeyTarget, RefusalGate,
+    SaveAsKind, WaitForKeyState, filter_digits,
+};
+use super::player_menu::{
+    PL_DIG, PL_LOAD_PROFILE, PL_NAME, PL_SAVE_PROFILE, PL_SAVE_PROFILE_AS, PL_UP, PL_WEAP0,
+    PlayerMenuModel,
 };
 use super::settings_menu::{
     LOAD_OPTIONS, SAVE_OPTIONS, SI_LEVEL, SI_WEAPON_OPTIONS, SettingsModel,
@@ -128,11 +134,12 @@ fn cur_menu_mut(w: &mut MenuWorld) -> &mut Menu {
     match w.cur_menu {
         CurMenu::Main => &mut w.main_menu,
         CurMenu::Settings => &mut w.settings_menu,
+        CurMenu::Player(_) => &mut w.player_menu,
     }
 }
 
 /// `gfx->cur_menu->OnLeftRight(common, dir)` with the menu's own model: the base behavior for
-/// the main menu, the settings for the settings menu.
+/// the main menu, the settings for the settings menu, player `p`'s settings for the player menu.
 fn cur_menu_left_right(w: &mut MenuWorld, dir: i32, cx: &mut MenuCx) -> bool {
     match w.cur_menu {
         CurMenu::Main => w.main_menu.on_left_right(&mut PlainModel, dir, cx),
@@ -145,7 +152,19 @@ fn cur_menu_left_right(w: &mut MenuWorld, dir: i32, cx: &mut MenuCx) -> bool {
             dir,
             cx,
         ),
+        CurMenu::Player(p) => {
+            let (menu, mut model) = w.player_parts(p);
+            menu.on_left_right(&mut model, dir, cx)
+        }
     }
+}
+
+/// `ItemPosition` of the player menu's item `id` plus the value column (`x += value_offset_x +
+/// 2`, `mainMenuState.cpp:329-331`, `:353-354`, `:395-396`), or `None` when it is not in view.
+fn player_value_pos(m: &Menu, id: i32) -> Option<(i32, i32)> {
+    let idx = usize::try_from(m.index_from_id(id)).ok()?;
+    m.item_position(idx)
+        .map(|(x, y)| (x + m.value_offset_x + 2, y))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,6 +288,11 @@ impl MainMenuState {
                 play(sounds, hooks.select);
                 match w.main_menu.selected_id() {
                     MA_SETTINGS => w.cur_menu = CurMenu::Settings,
+                    // :207-216 (Step 4½f-2): `PlayerSettings(0 | 1 | kNetworkPlayerIdx)`.
+                    id @ (MA_PLAYER1_SETTINGS | MA_PLAYER2_SETTINGS) => {
+                        w.player_settings((id - MA_PLAYER1_SETTINGS) as usize);
+                    }
+                    MA_NET_PLAYER_SETTINGS => w.player_settings(2),
                     // `default:` (:263-266).
                     id @ (MA_RESUME_GAME | MA_NEW_GAME | MA_QUIT) => {
                         w.cur_menu = CurMenu::Main;
@@ -276,10 +300,12 @@ impl MainMenuState {
                     }
                     // Their second MenuSelect (:234, :248, :254); inert until Step 5 (plan fact 2).
                     MA_JOIN_GAME | MA_HOST_ONLINE | MA_JOIN_ONLINE => play(sounds, hooks.select),
-                    // Inert placeholders (§5, Q2): LEFT/RIGHT PLAYER (4½f), OPTIONS (4½g), NETWORK
-                    // PLAYER / HOST LAN (Step 5), REPLAYS / TC (deferred).
+                    // Inert placeholders (§5, Q2): OPTIONS (4½g), HOST LAN (Step 5), REPLAYS / TC
+                    // (deferred).
                     _ => {}
                 }
+            } else if let CurMenu::Player(p) = w.cur_menu {
+                push = self.player_enter(w, p, sounds);
             } else {
                 match w.settings_menu.selected_id() {
                     // :275-278: MenuSelect + push WeaponMenuState.
@@ -308,7 +334,12 @@ impl MainMenuState {
                             usize::try_from(idx).ok().and_then(|i| m.item_position(i))
                         {
                             let x = x + m.value_offset_x + 2;
-                            push = Some(save_as_box(w.setup_name.as_bytes(), x, y));
+                            push = Some(save_as_box(
+                                SaveAsKind::Setup,
+                                w.setup_name.as_bytes(),
+                                x,
+                                y,
+                            ));
                         }
                     }
                     // :313-315: the behavior plays its own MenuSelect (plan fact 2); an
@@ -337,7 +368,10 @@ impl MainMenuState {
                                 Some(filter_digits),
                                 "",
                                 false,
-                                InputPurpose::IntegerEntry(e),
+                                InputPurpose::IntegerEntry {
+                                    entry: e,
+                                    target: EntryTarget::Settings,
+                                },
                             )));
                         }
                     }
@@ -350,20 +384,31 @@ impl MainMenuState {
             w.main_menu.move_to_id(self.start_item_id);
             self.selected = self.start_item_id;
         }
-        // :437-450, :452-459: consumed; OPTIONS (4½g), REPLAYS (deferred), the player menus (4½f)
-        // stay inert.
-        for k in [DK_F2, DK_F3, DK_F5, DK_F6] {
+        // :437-446: consumed; OPTIONS (4½g) and REPLAYS (deferred) stay inert.
+        for k in [DK_F2, DK_F3] {
             w.keys.test_once(k);
         }
-        // :460-463.
+        // :448-455 (Step 4½f-2): no sound, the main cursor to the item, `PlayerSettings`.
+        if w.keys.test_once(DK_F5) {
+            w.main_menu.move_to_id(MA_PLAYER1_SETTINGS);
+            w.player_settings(0);
+        }
+        if w.keys.test_once(DK_F6) {
+            w.main_menu.move_to_id(MA_PLAYER2_SETTINGS);
+            w.player_settings(1);
+        }
+        // :456-459.
         if w.keys.test_once(DK_F7) {
             w.main_menu.move_to_id(MA_SETTINGS);
             w.cur_menu = CurMenu::Settings;
         }
-        // :465-468 (the network player, Step 5) and the F8 easter egg (:470): consumed, inert.
-        for k in [DK_F9, DK_F8] {
-            w.keys.test_once(k);
+        // :461-464 (Step 4½f-2): the network player's menu.
+        if w.keys.test_once(DK_F9) {
+            w.main_menu.move_to_id(MA_NET_PLAYER_SETTINGS);
+            w.player_settings(2);
         }
+        // :466 — the F8 easter egg: consumed, inert.
+        w.keys.test_once(DK_F8);
         let mut mcx = MenuCx {
             menu_cycles: w.menu_cycles,
             hooks,
@@ -412,21 +457,132 @@ impl MainMenuState {
         true
     }
 
-    /// `Draw` (`mainMenuState.cpp:614-626`): `DrawBasicMenu`, then the settings menu — disabled
-    /// while the main menu has focus, else enabled as `cur_menu` (plan fact 1; 4½f/4½g add the
-    /// other menus). `DrawSpectatorInfo` draws into the spectator renderer only (finding 2).
+    /// The player menu's Enter (`mainMenuState.cpp:316-427`; plan facts 1-2, D3, D4), in source
+    /// order: LOAD PROFILE, NAME, SAVE PROFILE AS…, the eight key rows, WEAPON n, else the row's
+    /// own `OnEnter` (`selected_ = …`). Every intercepted arm plays `MenuSelect` first; NAME,
+    /// SAVE PROFILE AS… and WEAPON n push only while the item is in view, the key rows always.
+    /// Returns the screen to push.
+    fn player_enter(
+        &mut self,
+        w: &mut MenuWorld,
+        p: usize,
+        sounds: &mut Vec<i32>,
+    ) -> Option<Screen> {
+        let hooks = w.tc.hooks;
+        let id = w.player_menu.selected_id();
+        match id {
+            // :318-322, :348-366; SAVE PROFILE is the `else` arm's `ProfileSaveBehavior`
+            // (plan fact 2, D6). Task 4 makes them live; here: the MenuSelect alone.
+            PL_LOAD_PROFILE | PL_SAVE_PROFILE_AS | PL_SAVE_PROFILE => {
+                play(sounds, hooks.select);
+                None
+            }
+            // :323-347: `InputStringState(ws.name, 20, x + 95 + 2, y, no filter)`.
+            PL_NAME => {
+                play(sounds, hooks.select);
+                let (x, y) = player_value_pos(&w.player_menu, id)?;
+                let name = w.settings.worm_settings[p].name.as_bytes();
+                Some(Screen::InputString(InputStringState::new(
+                    name,
+                    20,
+                    x,
+                    y,
+                    None,
+                    "",
+                    false,
+                    InputPurpose::WormName { player: p },
+                )))
+            }
+            // :367-389: `WaitForKeyState(extended = true)`, pushed whether or not in view.
+            PL_UP..=PL_DIG => {
+                play(sounds, hooks.select);
+                Some(Screen::WaitForKey(WaitForKeyState::new(KeyTarget {
+                    player: p,
+                    control: (id - PL_UP) as usize,
+                })))
+            }
+            // :390-423: `InputStringState("", 10, x + 97, y, no filter)`.
+            _ if (PL_WEAP0..PL_WEAP0 + 5).contains(&id) => {
+                play(sounds, hooks.select);
+                let (x, y) = player_value_pos(&w.player_menu, id)?;
+                Some(Screen::InputString(InputStringState::new(
+                    b"",
+                    10,
+                    x,
+                    y,
+                    None,
+                    "",
+                    false,
+                    InputPurpose::WeaponFuzzy {
+                        player: p,
+                        slot: (id - PL_WEAP0) as usize,
+                    },
+                )))
+            }
+            // :424-426: the behavior plays its own sound (INPUT, CONTROLLER); HEALTH and R/G/B
+            // push their number entry (integerBehavior.cpp:56-78) into this player's fields.
+            _ => {
+                let mut mcx = MenuCx {
+                    menu_cycles: w.menu_cycles,
+                    hooks,
+                    sounds,
+                };
+                let (menu, mut model) = w.player_parts(p);
+                match menu.on_enter(&mut model, &mut mcx) {
+                    Enter::Result(r) => {
+                        self.selected = r;
+                        None
+                    }
+                    // `IntegerBehavior::OnEnter` returns -1 after its push.
+                    Enter::EditValue(e) => {
+                        self.selected = -1;
+                        let initial = e.initial.clone().into_bytes();
+                        Some(Screen::InputString(InputStringState::new(
+                            &initial,
+                            e.digits as usize,
+                            e.x,
+                            e.y,
+                            Some(filter_digits),
+                            "",
+                            false,
+                            InputPurpose::IntegerEntry {
+                                entry: e,
+                                target: EntryTarget::Player(p),
+                            },
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    /// `Draw` (`mainMenuState.cpp:614-626`; plan fact 4): `DrawBasicMenu`, then — with the main
+    /// menu's focus — the settings menu disabled, else `cur_menu` enabled (the settings menu or
+    /// the player menu with its colour bars). `DrawSpectatorInfo` draws into the spectator
+    /// renderer only (finding 2).
     pub fn draw(&self, cx: &mut MenuCtx) {
         let w = &mut *cx.w;
         draw_basic_menu(w, cx.font);
-        w.settings_menu.draw(
-            &PlainModel,
-            &mut w.surface,
-            &w.pal32,
-            cx.font,
-            w.cur_menu == CurMenu::Main,
-            -1,
-            false,
-        );
+        match w.cur_menu {
+            CurMenu::Main | CurMenu::Settings => w.settings_menu.draw(
+                &PlainModel,
+                &mut w.surface,
+                &w.pal32,
+                cx.font,
+                w.cur_menu == CurMenu::Main,
+                -1,
+                false,
+            ),
+            CurMenu::Player(p) => {
+                let model = PlayerMenuModel {
+                    ws: &mut w.settings.worm_settings[p],
+                    profile: w.profiles[p].as_ref(),
+                    tc: &w.tc,
+                };
+                w.player_menu
+                    .draw(&model, &mut w.surface, &w.pal32, cx.font, false, -1, false);
+            }
+        }
     }
 }
 

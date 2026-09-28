@@ -356,6 +356,10 @@ pub fn hooks(shell: &Shell) -> Hooks {
         (Some(v), _) => format!("{}{}", v.top, v.selection),
         (None, CurMenu::Main) => format!("M{}", shell.main_selection()),
         (None, CurMenu::Settings) => format!("S{}", shell.settings_menu().selection()),
+        // 4½f-2 (§Formats): `1<n>` / `2<n>` / `N<n>`, also under PRESS A KEY.
+        (None, CurMenu::Player(p)) => {
+            format!("{}{}", ['1', '2', 'N'][p], shell.player_menu().selection())
+        }
     };
     Hooks {
         top: shell.top_char(),

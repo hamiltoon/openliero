@@ -13,6 +13,10 @@
 //! `MenuCtx`. T4: LEVEL, LOAD SETUP and SAVE SETUP AS… live — the Save-As chain (the reserved
 //! box and its reopen), LOAD SETUP (fresh settings, the name, the detach), picks written back
 //! only while the match is attached.
+//!
+//! Step 4½f-2 (T3): the player menus (`player_menu`, `CurMenu::Player`), PRESS A KEY
+//! (`Screen::WaitForKey`, top `K`), the player menu's overlays and the network player's slot-0
+//! menu palette.
 pub mod files;
 pub mod level_path;
 pub mod level_slot;
@@ -21,6 +25,7 @@ pub mod main_menu;
 pub mod match_flow;
 pub mod new_game;
 pub mod overlay;
+pub mod player_menu;
 pub mod playing;
 pub mod selection;
 pub mod settings_menu;
@@ -34,7 +39,7 @@ use std::path::{Path, PathBuf};
 use assets::palette::Palette;
 use render::bitmap::{Bitmap, Pal32};
 use render::frame::Scene;
-use render::menu::menu_palette;
+use render::menu::menu_palette_with;
 use scenario::SceneData;
 use scenario::build::apply_live_settings;
 use scenario::settings::Settings;
@@ -44,11 +49,15 @@ use sim::state::{ControlState, SimState};
 
 use crate::keys::{DK_ESCAPE, DK_F5, DosHeld, INPUT_KEYBOARD, KeyLatch, TypedKey, clean_words};
 use crate::menu::Menu;
-use crate::text::{UiTc, dos_display, dos_to_text};
+use crate::text::{UiTc, dos_display, dos_to_text, weapon_fuzzy_match};
 use files::{Picked, SelectorView};
 use level_slot::{LevelSlot, SeedSource};
 use main_menu::{MA_NEW_GAME, MA_QUIT, MA_RESUME_GAME, MainMenuState, MenuCtx, main_menu};
-use overlay::{InfoBoxState, InfoPurpose, InputPurpose, InputStringState, RefusalGate};
+use overlay::{
+    EntryTarget, InfoBoxState, InfoPurpose, InputPurpose, InputStringState, KeyTarget, RefusalGate,
+    SaveAsKind,
+};
+use player_menu::{PlayerMenuModel, ProfileRef, player_menu};
 use playing::{Match, StartOptions};
 use settings_menu::{SettingsModel, settings_menu};
 use stack::{AfterUpdate, Screen, ScreenStack};
@@ -206,18 +215,22 @@ pub enum TextMode {
     Text,
 }
 
-/// `Gfx::cur_menu` (`gfx.hpp:321`; plan fact 1): which menu has focus. 4½f adds the player
-/// menu, 4½g the hidden one.
+/// `Gfx::cur_menu` (`gfx.hpp:321`; plan fact 1): which menu has focus. 4½f-2 adds the player
+/// menu — `Player(p)` edits `settings.worm_settings[p]` (0 left, 1 right, 2 network; C++
+/// `player_menu.ws`) —, 4½g the hidden one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CurMenu {
     Main,
     Settings,
+    Player(usize),
 }
 
 /// An overlay whose `Update` found it done this frame (`Shell::close`).
 enum Closing {
     Input(InputPurpose, bool, Vec<u8>),
     Info(InfoPurpose, bool),
+    /// A `WaitForKeyState` with its result (Step 4½f-2).
+    Key(KeyTarget, u32),
 }
 
 /// Everything `MainMenuState` touches — C++ `Gfx` members: the menus, `cur_menu`, `settings`,
@@ -226,7 +239,12 @@ enum Closing {
 pub struct MenuWorld {
     pub main_menu: Menu,
     pub settings_menu: Menu,
+    /// `gfx.player_menu` (Step 4½f-2): one menu, re-pointed by `cur_menu`'s player.
+    pub player_menu: Menu,
     pub cur_menu: CurMenu,
+    /// Each player's loaded profile (C++ `WormSettings::profile_node`; plan D5): `None` at boot;
+    /// Task 4 sets and clears them.
+    pub profiles: [Option<ProfileRef>; 3],
     pub settings: Settings,
     pub tc: UiTc,
     pub setup_name: String,
@@ -237,6 +255,32 @@ pub struct MenuWorld {
     pub frozen: Bitmap,
     pub pal32: Pal32,
     pub origpal: Palette,
+}
+
+impl MenuWorld {
+    /// The player menu and player `p`'s model (C++ `player_menu` with `ws = worm_settings[p]`).
+    pub(crate) fn player_parts(&mut self, p: usize) -> (&mut Menu, PlayerMenuModel<'_>) {
+        let model = PlayerMenuModel {
+            ws: &mut self.settings.worm_settings[p],
+            profile: self.profiles[p].as_ref(),
+            tc: &self.tc,
+        };
+        (&mut self.player_menu, model)
+    }
+
+    /// `player_menu.UpdateItems` for player `p`.
+    pub(crate) fn player_update_items(&mut self, p: usize) {
+        let (menu, mut model) = self.player_parts(p);
+        menu.update_items(&mut model);
+    }
+
+    /// `Gfx::PlayerSettings(player)` (`gfx.cpp:1430-1437`, R2-3): point the menu at the player,
+    /// `UpdateItems`, `MoveToFirstVisible`, focus.
+    pub(crate) fn player_settings(&mut self, p: usize) {
+        self.player_update_items(p);
+        self.player_menu.move_to_first_visible();
+        self.cur_menu = CurMenu::Player(p);
+    }
 }
 
 /// Test-only switches (plan T4 Step 8; T8's counterfactual witnesses): each `false` skips the
@@ -292,9 +336,9 @@ fn atoi(b: &[u8]) -> i64 {
     if neg { -v } else { v }
 }
 
-/// `MakeSaveAsState("Setups", ".cfg", initial, x, y, …)` (`mainMenuState.cpp:69-91`): the name
-/// box, 30 bytes, no filter, no prefix, not centred.
-pub(crate) fn save_as_box(initial: &[u8], x: i32, y: i32) -> Screen {
+/// `MakeSaveAsState(subdir, ext, initial, x, y, …)` (`mainMenuState.cpp:69-91`) of `kind`: the
+/// name box, 30 bytes, no filter, no prefix, not centred.
+pub(crate) fn save_as_box(kind: SaveAsKind, initial: &[u8], x: i32, y: i32) -> Screen {
     Screen::InputString(InputStringState::new(
         initial,
         30,
@@ -303,7 +347,7 @@ pub(crate) fn save_as_box(initial: &[u8], x: i32, y: i32) -> Screen {
         None,
         "",
         false,
-        InputPurpose::SaveSetupAs { x, y },
+        InputPurpose::SaveAs { kind, x, y },
     ))
 }
 
@@ -341,7 +385,9 @@ impl Shell {
         let world = MenuWorld {
             main_menu: main_menu(),
             settings_menu: settings_menu(),
+            player_menu: player_menu(),
             cur_menu: CurMenu::Main,
+            profiles: Default::default(),
             origpal: boot.scene.origpal.clone(),
             settings,
             tc,
@@ -456,6 +502,7 @@ impl Shell {
                     match self.stack.top_mut() {
                         Some(Screen::InputString(s)) => s.handle_key(ev),
                         Some(Screen::InfoBox(b)) => b.handle_key(ev),
+                        Some(Screen::WaitForKey(k)) => k.handle_key(ev),
                         _ => {}
                     }
                 }
@@ -534,6 +581,15 @@ impl Shell {
                 }
                 !b.done
             }
+            // `WaitForKeyState::Update` (`inputState.cpp:143-150`): when done, `ClearKeys`, the
+            // callback, pop (`Shell::close`).
+            Screen::WaitForKey(k) => match k.result {
+                None => true,
+                Some(dos) => {
+                    closing = Some(Closing::Key(k.target, dos));
+                    false
+                }
+            },
             Screen::LevelSelect(s) => {
                 let o = s.update(&mut MenuCtx {
                     w: &mut self.world,
@@ -631,10 +687,11 @@ impl Shell {
         }
     }
 
-    /// The close half of an overlay's `Update` (`inputState.cpp:75-84`, `:186-198`), before its
-    /// pop. `InputStringState`: `MenuSelect`, `ClearKeys`, the continuation. `InfoBoxState`:
-    /// `ClearKeys`, the optional `Fill(bmp, 0)`, `on_dismiss` (only the reserved-name box has
-    /// one).
+    /// The close half of an overlay's `Update` (`inputState.cpp:75-84`, `:186-198`, `:143-150`),
+    /// before its pop. `InputStringState`: `MenuSelect`, `ClearKeys`, the continuation.
+    /// `InfoBoxState`: `ClearKeys`, the optional `Fill(bmp, 0)`, `on_dismiss` (only the
+    /// reserved-name box has one). `WaitForKeyState`: `ClearKeys`, the key row's callback — no
+    /// sound (T0 P3).
     fn close(&mut self, c: Closing, out: &mut FrameOut) {
         match c {
             Closing::Input(purpose, accepted, buffer) => {
@@ -652,14 +709,36 @@ impl Shell {
                 }
                 match purpose {
                     InfoPurpose::NoWeapons | InfoPurpose::Refused(_) => {}
-                    // `mainMenuState.cpp:81-84`: the name box again, on what was typed; the
-                    // replacement wins over the box's pop (`state.hpp:101-105`, fact 15).
-                    InfoPurpose::Reserved { typed, x, y } => {
-                        self.stack.schedule_replace_top(save_as_box(&typed, x, y));
+                    // `mainMenuState.cpp:81-84`: the name box of the same kind again, on what
+                    // was typed; the replacement wins over the box's pop (`state.hpp:101-105`,
+                    // fact 15).
+                    InfoPurpose::Reserved { kind, typed, x, y } => {
+                        self.stack
+                            .schedule_replace_top(save_as_box(kind, &typed, x, y));
                     }
                 }
             }
+            Closing::Key(target, dos) => {
+                self.world.keys.clear();
+                self.key_bound(target, dos);
+            }
         }
+    }
+
+    /// The key rows' `WaitForKeyState` callback (`mainMenuState.cpp:372-388`; plan D3): Esc binds
+    /// nothing; any other key is the control's `controls_ex`, and its `controls` for the seven
+    /// base controls — never DIG's: C++ writes `controls[7]`, one past the array, which is
+    /// `weapons[0]` (T0 P1), and John's Q4 = A fixes that. Then `player_menu.UpdateItems`.
+    fn key_bound(&mut self, target: KeyTarget, dos: u32) {
+        if dos == DK_ESCAPE {
+            return;
+        }
+        let ws = &mut self.world.settings.worm_settings[target.player];
+        if target.control < ws.controls.len() {
+            ws.controls[target.control] = dos;
+        }
+        ws.controls_ex[target.control] = dos;
+        self.world.player_update_items(target.player);
     }
 
     /// An `InputStringState`'s callback (`callback_(accepted_, buffer_)`).
@@ -673,33 +752,68 @@ impl Shell {
         match purpose {
             // `integerBehavior.cpp:56-76` (plan fact 13): on accept with a non-empty result,
             // `atoi`, clamp to the displayed range, store `val * div`; then ALWAYS rewrite the
-            // item's value from the field — no `UpdateItems`.
-            InputPurpose::IntegerEntry(e) => {
-                let w = &mut self.world;
-                let mut model = SettingsModel {
-                    settings: &mut w.settings,
-                    tc: &w.tc,
-                    setup_name: &w.setup_name,
+            // item's value from the field — no `UpdateItems`. The field and the item are the
+            // target menu's (design R-8).
+            InputPurpose::IntegerEntry { entry: e, target } => {
+                let write = |field: &mut i32| {
+                    if accepted && !buffer.is_empty() {
+                        let val = atoi(buffer).clamp(i64::from(e.min), i64::from(e.max)) as i32;
+                        *field = val * e.div;
+                    }
+                    let mut value = (*field / e.div).to_string();
+                    if e.percentage {
+                        value.push('%');
+                    }
+                    value
                 };
-                let field = model
-                    .int_field(e.item_id)
-                    .expect("an integer entry names an integer setting");
-                if accepted && !buffer.is_empty() {
-                    let val = atoi(buffer).clamp(i64::from(e.min), i64::from(e.max)) as i32;
-                    *field = val * e.div;
-                }
-                let mut value = (*field / e.div).to_string();
-                if e.percentage {
-                    value.push('%');
-                }
-                let item = w
-                    .settings_menu
-                    .item_from_id_mut(e.item_id)
-                    .expect("the entry's item");
+                let w = &mut self.world;
+                let (value, menu) = match target {
+                    EntryTarget::Settings => {
+                        let mut model = SettingsModel {
+                            settings: &mut w.settings,
+                            tc: &w.tc,
+                            setup_name: &w.setup_name,
+                        };
+                        let field = model
+                            .int_field(e.item_id)
+                            .expect("an integer entry names an integer setting");
+                        (write(field), &mut w.settings_menu)
+                    }
+                    EntryTarget::Player(p) => {
+                        let (menu, mut model) = w.player_parts(p);
+                        let field = model
+                            .int_field(e.item_id)
+                            .expect("a player entry names HEALTH or a colour");
+                        (write(field), menu)
+                    }
+                };
+                let item = menu.item_from_id_mut(e.item_id).expect("the entry's item");
                 item.value = value;
                 item.has_value = true;
             }
-            InputPurpose::SaveSetupAs { x, y } => self.save_setup_as(accepted, buffer, x, y, out),
+            InputPurpose::SaveAs { kind, x, y } => self.save_as(kind, accepted, buffer, x, y, out),
+            // `mainMenuState.cpp:333-345`: an accepted name (even empty: `GenerateName` is a
+            // no-op, finding 4), `random_name = false`, `MenuSelect`, `UpdateItems`.
+            InputPurpose::WormName { player } => {
+                let w = &mut self.world;
+                let ws = &mut w.settings.worm_settings[player];
+                if accepted {
+                    ws.name = dos_to_text(buffer);
+                }
+                ws.random_name = false;
+                main_menu::play(&mut out.menu_sounds, w.tc.hooks.select);
+                w.player_update_items(player);
+            }
+            // `mainMenuState.cpp:398-419`: an accepted non-empty name picks the weapon whose name
+            // is nearest (finding 14), then `UpdateItems`; no sound of its own.
+            InputPurpose::WeaponFuzzy { player, slot } => {
+                if accepted && !buffer.is_empty() {
+                    let w = &mut self.world;
+                    let v = &mut w.settings.worm_settings[player].weapons[slot];
+                    *v = weapon_fuzzy_match(&w.tc.weapon_names, buffer, *v);
+                    w.player_update_items(player);
+                }
+            }
         }
     }
 
@@ -709,8 +823,20 @@ impl Shell {
     /// the black `NAME '<leaf>' IS RESERVED` box, with no sound and no completion. Otherwise
     /// the completion: a non-empty accepted name saves the settings to `Setups/<name>.cfg` and
     /// becomes the setup's name (a write error is a note and keeps the name); then, always,
-    /// `MenuSelect` + `UpdateItems`.
-    fn save_setup_as(&mut self, accepted: bool, buffer: &[u8], x: i32, y: i32, out: &mut FrameOut) {
+    /// `MenuSelect` + `UpdateItems`. SAVE PROFILE AS… (`SaveAsKind::Profile`) is pushed from Task
+    /// 4 on (plan D4), which adds its arm.
+    fn save_as(
+        &mut self,
+        kind: SaveAsKind,
+        accepted: bool,
+        buffer: &[u8],
+        x: i32,
+        y: i32,
+        out: &mut FrameOut,
+    ) {
+        if let SaveAsKind::Profile(_) = kind {
+            unreachable!("SAVE PROFILE AS… opens no name box before Task 4 (plan D4)");
+        }
         if accepted && !buffer.is_empty() {
             let name = dos_to_text(buffer);
             let leaf = format!("{name}.cfg");
@@ -723,6 +849,7 @@ impl Shell {
                         100,
                         true,
                         InfoPurpose::Reserved {
+                            kind,
                             typed: buffer.to_vec(),
                             x,
                             y,
@@ -821,6 +948,8 @@ impl Shell {
             // `LevelSelectorState::Enter`, `OptionsSelectorState::Enter`.
             Screen::LevelSelect(s) => s.enter(&mut self.world, &*self.store),
             Screen::SetupSelect(s) => s.enter(&mut self.world, &*self.store),
+            // `WaitForKeyState::Enter` is empty (`inputState.cpp:104`).
+            Screen::WaitForKey(_) => {}
         }
     }
 
@@ -928,7 +1057,8 @@ impl Shell {
         self.stack.push(s);
     }
 
-    /// `Gfx::UpdateMenuPalettes(quitting)` (`gfx.cpp:978-1005`) for the play renderer.
+    /// `Gfx::UpdateMenuPalettes(quitting)` (`gfx.cpp:978-1005`) for the play renderer: with the
+    /// NETWORK PLAYER menu focused, slot 0 shows the network player's colour (plan fact 5).
     fn update_menu_palettes(&mut self, fading: bool) {
         let w = &mut self.world;
         if w.fade < 32 && !fading {
@@ -939,7 +1069,8 @@ impl Shell {
             w.settings.worm_settings[0].rgb,
             w.settings.worm_settings[1].rgb,
         ];
-        w.pal32 = menu_palette(&w.origpal, w.menu_cycles, rgb);
+        let slot0 = (w.cur_menu == CurMenu::Player(2)).then(|| w.settings.worm_settings[2].rgb);
+        w.pal32 = menu_palette_with(&w.origpal, w.menu_cycles, rgb, slot0);
     }
 
     /// `StateStack::Draw` (`state.hpp:114-131`).
@@ -990,6 +1121,13 @@ impl Shell {
                 }
                 Screen::SetupSelect(s) => {
                     s.draw(&mut self.world, &*self.store, &self.boot_scene.font);
+                }
+                Screen::WaitForKey(k) => {
+                    k.draw(
+                        &mut self.world.surface,
+                        &self.world.pal32,
+                        &self.boot_scene.font,
+                    );
                 }
             }
         }
@@ -1059,7 +1197,8 @@ impl Shell {
                 | Screen::WeaponOptions(_)
                 | Screen::InfoBox(_)
                 | Screen::LevelSelect(_)
-                | Screen::SetupSelect(_),
+                | Screen::SetupSelect(_)
+                | Screen::WaitForKey(_),
             ) => Phase::Menu,
             Some(Screen::InputString(_)) => Phase::Text,
             Some(Screen::Playing) => {
@@ -1072,9 +1211,9 @@ impl Shell {
         }
     }
 
-    /// `M` / `G` / `O` / `I` / `B` / `L` / `P` / `-` (the G2 golden's `<top>`; `O`, `I`, `B` are
-    /// WEAPON OPTIONS, an `InputStringState` and an `InfoBoxState`, Step 4½e-1; `L`, `P` the
-    /// level and options selectors, Step 4½e-2).
+    /// `M` / `G` / `O` / `I` / `B` / `L` / `P` / `K` / `-` (the G2 golden's `<top>`; `O`, `I`, `B`
+    /// are WEAPON OPTIONS, an `InputStringState` and an `InfoBoxState`, Step 4½e-1; `L`, `P` the
+    /// level and options selectors, Step 4½e-2; `K` PRESS A KEY, Step 4½f-2).
     pub fn top_char(&self) -> char {
         match self.stack.top() {
             None => '-',
@@ -1085,6 +1224,7 @@ impl Shell {
             Some(Screen::InfoBox(_)) => 'B',
             Some(Screen::LevelSelect(_)) => 'L',
             Some(Screen::SetupSelect(_)) => 'P',
+            Some(Screen::WaitForKey(_)) => 'K',
         }
     }
 
@@ -1199,6 +1339,17 @@ impl Shell {
         &self.world.main_menu
     }
 
+    /// `gfx.player_menu` (Step 4½f-2): its cursor is the `d` line's `ssel` and `lieroSel`'s
+    /// `1<n>` / `2<n>` / `N<n>` while `cur_menu()` is a player.
+    pub fn player_menu(&self) -> &Menu {
+        &self.world.player_menu
+    }
+
+    /// For tests (to place the player menu's cursor).
+    pub fn player_menu_mut(&mut self) -> &mut Menu {
+        &mut self.world.player_menu
+    }
+
     /// For tests (to place the main menu's cursor).
     pub fn main_menu_mut(&mut self) -> &mut Menu {
         &mut self.world.main_menu
@@ -1222,6 +1373,7 @@ impl Shell {
 mod tests {
     use std::collections::VecDeque;
 
+    use render::menu::menu_palette;
     use scenario::paths::TC_ROOT;
     use scenario::storage::MemoryStore;
 
@@ -1438,21 +1590,11 @@ mod tests {
 
     #[test]
     fn placeholders_play_select_but_never_select_and_f_keys_are_inert() {
-        // MATCH SETUP and F7 are live since 4½e-1 (`the_settings_focus_*` below).
+        // MATCH SETUP and F7 are live since 4½e-1 (`the_settings_focus_*` below); LEFT / RIGHT /
+        // NETWORK PLAYER and F5 / F6 / F9 since 4½f-2 (`player_menus` below).
         let (mut sh, mut sim, _) = boot();
         let s = hooks().hooks.select;
-        for (idx, want) in [
-            (2, 1),
-            (3, 2),
-            (4, 2),
-            (5, 2),
-            (6, 1),
-            (7, 1),
-            (8, 1),
-            (11, 1),
-            (12, 1),
-            (13, 1),
-        ] {
+        for (idx, want) in [(2, 1), (3, 2), (4, 2), (5, 2), (6, 1), (7, 1), (8, 1)] {
             sh.main_menu_mut().move_to(idx);
             let o = tap(&mut sh, &mut sim, DK_RETURN);
             assert_eq!(
@@ -1462,11 +1604,11 @@ mod tests {
             );
         }
         sh.main_menu_mut().move_to(1);
-        for dos in [DK_F2, DK_F3, DK_F5, DK_F6, DK_F8, DK_F9] {
+        for dos in [DK_F2, DK_F3, DK_F8] {
             let o = tap(&mut sh, &mut sim, dos);
             assert!(o.menu_sounds.is_empty());
         }
-        assert_eq!(sh.main_selection(), 1);
+        assert_eq!((sh.main_selection(), sh.cur_menu()), (1, CurMenu::Main));
         assert!(
             idle(&mut sh, &mut sim, 40)
                 .iter()
@@ -1815,17 +1957,20 @@ mod tests {
             Some(overlay::filter_digits),
             "",
             false,
-            InputPurpose::IntegerEntry(crate::menu::ValueEntry {
-                item_id: settings_menu::SI_LIVES,
-                initial: initial.into(),
-                digits: 3,
-                x: 120,
-                y: 60,
-                min: 0,
-                max: 999,
-                div: 1,
-                percentage: false,
-            }),
+            InputPurpose::IntegerEntry {
+                entry: crate::menu::ValueEntry {
+                    item_id: settings_menu::SI_LIVES,
+                    initial: initial.into(),
+                    digits: 3,
+                    x: 120,
+                    y: 60,
+                    min: 0,
+                    max: 999,
+                    div: 1,
+                    percentage: false,
+                },
+                target: EntryTarget::Settings,
+            },
         ))
     }
 
@@ -3356,7 +3501,14 @@ mod tests {
         );
         assert_eq!(
             (x, e.purpose.clone()),
-            (178, InputPurpose::SaveSetupAs { x: 280, y })
+            (
+                178,
+                InputPurpose::SaveAs {
+                    kind: SaveAsKind::Setup,
+                    x: 280,
+                    y
+                }
+            )
         );
         // A bare Return: the reserved box replaces the entry and is presented on the Return
         // frame (T0 P5): black, through the exepal.
@@ -3397,7 +3549,11 @@ mod tests {
         assert_eq!(input_state(&sh).buffer, b"liero");
         assert_eq!(
             input_state(&sh).purpose,
-            InputPurpose::SaveSetupAs { x: 280, y }
+            InputPurpose::SaveAs {
+                kind: SaveAsKind::Setup,
+                x: 280,
+                y
+            }
         );
         // `mine`: saved; two MenuSelects; the value reads `mine`.
         let o = retype(&mut sh, &mut sim, 5, "mine");
@@ -4488,6 +4644,577 @@ mod tests {
                 ["F5 restart ignored: F5 is player 1's FIRE key".to_string()]
             );
             assert_eq!(m(&sh).words(), [FIRE, 0], "F5 is P1's Fire");
+        }
+    }
+
+    // Step 4½f-2 (T3): the player menus through `Shell::frame` — the Enter and F-key entries,
+    // the focus, PRESS A KEY, the player overlays, the network player's slot 0.
+    mod player_menus {
+        use super::*;
+        use crate::keys::{DK_BACKSPACE, DK_LEFT, DK_PGDN, DK_RIGHT, K_FIRE, K_JUMP, K_UP};
+        use crate::shell::main_menu::{
+            MA_NET_PLAYER_SETTINGS, MA_PLAYER1_SETTINGS, MA_PLAYER2_SETTINGS, draw_basic_menu,
+        };
+        use crate::shell::overlay::WaitForKeyState;
+        use crate::shell::player_menu::*;
+        use crate::text::get_key_name;
+
+        const KEY_Q: u32 = 16;
+        const KEY_X: u32 = 45;
+        const KEY_C: u32 = 46;
+        const KEY_V: u32 = 47;
+        const KEY_APPLICATION: u32 = 89;
+
+        /// Boot and fade the menu in.
+        fn menu() -> (Shell, SimState) {
+            let (mut sh, mut sim, _) = boot();
+            idle(&mut sh, &mut sim, 40);
+            (sh, sim)
+        }
+
+        /// `menu()`, then F<n> for player `p`.
+        fn focused(p: usize) -> (Shell, SimState) {
+            let (mut sh, mut sim) = menu();
+            tap(&mut sh, &mut sim, [DK_F5, DK_F6, DK_F9][p]);
+            assert_eq!(sh.cur_menu(), CurMenu::Player(p));
+            (sh, sim)
+        }
+
+        fn row(sh: &Shell, id: i32) -> String {
+            sh.player_menu().item_from_id(id).unwrap().value.clone()
+        }
+
+        /// Put the player cursor on `id` and tap Return; the Return frame's output.
+        fn enter_row(sh: &mut Shell, sim: &mut SimState, id: i32) -> FrameOut {
+            sh.player_menu_mut().move_to_id(id);
+            assert_eq!(sh.player_menu().selected_id(), id, "row {id} is visible");
+            tap(sh, sim, DK_RETURN)
+        }
+
+        fn entry(sh: &Shell) -> &overlay::InputStringState {
+            match sh.stack.top() {
+                Some(Screen::InputString(s)) => s,
+                _ => panic!("an entry is on top, not {}", sh.top_char()),
+            }
+        }
+
+        fn backspaces(sh: &mut Shell, sim: &mut SimState, n: usize) {
+            for _ in 0..n {
+                let rep = KeyEvent {
+                    repeat: true,
+                    ..ev(DK_BACKSPACE, true)
+                };
+                step(sh, sim, &[rep], [0, 0]);
+            }
+        }
+
+        /// `DrawBasicMenu` + the focused player menu, as `MainMenuState::Draw` does.
+        fn menu_draw(sh: &mut Shell, p: usize) -> Bitmap {
+            let font = sh.boot_scene.font.clone();
+            let w = &mut sh.world;
+            let keep = w.surface.clone();
+            draw_basic_menu(w, &font);
+            let model = PlayerMenuModel {
+                ws: &mut w.settings.worm_settings[p],
+                profile: w.profiles[p].as_ref(),
+                tc: &w.tc,
+            };
+            w.player_menu
+                .draw(&model, &mut w.surface, &w.pal32, &font, false, -1, false);
+            std::mem::replace(&mut w.surface, keep)
+        }
+
+        #[test]
+        fn f5_f6_f9_open_the_player_menus_in_cpp_order_without_a_sound() {
+            let (mut sh, mut sim) = menu();
+            for (key, p, main) in [(DK_F5, 0, 11), (DK_F6, 1, 12), (DK_F9, 2, 13)] {
+                let o = tap(&mut sh, &mut sim, key);
+                assert_eq!(
+                    (sh.cur_menu(), sh.main_selection(), o.menu_sounds.len()),
+                    (CurMenu::Player(p), main, 0),
+                    "mainMenuState.cpp:448-464"
+                );
+                assert_eq!(
+                    sh.player_menu().selected_id(),
+                    PL_SAVE_PROFILE_AS,
+                    "MoveToFirstVisible: no profile"
+                );
+            }
+            assert_eq!(
+                sh.main_menu().items[11..14]
+                    .iter()
+                    .map(|i| i.id)
+                    .collect::<Vec<_>>(),
+                [
+                    MA_PLAYER1_SETTINGS,
+                    MA_PLAYER2_SETTINGS,
+                    MA_NET_PLAYER_SETTINGS
+                ]
+            );
+            // Several in one frame: F1, F2, F3, F5, F6, F7, F9, F8 (plan fact 3).
+            let both = |sh: &mut Shell, sim: &mut SimState, a: u32, b: u32| {
+                step(sh, sim, &[ev(a, true), ev(b, true)], [0, 0]);
+                step(sh, sim, &[ev(a, false), ev(b, false)], [0, 0]);
+                sh.cur_menu()
+            };
+            assert_eq!(both(&mut sh, &mut sim, DK_F9, DK_F5), CurMenu::Player(2));
+            assert_eq!(both(&mut sh, &mut sim, DK_F7, DK_F6), CurMenu::Settings);
+            assert_eq!(both(&mut sh, &mut sim, DK_F9, DK_F7), CurMenu::Player(2));
+            assert_eq!(sh.main_selection(), 13);
+        }
+
+        #[test]
+        fn enter_on_a_player_item_plays_select_and_opens_that_players_menu() {
+            let (mut sh, mut sim) = menu();
+            let select = hooks().hooks.select;
+            sh.settings_mut().worm_settings[2].name = "NET".into();
+            for (idx, p) in [(11, 0), (12, 1), (13, 2)] {
+                sh.main_menu_mut().move_to(idx);
+                let o = tap(&mut sh, &mut sim, DK_RETURN);
+                assert_eq!(
+                    (o.menu_sounds, sh.cur_menu()),
+                    (vec![select], CurMenu::Player(p))
+                );
+                let want = if p == 2 { "NET" } else { "" };
+                assert_eq!(row(&sh, PL_NAME), want, "player {p}'s values");
+                let aim = sh.settings().worm_settings[p].controls_ex[K_UP];
+                assert_eq!(row(&sh, PL_UP), get_key_name(aim));
+                // Esc: back to the main menu, its cursor kept, no sound.
+                let o = tap(&mut sh, &mut sim, DK_ESCAPE);
+                assert_eq!(
+                    (sh.cur_menu(), sh.main_selection(), o.menu_sounds.len()),
+                    (CurMenu::Main, idx, 0)
+                );
+            }
+        }
+
+        #[test]
+        fn any_players_jump_returns_and_f1_goes_to_the_start_item() {
+            let (mut sh, mut sim) = focused(0);
+            let p2_jump = Settings::default().worm_settings[1].controls_ex[K_JUMP];
+            tap(&mut sh, &mut sim, p2_jump);
+            assert_eq!((sh.cur_menu(), sh.main_selection()), (CurMenu::Main, 11));
+            tap(&mut sh, &mut sim, DK_F6);
+            tap(&mut sh, &mut sim, DK_F1);
+            assert_eq!(
+                (sh.cur_menu(), sh.main_selection(), sh.menu_fading()),
+                (CurMenu::Main, 1, true),
+                "F1: main, NEW GAME, selected"
+            );
+        }
+
+        #[test]
+        fn the_cursor_scrolls_down_to_controller_and_pages() {
+            let (mut sh, mut sim) = focused(0);
+            let h = hooks().hooks;
+            assert_eq!(sh.player_menu().selection(), 2, "SAVE PROFILE AS...");
+            assert_eq!(sh.player_menu().top_item, 0);
+            for _ in 0..21 {
+                let o = tap(&mut sh, &mut sim, DK_DOWN);
+                assert_eq!(o.menu_sounds, [h.move_up]);
+            }
+            let m = sh.player_menu();
+            assert_eq!(m.selected_id(), PL_CONTROLLER, "22 visible rows");
+            assert_eq!(
+                (m.top_item, m.bottom_item, m.visible_item_count),
+                (7, 22, 24),
+                "scrolled; the count keeps AddItem's 24 (gfx.cpp:225, :240-243)"
+            );
+            let mut want = sh.player_menu().clone();
+            want.movement_page(-1);
+            let o = tap(&mut sh, &mut sim, DK_PGUP);
+            assert_eq!(o.menu_sounds, [h.move_down]);
+            assert_eq!(*sh.player_menu(), want);
+            want.movement_page(1);
+            let o = tap(&mut sh, &mut sim, DK_PGDN);
+            assert_eq!(o.menu_sounds, [h.move_up]);
+            assert_eq!(*sh.player_menu(), want);
+            // Down from CONTROLLER wraps to the first visible row.
+            sh.player_menu_mut().move_to_id(PL_CONTROLLER);
+            tap(&mut sh, &mut sim, DK_DOWN);
+            assert_eq!(sh.player_menu().selected_id(), PL_SAVE_PROFILE_AS);
+        }
+
+        #[test]
+        fn f6_from_f5_repoints_the_menu_and_moves_to_the_first_visible() {
+            let (mut sh, mut sim) = focused(0);
+            for _ in 0..5 {
+                tap(&mut sh, &mut sim, DK_DOWN);
+            }
+            assert_eq!(sh.player_menu().selected_id(), PL_GREEN);
+            tap(&mut sh, &mut sim, DK_F6);
+            assert_eq!(sh.cur_menu(), CurMenu::Player(1));
+            assert_eq!(sh.player_menu().selected_id(), PL_SAVE_PROFILE_AS);
+            let ws = &sh.settings().worm_settings[1];
+            let keys: Vec<String> = ws.controls_ex[..7]
+                .iter()
+                .map(|&k| get_key_name(k))
+                .collect();
+            let shown: Vec<String> = (PL_UP..PL_DIG).map(|id| row(&sh, id)).collect();
+            assert_eq!(shown, keys);
+            assert_eq!(row(&sh, PL_RED), (ws.rgb[0] / 4).to_string());
+        }
+
+        #[test]
+        fn the_player_menu_is_drawn_enabled_and_the_settings_menu_not_at_all() {
+            let (mut sh, mut sim) = focused(1);
+            step(&mut sh, &mut sim, &[], [0, 0]);
+            let want = menu_draw(&mut sh, 1);
+            assert_eq!(*sh.surface(), want, "mainMenuState.cpp:621-625");
+            // Non-vacuous: the settings menu's first row would have drawn over (178, 20).
+            let (sw, pal) = (sh.world.settings_menu.clone(), *sh.pal32());
+            let mut with_settings = want.clone();
+            sw.draw(
+                &crate::menu::PlainModel,
+                &mut with_settings,
+                &pal,
+                &sh.boot_scene.font,
+                true,
+                -1,
+                false,
+            );
+            assert_ne!(with_settings, want);
+        }
+
+        #[test]
+        fn held_right_steps_health_every_fourth_menu_cycle() {
+            let (mut sh, mut sim) = focused(0);
+            sh.player_menu_mut().move_to_id(PL_HEALTH);
+            step(&mut sh, &mut sim, &[ev(DK_RIGHT, true)], [0, 0]);
+            for _ in 0..15 {
+                step(&mut sh, &mut sim, &[], [0, 0]);
+            }
+            step(&mut sh, &mut sim, &[ev(DK_RIGHT, false)], [0, 0]);
+            assert_eq!(sh.settings().worm_settings[0].health, 104, "16 frames / 4");
+            assert_eq!(row(&sh, PL_HEALTH), "104%");
+            step(&mut sh, &mut sim, &[ev(DK_LEFT, true)], [0, 0]);
+            for _ in 0..3 {
+                step(&mut sh, &mut sim, &[], [0, 0]);
+            }
+            step(&mut sh, &mut sim, &[ev(DK_LEFT, false)], [0, 0]);
+            assert_eq!(sh.settings().worm_settings[0].health, 103);
+        }
+
+        #[test]
+        fn input_and_controller_play_their_own_sounds_through_the_shell() {
+            let (mut sh, mut sim) = focused(1);
+            let h = hooks().hooks;
+            sh.settings_mut().worm_settings[1].input_device = 1;
+            let o = enter_row(&mut sh, &mut sim, PL_INPUT);
+            assert_eq!(o.menu_sounds, [h.select], "one: the behaviour's");
+            assert_eq!(sh.settings().worm_settings[1].input_device, 0);
+            assert_eq!(row(&sh, PL_INPUT), "Keyboard");
+            let o = enter_row(&mut sh, &mut sim, PL_CONTROLLER);
+            assert_eq!(o.menu_sounds, [h.select]);
+            assert_eq!(row(&sh, PL_CONTROLLER), "CPU");
+            assert_eq!(sh.top_char(), 'M');
+            assert!(!sh.menu_fading(), "OnEnter's -1 selects nothing");
+        }
+
+        // PRESS A KEY (plan D3; T0 P2).
+
+        fn press_a_key(sh: &mut Shell, sim: &mut SimState, id: i32) -> FrameOut {
+            sh.player_menu_mut().move_to_id(id);
+            step(sh, sim, &[], [0, 0]);
+            let before = sh.surface().clone();
+            let o = step(sh, sim, &[ev(DK_RETURN, true)], [0, 0]);
+            assert_eq!(
+                (o.upd, o.phase, sh.top_char(), o.menu_sounds.clone()),
+                (Phase::Menu, Phase::Menu, 'K', vec![hooks().hooks.select])
+            );
+            let mut want = before;
+            WaitForKeyState::new(overlay::KeyTarget {
+                player: 0,
+                control: 0,
+            })
+            .draw(&mut want, sh.pal32(), &sh.boot_scene.font);
+            assert_eq!(
+                *sh.surface(),
+                want,
+                "the push frame: the box over the last frame, the menu not redrawn (R-3)"
+            );
+            step(sh, sim, &[ev(DK_RETURN, false)], [0, 0]);
+            assert_eq!(sh.top_char(), 'K');
+            o
+        }
+
+        #[test]
+        fn a_key_row_binds_the_next_key_down_on_a_silent_pop_frame() {
+            let (mut sh, mut sim) = focused(0);
+            press_a_key(&mut sh, &mut sim, PL_UP);
+            assert_eq!(
+                sh.cur_menu(),
+                CurMenu::Player(0),
+                "focus kept under the box"
+            );
+            let o = step(&mut sh, &mut sim, &[ev(KEY_Q, true)], [0, 0]);
+            assert_eq!(
+                (o.upd, sh.top_char(), o.menu_sounds.len()),
+                (Phase::Menu, 'M', 0),
+                "no sound (inputState.cpp:143-150, T0 P3)"
+            );
+            let ws = &sh.settings().worm_settings[0];
+            assert_eq!((ws.controls[K_UP], ws.controls_ex[K_UP]), (KEY_Q, KEY_Q));
+            assert_eq!(row(&sh, PL_UP), "Q");
+            let want = menu_draw(&mut sh, 0);
+            assert_eq!(*sh.surface(), want, "the pop frame redraws the menu");
+            step(&mut sh, &mut sim, &[ev(KEY_Q, false)], [0, 0]);
+            // Esc binds nothing and plays nothing.
+            let before = sh.settings().worm_settings[0].clone();
+            press_a_key(&mut sh, &mut sim, PL_DOWN);
+            let o = tap(&mut sh, &mut sim, DK_ESCAPE);
+            assert_eq!((sh.top_char(), o.menu_sounds.len()), ('M', 0));
+            assert_eq!(sh.settings().worm_settings[0], before);
+            assert_eq!(
+                sh.cur_menu(),
+                CurMenu::Player(0),
+                "ClearKeys: the Esc never reaches the menu"
+            );
+        }
+
+        #[test]
+        fn the_last_key_down_wins_a_repeat_binds_and_application_is_blank() {
+            let (mut sh, mut sim) = focused(0);
+            press_a_key(&mut sh, &mut sim, PL_LEFT);
+            step(
+                &mut sh,
+                &mut sim,
+                &[ev(KEY_C, true), ev(KEY_V, true)],
+                [0, 0],
+            );
+            assert_eq!(sh.settings().worm_settings[0].controls_ex[2], KEY_V);
+            step(
+                &mut sh,
+                &mut sim,
+                &[ev(KEY_C, false), ev(KEY_V, false)],
+                [0, 0],
+            );
+            step(&mut sh, &mut sim, &[ev(KEY_X, true)], [0, 0]);
+            press_a_key(&mut sh, &mut sim, PL_RIGHT);
+            let rep = KeyEvent {
+                repeat: true,
+                ..ev(KEY_X, true)
+            };
+            step(&mut sh, &mut sim, &[rep], [0, 0]);
+            assert_eq!(
+                (sh.top_char(), sh.settings().worm_settings[0].controls_ex[3]),
+                ('M', KEY_X),
+                "an OS repeat binds (T0 P2)"
+            );
+            step(&mut sh, &mut sim, &[ev(KEY_X, false)], [0, 0]);
+            press_a_key(&mut sh, &mut sim, PL_FIRE);
+            tap(&mut sh, &mut sim, KEY_APPLICATION);
+            let ws = &sh.settings().worm_settings[0];
+            assert_eq!(
+                (ws.controls[K_FIRE], ws.controls_ex[K_FIRE]),
+                (KEY_APPLICATION, KEY_APPLICATION)
+            );
+            assert_eq!(row(&sh, PL_FIRE), "", "key_names[89] is blank");
+            assert!(sh.player_menu().item_from_id(PL_FIRE).unwrap().has_value);
+        }
+
+        #[test]
+        fn dig_binds_controls_ex_only_and_never_weapon_1() {
+            // Q4 = A: C++ writes controls[7], which is weapons[0] (T0 P1); Rust does not.
+            let (mut sh, mut sim) = focused(1);
+            let before = sh.settings().worm_settings[1].clone();
+            press_a_key(&mut sh, &mut sim, PL_DIG);
+            tap(&mut sh, &mut sim, KEY_Q);
+            let ws = &sh.settings().worm_settings[1];
+            assert_eq!(ws.controls_ex[7], KEY_Q);
+            assert_eq!(
+                (ws.weapons, ws.controls),
+                (before.weapons, before.controls),
+                "WEAPON 1 and the seven base controls unchanged"
+            );
+            assert_eq!(row(&sh, PL_DIG), "Q");
+            assert_eq!(
+                sh.settings().worm_settings[0],
+                Settings::default().worm_settings[0]
+            );
+        }
+
+        // The player overlays (plan D4; T0 P3).
+
+        #[test]
+        fn name_closes_with_two_selects_and_clears_random_name() {
+            let (mut sh, mut sim) = focused(0);
+            let select = hooks().hooks.select;
+            sh.settings_mut().worm_settings[0].random_name = true;
+            let o = enter_row(&mut sh, &mut sim, PL_NAME);
+            let m = sh.player_menu();
+            let (x, y) = m.item_position(m.index_from_id(PL_NAME) as usize).unwrap();
+            let e = entry(&sh);
+            assert_eq!(
+                (
+                    o.menu_sounds,
+                    e.buffer.len(),
+                    e.max_len,
+                    e.x,
+                    e.y,
+                    e.filter.is_none()
+                ),
+                (vec![select], 0, 20, x + 95 + 2, y, true)
+            );
+            assert_eq!(sh.text_mode(), Some(TextMode::Text));
+            type_str(&mut sh, &mut sim, "WORMY");
+            let o = tap(&mut sh, &mut sim, DK_RETURN);
+            let ws = &sh.settings().worm_settings[0];
+            assert_eq!(
+                (o.menu_sounds, ws.name.as_str(), ws.random_name),
+                (vec![select, select], "WORMY", false)
+            );
+            assert_eq!(row(&sh, PL_NAME), "WORMY");
+            // Esc: two MenuSelects, the name kept, random_name cleared all the same.
+            sh.settings_mut().worm_settings[0].random_name = true;
+            enter_row(&mut sh, &mut sim, PL_NAME);
+            assert_eq!(entry(&sh).buffer, b"WORMY", "the box opens on the name");
+            type_str(&mut sh, &mut sim, "ZZ");
+            let o = tap(&mut sh, &mut sim, DK_ESCAPE);
+            let ws = &sh.settings().worm_settings[0];
+            assert_eq!(
+                (o.menu_sounds, ws.name.as_str(), ws.random_name),
+                (vec![select, select], "WORMY", false)
+            );
+            // An empty Return: the name is empty (GenerateName is a no-op, finding 4).
+            enter_row(&mut sh, &mut sim, PL_NAME);
+            backspaces(&mut sh, &mut sim, 5);
+            let o = tap(&mut sh, &mut sim, DK_RETURN);
+            assert_eq!(o.menu_sounds, [select, select]);
+            assert_eq!(sh.settings().worm_settings[0].name, "");
+            // 25 typed bytes keep 20.
+            enter_row(&mut sh, &mut sim, PL_NAME);
+            type_str(&mut sh, &mut sim, "ABCDEFGHIJKLMNOPQRSTUVWXY");
+            tap(&mut sh, &mut sim, DK_RETURN);
+            assert_eq!(sh.settings().worm_settings[0].name, "ABCDEFGHIJKLMNOPQRST");
+        }
+
+        #[test]
+        fn weapon_n_takes_the_nearest_name_with_one_select() {
+            let (mut sh, mut sim) = focused(0);
+            let tc = hooks();
+            let select = tc.hooks.select;
+            let bazooka = tc.weapon_names.iter().position(|n| n == "BAZOOKA").unwrap() as u32 + 1;
+            sh.settings_mut().worm_settings[0].weapons[1] = 5;
+            assert_ne!(bazooka, 5);
+            let o = enter_row(&mut sh, &mut sim, PL_WEAP0 + 1);
+            let m = sh.player_menu();
+            let (x, y) = m
+                .item_position(m.index_from_id(PL_WEAP0 + 1) as usize)
+                .unwrap();
+            let e = entry(&sh);
+            assert_eq!(
+                (
+                    o.menu_sounds,
+                    e.buffer.len(),
+                    e.max_len,
+                    e.x,
+                    e.y,
+                    e.filter.is_none()
+                ),
+                (vec![select], 0, 10, x + 97, y, true)
+            );
+            type_str(&mut sh, &mut sim, "bazoka");
+            let o = tap(&mut sh, &mut sim, DK_RETURN);
+            assert_eq!(o.menu_sounds, [select], "the entry's own only (T0 P3)");
+            assert_eq!(sh.settings().worm_settings[0].weapons[1], bazooka);
+            assert_eq!(row(&sh, PL_WEAP0 + 1), "BAZOOKA");
+            // An empty Return and an Esc keep the value, one MenuSelect each.
+            for close in [DK_RETURN, DK_ESCAPE] {
+                enter_row(&mut sh, &mut sim, PL_WEAP0 + 1);
+                if close == DK_ESCAPE {
+                    type_str(&mut sh, &mut sim, "uzi");
+                }
+                let o = tap(&mut sh, &mut sim, close);
+                assert_eq!(o.menu_sounds, [select]);
+                assert_eq!(sh.settings().worm_settings[0].weapons[1], bazooka);
+            }
+        }
+
+        #[test]
+        fn health_and_colour_entries_clamp_into_the_players_fields() {
+            let (mut sh, mut sim) = focused(0);
+            let select = hooks().hooks.select;
+            for (typed, want, shown) in [
+                ("250", 250, "250%"),
+                ("0", 1, "1%"),
+                ("99999", 10000, "10000%"),
+            ] {
+                let o = enter_row(&mut sh, &mut sim, PL_HEALTH);
+                assert_eq!(o.menu_sounds, [select], "IntegerBehavior's own");
+                let e = entry(&sh);
+                assert_eq!((e.max_len, e.filter.is_some()), (5, true));
+                assert_eq!(sh.text_mode(), Some(TextMode::Numeric));
+                let n = e.buffer.len();
+                backspaces(&mut sh, &mut sim, n);
+                type_str(&mut sh, &mut sim, typed);
+                let o = tap(&mut sh, &mut sim, DK_RETURN);
+                assert_eq!(o.menu_sounds, [select]);
+                assert_eq!(sh.settings().worm_settings[0].health, want);
+                assert_eq!(row(&sh, PL_HEALTH), shown);
+            }
+            assert_eq!(
+                sh.settings().lives,
+                Settings::default().lives,
+                "never the settings' id 1 (LIVES, R-8)"
+            );
+            for (typed, stored, shown) in [("70", 252, "63"), ("10", 40, "10"), ("63", 252, "63")] {
+                enter_row(&mut sh, &mut sim, PL_GREEN);
+                let n = entry(&sh).buffer.len();
+                assert_eq!(entry(&sh).max_len, 2);
+                backspaces(&mut sh, &mut sim, n);
+                type_str(&mut sh, &mut sim, typed);
+                tap(&mut sh, &mut sim, DK_RETURN);
+                assert_eq!(sh.settings().worm_settings[0].rgb[1], stored);
+                assert_eq!(row(&sh, PL_GREEN), shown);
+            }
+            // Esc keeps the value.
+            enter_row(&mut sh, &mut sim, PL_HEALTH);
+            type_str(&mut sh, &mut sim, "5");
+            tap(&mut sh, &mut sim, DK_ESCAPE);
+            assert_eq!(sh.settings().worm_settings[0].health, 10000);
+        }
+
+        #[test]
+        fn the_profile_rows_only_play_select_until_task_4() {
+            let (mut sh, mut sim) = focused(0);
+            let select = hooks().hooks.select;
+            for id in [PL_LOAD_PROFILE, PL_SAVE_PROFILE_AS] {
+                let o = enter_row(&mut sh, &mut sim, id);
+                assert_eq!((o.menu_sounds, sh.top_char()), (vec![select], 'M'));
+            }
+        }
+
+        // The network player's slot 0 (plan fact 5; T0 P8).
+
+        #[test]
+        fn the_network_players_colour_takes_slot_0_only_while_its_menu_has_focus() {
+            let (mut sh, mut sim) = focused(2);
+            sh.settings_mut().worm_settings[2].rgb = [64, 104, 252];
+            let pal = |sh: &Shell, slot0: bool| {
+                let w = &sh.world;
+                let ws = &w.settings.worm_settings;
+                render::menu::menu_palette_with(
+                    &w.origpal,
+                    w.menu_cycles,
+                    [ws[0].rgb, ws[1].rgb],
+                    slot0.then_some(ws[2].rgb),
+                )
+            };
+            step(&mut sh, &mut sim, &[], [0, 0]);
+            assert_eq!(*sh.pal32(), pal(&sh, true));
+            assert_ne!(pal(&sh, true), pal(&sh, false), "non-vacuous");
+            // Under PRESS A KEY the focus is still the network player's.
+            sh.player_menu_mut().move_to_id(PL_UP);
+            tap(&mut sh, &mut sim, DK_RETURN);
+            assert_eq!((sh.top_char(), *sh.pal32()), ('K', pal(&sh, true)));
+            tap(&mut sh, &mut sim, DK_ESCAPE);
+            tap(&mut sh, &mut sim, DK_F5);
+            assert_eq!(*sh.pal32(), pal(&sh, false), "LEFT PLAYER: player 1's ramp");
+            tap(&mut sh, &mut sim, DK_F9);
+            assert_eq!(*sh.pal32(), pal(&sh, true));
+            tap(&mut sh, &mut sim, DK_ESCAPE);
+            assert_eq!(*sh.pal32(), pal(&sh, false), "main focus");
         }
     }
 }

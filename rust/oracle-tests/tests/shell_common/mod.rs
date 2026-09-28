@@ -1816,9 +1816,12 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
             .push(format!("f {frame} {upd} {p} {} {sounds}", tail(&sh)));
         let in_match = top1 == 'G' && sh.phase() == Phase::Game;
         if script.detail {
-            let cur = match sh.cur_menu() {
-                CurMenu::Main => 'M',
-                CurMenu::Settings => 'S',
+            // 4½f-2 §Formats: `1`/`2`/`N` and the player menu's `ssel` while a player menu has
+            // focus; `M`/`S` and the settings menu's otherwise.
+            let (cur, ssel) = match sh.cur_menu() {
+                CurMenu::Main => ('M', sh.settings_menu().selection()),
+                CurMenu::Settings => ('S', sh.settings_menu().selection()),
+                CurMenu::Player(p) => (['1', '2', 'N'][p], sh.player_menu().selection()),
             };
             let state = if in_match {
                 format!("{:08x}", hash_game_state(&sim))
@@ -1826,8 +1829,7 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 "-".to_string()
             };
             run.details.push(format!(
-                "d {frame} {cur} {} {:016x} {state}",
-                sh.settings_menu().selection(),
+                "d {frame} {cur} {ssel} {:016x} {state}",
                 fnv64(settings_to_toml(sh.settings()).as_bytes())
             ));
         }

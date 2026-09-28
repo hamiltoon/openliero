@@ -622,3 +622,239 @@ Batch 1 also reports every probe's verdict and P0's vector counts. Batch 3 repor
 None. Every open point in the design and the refresh is engineering, decided above (D1–D16); the two behaviour choices it raised (Q6, Q7) were ruled on 2026-09-28 and are encoded in D9 and D10.
 
 (The T0 addendum is appended below by Batch 1.)
+
+---
+
+## Addendum T0 (probe results)
+
+Run 2026-09-28 on `claude/cpp-oracle-vcpkg-assets-chcwcm` at `c7fffc1`, against the real `Gfx::RunOneFrame` in a temporarily patched `oracle_dump_shell` (release `build/linux-x64` and checked `$S/build-chk`). Every artefact is in `$S/t0f2/`. Nothing but this addendum is committed.
+
+**Verdict.**
+- **P0–P8 are all CONFIRMED.** No contradiction rule of Step 5 fired, so D1–D16 and T1–T9 stand as written (§"Changes to later tasks").
+- Every probe script ran under **both** builds with byte-identical output (13 scripts; `cmp` equal). The one exception is `d_z`, run under the checked build only, as planned: it aborts (P1).
+- The restored dumper reproduces the four Step-7 goldens byte-identically under both builds (§"Restore").
+
+### Method
+
+- **The patch** is `$S/t0f2/probe.diff` (243 lines). It lived in the working tree only. In `oracle_dump_shell` it added:
+  - `ScancodeOf`: `APPLICATION` → `SDL_SCANCODE_APPLICATION`;
+  - `TopOf`: `WaitForKeyState` → `K`, `ProfileSelectorState` → `F` (both checked right after `MainMenuState`);
+  - `DetailLine`: `cur` = `1`/`2`/`N` when `cur_menu == &player_menu` and `player_menu.ws == settings->worm_settings[i]` (else `Fail`); `ssel` = `player_menu.Selection()` for those, `settings_menu.Selection()` for `M`/`S` (the §Formats rule verbatim);
+  - `F` in the search-gap `kSearchable` set;
+  - the `profiles <user|sys>` manifest line exactly as D13 (sorted `data/Profiles/*.toml`, "given twice" checks);
+  - a probe-only `x <frame>` line after every `d` line: for `i` in 0..3 `w<i> name=<hex> hp rgb col in gp=<hex> ctl keys=<controls[0..7]> ex=<controls_ex[0..8]> wp=<weapons[0..5]> rn prof=<profile_node.FullPath() or ->`; while the player menu has focus `rows=[<id>[h]:<value>]…` (every item's `value`, `h` = hidden); `pal0=` the five `play_renderer.pal` entries `kWormColorBlocks[0].base - 2 … + 2`; per worm of `CurrentGame()` `clean=<%02x clean_control_states> cs=<%02x control_states> same=<worm->settings == settings->worm_settings[i]> nm=<hex of the worm's settings name> fire=<its controls_ex[4]>`; and while a `ProfileSelectorState` is on top `| F title=[<title_> <current_node->full_path>] sel=<Selection()> rows=[<child names>]` (read through a member pointer to the protected `selector_` / `title_`);
+  - a one-shot `PROBE_VECTORS=<file>` mode (Step 1's list; exits before loading anything).
+- **Build:** `source $S/env.sh && cmake --build build/linux-x64 --config Release --target oracle_dump_shell` and `cmake --build $S/build-chk --target oracle_dump_shell`, both exit 0.
+- **Fixtures:** `$S/t0f2/gen.py` writes every script: `setup default`, `boot_seed 7`, `detail`, first key at frame 40, taps down at *t* and up at *t*+2 with the next key at *t*+3, text one character per event and per frame (text events only, no key events), end by QUIT. Player-menu rows are addressed by menu index (0 PROFILE LOADED, 1 SAVE PROFILE, 2 SAVE PROFILE AS…, 3 LOAD PROFILE, 4 NAME, 5 HEALTH, 6–8 R/G/B, 9 INPUT, 10–17 AIM UP … DIG, 18–22 WEAPON 1–5, 23 CONTROLLER); every `ssel` below is that index. The `fs` manifests are the e-2 install (`shell_setup_save_fs.txt` minus comments) = `fs_install.txt`, plus `profiles sys` = `fs_prof.txt`, plus `file user Profiles/broken.toml $S/t0f2/broken.toml` (`name = "broken` + `health = [`, a TOML syntax error) = `fs_broken.txt`.
+- **Runs:** `$S/t0f2/runall.sh` / `rerun.sh` (release to `out/<case>_rel.out`, checked with `ASAN_OPTIONS=detect_leaks=0` to `out/<case>_chk.out`, then `cmp`); PPMs (release only) for `k_box`, `pr_io`, `l_sel` under `$S/t0f2/ppm/`. Sound ids in the `f` lines: **25** = MenuMoveUp (the Down key), **26** = MenuMoveDown (the Up key), **27** = MenuSelect.
+- **Method deviations (stronger, not weaker):** `v_fuzzy` types `bazoka` a second time after `la` (the first `bazoka` leaves WEAPON 2 at its current 1, which cannot tell the match from "unchanged"); `j_pad` re-loads `Joystick0` before **each** of INPUT Left / Right / Enter, so every one of the three starts from a pad player. The first `p_first`/`l_*` runs pressed their keys during RESUME's 32-frame fade-out (the waits were 20 frames) and were rerun with 45; the first `l_det` run's 15 Downs wrapped the 14-row settings menu onto GAME MODE and was rerun with F7 → Up (LOAD SETUP = index 18). Only the reruns are recorded.
+
+### P0 — the vectors for T1: CONFIRMED
+
+`PROBE_VECTORS` output, release and checked byte-identical (`$S/t0f2/vectors_rel.txt`).
+
+- **`Texts::key_names[i]`, all 177, as hex bytes** (`-` = the empty string). Confirms `[89] = ""`, `[29] = "Left Crtl"`, `[26] = "Å"` (`c3 85`), `[12] = "+"`, `` [13] = "`" ``, and `[117] = "Right Ctrl"` (spelled correctly, unlike 29):
+  ```
+  0:- 1:457363 2:31 3:32 4:33 5:34 6:35 7:36
+  8:37 9:38 10:39 11:30 12:2b 13:60 14:4261636b7370616365 15:546162
+  16:51 17:57 18:45 19:52 20:54 21:59 22:55 23:49
+  24:4f 25:50 26:c385 27:5e 28:456e746572 29:4c656674204372746c 30:41 31:53
+  32:44 33:46 34:47 35:48 36:4a 37:4b 38:4c 39:c396
+  40:c384 41:c2bd 42:4c656674205368696674 43:27 44:5a 45:58 46:43 47:56
+  48:42 49:4e 50:4d 51:2c 52:2e 53:2d 54:5269676874205368696674 55:2a202850616429
+  56:4c65667420416c74 57:- 58:43617073204c6f636b 59:4631 60:4632 61:4633 62:4634 63:4635
+  64:4636 65:4637 66:4638 67:4639 68:463130 69:4e756d204c6f636b 70:5363726f6c6c204c6f636b 71:37202850616429
+  72:38202850616429 73:39202850616429 74:2d202850616429 75:34202850616429 76:35202850616429 77:36202850616429 78:2b202850616429 79:31202850616429
+  80:32202850616429 81:33202850616429 82:30202850616429 83:2c202850616429 84:- 85:- 86:3c 87:463131
+  88:463132 89:- 90:- 91:- 92:- 93:- 94:- 95:-
+  96:- 97:- 98:- 99:- 100:- 101:- 102:- 103:-
+  104:- 105:- 106:- 107:- 108:- 109:- 110:- 111:-
+  112:- 113:- 114:- 115:- 116:456e746572202850616429 117:5269676874204374726c 118:- 119:-
+  120:- 121:- 122:- 123:- 124:- 125:- 126:- 127:-
+  128:- 129:- 130:5072696e742053637265656e 131:- 132:- 133:- 134:- 135:-
+  136:- 137:- 138:- 139:- 140:- 141:2f202850616429 142:- 143:5072696e742053637265656e
+  144:526967687420416c74 145:- 146:- 147:- 148:- 149:- 150:- 151:-
+  152:- 153:- 154:- 155:- 156:- 157:- 158:- 159:486f6d65
+  160:5570 161:50616765205570 162:- 163:4c656674 164:- 165:5269676874 166:- 167:456e64
+  168:446f776e 169:5061676520446f776e 170:496e73657274 171:44656c657465 172:- 173:- 174:- 175:-
+  176:-
+  ```
+- **`Gfx::GetKeyName(k)`:** 0 → `""`, 1 → `Esc`, 12 → `+`, 13 → `` ` ``, 26 → `Å`, 27 → `^`, 29 → `Left Crtl`, 41 → `½` (`c2 bd`), 89 → `""`, 176 → `""`, 177 → `""`, 300 → `""`, 511 → `""`, 512 → `J0_0`, 513 → `J0_1`, 543 → `J0_31`, 544 → `J1_0`, 1000 → `J15_8`.
+- **`Gfx::GetGamepadKeyName(k)`:** 0 `A`, 1 `B`, 2 `X`, 3 `Y`, 4 `Back`, 5 `Guide`, 6 `Start`, 7 `LS`, 8 `RS`, 9 `LB`, 10 `RB`, 11 `Up`, 12 `Down`, 13 `Left`, 14 `Right`, 15 `Btn15`, 99 `Btn99`, 100 `LX+`, 101 `LX-`, 102 `LY+`, 103 `LY-`, 104 `RX+`, 105 `RX-`, 106 `RY+`, 107 `RY-`, 108 `LT+`, 109 `LT-`, 110 `RT+`, 111 `RT-`, 112 `A6+`, 113 `A6-`, 114 `A7+`, 130 `A15+`.
+- **`common.texts.controllers`:** `Human`, `CPU`, `AI`.
+- **P1's layout vector:** `ptrdiff = (char*)ws.weapons - (char*)ws.controls = 28`, `sizeof ws.controls = 28`.
+- **The Levenshtein copy is verbatim.** Step 2's range is **lines 26–54**, not 26–53: `#define MIN3` is line 26 and `#undef MIN3` is line 54 (the function is 28–52). `diff <(sed -n 26,54p src/game/mainMenuState.cpp) <(sed -n '/^#define MIN3/,/^#undef MIN3/p' $S/t0f2/lev.cpp)` is empty; `lev.cpp` built with `g++ -std=c++20 -O1`. Classics: (`kitten`,`sitting`) = 3, (`ABC`,`abc`) = 0, (`a`,`""`) = 1.
+- **The 40 names in `weap_order`** (bytewise `std::string <` over the TC's `name` fields, all ASCII) and `Levenshtein(name, typed)` for each probe string (`$S/t0f2/lev_table.txt`):
+
+| # | name (weap_order) | len | `bazoka` | `LSR` | `a` | `zzzzzzzzzz` | `BIG NUKE` | `big nuke` | `""` | `la` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | BAZOOKA | 7 | 1 | 7 | 6 | 9 | 6 | 6 | 7 | 6 |
+| 2 | BIG NUKE | 8 | 6 | 8 | 8 | 10 | 0 | 0 | 8 | 8 |
+| 3 | BLASTER | 7 | 5 | 4 | 6 | 10 | 7 | 7 | 7 | 5 |
+| 4 | BOOBY TRAP | 10 | 8 | 9 | 9 | 10 | 8 | 8 | 10 | 9 |
+| 5 | BOUNCY LARPA | 12 | 10 | 10 | 11 | 12 | 10 | 10 | 12 | 10 |
+| 6 | BOUNCY MINE | 11 | 10 | 11 | 11 | 11 | 8 | 8 | 11 | 11 |
+| 7 | CANNON | 6 | 5 | 6 | 5 | 10 | 7 | 7 | 6 | 5 |
+| 8 | CHAINGUN | 8 | 7 | 8 | 7 | 10 | 7 | 7 | 8 | 7 |
+| 9 | CHIQUITA BOMB | 13 | 11 | 13 | 12 | 13 | 11 | 11 | 13 | 12 |
+| 10 | CLUSTER BOMB | 12 | 11 | 9 | 12 | 12 | 11 | 11 | 12 | 11 |
+| 11 | CRACKLER | 8 | 7 | 6 | 7 | 10 | 8 | 8 | 8 | 7 |
+| 12 | DART | 4 | 5 | 3 | 3 | 10 | 8 | 8 | 4 | 3 |
+| 13 | DIRTBALL | 8 | 7 | 7 | 7 | 10 | 7 | 7 | 8 | 7 |
+| 14 | DOOMSDAY | 8 | 7 | 7 | 7 | 10 | 8 | 8 | 8 | 7 |
+| 15 | EXPLOSIVES | 10 | 9 | 8 | 10 | 10 | 9 | 9 | 10 | 9 |
+| 16 | FAN | 3 | 5 | 3 | 2 | 10 | 7 | 7 | 3 | 2 |
+| 17 | FLAMER | 6 | 6 | 4 | 5 | 10 | 8 | 8 | 6 | 4 |
+| 18 | FLOAT MINE | 10 | 9 | 9 | 9 | 10 | 8 | 8 | 10 | 8 |
+| 19 | GAUSS GUN | 9 | 8 | 8 | 8 | 10 | 8 | 8 | 9 | 8 |
+| 20 | GRASSHOPPER | 11 | 9 | 9 | 10 | 11 | 10 | 10 | 11 | 10 |
+| 21 | GREENBALL | 9 | 8 | 9 | 8 | 10 | 8 | 8 | 9 | 8 |
+| 22 | GRENADE | 7 | 7 | 7 | 6 | 10 | 6 | 6 | 7 | 6 |
+| 23 | HANDGUN | 7 | 6 | 7 | 6 | 10 | 7 | 7 | 7 | 6 |
+| 24 | HELLRAIDER | 10 | 9 | 8 | 9 | 10 | 9 | 9 | 10 | 8 |
+| 25 | LARPA | 5 | 4 | 3 | 4 | 10 | 8 | 8 | 5 | 3 |
+| 26 | LASER | 5 | 5 | 2 | 4 | 10 | 8 | 8 | 5 | 3 |
+| 27 | MINE | 4 | 6 | 4 | 4 | 10 | 5 | 5 | 4 | 4 |
+| 28 | MINI NUKE | 9 | 8 | 9 | 9 | 10 | 3 | 3 | 9 | 9 |
+| 29 | MINI ROCKETS | 12 | 10 | 11 | 12 | 12 | 8 | 8 | 12 | 12 |
+| 30 | MINIGUN | 7 | 7 | 7 | 7 | 10 | 6 | 6 | 7 | 7 |
+| 31 | MISSILE | 7 | 7 | 6 | 7 | 10 | 6 | 6 | 7 | 6 |
+| 32 | NAPALM | 6 | 5 | 6 | 5 | 10 | 8 | 8 | 6 | 5 |
+| 33 | RB RAMPAGE | 10 | 8 | 9 | 9 | 10 | 8 | 8 | 10 | 9 |
+| 34 | RIFLE | 5 | 6 | 5 | 5 | 10 | 6 | 6 | 5 | 4 |
+| 35 | SHOTGUN | 7 | 7 | 7 | 7 | 10 | 7 | 7 | 7 | 7 |
+| 36 | SPIKEBALLS | 10 | 9 | 9 | 9 | 10 | 9 | 9 | 10 | 9 |
+| 37 | SUPER SHOTGUN | 13 | 12 | 12 | 13 | 13 | 12 | 12 | 13 | 13 |
+| 38 | UZI | 3 | 5 | 3 | 3 | 9 | 7 | 7 | 3 | 3 |
+| 39 | WINCHESTER | 10 | 10 | 8 | 10 | 10 | 8 | 8 | 10 | 10 |
+| 40 | ZIMM | 4 | 5 | 4 | 4 | 9 | 7 | 7 | 4 | 4 |
+
+- **The fuzzy match through the real menu** (`v_fuzzy`: F5 → WEAPON 2 (ssel 19) → Return → text → Return, each box closing with one `27`). `wp[1]` and the WEAPON 2 row's value after each close:
+
+  | Typed | Close frame | `wp[1]` | Row | Integer cross-multiplication (T1) |
+  |---|---|---|---|---|
+  | `bazoka` (current 1) | 68 | 1 | BAZOOKA | 1 (1/7) |
+  | `LSR` | 78 | 26 | LASER | 26 (2/5) |
+  | `a` | 86 | 16 | FAN | 16 (2/3) |
+  | `zzzzzzzzzz` | 103 | 4 | BOOBY TRAP | 4 — a 14-way tie at ratio 1 (4, 5, 6, 9, 10, 15, 18, 20, 24, 29, 33, 36, 37, 39): the lowest index wins |
+  | `BIG NUKE` | 118 | 2 | BIG NUKE | 2 (0) |
+  | `la` (the tie string) | 127 | 25 | LARPA | 25 — LARPA 3/5 ties LASER 3/5: the lower index wins |
+  | `bazoka` (current 25) | 140 | 1 | BAZOOKA | 1 |
+  | empty Return | 146 | 1 | BAZOOKA | unchanged (never called on an empty name) |
+
+  Every result equals the table's integer cross-multiplication with strict `<` from index 1 (`$S/t0f2/levtab.py`).
+
+### P1 — DIG: CONFIRMED
+
+- `ptrdiff == 28` (P0).
+- `d_q` (F5 → DIG, ssel 17 → Return on 64 → `Q` on 67): frame 66 `ex=…,0 wp=1,1,1,1,1`; frame 67 `keys` unchanged, `ex=19,33,32,34,29,42,56,16 wp=16,1,1,1,1` — the `controls[7]` write lands in `weapons[0]`; `cfg16` changes on 67.
+- `d_eq` (WEAPON 1 Right ×15 → `wp[0] = 16` by frame 110, then DIG = `Q` on 112): `ex[7] = 16`, `wp[0]` stays 16.
+- `d_z` (DIG = `Z`, 44), checked build only: **aborts on the bind frame (67), exit 134, no output written**:
+  ```
+  /usr/include/c++/13/bits/stl_vector.h:1128: constexpr std::vector<_Tp, _Alloc>::reference std::vector<_Tp, _Alloc>::operator[](size_type) [with _Tp = int; _Alloc = std::allocator<int>; reference = int&; size_type = long unsigned int]: Assertion '__n < this->size()' failed.
+  ```
+  With `ASAN_OPTIONS=handle_abort=1` the stack is `std::__glibcxx_assert_fail` ← `WeaponEnumBehavior::OnUpdate(Menu&, MenuItem&)` ← `MainMenuState::Update()::{lambda(unsigned int, bool)#1}` (the key callback's `UpdateItems`) ← `WaitForKeyState::Update()` ← `Gfx::RunOneFrame()` ← `main`. Recorded, never gated (pitfall 17).
+
+### P2 — the key box: CONFIRMED
+
+`k_box`: F5 → AIM UP (ssel 10).
+- **The push frame draws the box over the previous frame's pixels.** Return on 69: `f 69 M … K … 27` (upd `M`, top `K`, one MenuSelect). The presented frame 69 differs from 68 **only** inside (133..187, 94..102), the `PRESS A KEY` box (465 pixels). Frame 67 → 68 changes the selected row's animation (180..276, 85..89), and 68 → 69 does not: the menu was not redrawn. Frames 69, 70 and 71 present the same hash. PPMs: `ppm/k_box/f_0068.png`, `f_0069.png`.
+- **The pop frame redraws the menu with the new name:** `Q` on 72: upd `K`, top `M`, **no sound**; `ex[0] = 16`; the frame differs from 71 over the box and the AIM UP row (`f_0072.png` shows `AIM UP Q`).
+- **Esc** (AIM DOWN, push 78, Esc 81): upd `K` → top `M`, sounds `-`, `ex` unchanged.
+- **`C` + `V` down on one frame** (MOVE LEFT, 90): `ex[2] = 47` (`V`, the last key-down).
+- **A repeat binds:** `X` held since 96 (menu), MOVE RIGHT Return on 99, an `X` `repeat` on 102 while `K` is up → `ex[3] = 45`.
+- **`APPLICATION`** (FIRE, 111): `keys[4] = ex[4] = 89`; the FIRE row's value is `""` (`rows=…[10:]…`).
+- The probe `d` line keeps `cur 1` with the player menu's `ssel` on every `K` frame (`d 64 1 17` … `d 66 1 17` in `d_q`), as §Formats and the `lieroSel` hook assume.
+
+### P3 — closing sounds: CONFIRMED
+
+`s_close` (`fs_prof.txt`); the sounds of each closing frame (the frame whose event closes the box), from `f` field 11:
+
+| Box | Close | Frame | Sounds | Note |
+|---|---|---|---|---|
+| NAME | Return (`AB`) | 55 | `27,27` | `name = "AB"` |
+| NAME | Esc | 63 | `27,27` | name unchanged |
+| NAME | empty Return (Backspace ×2) | 75 | `27,27` | `name = ""` (`GenerateName` is a no-op), `rn = 0` |
+| SAVE PROFILE AS… | Return (`mine`) | 92 | `27,27` | `prof = ./user/Profiles/mine.toml` |
+| SAVE PROFILE AS… | Esc | 100 | `27,27` | |
+| SAVE PROFILE AS… | Return (`Joystick0`, reserved) | 116 | **`27`** | upd `I` → top `B` |
+| (the reserved box) | dismiss (Return) | 119 | `-` | upd `B` → top `I` (the reopened box) |
+| SAVE PROFILE AS… (reopened) | Esc | 122 | `27,27` | |
+| WEAPON 1 | Return (`uzi`) | 156 | `27` | `wp[0] = 38` |
+| WEAPON 1 | empty Return | 162 | `27` | unchanged |
+| WEAPON 1 | Esc (`fan` typed) | 172 | `27` | unchanged |
+| JUMP key capture | `Y` | 184 | `-` | `ex[6] = 21` |
+| JUMP key capture | Esc | 190 | `-` | unchanged |
+
+Every push frame plays one `27`. NAME 2/2/2, SAVE PROFILE AS… 2/2/**1**, WEAPON n 1/1/1, key capture 0/0 — exactly fact 10 and D4.
+
+### P4 — play: CONFIRMED (first match; the DIG rule)
+
+- `p_first` (`match_seed 4101`): NEW GAME, both DONE, 100 frames, Esc; F5 → FIRE (ssel 14) → `RCTRL` on 260: player 1's `ex[4] = 117`, equal to player 2's FIRE (117 = `Right Ctrl`); F1 (RESUME) on 266, back in play on 300. `RCTRL` down on 314: **`w0 clean=10`, `w1 clean=00`**; up on 324: both `00`. Player 2's clean word never moves. (`cs` stays `00` because the dead worm's `PressedOnce(kFire)` consumes the bit, `worm.cpp:435`; `clean` is `OnKey`'s own record of `FindControlForKey`.)
+- `p_dig` (`match_seed 4201`; WEAPON 1 → 16, DIG = `Q` before NEW GAME, so `ex[7] = 16`, `wp[0] = 16`): in play (`ws=0`), worm 0:
+
+  | Frame | Event | `clean` | `cs` |
+  |---|---|---|---|
+  | 222 | `Q` down | `80` | `0c` |
+  | 227 | `LCTRL` down (Q held) | `90` | `0c` |
+  | 230 | `LCTRL` up | `80` | `0c` |
+  | 234 | `D` down (Left) | `84` | `0c` |
+  | 240 | `Q` up (D held) | `04` | `04` |
+  | 246 | `D` up | `00` | `00` |
+
+  While `Q` is held every event leaves `cs & 0x0c == 0x0c`; after `Q`'s release with `D` held, Left stays and Right is released. Worm 1 stays `00` throughout. D1's `apply_clean_edges` both arms are as written.
+
+### P5 — profiles: CONFIRMED (the unreadable shape: desk only)
+
+`pr_io` (`fs_broken.txt`):
+- **LOAD PROFILE** (ssel 3, Return on 46, one `27`): top `F`, `title=[Select profile: ./user/Profiles] sel=0 rows=[AI (L)][AI (R)][broken][Joystick0][Joystick1][Lefty (L)][Lefty (R)][Righty (L)][Righty (R)]` — opened inside `Profiles`, `.toml` only, `CiLess` order, both layers merged, the cursor on the first row (`ppm/pr_io/f_0047.png`). Each Down plays `25`.
+- **`Lefty (L)`** (Return on 66, `27`, top `M`): `name=etc`, `rgb=160,40,220` (×4), `col=32` kept, `keys`/`ex` = W/S/A/D/Y/U/I (`…,0`), `wp=19,36,9,40,31`, `rn=0`, `prof=./user/Profiles/Lefty (L).toml` (the merged config node's path; the file is in the system layer). `ssel` stays **3** although PROFILE LOADED and SAVE PROFILE appear above it (pitfall 20).
+- **SAVE PROFILE AS… `Joystick0`** (Return on 87, one `27`): the black box reads `NAME 'Joystick0.toml' IS RESERVED` (`f_0088.png`); dismissed on 92, the reopened box holds `Joystick0_` (`f_0094.png`). Backspace ×9, `mine`, Return on 129: `27,27`, `prof=./user/Profiles/mine.toml`.
+- **SAVE PROFILE** (ssel 1, Return on 137): one `27`, `prof` unchanged (`mine`). The rewrite of `mine.toml` is not observable (same bytes); the `Joystick0` save below proves the write path.
+- **LOAD PROFILE `broken`** (the listing now has `[mine]` between `Lefty (R)` and `Righty (L)`; Return on 157): `prof=./user/Profiles/broken.toml`, **no other field changes** (R2-18's parse-failure shape).
+- **LOAD PROFILE `Joystick0`** (176): `name=chucky`, `in=1`, `rgb=104,104,252`, `col=32`, `prof=./user/Profiles/Joystick0.toml`. **SAVE PROFILE** (187, `27`) writes the user copy.
+- `file` lines: `Profiles/Joystick0.toml`, `Profiles/broken.toml`, `Profiles/mine.toml`, `Setups/liero.cfg` — no `Lefty (L).toml` (loading writes nothing, R-5).
+- The unreadable `.toml` was not attempted (root reads a `chmod 000` file, fact 20): **desk only**.
+
+### P6 — pads: CONFIRMED
+
+`j_pad` (`fs_prof.txt`, `match_seed 4601`):
+- LOAD `Joystick0` (57): `in=1`, rows `[5:Gamepad (none)][6:Up][7:Down][8:Left][9:Right][10:RT+][11:RB][12:A][13:LB]`.
+- `F` on 62 (player 1's Down, now a pad player): `ssel 3 → 4`, sound `25` — the network player's default keys drive the menu (R2-21a).
+- INPUT (ssel 9): **Left** on 80 → sound `26` (MoveDown), `in 1 → 0`, rows `Keyboard`, `R`, `F`, `D`, `G`; re-load `Joystick0` (114, `in=1`); **Right** on 137 → `25` (MoveUp), `in=0`; re-load (171); **Enter** on 194 → `27`, `in=0`; re-load (228, `in=1`). Every one lands on `Keyboard`; LOAD makes it a pad player again.
+- NEW GAME (F1 on 236): weapon selection from 270. Player 2's `UP`, `RCTRL` (271, 274) set `w1 clean=01`, `10`; player 1's `R`, `LCTRL` (277, 280) leave `w0 clean=00`. 165 `W` frames, `ws=1` until Esc (403); the menu is back on 435. Player 1 never readies (R2-21b).
+
+### P7 — live edits: CONFIRMED (RD-2 holds)
+
+- `l_att` (`fs_install.txt`, `match_seed 4701`): after 150 frames of play, Esc; F5 → NAME `LIVE` (close on 351, `27,27`) → FIRE → `K` (387, `ex[4] = 37`); F1 on 393. In play: `K` down on 441 → `w0 clean=10 cs=10`, sound `3` (a shot); `LCTRL` on 457 → nothing. The match's worm 0 has `same=1 nm=LIVE fire=37`: the attached rename and rebind act from the first resumed tick.
+- `l_det` (`match_seed 4702`): as `l_att`, then Esc; F7 → Up (LOAD SETUP, ssel 18) → Return (522, top `P`, `Select options: ./user/Setups`, rows `liero`, `orbmit`) → Down → Return on `orbmit` (530): `gfx.settings` is a fresh object (`w0 name=""`, `ex=…,29,…`), while the match's worm keeps `same=0 nm=LIVE fire=37`. F5 → FIRE → `J` (572, the new object's `ex[4] = 36`); F1 on 578. In play: **`K` (626) → `w0 clean=10 cs=10`, sound `3`; `J` (642) → nothing.** The detached match keeps the old bindings and name.
+- `l_sel` (`match_seed 4703`): NEW GAME, Esc during weapon selection (83), F5 → NAME `SEL` (202); F1 on 205; selection is back on 239 (fade 1). Frame 240 (fade 2, brightened ×16: `ppm/l_sel/b240.png`) and frame 275 show `SEL` in player 1's name box; frame 100 (before the rename) shows an empty box.
+
+### P8 — F9's slot 0: CONFIRMED
+
+`n_slot`: F9 → Red (ssel 6), `LEFT` held 55–95 → the network player's red steps 104 → 64 every 4 frames (56, 60, …, 92), player 1's stays 104. `pal0` (entries base−2 … base+2):
+- frame 40 (`cur N`, no edit yet): `3c3c94,5050c4,6868fc,8888f8,b4b4f8` — player 1's ramp (fact 6: equal defaults);
+- frames 56–92 (`cur N`): follows the network player's red (`383c94,…` at 56 … `243c94,3050c4,4068fc,6c88f8,a4b4f8` at 92);
+- frame 98 (Esc → `cur M`) and 114 (Esc again): player 1's ramp;
+- frame 106 (F9 again, `cur N`): the network player's edited ramp at once.
+
+### Restore
+
+- `git checkout -- src/tools/oracle_dump/shell_dump.cpp`; both builds rebuilt (exit 0). `git status --short src data rust` empty; `git status --porcelain rust/oracle-tests/golden` empty; no `/tmp/oracle_shell_fs_*` left.
+- The restored binaries regenerate the four goldens into `$S/t0f2/restore/` (`oracle_dump_shell rust/oracle-tests/golden/<case>_script.txt $S/t0f2/restore/<case>_{rel,chk}.txt`, checked with `ASAN_OPTIONS=detect_leaks=0`), and `cmp` each against `rust/oracle-tests/golden/<case>.txt`:
+
+  | Golden | Release | Checked |
+  |---|---|---|
+  | `shell_boot_idle.txt` | SAME | SAME |
+  | `shell_milestone.txt` | SAME | SAME |
+  | `shell_setup_save.txt` | SAME | SAME |
+  | `shell_cpu_match.txt` | SAME | SAME |
+
+### Changes to later tasks
+
+**None is required.** No probe contradicted the plan, so no Step-5 rule fired: D1 (P4), D3 (P2), D4 (P3), D5/D14 (P5), D2's INPUT (P6), RD-2 (P7) and fact 5 (P8) stand, and T2 may start. Precisions for the tasks that use these results (no rule changes):
+- **T0 Step 2** (this task's own text): the verbatim range is `sed -n 26,54p`, not `26,53p` (`#undef MIN3` is line 54).
+- **T1:** embed the tables above as they are: the 177 `key_names` hex entries, the `GetKeyName` / `GetGamepadKeyName` / controller vectors (including the extra `GetKeyName(1000) = "J15_8"`, `(41) = "½"` and the axis names `A6±`, `A7+`, `A15+`), the 40 × 8 Levenshtein table plus the classics, and the eight menu results (`zzzzzzzzzz` → 4 is a second tie witness besides `la` → 25).
+- **T3:** the `K` push frame is upd `M` → top `K` with one `27`; each `K` frame presents the push frame's pixels; the pop frame is upd `K` → top `M` with no sound. The `d` line keeps `cur 1|2|N` and the player menu's `ssel` while `K` is on top.
+- **T4:** the profile selector's title in an `fs` case reads `Select profile: ./user/Profiles` (the same config-root string Rust's options selector already prints as `Select options: ./user/Setups`); C++'s `profile_node` for a shipped profile is `./user/Profiles/<leaf>.toml` (the merged root), so D5's `ProfileRef { rel: "Profiles/<leaf>.toml" }` and SAVE PROFILE's `user/Profiles/<leaf>` hold for both layers.
+- **T7:** a Fire press is visible in `clean_control_states`, but the dead-worm branch can consume it from `control_states` (`p_first`); witnesses on Fire should rest on `state8`, not on the word alone. RESUME needs 34 frames before a key reaches the match (F1 on 266, `G` on 300 in `p_first`; 393 → 427 in `l_att`: the menu's fade-out): the generator's waits must allow for it.

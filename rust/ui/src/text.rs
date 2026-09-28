@@ -10,6 +10,7 @@ use assets::tc::TcConfig;
 use scenario::build::BuildError;
 use sim::weapsel::WeapselError;
 
+use crate::keys::MAX_DOS_KEY;
 use crate::menu::MenuHooks;
 use crate::shell::overlay::Refusal;
 
@@ -25,6 +26,236 @@ pub const ONOFF: [&str; 2] = ["OFF", "ON"];
 /// `Texts::weap_states` (`common.cpp:222-224`), indexed by a `Settings::weap_table` entry: the
 /// WEAPON OPTIONS values (Step 4½e-1).
 pub const WEAP_STATES: [&str; 3] = ["Menu", "Bonus", "Banned"];
+
+/// `Texts::controllers` (`common.cpp:214-216`), indexed by `WormSettings::controller`: the player
+/// menu's CONTROLLER values (Step 4½f-2).
+pub const CONTROLLERS: [&str; 3] = ["Human", "CPU", "AI"];
+
+/// `Texts::key_names` (`common.cpp:25-203`) verbatim, indexed by DOS key code: the player menu's
+/// key rows. The source's spellings stay (`"Left Crtl"` at 29), UTF-8 as in the source (`"Å"` at
+/// 26, drawn through the font's CP437 map), and `""` at 89 (`APPLICATION`) and every gap.
+pub const KEY_NAMES: [&str; MAX_DOS_KEY as usize] = [
+    "",
+    "Esc",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "0",
+    "+",
+    "`",
+    "Backspace",
+    "Tab",
+    "Q",
+    "W",
+    "E",
+    "R",
+    "T",
+    "Y",
+    "U",
+    "I",
+    "O",
+    "P",
+    "Å",
+    "^",
+    "Enter",
+    "Left Crtl",
+    "A",
+    "S",
+    "D",
+    "F",
+    "G",
+    "H",
+    "J",
+    "K",
+    "L",
+    "Ö",
+    "Ä",
+    "½",
+    "Left Shift",
+    "'",
+    "Z",
+    "X",
+    "C",
+    "V",
+    "B",
+    "N",
+    "M",
+    ",",
+    ".",
+    "-",
+    "Right Shift",
+    "* (Pad)",
+    "Left Alt",
+    "",
+    "Caps Lock",
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+    "F6",
+    "F7",
+    "F8",
+    "F9",
+    "F10",
+    "Num Lock",
+    "Scroll Lock",
+    "7 (Pad)",
+    "8 (Pad)",
+    "9 (Pad)",
+    "- (Pad)",
+    "4 (Pad)",
+    "5 (Pad)",
+    "6 (Pad)",
+    "+ (Pad)",
+    "1 (Pad)",
+    "2 (Pad)",
+    "3 (Pad)",
+    "0 (Pad)",
+    ", (Pad)",
+    "",
+    "",
+    "<",
+    "F11",
+    "F12",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "Enter (Pad)",
+    "Right Ctrl",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "Print Screen",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "/ (Pad)",
+    "",
+    "Print Screen",
+    "Right Alt",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "Home",
+    "Up",
+    "Page Up",
+    "",
+    "Left",
+    "",
+    "Right",
+    "",
+    "End",
+    "Down",
+    "Page Down",
+    "Insert",
+    "Delete",
+    "",
+    "",
+    "",
+    "",
+    "",
+];
+
+/// `kJoyKeysStart`, `kMaxJoyButtons` (`keys.hpp:15-18`).
+const JOY_KEYS_START: u32 = 512;
+const MAX_JOY_BUTTONS: u32 = 32;
+/// `WormSettingsExtensions::kGamepadAxisBase` (`worm.hpp:74-77`).
+const GAMEPAD_AXIS_BASE: u32 = 100;
+
+/// `Gfx::GetKeyName(key)` (`gfx.cpp:828-840`): the table below `kMaxDosKey`, `J<pad>_<button>`
+/// from `kJoyKeysStart` on, `""` between.
+pub fn get_key_name(key: u32) -> String {
+    if key < MAX_DOS_KEY {
+        KEY_NAMES[key as usize].to_string()
+    } else if key >= JOY_KEYS_START {
+        let k = key - JOY_KEYS_START;
+        format!("J{}_{}", k / MAX_JOY_BUTTONS, k % MAX_JOY_BUTTONS)
+    } else {
+        String::new()
+    }
+}
+
+/// `Gfx::GetGamepadKeyName(gamepad_key)` (`gfx.cpp:842-859`): from `kGamepadAxisBase` an axis
+/// (`LX LY RX RY LT RT`, then `A<n>`) with `+`, or `-` for an odd offset; below 15 a button
+/// name; else `Btn<n>`.
+pub fn get_gamepad_key_name(gamepad_key: u32) -> String {
+    if gamepad_key >= GAMEPAD_AXIS_BASE {
+        const AXIS_NAMES: [&str; 6] = ["LX", "LY", "RX", "RY", "LT", "RT"];
+        let axis = (gamepad_key - GAMEPAD_AXIS_BASE) / 2;
+        let negative = (gamepad_key - GAMEPAD_AXIS_BASE) % 2 != 0;
+        let name = match AXIS_NAMES.get(axis as usize) {
+            Some(n) => n.to_string(),
+            None => format!("A{axis}"),
+        };
+        return name + if negative { "-" } else { "+" };
+    }
+    const BUTTON_NAMES: [&str; 15] = [
+        "A", "B", "X", "Y", "Back", "Guide", "Start", "LS", "RS", "LB", "RB", "Up", "Down", "Left",
+        "Right",
+    ];
+    match BUTTON_NAMES.get(gamepad_key as usize) {
+        Some(n) => n.to_string(),
+        None => format!("Btn{gamepad_key}"),
+    }
+}
 
 /// The Rust-only refusal boxes' texts (plan D5; Q2; 4½f Q2 for FollowAI), drawn at (160, 100)
 /// without clearing. A NUL breaks the line, as in the TC's own texts. Zero enabled weapons reuses
@@ -225,6 +456,77 @@ pub fn get_basename(path: &str) -> &str {
 /// `GetExtension(path)` (`filesystem.cpp:56-63`): after the last `.`, or `""` without one.
 pub fn get_extension(path: &str) -> &str {
     path.rsplit_once('.').map_or("", |(_, e)| e)
+}
+
+/// `Levenshtein(s1, s2)` (`mainMenuState.cpp:26-54`), loop for loop: the
+/// `(s2len + 1) × (s1len + 1)` matrix, rows over `s2`, `MIN3` picking the first of equal
+/// minima, each byte compared through `std::tolower` (ASCII only; a byte ≥ 0x80 is compared as
+/// itself — C++ passes a negative `char`, undefined, and no gate types one). The slices are what
+/// `strlen` sees.
+pub fn levenshtein(s1: &[u8], s2: &[u8]) -> u32 {
+    fn min3(a: u32, b: u32, c: u32) -> u32 {
+        if a < b {
+            if a < c { a } else { c }
+        } else if b < c {
+            b
+        } else {
+            c
+        }
+    }
+    let (s1len, s2len) = (s1.len(), s2.len());
+    let w = s1len + 1;
+    let mut matrix = vec![0u32; w * (s2len + 1)];
+    for x in 1..=s2len {
+        matrix[x * w] = matrix[(x - 1) * w] + 1;
+    }
+    for y in 1..=s1len {
+        matrix[y] = matrix[y - 1] + 1;
+    }
+    for x in 1..=s2len {
+        for y in 1..=s1len {
+            let c = u32::from(s1[y - 1].to_ascii_lowercase() != s2[x - 1].to_ascii_lowercase());
+            matrix[x * w + y] = min3(
+                matrix[(x - 1) * w + y] + 1,
+                matrix[x * w + y - 1] + 1,
+                matrix[(x - 1) * w + y - 1] + c,
+            );
+        }
+    }
+    matrix[s2len * w + s1len]
+}
+
+/// WEAPON n's typed name (`mainMenuState.cpp:398-417`): the 1-based index into `names` (the
+/// TC's weapon names in `weap_order`) with the smallest `Levenshtein(name, typed) / len(name)`,
+/// the first of equal ratios; `current` when nothing is taken. The caller never passes an empty
+/// `typed` (C++ tests `!result.empty()` first).
+///
+/// C++ compares `double` quotients with a strict `<` from `DBL_MAX`; this compares
+/// `d * l_best < d_best * l` in integers (finding 14), which is the same order: IEEE division is
+/// correctly rounded and monotonic, so equal ratios give equal doubles, and two different ratios
+/// whose lengths are below 2^16 (the box takes 10 bytes) differ by at least `1 / (l * l_best)`,
+/// more than 2^-32, while doubles below 2^16 are spaced at most 2^-37 apart, so their quotients
+/// keep their order. A name of length 0 gives C++ `inf` or `NaN`,
+/// which is never `<` anything, so it is never taken. The distance runs over the name up to its
+/// first NUL (`c_str()`), the length is the whole name's (`length()`).
+pub fn weapon_fuzzy_match(names: &[String], typed: &[u8], current: u32) -> u32 {
+    fn c_str(b: &[u8]) -> &[u8] {
+        b.iter().position(|&c| c == 0).map_or(b, |n| &b[..n])
+    }
+    let typed = c_str(typed);
+    let mut best = current;
+    let mut best_ratio: Option<(u64, u64)> = None;
+    for (i, name) in (1u32..).zip(names) {
+        let l = name.len() as u64;
+        if l == 0 {
+            continue;
+        }
+        let d = u64::from(levenshtein(c_str(name.as_bytes()), typed));
+        if best_ratio.is_none_or(|(bd, bl)| d * bl < bd * l) {
+            best = i;
+            best_ratio = Some((d, l));
+        }
+    }
+    best
 }
 
 /// What the menus read from the TC: `common.s[..]` strings (`tc.cfg [texts]`), `common.c[..]`
@@ -513,5 +815,247 @@ mod tests {
         ] {
             assert_eq!(t(r), "THIS SETUP CANNOT\0BE PLAYED YET");
         }
+    }
+
+    /// Addendum T0 P0: `Texts::key_names[i]` as the real C++ printed it (`PROBE_VECTORS`,
+    /// `$S/t0f2/vectors_rel.txt`), `<i>:<hex bytes>`, `-` for the empty string.
+    const KEY_NAMES_HEX: &str = "
+        0:- 1:457363 2:31 3:32 4:33 5:34 6:35 7:36
+        8:37 9:38 10:39 11:30 12:2b 13:60 14:4261636b7370616365 15:546162
+        16:51 17:57 18:45 19:52 20:54 21:59 22:55 23:49
+        24:4f 25:50 26:c385 27:5e 28:456e746572 29:4c656674204372746c 30:41 31:53
+        32:44 33:46 34:47 35:48 36:4a 37:4b 38:4c 39:c396
+        40:c384 41:c2bd 42:4c656674205368696674 43:27 44:5a 45:58 46:43 47:56
+        48:42 49:4e 50:4d 51:2c 52:2e 53:2d 54:5269676874205368696674 55:2a202850616429
+        56:4c65667420416c74 57:- 58:43617073204c6f636b 59:4631 60:4632 61:4633 62:4634 63:4635
+        64:4636 65:4637 66:4638 67:4639 68:463130 69:4e756d204c6f636b 70:5363726f6c6c204c6f636b 71:37202850616429
+        72:38202850616429 73:39202850616429 74:2d202850616429 75:34202850616429 76:35202850616429 77:36202850616429 78:2b202850616429 79:31202850616429
+        80:32202850616429 81:33202850616429 82:30202850616429 83:2c202850616429 84:- 85:- 86:3c 87:463131
+        88:463132 89:- 90:- 91:- 92:- 93:- 94:- 95:-
+        96:- 97:- 98:- 99:- 100:- 101:- 102:- 103:-
+        104:- 105:- 106:- 107:- 108:- 109:- 110:- 111:-
+        112:- 113:- 114:- 115:- 116:456e746572202850616429 117:5269676874204374726c 118:- 119:-
+        120:- 121:- 122:- 123:- 124:- 125:- 126:- 127:-
+        128:- 129:- 130:5072696e742053637265656e 131:- 132:- 133:- 134:- 135:-
+        136:- 137:- 138:- 139:- 140:- 141:2f202850616429 142:- 143:5072696e742053637265656e
+        144:526967687420416c74 145:- 146:- 147:- 148:- 149:- 150:- 151:-
+        152:- 153:- 154:- 155:- 156:- 157:- 158:- 159:486f6d65
+        160:5570 161:50616765205570 162:- 163:4c656674 164:- 165:5269676874 166:- 167:456e64
+        168:446f776e 169:5061676520446f776e 170:496e73657274 171:44656c657465 172:- 173:- 174:- 175:-
+        176:-
+    ";
+
+    fn unhex(s: &str) -> Vec<u8> {
+        if s == "-" {
+            return Vec::new();
+        }
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn key_names_are_the_cpp_table_byte_for_byte() {
+        // common.cpp:25-203, checked against Addendum T0 P0's hex table, all 177.
+        let entries: Vec<&str> = KEY_NAMES_HEX.split_whitespace().collect();
+        assert_eq!(entries.len(), 177);
+        assert_eq!(KEY_NAMES.len(), 177);
+        for (i, e) in entries.iter().enumerate() {
+            let (idx, hex) = e.split_once(':').unwrap();
+            assert_eq!(idx.parse::<usize>().unwrap(), i);
+            assert_eq!(KEY_NAMES[i].as_bytes(), unhex(hex), "key_names[{i}]");
+        }
+        // The spellings pitfall 16 pins: never "fixed".
+        assert_eq!(KEY_NAMES[29], "Left Crtl");
+        assert_eq!(KEY_NAMES[117], "Right Ctrl");
+        assert_eq!(KEY_NAMES[26].as_bytes(), [0xc3, 0x85], "Å");
+        assert_eq!((KEY_NAMES[12], KEY_NAMES[13]), ("+", "`"));
+        assert_eq!(KEY_NAMES[89], "", "APPLICATION's DOS code: a blank row");
+    }
+
+    #[test]
+    fn get_key_name_is_the_table_then_the_joystick_names() {
+        // gfx.cpp:828-840; Addendum T0 P0's GetKeyName vectors.
+        let cases: [(u32, &str); 18] = [
+            (0, ""),
+            (1, "Esc"),
+            (12, "+"),
+            (13, "`"),
+            (26, "Å"),
+            (27, "^"),
+            (29, "Left Crtl"),
+            (41, "½"),
+            (89, ""),
+            (176, ""),
+            (177, ""),
+            (300, ""),
+            (511, ""),
+            (512, "J0_0"),
+            (513, "J0_1"),
+            (543, "J0_31"),
+            (544, "J1_0"),
+            (1000, "J15_8"),
+        ];
+        for (k, name) in cases {
+            assert_eq!(get_key_name(k), name, "GetKeyName({k})");
+        }
+    }
+
+    #[test]
+    fn get_gamepad_key_name_is_the_buttons_then_the_axes() {
+        // gfx.cpp:842-859; Addendum T0 P0's GetGamepadKeyName vectors.
+        let cases: [(u32, &str); 33] = [
+            (0, "A"),
+            (1, "B"),
+            (2, "X"),
+            (3, "Y"),
+            (4, "Back"),
+            (5, "Guide"),
+            (6, "Start"),
+            (7, "LS"),
+            (8, "RS"),
+            (9, "LB"),
+            (10, "RB"),
+            (11, "Up"),
+            (12, "Down"),
+            (13, "Left"),
+            (14, "Right"),
+            (15, "Btn15"),
+            (99, "Btn99"),
+            (100, "LX+"),
+            (101, "LX-"),
+            (102, "LY+"),
+            (103, "LY-"),
+            (104, "RX+"),
+            (105, "RX-"),
+            (106, "RY+"),
+            (107, "RY-"),
+            (108, "LT+"),
+            (109, "LT-"),
+            (110, "RT+"),
+            (111, "RT-"),
+            (112, "A6+"),
+            (113, "A6-"),
+            (114, "A7+"),
+            (130, "A15+"),
+        ];
+        for (k, name) in cases {
+            assert_eq!(get_gamepad_key_name(k), name, "GetGamepadKeyName({k})");
+        }
+    }
+
+    #[test]
+    fn the_controller_names() {
+        // common.cpp:214-216; Addendum T0 P0.
+        assert_eq!(CONTROLLERS, ["Human", "CPU", "AI"]);
+    }
+
+    /// Addendum T0 P0: `Levenshtein(name, typed)` from the verbatim copy of
+    /// `mainMenuState.cpp:26-54`, for the 40 names in `weap_order` and the probe strings of
+    /// `LEV_PROBES`.
+    const LEV_PROBES: [&str; 8] = [
+        "bazoka",
+        "LSR",
+        "a",
+        "zzzzzzzzzz",
+        "BIG NUKE",
+        "big nuke",
+        "",
+        "la",
+    ];
+
+    fn lev_table() -> [(&'static str, [u32; 8]); 40] {
+        [
+            ("BAZOOKA", [1, 7, 6, 9, 6, 6, 7, 6]),
+            ("BIG NUKE", [6, 8, 8, 10, 0, 0, 8, 8]),
+            ("BLASTER", [5, 4, 6, 10, 7, 7, 7, 5]),
+            ("BOOBY TRAP", [8, 9, 9, 10, 8, 8, 10, 9]),
+            ("BOUNCY LARPA", [10, 10, 11, 12, 10, 10, 12, 10]),
+            ("BOUNCY MINE", [10, 11, 11, 11, 8, 8, 11, 11]),
+            ("CANNON", [5, 6, 5, 10, 7, 7, 6, 5]),
+            ("CHAINGUN", [7, 8, 7, 10, 7, 7, 8, 7]),
+            ("CHIQUITA BOMB", [11, 13, 12, 13, 11, 11, 13, 12]),
+            ("CLUSTER BOMB", [11, 9, 12, 12, 11, 11, 12, 11]),
+            ("CRACKLER", [7, 6, 7, 10, 8, 8, 8, 7]),
+            ("DART", [5, 3, 3, 10, 8, 8, 4, 3]),
+            ("DIRTBALL", [7, 7, 7, 10, 7, 7, 8, 7]),
+            ("DOOMSDAY", [7, 7, 7, 10, 8, 8, 8, 7]),
+            ("EXPLOSIVES", [9, 8, 10, 10, 9, 9, 10, 9]),
+            ("FAN", [5, 3, 2, 10, 7, 7, 3, 2]),
+            ("FLAMER", [6, 4, 5, 10, 8, 8, 6, 4]),
+            ("FLOAT MINE", [9, 9, 9, 10, 8, 8, 10, 8]),
+            ("GAUSS GUN", [8, 8, 8, 10, 8, 8, 9, 8]),
+            ("GRASSHOPPER", [9, 9, 10, 11, 10, 10, 11, 10]),
+            ("GREENBALL", [8, 9, 8, 10, 8, 8, 9, 8]),
+            ("GRENADE", [7, 7, 6, 10, 6, 6, 7, 6]),
+            ("HANDGUN", [6, 7, 6, 10, 7, 7, 7, 6]),
+            ("HELLRAIDER", [9, 8, 9, 10, 9, 9, 10, 8]),
+            ("LARPA", [4, 3, 4, 10, 8, 8, 5, 3]),
+            ("LASER", [5, 2, 4, 10, 8, 8, 5, 3]),
+            ("MINE", [6, 4, 4, 10, 5, 5, 4, 4]),
+            ("MINI NUKE", [8, 9, 9, 10, 3, 3, 9, 9]),
+            ("MINI ROCKETS", [10, 11, 12, 12, 8, 8, 12, 12]),
+            ("MINIGUN", [7, 7, 7, 10, 6, 6, 7, 7]),
+            ("MISSILE", [7, 6, 7, 10, 6, 6, 7, 6]),
+            ("NAPALM", [5, 6, 5, 10, 8, 8, 6, 5]),
+            ("RB RAMPAGE", [8, 9, 9, 10, 8, 8, 10, 9]),
+            ("RIFLE", [6, 5, 5, 10, 6, 6, 5, 4]),
+            ("SHOTGUN", [7, 7, 7, 10, 7, 7, 7, 7]),
+            ("SPIKEBALLS", [9, 9, 9, 10, 9, 9, 10, 9]),
+            ("SUPER SHOTGUN", [12, 12, 13, 13, 12, 12, 13, 13]),
+            ("UZI", [5, 3, 3, 9, 7, 7, 3, 3]),
+            ("WINCHESTER", [10, 8, 10, 10, 8, 8, 10, 10]),
+            ("ZIMM", [5, 4, 4, 9, 7, 7, 4, 4]),
+        ]
+    }
+
+    #[test]
+    fn levenshtein_is_the_cpp_copy() {
+        let tc = UiTc::load(std::path::Path::new(scenario::paths::TC_ROOT));
+        let table = lev_table();
+        let names: Vec<&str> = table.iter().map(|(n, _)| *n).collect();
+        assert_eq!(tc.weapon_names, names, "the TC's weap_order names");
+        for (name, row) in table {
+            for (typed, d) in LEV_PROBES.iter().zip(row) {
+                assert_eq!(
+                    levenshtein(name.as_bytes(), typed.as_bytes()),
+                    d,
+                    "Levenshtein({name:?}, {typed:?})"
+                );
+            }
+        }
+        assert_eq!(levenshtein(b"kitten", b"sitting"), 3);
+        assert_eq!(levenshtein(b"ABC", b"abc"), 0, "std::tolower per byte");
+        assert_eq!(levenshtein(b"a", b""), 1);
+    }
+
+    #[test]
+    fn weapon_fuzzy_match_is_the_real_menus_pick() {
+        // Addendum T0 P0, `v_fuzzy`: WEAPON 2's value before and after each box, in order.
+        let tc = UiTc::load(std::path::Path::new(scenario::paths::TC_ROOT));
+        let cases: [(&str, u32, u32); 7] = [
+            ("bazoka", 1, 1),
+            ("LSR", 1, 26),
+            ("a", 26, 16),
+            // A 14-way tie at ratio 1: the lowest index (BOOBY TRAP) wins.
+            ("zzzzzzzzzz", 16, 4),
+            ("BIG NUKE", 4, 2),
+            // LARPA 3/5 ties LASER 3/5: the lower index wins.
+            ("la", 2, 25),
+            ("bazoka", 25, 1),
+        ];
+        for (typed, current, want) in cases {
+            assert_eq!(
+                weapon_fuzzy_match(&tc.weapon_names, typed.as_bytes(), current),
+                want,
+                "{typed:?} from {current}"
+            );
+        }
+        assert_eq!(
+            weapon_fuzzy_match(&[], b"x", 7),
+            7,
+            "no names: the current value"
+        );
     }
 }

@@ -247,7 +247,7 @@ fn bonus_slots(st: &SimState) -> Vec<Option<(i32, i32)>> {
 }
 
 fn total(st: &SimState, i: usize) -> i64 {
-    i64::from(st.worms[i].lives) * i64::from(st.settings_health) + i64::from(st.worms[i].health)
+    i64::from(st.worms[i].lives) * i64::from(st.worms[i].max_health) + i64::from(st.worms[i].health)
 }
 
 fn angles_ok(st: &SimState) -> bool {

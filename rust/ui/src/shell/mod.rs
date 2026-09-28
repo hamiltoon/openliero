@@ -241,6 +241,9 @@ pub struct ShellDebug {
     /// LOAD SETUP's detach of the current match (Step 4½e-2, plan D17): `false` keeps it
     /// attached, so RESUME resyncs it to the loaded setup.
     pub load_detach: bool,
+    /// The match's AI step (4½f-1 D8): `false` leaves a CPU worm's word as its keys made it
+    /// (the G2f-1 negative control).
+    pub ais: bool,
 }
 
 impl Default for ShellDebug {
@@ -249,6 +252,7 @@ impl Default for ShellDebug {
             resume_sync: true,
             small_labels: true,
             load_detach: true,
+            ais: true,
         }
     }
 }
@@ -472,7 +476,8 @@ impl Shell {
             }
             Screen::Playing => {
                 let m = self.current.as_mut().expect("Playing has a match");
-                let (keep, ticked) = m.process(sim, input.sampled, &mut out.menu_sounds);
+                let (keep, ticked) =
+                    m.process(sim, input.sampled, self.debug.ais, &mut out.menu_sounds);
                 out.sim_ticked = ticked;
                 keep
             }
@@ -742,6 +747,10 @@ impl Shell {
                 match parsed {
                     Ok(s) => {
                         self.world.settings = s;
+                        // 4½f-1 D3: a phone cannot drive a setup's human player 2.
+                        if self.options.touch_only {
+                            selection::touch_settings(&mut self.world.settings);
+                        }
                         self.world.setup_name = name;
                         if self.debug.load_detach
                             && let Some(m) = self.current.as_mut()
@@ -817,7 +826,10 @@ impl Shell {
                         apply_live_settings(sim, &self.world.settings);
                         m.resync(&self.world.settings);
                     }
+                    // `Game::Focus` rewrites the renderer's worm ramps (4½f-1 D9), which the
+                    // menus draw with too (T0 P6: the menu after the resumed play shows them).
                     m.focus(&input.sampled);
+                    self.world.origpal = m.origpal().clone();
                     out.routed = Some(Route::Resume);
                 }
                 other => unreachable!("main-menu item {other} never selects (4½d §5, 4½e-1)"),
@@ -2518,7 +2530,97 @@ mod tests {
     }
 
     #[test]
-    fn new_game_refuses_zero_weapons_and_unequal_healths() {
+    fn new_game_and_f1_refuse_a_follow_ai_player_with_a_box_and_the_menu_stays() {
+        // 4½f Q2 (John): an "AI" (FollowAI, controller 2) player is refused at NEW GAME, the
+        // Holdazone way (4½f-1 D1).
+        let select = hooks().hooks.select;
+        for worm in 0..2 {
+            for (key, sounds) in [(DK_RETURN, vec![select]), (DK_F1, vec![])] {
+                let (mut sh, mut sim, o) =
+                    refused_new_game(|s| s.worm_settings[worm].controller = 2, key);
+                let refusal =
+                    overlay::Refusal::Build(scenario::build::BuildError::FollowAiUnsupported {
+                        worm,
+                    });
+                assert_eq!(o.menu_sounds, sounds);
+                assert_eq!((sh.top_char(), sh.menu_fading()), ('B', false));
+                assert_eq!(sh.top_refusal(), Some(&refusal));
+                let b = top_box(&sh);
+                assert_eq!(
+                    (b.text.as_str(), b.x, b.y, b.clear_screen),
+                    ("AI PLAYERS ARE NOT\0SUPPORTED YET", 160, 100, false)
+                );
+                assert_eq!(b.purpose, InfoPurpose::Refused(refusal));
+                assert!(
+                    idle(&mut sh, &mut sim, 40)
+                        .iter()
+                        .all(|o| o.routed.is_none()),
+                    "never routed"
+                );
+                assert!(sh.current().is_none(), "no match started");
+                tap(&mut sh, &mut sim, 57);
+                assert_eq!((sh.top_char(), sh.main_selection()), ('M', MA_NEW_GAME));
+                // A CPU (or a human) starts.
+                sh.settings_mut().worm_settings[worm].controller = 1;
+                let outs = until_routed(&mut sh, &mut sim, DK_RETURN);
+                assert_eq!(
+                    outs.last().unwrap().routed,
+                    Some(Route::NewGame { seed: 21 })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resume_never_refuses_a_follow_ai_player() {
+        // CONTROLLER never reaches a running match (design finding 7): a paused, attached match
+        // whose settings now say controller 2 resumes (4½f-1 D1).
+        let (mut sh, mut sim, _) = boot();
+        start_match(&mut sh, &mut sim);
+        to_menu(&mut sh, &mut sim);
+        assert!(sh.current().unwrap().attached());
+        sh.settings_mut().worm_settings[1].controller = 2;
+        let outs = until_routed(&mut sh, &mut sim, DK_F1);
+        assert_eq!(outs.last().unwrap().routed, Some(Route::Resume));
+        assert_eq!(sh.top_refusal(), None);
+        let cycles = sim.cycles;
+        idle(&mut sh, &mut sim, 3);
+        assert!(sim.cycles > cycles, "the match ticks again");
+    }
+
+    #[test]
+    fn unequal_healths_boot_start_and_play_at_each_worms_own_max() {
+        // 4½f-1 T3: no refusal, and the boot no longer copies player 1's health.
+        let mut settings = Settings::default();
+        settings.worm_settings[0].health = 70;
+        settings.worm_settings[1].health = 250;
+        let seeds = SeedSource::Scripted {
+            boot: 11,
+            matches: VecDeque::from([21]),
+        };
+        let (mut sh, mut sim, _) = Shell::boot(
+            tc(),
+            settings,
+            Box::new(MemoryStore::new()),
+            seeds,
+            0,
+            StartOptions::default(),
+        );
+        assert_eq!(
+            (sim.worms[0].max_health, sim.worms[1].max_health),
+            (70, 250),
+            "the boot game"
+        );
+        start_match(&mut sh, &mut sim);
+        assert_eq!(
+            (sim.worms[0].max_health, sim.worms[1].max_health),
+            (70, 250)
+        );
+        assert_eq!((sim.worms[0].health, sim.worms[1].health), (70, 250));
+    }
+
+    #[test]
+    fn new_game_refuses_zero_weapons_and_blood_max_but_not_unequal_healths() {
         let (sh, _, _) = refused_new_game(|s| s.weap_table = [2; 40], DK_RETURN);
         assert_eq!(
             (top_box(&sh).text.as_str(), &top_box(&sh).purpose),
@@ -2529,10 +2631,18 @@ mod tests {
                 ))
             )
         );
-        let (sh, _, _) = refused_new_game(|s| s.worm_settings[1].health = 50, DK_RETURN);
-        assert_eq!(top_box(&sh).text, "BOTH PLAYERS NEED\0THE SAME HEALTH");
         let (sh, _, _) = refused_new_game(|s| s.blood_particle_max = 0, DK_RETURN);
         assert_eq!(top_box(&sh).text, "THIS SETUP CANNOT\0BE PLAYED YET");
+        let (mut sh, mut sim, o) = refused_new_game(|s| s.worm_settings[1].health = 50, DK_RETURN);
+        assert_eq!(sh.top_refusal(), None, "4½f-1 T3: unequal healths play");
+        let mut routed = o.routed;
+        for _ in 0..300 {
+            if routed.is_some() {
+                break;
+            }
+            routed = step(&mut sh, &mut sim, &[], [0, 0]).routed;
+        }
+        assert_eq!(routed, Some(Route::NewGame { seed: 21 }));
     }
 
     #[test]
@@ -2571,6 +2681,13 @@ mod tests {
         s.map = false;
         s.names_on_bonuses = true;
         s.lives = 3;
+        s.worm_settings[0].health = 30;
+        s.worm_settings[1].health = 250;
+    }
+
+    /// Both worms' `max_health` (4½f-1: HEALTH is live, `apply_live_settings`).
+    fn maxes(sim: &SimState) -> [i32; 2] {
+        [sim.worms[0].max_health, sim.worms[1].max_health]
     }
 
     fn live_fields(sim: &SimState) -> (i32, Vec<i32>, u32, i32, i32, i32, bool, bool) {
@@ -2592,9 +2709,12 @@ mod tests {
         start_match(&mut sh, &mut sim);
         to_menu(&mut sh, &mut sim);
         let before = live_fields(&sim);
+        assert_eq!(maxes(&sim), [100, 100]);
         edited(sh.settings_mut());
         assert_eq!(live_fields(&sim), before, "the menu never touches the sim");
+        assert_eq!(maxes(&sim), [100, 100]);
         until_routed(&mut sh, &mut sim, DK_F1);
+        assert_eq!(maxes(&sim), [30, 250], "RESUME brings both maxes (T0 P5)");
         let st = sh.settings();
         let want = (
             st.max_bonuses,
@@ -2629,6 +2749,7 @@ mod tests {
             edited(sh.settings_mut());
             until_routed(&mut sh, &mut sim, DK_F1);
             assert_eq!(live_fields(&sim), before, "detach {detach}");
+            assert_eq!(maxes(&sim), [100, 100], "detach {detach}");
             assert_eq!(*sh.current().unwrap().settings(), settings);
         }
     }
@@ -2713,8 +2834,8 @@ mod tests {
                 "HOLDAZONE IS NOT\0SUPPORTED YET",
             ),
             (
-                |s| s.worm_settings[0].health = 70,
-                "BOTH PLAYERS NEED\0THE SAME HEALTH",
+                |s| s.worm_settings[1].controller = 2,
+                "AI PLAYERS ARE NOT\0SUPPORTED YET",
             ),
             (
                 |s| s.blood_particle_max = 0,
@@ -3438,5 +3559,556 @@ mod tests {
         );
         assert_eq!(o.notes.len(), 1, "{:?}", o.notes);
         assert!(o.notes[0].starts_with("SAVE SETUP AS: Setups/mine.cfg: "));
+    }
+
+    // Step 4½f-1 (T7 Step 4): the CPU player (`DumbLieroAI`) through `Shell::frame`.
+    mod cpu {
+        use sim::ai::DumbLieroAi;
+        use sim::hash::hash_game_state;
+        use sim_core::fixed::ftoi;
+
+        use super::*;
+        use crate::keys::KeyEdges;
+        use crate::shell::selection::{BOT_WEAPONS_KEEP, CONTROLLER_BOT};
+
+        /// C++ `Settings()` with player 2 the CPU and BOT WEAPONS KEEP (ready at once with its
+        /// saved picks: BIG NUKE, MINI NUKE, DOOMSDAY, CRACKLER, NAPALM, so it dies too), and
+        /// REGENERATE LEVEL on, so every NEW GAME generates its level from its own seed.
+        fn cpu_settings() -> Settings {
+            let mut s = Settings::default();
+            s.worm_settings[1].controller = CONTROLLER_BOT;
+            s.worm_settings[1].weapons = [2, 28, 14, 11, 32];
+            s.select_bot_weapons = BOT_WEAPONS_KEEP;
+            s.regenerate_level = true;
+            s
+        }
+
+        fn boot_with(
+            settings: Settings,
+            matches: &[u32],
+            touch_only: bool,
+        ) -> (Shell, SimState) {
+            let seeds = SeedSource::Scripted {
+                boot: 11,
+                matches: VecDeque::from(matches.to_vec()),
+            };
+            let options = StartOptions {
+                touch_only,
+                ..StartOptions::default()
+            };
+            let (sh, sim, _) = Shell::boot(
+                tc(),
+                settings,
+                Box::new(MemoryStore::new()),
+                seeds,
+                0,
+                options,
+            );
+            (sh, sim)
+        }
+
+        fn m(sh: &Shell) -> &Match {
+            sh.current().expect("a match")
+        }
+
+        /// Menu → NEW GAME → the selection (the CPU ready at once) → P1 Up, Fire: the frame
+        /// that finalises it (no tick, no AI). P2's keys are never pressed.
+        fn start_cpu_match(sh: &mut Shell, sim: &mut SimState) {
+            idle(sh, sim, 40);
+            until_routed(sh, sim, DK_RETURN);
+            let ws = m(sh).weapon_selection().expect("selection");
+            assert!(
+                !ws.player(0).ready && ws.player(1).ready,
+                "KEEP: the CPU is ready on the selection's first frame (weapsel.cpp:95)"
+            );
+            for w in [1, 0] {
+                step(sh, sim, &[], [w, 0]);
+            }
+            let o = step(sh, sim, &[], [16, 0]);
+            assert!(!o.sim_ticked && sh.phase() == Phase::Game, "DONE finalises");
+            assert_eq!(m(sh).ai(1).unwrap().rand.draws(), 0, "no AI in selection");
+        }
+
+        /// Player 1 presses FIRE on every other tick while it waits to respawn and is idle
+        /// otherwise, so the CPU has a target; player 2 has no key at all.
+        fn p1_word(sim: &SimState) -> u32 {
+            u32::from(!sim.worms[0].visible && sim.cycles % 2 == 0) * 16
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        struct Tick {
+            pub word: u32,
+            pub visible: bool,
+            pub pos: (i32, i32),
+            pub lives: [i32; 2],
+            pub last: u32,
+            pub hash: u32,
+        }
+
+        /// `n` frames of [`p1_word`]; one [`Tick`] per frame (every one ticks the match).
+        fn drive(sh: &mut Shell, sim: &mut SimState, n: usize) -> Vec<Tick> {
+            (0..n)
+                .map(|_| {
+                    let o = step(sh, sim, &[], [p1_word(sim), 0]);
+                    assert!(o.sim_ticked);
+                    let w = &sim.worms[1];
+                    Tick {
+                        word: w.control_states.pack(),
+                        visible: w.visible,
+                        pos: (ftoi(w.pos.x), ftoi(w.pos.y)),
+                        lives: [sim.worms[0].lives, w.lives],
+                        last: m(sh).ai(1).unwrap().rand.last(),
+                        hash: hash_game_state(sim),
+                    }
+                })
+                .collect()
+        }
+
+        /// Whether player 2 was visible, then not, then visible again.
+        fn died_and_respawned(ticks: &[Tick]) -> bool {
+            let mut phase = 0;
+            for t in ticks {
+                phase = match (phase, t.visible) {
+                    (0, true) | (1, true) => 1,
+                    (1, false) | (2, false) => 2,
+                    (2, true) | (3, _) => 3,
+                    (p, _) => p,
+                };
+            }
+            phase == 3
+        }
+
+        /// The pinned CPU match, found by [`search_cpu_seeds`] over seeds 1..=40 (22 of them
+        /// qualify; 8 dies first): with [`p1_word`] and no P2 key, the CPU is visible, dies (by
+        /// its own explosives, on match tick 597) and is visible again within 1,500 ticks, and
+        /// player 1 never dies. With `lives = 1` that death is the game over.
+        const CPU_SEED: u32 = 8;
+
+        #[test]
+        fn a_cpu_player_fights_dies_and_respawns_without_a_key() {
+            let (mut sh, mut sim) = boot_with(cpu_settings(), &[CPU_SEED], false);
+            start_cpu_match(&mut sh, &mut sim);
+            assert!(!m(&sh).is_cpu(0) && m(&sh).is_cpu(1));
+            let ticks = drive(&mut sh, &mut sim, 1500);
+            assert_eq!(
+                ticks[0].last, 0x2af0_9813,
+                "the first tick of a fresh mt19937(0x1337) AI (T0 P1)"
+            );
+            assert!(ticks.iter().any(|t| t.word != 0), "the CPU presses keys");
+            let seen: Vec<(i32, i32)> = ticks.iter().filter(|t| t.visible).map(|t| t.pos).collect();
+            assert!(
+                seen.windows(2).any(|w| w[0] != w[1]),
+                "the CPU moves while visible"
+            );
+            assert!(
+                died_and_respawned(&ticks),
+                "the CPU dies and respawns by itself"
+            );
+            assert!(m(&sh).ai_traces()[1].ran && !m(&sh).ai_traces()[0].ran);
+        }
+
+        #[test]
+        fn the_match_runs_the_ai_on_the_edge_word_before_the_tick_in_cpp_order() {
+            // A hand driver on its own state, built as the NEW GAME builds it: `edges.apply`,
+            // then each CPU's `DumbLieroAi::process` in `(k + cycles % 2) % 2` order
+            // (localController.cpp:156-164), then the sim tick. Same states and AI draws on
+            // every tick.
+            let settings = cpu_settings();
+            let (mut sh, mut sim) = boot_with(settings.clone(), &[CPU_SEED], false);
+            start_cpu_match(&mut sh, &mut sim);
+            let cfg = scenario::settings::MatchConfig {
+                settings: settings.clone(),
+                seed: CPU_SEED,
+            };
+            let level = generate_level(tc(), &settings, None, CPU_SEED);
+            let mut h = scenario::build::new_match(tc(), &cfg, &level)
+                .unwrap()
+                .state;
+            let wcfg = scenario::build::weapsel_config(&settings);
+            let mut ws = sim::weapsel::WeaponSelection::new(&mut h, &wcfg).unwrap();
+            for (w, done) in [(1, false), (0, false), (16, true)] {
+                let inputs = [ControlState::unpack(w), ControlState::unpack(0)];
+                assert_eq!(ws.process_frame(&mut h, &inputs), done);
+            }
+            ws.finalize(&mut h);
+            scenario::build::enter_game(&mut h, &cfg);
+            assert_eq!(hash_game_state(&h), hash_game_state(&sim), "the same start");
+            let mut edges = KeyEdges::default();
+            let mut ais = [None, Some(DumbLieroAi::new())];
+            let mut words = Vec::new();
+            for k in 0..1500 {
+                // Two empty ticks first: the DONE latch lets go (keys::ReleaseLatch).
+                let p1 = if k < 2 { 0 } else { p1_word(&h) };
+                let mut inputs = edges.apply(
+                    &[ControlState::unpack(p1), ControlState::unpack(0)],
+                    &h.worms,
+                );
+                for i in 0..2 {
+                    let w = (i + h.cycles.rem_euclid(2) as usize) % 2;
+                    if let Some(ai) = ais[w].as_mut() {
+                        inputs[w] = ai.process(&h, w, inputs[w]);
+                    }
+                }
+                words.push(inputs[1].pack());
+                h.process_frame(&inputs);
+                h.drain_shake_events();
+                assert!(step(&mut sh, &mut sim, &[], [p1, 0]).sim_ticked);
+                assert_eq!(hash_game_state(&h), hash_game_state(&sim), "tick {k}");
+                assert_eq!(h.worms[1].control_states, sim.worms[1].control_states);
+                assert_eq!(
+                    ais[1].as_ref().unwrap().rand.last(),
+                    m(&sh).ai(1).unwrap().rand.last()
+                );
+            }
+            assert!(words.iter().any(|&w| w != 0));
+        }
+
+        #[test]
+        fn no_ai_runs_in_selection_and_a_pick_bot_takes_its_players_keys() {
+            // Plan fact 5, T0 P3: BOT WEAPONS PICK. P2's keys drive the CPU's menu exactly as
+            // they drive a human player 2's (the same words and states on every selection
+            // frame, no AI draw); the AI starts on the first match tick.
+            let run = |controller: u32| {
+                let mut s = Settings::default();
+                s.worm_settings[1].controller = controller;
+                assert_eq!(s.select_bot_weapons, 1, "PICK");
+                let (mut sh, mut sim) = boot_with(s, &[CPU_SEED], false);
+                idle(&mut sh, &mut sim, 40);
+                until_routed(&mut sh, &mut sim, DK_RETURN);
+                let p2 = *m(&sh).weapon_selection().unwrap().player(1);
+                assert!(!p2.ready);
+                let mut frames =
+                    vec![(sim.worms[1].control_states, hash_game_state(&sim), Some(p2))];
+                // P2: Down, Right (weapon 1 changes), Up, Up (DONE!), Fire; then P1 Up, Fire.
+                for w in [
+                    [0, 2],
+                    [0, 0],
+                    [0, 8],
+                    [0, 0],
+                    [0, 1],
+                    [0, 0],
+                    [0, 1],
+                    [0, 0],
+                    [0, 16],
+                    [0, 0],
+                    [1, 0],
+                    [0, 0],
+                    [16, 0],
+                ] {
+                    let o = step(&mut sh, &mut sim, &[], w);
+                    assert!(!o.sim_ticked);
+                    let p2 = m(&sh).weapon_selection().map(|ws| *ws.player(1));
+                    if controller == 1 {
+                        assert_eq!(m(&sh).ai(1).unwrap().rand.draws(), 0, "no AI draw");
+                        assert!(!m(&sh).ai_traces()[1].ran);
+                    }
+                    frames.push((sim.worms[1].control_states, hash_game_state(&sim), p2));
+                }
+                assert_eq!(sh.phase(), Phase::Game, "both DONE");
+                (sh, sim, frames)
+            };
+            let (mut sh, mut sim, cpu) = run(CONTROLLER_BOT);
+            let (_, _, human) = run(0);
+            assert_eq!(cpu, human, "the AI is invisible in selection");
+            let p2: Vec<_> = cpu.iter().filter_map(|f| f.2).collect();
+            assert_ne!(
+                p2[0].cursor, p2[1].cursor,
+                "P2's Down moves the CPU's cursor"
+            );
+            assert_ne!(p2[0].picks, p2[3].picks, "P2's Right changes its weapon 1");
+            assert!(
+                p2.last().unwrap().ready,
+                "P2's Fire on DONE! readies the CPU"
+            );
+            assert!(m(&sh).is_cpu(1));
+            step(&mut sh, &mut sim, &[], [0, 0]);
+            assert!(m(&sh).ai_traces()[1].ran);
+            assert_eq!(
+                m(&sh).ai(1).unwrap().rand.last(),
+                0x2af0_9813,
+                "the first draws on the first match tick"
+            );
+        }
+
+        /// The AI's per-frame (draws, P2 word) over frames that each tick the match.
+        fn ai_frames(sh: &Shell, sim: &SimState) -> (u64, u32) {
+            (
+                m(sh).ai(1).unwrap().rand.draws(),
+                sim.worms[1].control_states.pack(),
+            )
+        }
+
+        fn assert_ai_ran_on_each(frames: &[(u64, u32)], what: &str) {
+            assert!(
+                frames.windows(2).all(|w| w[1].0 > w[0].0),
+                "{what}: the AI draws on every tick"
+            );
+            assert!(
+                frames.windows(2).any(|w| w[1].1 != w[0].1),
+                "{what}: P2's word changes"
+            );
+        }
+
+        #[test]
+        fn the_esc_fade_and_the_post_mortem_still_run_the_ai() {
+            // kStateGame / kStateGameEnded: every tick the match processes runs the AIs
+            // (localController.cpp:156-175, plan fact 5).
+            // Esc where the undisturbed run's P2 word changes within the next 32 ticks (the fade
+            // ticks are those same ticks: Esc touches no worm).
+            let (mut sh, mut sim) = boot_with(cpu_settings(), &[CPU_SEED], false);
+            start_cpu_match(&mut sh, &mut sim);
+            let reference = drive(&mut sh, &mut sim, 1500);
+            let esc = (100..1400)
+                .find(|&k| {
+                    reference[k - 1..k + 32]
+                        .windows(2)
+                        .any(|w| w[0].word != w[1].word)
+                })
+                .expect("the CPU acts");
+            let (mut sh, mut sim) = boot_with(cpu_settings(), &[CPU_SEED], false);
+            start_cpu_match(&mut sh, &mut sim);
+            drive(&mut sh, &mut sim, esc);
+            let mut fade = vec![ai_frames(&sh, &sim)];
+            let p1 = p1_word(&sim);
+            let mut o = step(&mut sh, &mut sim, &[ev(DK_ESCAPE, true)], [p1, 0]);
+            fade.push(ai_frames(&sh, &sim));
+            let mut up = vec![ev(DK_ESCAPE, false)];
+            while o.routed.is_none() {
+                let p1 = p1_word(&sim);
+                o = step(&mut sh, &mut sim, &up, [p1, 0]);
+                up.clear();
+                assert!(o.sim_ticked);
+                fade.push(ai_frames(&sh, &sim));
+            }
+            assert_eq!(fade.len(), 33, "32 fade ticks");
+            assert_ai_ran_on_each(&fade, "the Esc fade");
+
+            let mut s = cpu_settings();
+            s.lives = 1;
+            let (mut sh, mut sim) = boot_with(s, &[CPU_SEED], false);
+            start_cpu_match(&mut sh, &mut sim);
+            let mut k = 0;
+            while !sim::game_over::is_game_over(&sim) {
+                let p1 = p1_word(&sim);
+                step(&mut sh, &mut sim, &[], [p1, 0]);
+                k += 1;
+                assert!(k < 4000, "the pinned match ends");
+            }
+            let mut post = vec![ai_frames(&sh, &sim)];
+            while sh.phase() == Phase::Game {
+                let o = step(&mut sh, &mut sim, &[], [0, 0]);
+                if !o.sim_ticked {
+                    break;
+                }
+                post.push(ai_frames(&sh, &sim));
+            }
+            assert!(post.len() > 150, "the post-mortem ({} ticks)", post.len());
+            assert_ai_ran_on_each(&post, "the post-mortem");
+            assert_eq!(sh.top_char(), 'M', "back to the menu");
+        }
+
+        #[test]
+        fn every_new_game_makes_a_fresh_ai() {
+            // CreateAi runs in every NEW GAME's LocalController (T0 P1): the second match
+            // replays the first one's words exactly (the level regenerates from the same seed).
+            let (mut sh, mut sim) = boot_with(cpu_settings(), &[CPU_SEED, CPU_SEED], false);
+            start_cpu_match(&mut sh, &mut sim);
+            let first = drive(&mut sh, &mut sim, 200);
+            to_menu(&mut sh, &mut sim);
+            sh.main_menu_mut().move_to_id(MA_NEW_GAME);
+            let outs = until_routed(&mut sh, &mut sim, DK_RETURN);
+            assert_eq!(
+                outs.last().unwrap().routed,
+                Some(Route::NewGame { seed: CPU_SEED })
+            );
+            for w in [1, 0, 16] {
+                step(&mut sh, &mut sim, &[], [w, 0]);
+            }
+            assert_eq!(m(&sh).ai(1).unwrap().rand.draws(), 0);
+            let second = drive(&mut sh, &mut sim, 200);
+            assert_eq!(first, second);
+        }
+
+        #[test]
+        fn two_shell_runs_with_the_same_seeds_hash_alike() {
+            // Plan D13 (no recorded-CPU replay yet): the CPU match is deterministic.
+            let run = || {
+                let (mut sh, mut sim) = boot_with(cpu_settings(), &[CPU_SEED], false);
+                start_cpu_match(&mut sh, &mut sim);
+                drive(&mut sh, &mut sim, 1000)
+            };
+            let (a, b) = (run(), run());
+            assert_eq!(
+                a.iter().map(|t| t.hash).collect::<Vec<_>>(),
+                b.iter().map(|t| t.hash).collect::<Vec<_>>()
+            );
+            assert_eq!(a, b);
+        }
+
+        #[test]
+        fn the_skip_route_runs_the_ai_from_tick_zero() {
+            let opts = StartOptions {
+                skip_selection: true,
+                loadout: vec!["BAZOOKA".into()],
+                touch_only: false,
+            };
+            let (mut sh, mut sim, out) = Shell::boot_playing(
+                tc(),
+                cpu_settings(),
+                Box::new(MemoryStore::new()),
+                SeedSource::Fixed(7),
+                0,
+                opts,
+            );
+            assert_eq!(out.phase, Phase::Game);
+            assert!(m(&sh).is_cpu(1) && !m(&sh).is_cpu(0));
+            assert_eq!(m(&sh).ai(1).unwrap().rand.draws(), 0);
+            assert!(step(&mut sh, &mut sim, &[], [0, 0]).sim_ticked);
+            assert!(m(&sh).ai_traces()[1].ran);
+            assert_eq!(m(&sh).ai(1).unwrap().rand.last(), 0x2af0_9813);
+        }
+
+        #[test]
+        fn resume_reapplies_the_worm_colours_while_attached() {
+            // D9, T0 P6: Game::Focus rewrites the ramps on every RESUME, from the game's
+            // settings (the menu's while attached, the old object after LOAD SETUP), and the
+            // menus draw with them afterwards.
+            let red = [255, 20, 20];
+            for (edit, detach) in [(false, false), (true, false), (true, true)] {
+                let (mut sh, mut sim, _) = boot();
+                start_match(&mut sh, &mut sim);
+                to_menu(&mut sh, &mut sim);
+                let old = m(&sh).origpal().clone();
+                if detach {
+                    sh.current.as_mut().unwrap().detach();
+                }
+                if edit {
+                    sh.settings_mut().worm_settings[0].rgb = red;
+                }
+                until_routed(&mut sh, &mut sim, DK_F1);
+                let got = m(&sh).origpal().clone();
+                let mut want = old.clone();
+                if edit && !detach {
+                    render::palette::set_worm_colour(&mut want, 0, red);
+                    assert_ne!(got, old, "the new ramp");
+                }
+                assert_eq!(got, want, "edit {edit} detach {detach}");
+                assert_eq!(sh.world.origpal, got, "the menus' palette follows");
+            }
+        }
+
+        #[test]
+        fn unequal_healths_start_and_resume_at_each_worms_own_max() {
+            let mut settings = Settings::default();
+            settings.worm_settings[0].health = 40;
+            settings.worm_settings[1].health = 250;
+            let (mut sh, mut sim) = boot_with(settings, &[21], false);
+            start_match(&mut sh, &mut sim);
+            assert_eq!(maxes(&sim), [40, 250]);
+            assert_eq!((sim.worms[0].health, sim.worms[1].health), (40, 250));
+            to_menu(&mut sh, &mut sim);
+            sh.settings_mut().worm_settings[0].health = 30;
+            until_routed(&mut sh, &mut sim, DK_F1);
+            assert_eq!(maxes(&sim), [30, 250], "RESUME brings the max (T0 P5)");
+            assert_eq!(sim.worms[0].health, 40, "no tick yet");
+            assert!(step(&mut sh, &mut sim, &[], [0, 0]).sim_ticked);
+            assert_eq!(
+                (sim.worms[0].health, sim.worms[1].health),
+                (30, 250),
+                "the clamp (worm.cpp:213) on the first resumed tick"
+            );
+        }
+
+        #[test]
+        fn a_touch_only_load_setup_makes_player_two_the_cpu_again() {
+            assert_eq!(super::orbmit().worm_settings[1].controller, 0);
+            for touch_only in [false, true] {
+                let seeds = SeedSource::Scripted {
+                    boot: 11,
+                    matches: VecDeque::from([21]),
+                };
+                let (mut sh, mut sim, _) = Shell::boot(
+                    tc(),
+                    Settings::default(),
+                    Box::new(files::tests::install()),
+                    seeds,
+                    0,
+                    StartOptions {
+                        touch_only,
+                        ..StartOptions::default()
+                    },
+                );
+                idle(&mut sh, &mut sim, 40);
+                load_setup(&mut sh, &mut sim, 1);
+                let mut want = super::orbmit();
+                if touch_only {
+                    want.worm_settings[1].controller = CONTROLLER_BOT;
+                }
+                assert_eq!(*sh.settings(), want, "touch_only {touch_only}");
+            }
+        }
+
+        #[test]
+        fn a_touch_only_new_game_gives_the_cpu_random_weapons_ready_at_once() {
+            // D3's selection half: BOT WEAPONS RANDOM draws the picks in the constructor
+            // (weapsel.cpp:57-61), which a live match allows (only a G2 case refuses it).
+            let mut s = cpu_settings();
+            s.select_bot_weapons = 1; // PICK in the file: the touch rule overrides it
+            let picks = |touch_only: bool| {
+                let (mut sh, mut sim) = boot_with(s.clone(), &[CPU_SEED], touch_only);
+                idle(&mut sh, &mut sim, 40);
+                until_routed(&mut sh, &mut sim, DK_RETURN);
+                let ws = m(&sh).weapon_selection().unwrap();
+                assert!(!ws.player(0).ready, "P1 is human");
+                (ws.player(1).ready, ws.player(1).picks, sim.rand.draws())
+            };
+            let (desk_ready, desk_picks, desk_draws) = picks(false);
+            let (ready, random, draws) = picks(true);
+            assert!(!desk_ready && ready, "PICK on a desktop; RANDOM on a phone");
+            assert_eq!(desk_picks, s.worm_settings[1].weapons, "the saved picks");
+            assert_eq!(draws, desk_draws + 5, "five rand(1, 41) draws");
+            assert_ne!(random, desk_picks);
+            assert!(random.iter().all(|&p| (1..=40).contains(&p)));
+        }
+
+        #[test]
+        fn the_ais_switch_leaves_a_cpu_to_its_keys() {
+            // `ShellDebug::ais` (the G2f-1 negative control): no AI step, so the CPU worm plays
+            // on its keys' edge words, as a human would: with no key, an empty word.
+            let (mut sh, mut sim) = boot_with(cpu_settings(), &[CPU_SEED], false);
+            sh.debug_mut().ais = false;
+            start_cpu_match(&mut sh, &mut sim);
+            let ticks = drive(&mut sh, &mut sim, 300);
+            assert!(m(&sh).is_cpu(1));
+            assert_eq!(m(&sh).ai(1).unwrap().rand.draws(), 0);
+            assert!(!m(&sh).ai_traces()[1].ran);
+            assert!(ticks.iter().all(|t| t.word == 0));
+        }
+
+        #[test]
+        #[ignore = "the seed search behind the pinned CPU seeds (run by hand)"]
+        fn search_cpu_seeds() {
+            let lo: u32 = std::env::var("CPU_SEARCH_LO").map_or(1, |v| v.parse().unwrap());
+            let hs: Vec<_> = (0..4u32)
+                .map(|t| {
+                    std::thread::spawn(move || {
+                        for seed in (lo..lo + 40).filter(|s| s % 4 == t) {
+                            let (mut sh, mut sim) = boot_with(cpu_settings(), &[seed], false);
+                            start_cpu_match(&mut sh, &mut sim);
+                            let ticks = drive(&mut sh, &mut sim, 1500);
+                            let first_death = ticks.iter().position(|t| t.lives != [15, 15]);
+                            println!(
+                                "seed {seed}: respawn {} first death {first_death:?} lives {:?}",
+                                died_and_respawned(&ticks),
+                                ticks.last().unwrap().lives
+                            );
+                        }
+                    })
+                })
+                .collect();
+            for h in hs {
+                h.join().unwrap();
+            }
+        }
     }
 }

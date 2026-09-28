@@ -305,7 +305,7 @@ struct Ledger {
 }
 
 fn total(s: &SimState, i: usize) -> i64 {
-    i64::from(s.worms[i].lives) * i64::from(s.settings_health) + i64::from(s.worms[i].health)
+    i64::from(s.worms[i].lives) * i64::from(s.worms[i].max_health) + i64::from(s.worms[i].health)
 }
 
 fn angles_ok(s: &SimState) -> bool {

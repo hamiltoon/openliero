@@ -1,6 +1,6 @@
 # Step 4½ — Game shell: overview / altitude decisions
 
-Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, **4½c LANDED**, **4½d LANDED (the Step 4½ milestone)**, **4½e LANDED** (4½e-1 + 4½e-2), 4½f–4½h planned (next: 4½f)
+Status: **OVERVIEW — Step 4½ architecture/strategy** · 2026-09-10 · **4½a LANDED** (4½a-1 + 4½a-2), **4½b complete on `liero-rs-step-4-5`**, **4½c-0 LANDED**, **4½c LANDED**, **4½d LANDED (the Step 4½ milestone)**, **4½e LANDED** (4½e-1 + 4½e-2), **4½f-1 LANDED**, 4½f-2 and 4½g–4½h planned (next: 4½f-2)
 Part of: `2026-06-26-liero-rs-roadmap.md`
 Detailing: the "Step 4½ — Game shell" section of `2026-06-26-liero-rs-steps2-5-preliminary-breakdown.md`
 Built on: `2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++ map, cited as **cpp-map §N**)
@@ -412,6 +412,25 @@ already works end to end. Each slice accumulates on `liero-rs-step-4-5` and stat
   `worm.cpp:543-556`) with its **own** `Rand` (`worm.hpp:133`). **Gate:** the fixed-seed AI dumper
   directive → bit-exact control-state stream, then an ordinary sim golden of a human-vs-bot match.
   **Parallel with 4½e.**
+  **Split (John's Q1 → A, 4½f design Rulings): 4½f-1 the CPU, 4½f-2 the player menus.**
+  **4½f-1 landed** (plan `plans/2026-09-27-liero-rs-step4.5-slice4.5f1-plan.md`): `sim::ai::DumbLieroAi`
+  (`worm.cpp:477-696` line for line, its own `mt19937(0x1337)` per CPU per NEW GAME, run by
+  `ui::shell::playing::Match` after the key edges and before the tick in `LocalController`'s
+  alternating order, never in weapon selection), per-worm `max_health` (unequal healths play; the
+  4½a interim refusal is gone), `reacts` kept between ticks, the phone's player 2 as the real CPU
+  with RANDOM weapons (John's Q3; the 4½c stand-in is gone), `?cpu=0|1|2`, and the FollowAI
+  ("AI") refusal box at NEW GAME (John's Q2). **Hard gate 4 is met:** the oracle-only `ai`
+  directive of `oracle_dump_sim_physics` runs a real C++ `DumbLieroAI` and G-AI (5 cases, the
+  human-vs-CPU golden `ai_vs_human` among them) + G-HP (3 unequal-health cases) are bit-exact on
+  every column, the AI's word and `rand.last` included; 🎯 G2f-1 (4 shell cases, `shell_cpu_match`)
+  is bit-exact through the real `Gfx::RunOneFrame` with the real `LocalController` running the real
+  `DumbLieroAI`. Corrections: (1) the AI seed is the constant `0x1337` (Q3 below); (2) C++'s
+  `Worm::reacts` is uninitialised and the AI reads it stale (C++ UB): Rust starts it at 0 and both
+  dumpers zero it; (3) C++ has no random player names (`GenerateName` is `#if 0`), so the NAME
+  bullet above describes dead code; (4) the key names are a hard-coded C++ table, not the TC's
+  (Q4 below). **4½f-2** (planned): the LEFT / RIGHT / NETWORK PLAYER menus, profiles, key capture
+  with the full DIG rule and the DIG-binding overflow fixed (John's Q4), Joystick profiles as in C++
+  (Q5), names.
 - **4½g — Match end + compact stats screen + hidden options subset.** The `GamePlayState` end
   routing (`gamePlayState.cpp:53-93`); a **StatsRecorder subset** in `sim` — kills, damage
   dealt/received/self, lives, timers, per-weapon hits/damage — written **hash-inert**, the way 4c's
@@ -504,6 +523,13 @@ depends on a+b+c. 4½g depends on 4½a's `IsGameOver`. 4½h is last by nature.*
    reproducible control-state stream. **Recommendation:** treat this as the first task of 4½f, and
    if C++ seeds it from anything non-deterministic, have the dumper directive *override* the seed
    explicitly (the same shape as any other directive) rather than trying to reproduce a wall clock.
+   **Answered (4½f design finding 1, 4½f-1 T0 P1, check 3″):** `DumbLieroAI` holds a
+   default-constructed `Rand`, i.e. `mt19937(0x1337)` with `last = 0`, made fresh per CPU player
+   per NEW GAME (`CreateAi` in the `LocalController` constructor) and never reseeded — the only
+   `Seed` calls are `game.rand`, `gfx.rand` (both from the clock) and the F8 randomiser's local
+   `Rand`. So **no seed override is needed**: the dumpers run the real AI as it is, and
+   `oracle_dump_shell`'s check 3″ re-proves the fresh seed on every G2f-1 run. Two CPUs draw
+   identical but separate streams.
 4. **Key naming and storage: DOS scancodes or Bevy `KeyCode`?** C++ displays DOS-scancode key names
    from `common.texts.key_names[177]` (`common.hpp:60`, `gfx.cpp:828`) and stores DOS scancodes in
    the profile TOML (defaults `{0x13,0x21,0x20,0x22,0x1D,0x2A,0x38}` / `{0xA0,0xA8,0xA3,0xA5,0x75,0x90,0x36}`,
@@ -512,6 +538,11 @@ depends on a+b+c. 4½g depends on 4½a's `IsGameOver`. 4½h is last by nature.*
    table ported from `keys.cpp:9-85`, and display `key_names` from the TC — which `assets::tc::Texts`
    already parses (rust-map §6). Bindings that have no DOS equivalent are the only thing that needs
    a decision, and there are none in the default set.
+   **Corrected (4½f design finding 5):** C++ does not read the key names from the TC —
+   `Texts::key_names[177]` is a hard-coded table (`common.cpp:25-203`, UTF-8 drawn through
+   `cp437::UnicodeToByte`) read by `Gfx::GetKeyName` (`gfx.cpp:828-840`), and the controller names
+   ("Human", "CPU", "AI") are hard-coded too. Rust ports that table into `ui::text` (4½f-2, with
+   the key capture); storing DOS scancodes in the TOML stands.
 5. **Minimap preview in the level selector on wasm.** The C++ selector *loads each highlighted level*
    to draw its miniature (`fileSelectorState.cpp:105-156`). Natively this is fine. On wasm only the
    embedded manifest exists. **Recommendation:** preview whatever the manifest contains and show the

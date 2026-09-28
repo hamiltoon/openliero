@@ -1,0 +1,30 @@
+# Step 4½f-1 G2f-1 case cpu_pick (plan Task 8) — written by gen_slice4_5f1_shell.
+# Rust ledger: 480 frames, end `end 479 quit`, NEW GAME 1, RESUME 0, back-to-menu 1, CPU match frames [0, 334], deaths [0, 0], respawns [0, 0], game over [], P2 keys in a match false, file lines 0
+setup shell_cpu_pick_setup.cfg
+boot_seed 73
+match_seed 7301
+frames 489
+expect quit
+detail
+key 40 down RETURN
+key 42 up RETURN
+key 75 down DOWN
+key 77 up DOWN
+key 78 down RIGHT
+key 80 up RIGHT
+key 81 down UP
+key 83 up UP
+key 84 down UP
+key 86 up UP
+key 87 down RCTRL
+key 89 up RCTRL
+key 90 down R
+key 92 up R
+key 93 down LCTRL
+key 95 up LCTRL
+key 396 down ESC
+key 398 up ESC
+key 438 down ESC
+key 440 up ESC
+key 446 down RETURN
+key 448 up RETURN

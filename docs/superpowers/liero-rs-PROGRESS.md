@@ -8,7 +8,64 @@
 > The headline % tracks the **rewrite**; the **new** track is exploratory/future.
 > The dense machine ledger lives in `.superpowers/sdd/progress.md` (gitignored).
 >
-> **Last updated:** 2026-09-27 · **🗡️ 4½e-2 (the level selector, SAVE SETUP AS… / LOAD SETUP, the
+> **Last updated:** 2026-09-27 · **🤖 4½f-1 (DumbLieroAI — the CPU player — per-player health, the
+> phone's player 2 as the real CPU, `?cpu=`) LANDED. 🎯 The original's CPU opponent plays in Rust
+> exactly as C++ plays it: a `liero.cfg` player with `controller = 1` is `DumbLieroAI`, natively and
+> in the browser — it walks toward the nearest worm, fires in range, changes weapons and respawns by
+> itself; its per-tick control words and its own RNG, unequal per-player healths, and CPU matches
+> driven through the REAL C++ `Gfx::RunOneFrame` (the real `LocalController` running the real
+> `DumbLieroAI`) are all bit-exact.** `sim` gained `ai` (`DumbLieroAi`, which owns only its `Rand` —
+> `mt19937(0x1337)`, fresh per CPU player per NEW GAME, never reseeded; `worm.cpp:477-696` line for
+> line, with the conditional Fire draw and the six drawing fallback arms; `run_ais` in
+> `LocalController`'s alternating `(i + cycles % 2) % 2` order; `AiTrace`, behaviour-free, for tests
+> and ledgers), `WormState::reacts` kept between ticks (not hashed, never reset),
+> `WormState::max_health` instead of the `settings_health` scalar at every C++
+> `worm.settings->health` site (the clamp, the health bonus, the low-health blood gate, Scales'
+> extra life and healing, respawn, the lifebar) and `SimState::ai_params` from the TC — all
+> hash-neutral; `render` changed only the lifebar. `scenario`: `AsymmetricHealth` and the boot's
+> sanitising copy are gone (unequal healths boot and play; RESUME brings both maxes),
+> `refuse_follow_ai` (John's Q2: an "AI" (FollowAI) player gets `AI PLAYERS ARE NOT SUPPORTED YET`
+> at NEW GAME only; it still boots and RESUMEs), the oracle-only `ai` directive. `ui::shell`:
+> `Match` makes its AIs at NEW GAME and runs them after the key edges and before the tick, never in
+> weapon selection; RESUME re-applies `Game::Focus`'s worm colour ramps; the touch rule split (the
+> settings make player 2 the CPU, NEW GAME's selection sets BOT WEAPONS RANDOM). **🎯 G-AI + G-HP:**
+> `oracle_dump_sim_physics` grew `ai` (a real `DumbLieroAI` per controller-1 player in
+> `LocalController`'s order, the `reacts` fill, four AI columns: the CPU's word after its AI step
+> and its AI's `rand.last`); 8 generated cases, bit-exact on every row and column — `ai_idle` (3,000
+> ticks), **`ai_vs_human` (Hard gate 4's human-vs-CPU golden: 8,393 ticks, game over at 8,193, 3 + 1
+> deaths)**, `ai_vs_ai` (two RANDOM bots through one weapsel frame, game over at 1,417),
+> `ai_weapons` (both `max_dist` arms and the floor), `ai_close` (333×360: 8 of the 10 fallback arms,
+> the rope arm, both `reacts` arms), `hp_killemall` (50 / 300, a health bonus each), `hp_scales` (30
+> / 200, 3 + 2 wraps into an extra life), `hp_tag` (1000 / 10, game over at 6,440); no sim fix was
+> needed; the `_GLIBCXX_ASSERTIONS` + ASan dumper writes the same bytes. **🎯 G2f-1 (milestone
+> f-1):** `oracle_dump_shell` grew intervention 3′ (zero the new game's `reacts`), check 3″ (every
+> new `DumbLieroAI` starts at `mt19937(0x1337)`: no seed override is needed, re-proven on every run)
+> and the FollowAI guard; 4 generator-validated cases — **`cpu_match` (2,170 frames: a human vs the
+> CPU, the Esc fade, RESUME, a death and a respawn each)**, `cpu_vs_cpu` (4,059, two KEEP bots to
+> game over and the post-mortem), `cpu_pick` (480, a PICK bot driven by player 2's keys), `hp_boot`
+> (1,188, unequal healths from `liero.cfg`) — 7,897 frames + 7,897 `d` lines + 2 saved files
+> bit-exact on the first run; all 32 shell cases green under both C++ builds; the negative control
+> (the Rust AI switched off) diverges at `cpu_match` frame 78. **The live game** (`game` is glue):
+> on a phone player 2 is the real CPU with random weapons every match (John's Q3; the stand-in
+> `BotRespawn` is gone; LOAD SETUP resets player 2 to the CPU); `?cpu=0|1|2` (both human / player 2
+> the CPU / both CPUs; John's ruling: it keeps the setup's BOT WEAPONS, so on a keyboard `?cpu=1`
+> picks the CPU's weapons with player 2's keys; it does not skip the menu); "FIRE to respawn" only
+> for a human player 1; read-only `lieroWorms` / `lieroControllers` / `lieroWeapsel`. Headless
+> Chromium: the phone's real flow 18/18, the phone's CPU dying and respawning alone on the pinned
+> seed 8 (back on tick 770) 7/7, desktop `?cpu=1` / `?cpu=2` 21/21, the e-1 phone walk 74/74 and the
+> e-2 phone walk 90/90. **C++ UB, documented and neutralised:** `Worm::reacts` is uninitialised in
+> C++ and `DumbLieroAI` reads it stale from the CPU's first placed-but-invisible tick (release:
+> ASLR-dependent heap garbage; ASan: `0xBEBEBEBE`), which moves the CPU's word from tick 150 (T0
+> P2); both dumpers zero it where no code under test has run, as Rust starts it. The C++ comparison
+> ran in this cloud session: the dumpers headless, and the real `openliero` under Xvfb + xdotool vs
+> the browser bundle (side-by-sides, not committed). Audit: 38 `A` golden files, 0 `M`; C++ changes
+> only in the two dumpers; one frozen-generator line (D6, proven on the G3 cases); every golden
+> regenerates byte-identically under both builds (`pickup_weapon` excepted: the known `cossin[128]`
+> hang); `ui` has no Bevy; `sim-core` has no dependencies. Step 4½ now: **4½a ✅ 4½b ✅ 4½c-0 ✅ 4½c ✅
+> 4½d ✅ 4½e ✅ 4½f-1 ✅**; 4½f-2 (the player menus, profiles, key capture with DIG, names) and 4½g…4½h
+> are planned (next: 4½f-2).
+>
+> Prior (2026-09-27): **🗡️ 4½e-2 (the level selector, SAVE SETUP AS… / LOAD SETUP, the
 > shipped-level fix, the browser level catalogue) LANDED — 4½e is COMPLETE. 🎯 LEVEL, LOAD SETUP and
 > SAVE SETUP AS… work like C++: LEVEL → the config tree (`[RANDOM]` first, folders first, the parent
 > pane, type-to-search) → Levels → the minimap preview (one frame late, persisting into the menu) →
@@ -634,8 +691,10 @@ number entry, `liero.cfg` at boot/exit and the small labels, bit-exact vs the re
 `Gfx::RunOneFrame` including every saved byte; the sim bit-exact on four generated levels that are
 not 504×350) and **4½e-2** (the level selector, SAVE SETUP AS… / LOAD SETUP and the shipped-level
 fix, every frame, `d` line and saved file bit-exact vs the real `Gfx::RunOneFrame`; the browser
-level catalogue) are done — 4½e is complete; 4½f…4½h are planned. Step 5 (netplay) is not
-started.
+level catalogue) and **4½f-1** (DumbLieroAI, per-player health and the phone's CPU player 2: the
+AI's control words and RNG bit-exact vs the C++ sim oracle, CPU matches bit-exact vs the real
+`Gfx::RunOneFrame`) are done — 4½e is complete; 4½f-2 and 4½g…4½h are planned. Step 5 (netplay)
+is not started.
 
 The % was re-based on 2026-09-10: the denominator is now **steps 0–5 plus Step 4½** (~10 k C++
 LOC of shell, ~1.5 k of it sim-affecting), so the same finished work (steps 0–4) reads ~70%
@@ -649,7 +708,7 @@ REWRITE (steg 0–5, incl. 4½)                                ~70%
 ├─ ✅ Step 2  deterministic sim core                            COMPLETE — merged (PR #3)
 ├─ ✅ Step 3  Bevy rendering / window (reproduce the SDL3 view) DONE — 3a–3f shipped (PR #4)
 ├─ ✅ Step 4  input + replay (.lrp) + audio                     COMPLETE — 4a–4g shipped (4e-phase2 bounded follow-on)
-├─ 🟡 Step 4½ game shell (menus, weapsel, level select/gen,     4½a ✅ 4½b ✅ 4½c-0 ✅ 4½c ✅ 4½d ✅ (milestone) 4½e ✅ (e-1 + e-2), rest planned  ◀── YOU ARE HERE
+├─ 🟡 Step 4½ game shell (menus, weapsel, level select/gen,     4½a ✅ 4½b ✅ 4½c-0 ✅ 4½c ✅ 4½d ✅ (milestone) 4½e ✅ (e-1 + e-2) 4½f-1 ✅, rest planned  ◀── YOU ARE HERE
 │             settings/profiles, DumbLieroAI, match end + stats)
 └─ ⬜ Step 5  native netplay (ENet + rollback + Go relay)       not started
 ```
@@ -976,7 +1035,7 @@ TWO input formats by design (Rust-native round-trip artifact ≠ foreign `.lrp`)
 
 ---
 
-### Step 4½ — Game shell (🟡 IN PROGRESS — 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅ — the Step 4½ milestone reached — 4½e-1 ✅, 4½e-2 ✅ · branch `liero-rs-step-4-5`, PR #7)
+### Step 4½ — Game shell (🟡 IN PROGRESS — 4½a ✅, 4½b ✅, 4½c-0 ✅, 4½c ✅, 4½d ✅ — the Step 4½ milestone reached — 4½e-1 ✅, 4½e-2 ✅, 4½f-1 ✅ · branch `liero-rs-step-4-5`, PR #7)
 
 Turn "plays a hard-coded match" into a complete game, close to or exactly like openliero: bare
 `cargo run -p game` opens the main menu over a generated level; a match is configured, weapon-
@@ -1040,9 +1099,16 @@ fact maps: `specs/2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++) and
 │          cases (3,957 frames + d lines + 18 saved files) bit-exact vs the real headless
 │          RunOneFrame, first run; still open: move settings/settings_toml/toml_fmt/storage into
 │          rust/settings (design §2.2; e-2 plan D15)                                   COMPLETE
-├─ ⬜ 4½f  player menu (name, health, RGB bar, key bindings, weapons via Levenshtein,
-│          controller Human/DumbAI) + profiles + DumbLieroAI port (own Rand). Gate: fixed-seed
-│          AI control-state stream, bit-exact                    (parallel with 4½e)   not started
+├─ ✅ 4½f-1 DumbLieroAI (sim::ai: its own mt19937(0x1337), worm.cpp:477-696 line for line,
+│          LocalController's alternating order) + per-worm max_health + persisted reacts + the
+│          phone's player 2 as the real CPU (RANDOM weapons; BotRespawn gone) + ?cpu=0|1|2 + the
+│          FollowAI refusal at NEW GAME; 🎯 G-AI + G-HP 8 generated sim cases bit-exact (Hard gate
+│          4's human-vs-CPU golden `ai_vs_human`, 8,393 ticks) + 🎯 MILESTONE f-1 G2f-1 4 shell
+│          cases (7,897 frames + d lines, `shell_cpu_match`) bit-exact vs the real headless
+│          RunOneFrame running the real DumbLieroAI, first run                          COMPLETE
+├─ ⬜ 4½f-2 player menus (LEFT/RIGHT/NETWORK PLAYER: name, health, RGB bars, INPUT, the key
+│          bindings + DIG with the overflow fix (Q4), weapons via Levenshtein, CONTROLLER) +
+│          profiles (Joystick profiles as C++, Q5) + key capture + the C++ key-name table  planned
 ├─ ⬜ 4½g  match end + compact stats screen (hash-inert StatsRecorder subset; no heatmaps/graph)
 │          + hidden options subset (fullscreen, shadows, powerlevel palettes, auto-record, bot
 │          weapons)                                                                      not started
@@ -1051,7 +1117,7 @@ fact maps: `specs/2026-09-10-liero-rs-step4.5-cpp-game-shell-map.md` (C++) and
            by the PR-preview track (PR #11): live keyboard, ?weapons/?level/?seed, 4 levels
            embedded, every PR deployed to Cloudflare Pages. + MOBILE (added 2026-09-25):
            responsive canvas (can land early) and touch controls for one player vs DumbLieroAI
-           (after 4½f)                                                            in progress
+           (after 4½f; the phone's CPU landed in 4½f-1)                           in progress
 ```
 
 4½c design-vs-source notes (plan "Plan-time facts"; the source won): `SetWormColour` IS on the
@@ -1079,8 +1145,11 @@ Also open for John (4½c):
   REAL C++ `WeaponSelection::Draw` (headless `Draw` in this cloud session, per John's ruling; 361
   frames), and the real C++ game ran under Xvfb for side-by-side PNGs (not committed). What the
   live screen still differs in, by design: C++'s default `random_name` gives the players random
-  names where Rust shows none (4½f). (The render fade and `menu_cycles` inheriting the main
-  menu's count landed in 4½d and are gated by G2.)
+  names where Rust shows none (4½f). **Corrected (4½f design finding 4, 4½f-1 plan fact 21, T0
+  P4):** C++ has no random names — `Settings::GenerateName` is `#if 0` (`settings.cpp:165-207`), a
+  fresh boot saves `name = ''` for every player, byte-equal to Rust's (`shell_cfg_default`); whatever
+  that Xvfb run showed must have come from its own `liero.cfg`. (The render fade and `menu_cycles` inheriting
+  the main menu's count landed in 4½d and are gated by G2.)
 - 4½c ports LocalController's key repeat; C++ netplay's RollbackController repeats differently
   (finding 5, `repeat_edge` pins the choice). Step 5 runs Rust on both peers.
 Also open for John (4½d):
@@ -1106,7 +1175,8 @@ Also open for John (4½d):
 - **Unported:** Tag's own-worm "YoureIt" banner (`viewport.cpp:249-254`) and the Holdazone zone
   box (the sim's Holdazone arm is unported: a Holdazone setup boots as a never-processed game,
   and only the HUD timer arms are drawn).
-- **Still absent:** the C++ random player names (4½f); recording a menu-driven match (Q6,
+- **Still absent:** ~~the C++ random player names (4½f)~~ (corrected in 4½f-1: C++ has none,
+  `GenerateName` is `#if 0`); recording a menu-driven match (Q6,
   postponed); `liero.cfg` load/save (Q7; landed in 4½e-1). `--live [<scenario>]` keeps the 4½c
   scenario-live semantics (selection, F5, Esc quits), with no menu.
 - The native `cargo run -p game` smoke cannot run in this cloud container (no GPU adapter:
@@ -1241,6 +1311,98 @@ Also open for John (4½e-2):
   root label (the copy's path vs `/openliero`), the Levels rows (5 vs 4, Q6) and so the first
   preview (`modern_test` vs `physics_fall_test`), the boot level (seed), and the cursor's colour
   cycle (timing). The native `game` still cannot run here (no GPU adapter).
+Also open for John (4½f-1):
+- **John's rulings for 4½f** (design, end section): Q1 → two parts, the CPU first (this is 4½f-1;
+  the player menus, profiles, key capture and names are 4½f-2); Q2 → an "AI" (FollowAI) player
+  gets `AI PLAYERS ARE NOT SUPPORTED YET` at NEW GAME, the Holdazone way; Q3 → on a phone player 2
+  is the real CPU with random weapons each match (landed; the RIGHT PLAYER menu that shows and
+  changes it is 4½f-2's); Q4 → fix the C++ DIG-binding overflow (4½f-2); Q5 → Joystick profiles as
+  in C++ (4½f-2). And the plan's open `?cpu=` question (Addendum T9): `?cpu=` keeps the original's
+  weapon picking — it only switches controllers, BOT WEAPONS follows the setup (PICK), so **`?cpu=1`
+  on a keyboard needs player 2's keys in weapon selection** (the arrows, then Right Ctrl on
+  DONE!); the page's Player 2 key help and the preview comment say so.
+- **The design findings, confirmed or sharpened against the source** (the source won): finding 1
+  (the AI seed is the constant `0x1337`; T0 P1 and check 3″ on every G2f-1 run), finding 2 (`reacts`
+  is uninitialised and read stale; T0 P2 below), finding 6 (health is per player and read live; T0
+  P5, P7, G-HP), finding 10 (the AI runs before the tick in alternating order, never in selection,
+  and a CPU still receives its keys; T0 P3, `cpu_pick`), finding 11 (what the AI reads, sharpened
+  by plan fact 3: **the Fire draw is conditional** — only in range or while invisible — where the
+  design's risk list called it unconditional). The plan-time facts the design did not have: the F8
+  weapon randomiser's local `Rand r; r.Seed(14)` is a third `Seed` call (not an AI; fact 1); a
+  RANDOM bot draws in the `WeaponSelection` constructor, so it cannot appear in a shell case and
+  the design's `cpu_vs_cpu` became KEEP (fact 8, D2; RANDOM with the AI is gated by G-AI `ai_vs_ai`
+  through the sim dumper's `weapsel`); three committed sim setups have a controller-2 player 2 that
+  C++ plays as a human, the RefusalGate's RESUME arm re-runs `validate_for_selection`, and the
+  preview's skip route has no gate (facts 15–17, hence D1); C++ has no random player names (fact
+  21, finding 4, T0 P4: a fresh C++ boot saves `name = ''`, byte-equal to `shell_cfg_default`; the
+  two PROGRESS lines are corrected above).
+- **T0** (probes through the real `Gfx::RunOneFrame` and `Worm::Process`, plan Addendum T0): P1–P7
+  confirmed, no contradiction rule fired. **P2 above all:** the new controller's worms held
+  garbage `reacts` — `0,0,0,0` on the first NEW GAME of a release run, then bytes of the dumper's
+  own header text on the second, ASLR-dependent pointer halves in other scripts, and `0xBEBEBEBE` ×4
+  under ASan. Without the fill the CPU's word differs from its first placement (tick 150: `0d` vs
+  `05` in release, `49` vs `09` checked) and the release and checked outputs disagree; with it they
+  are byte-identical. Human worms never read it stale (558 equal frames with different garbage).
+  P1: both CPUs `fresh` from the new-controller frame through selection, first draw on the first
+  match tick (`last = 2af09813`), two CPUs identical separate streams; the boot controller also
+  builds a (never processed) `DumbLieroAI`. P3: RANDOM fails the dumper at NEW GAME, KEEP needs no
+  key (two KEEP bots finalise on the first frame), PICK is driven by player 2's keys. P5: HEALTH
+  reaches the match at RESUME (the first resumed tick is `30/30`). P6: the colour reaches the
+  palette at RESUME and not before (hence D9). P7: every per-worm read site confirmed (Scales wraps
+  at the worm's own max, the health bonus scales by the picker's max, the blood gate is
+  `health < own max / 4`).
+- **The plan's decisions** (D1–D17 stand): **D1** the FollowAI refusal is at the menu's NEW GAME
+  only (both routes), never in `build::validate` and never at RESUME; `Match::start` would play a
+  controller-2 player as an input-less human (unreachable, `debug_assert!`). **D2** no RANDOM bot in
+  a G2 case. **D3** the touch rule is split: the settings make player 2 the CPU (the boot, and again
+  after every LOAD SETUP on a touch-only page, because a shipped setup's player 2 is human), NEW
+  GAME's selection config sets the global BOT WEAPONS to RANDOM on a touch-only page (so RANDOM
+  applies to every bot, as in C++), and `live_config` keeps the 4½c rule for the native `--live
+  <scenario>` path only. **D4** `?cpu=0|1|2` changes only the in-memory settings and does not skip
+  the menu; a touch-only page without it acts as `?cpu=1`. **D6** the one frozen-file line:
+  `gen_slice4_5e1_sim.rs` reads `worms[i].max_health` for `settings_health` (a rename, proven by
+  re-running that generator for every committed G3 case and `cmp`-ing). **D13** no recorded-CPU
+  replay test yet: recording a menu-driven match is postponed (4½d Q6) and the non-shell paths
+  (`--live <scenario>`, `--replay`, Scripted, `?demo`) have no AI; replaced by two identical-seed
+  `Shell` runs with a CPU giving identical per-frame state hashes, plus G2f-1. **D15** "FIRE to
+  respawn" is a human player 1's only (a `?cpu=2` player 1 readies itself).
+- **Rust-only, by design (not gated):** the `AI PLAYERS ARE NOT\0SUPPORTED YET` box at (160, 100)
+  (Q2; C++ would start a FollowAI match); on a touch-only page the CPU player 2 and BOT WEAPONS
+  RANDOM (C++ has no touch page); `?cpu=`; `window.lieroWorms` / `lieroControllers` /
+  `lieroWeapsel`.
+- **Known C++ UB, a documented divergence only where C++ is UB** (the running list): `Worm::reacts`
+  uninitialised and read by the AI (4½f-1: Rust starts it at 0; both dumpers zero it, the shell
+  dumper as intervention 3′); spawning on a map shorter than ~342 rows (4½e-1 safe edges); the
+  `cossin_table[128]` read of `ProcessSight` (4½e-1: `gen_sim_slice5prime_pickup_weapon_golden.sh`
+  still hangs here — the checked build reports it as an ASan `global-buffer-overflow` in
+  `Worm::ProcessSight` — and its committed golden still passes); a truncated MODERNLV level at NEW
+  GAME (4½e-2); and the DIG-binding overflow into WEAPON 1 (design finding 3; John's Q4: fixed in
+  4½f-2).
+- **The gates' numbers.** G-AI + G-HP: 8 cases, 30,647 rows (tick 0 included), bit-exact on every column (the AI
+  columns included) on release and checked dumpers; three negative controls (the AI off, one
+  flipped hash cell, one flipped `rand.last` cell) are each caught at their tick and column.
+  G2f-1: 4 cases, 7,897 frames + 7,897 `d` lines + 2 saved files, bit-exact on the first run
+  (`cpu_match` 2,170, `cpu_vs_cpu` 4,059, `cpu_pick` 480, `hp_boot` 1,188); 32 shell cases in all,
+  byte-identical under both C++ builds; the negative control (the Rust AI off) diverges at
+  `cpu_match` frame 78, the first match tick where the CPU's word is not its keys'. T4/T5's
+  regeneration proofs: 39 of the 40 `oracle_dump_sim_physics` gen scripts and all 28 earlier shell
+  goldens regenerate byte-identically under the release and the checked dumper (the 40th is the
+  known `pickup_weapon` hang). Tests: 1,229 workspace + 100 `game` (one hand-run seed search
+  ignored in each).
+- **Notes for the walks:** headless Chromium runs at ~7–10 fps, so a pad tap in weapon selection
+  can overshoot (a test artefact; the walks re-press until the cursor lands); `tap1.mjs` can fail
+  by chance now, because the CPU may kill player 1 during its 30 s wait (future walks should press
+  FIRE while `lieroRespawn` is true, or use `?cpu=0`); the phone's CPU dies and respawns alone on
+  the pinned walk seed 8 (back on tick 770, `touch.rs`'s pinned test).
+- **Eyeball artefacts:** the real `openliero --config-root <copy of data/>` (with
+  `OPENLIERO_DATADIR=data`) under Xvfb + xdotool — `cpu_match`'s `liero.cfg` (player 2 the CPU, BOT
+  WEAPONS KEEP), and the same with both players CPUs for a death — vs the browser bundle with
+  `?cpu=1` (PICK, so player 2's keys ready the CPU) and the pinned `?cpu=1&seed=8&weapons=…`: 8
+  pairs, not committed — selection, the match start, the CPU walking (tunnelling), firing
+  ("Reloading…"), dying ("committed suicide" under its own BIG NUKE on both sides), back by itself
+  (lives 14), and Esc to the menu with RESUME GAME. The behaviour class is the same; the
+  differences are all expected: the level and seeds, the timing, and the selection screen (KEEP
+  shows only player 1's menu, PICK both). The native `game` still cannot run here (no GPU adapter).
 
 ---
 

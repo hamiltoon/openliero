@@ -384,7 +384,6 @@ pub fn nobject_process(
     num_blood_colours: i32,
     first_blood_colour: i32,
     game_mode: u32,
-    settings_health: i32,
     rand: &mut Rand,
 ) -> NObjectOutcome {
     let mut bounced = false;
@@ -529,7 +528,6 @@ pub fn nobject_process(
                 sobject_types,
                 blood,
                 game_mode,
-                settings_health,
                 rand,
             );
         }
@@ -595,7 +593,7 @@ pub fn nobject_process(
 
                 // :174 DoDamage(worm, hit_damage, owner_idx) — RNG-free wound; the
                 // Scales (game_mode 3) redistribution heals the other worm(s) (T5).
-                do_damage(worms, w_idx, ty.hit_damage, obj.owner_idx, game_mode, settings_health);
+                do_damage(worms, w_idx, ty.hit_damage, obj.owner_idx, game_mode);
 
                 // :180-186 HIT-SOUND GATE FIRST. The OUTER rand(3) is only drawn when
                 // `hit_damage > 0 && w.health > 0` (short-circuit — reading the
@@ -677,7 +675,6 @@ pub fn nobject_process(
                 sobject_types,
                 blood,
                 game_mode,
-                settings_health,
                 rand,
             );
         }
@@ -1139,7 +1136,6 @@ mod tests {
             0,
             0,
             0,
-            100,
             rand,
         )
     }
@@ -1528,7 +1524,6 @@ mod tests {
             0,
             0,
             0,
-            100,
             rand,
         )
     }
@@ -1648,7 +1643,6 @@ mod tests {
             0,
             0,
             0,
-            100,
             &mut rand,
         );
 
@@ -1743,7 +1737,6 @@ mod tests {
             0,
             0,
             0,
-            100,
             &mut rand,
         );
 
@@ -1902,7 +1895,6 @@ mod tests {
             num_blood_colours,
             first_blood_colour,
             0,
-            100,
             rand,
         )
     }
@@ -2121,7 +2113,6 @@ mod tests {
             0,
             0,
             0,
-            100,
             rand,
         )
     }
@@ -2475,7 +2466,6 @@ mod tests {
             0,
             0,
             0,
-            100,
             &mut rand,
         )
     }

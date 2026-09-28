@@ -18,15 +18,23 @@
 //! the cases that play a picked level, re-driven with the level only in the system layer (the
 //! default-install layout, where C++ plays random), must still equal the committed C++ golden of
 //! the both-layers run — Rust plays exactly what C++ plays when it can open the file.
+//!
+//! Step 4½f-1 (plan Task 8): the G2f-1 cases (`shell_f1_cases`: a human vs the CPU, CPU vs CPU
+//! to game over, a PICK bot driven by its keys, unequal healths from `liero.cfg`), the 🎯 f-1
+//! milestone `cpu_match` — the real C++ `LocalController` running the real `DumbLieroAI` — and
+//! the negative control: the same drive with the Rust AI switched off diverges on the first
+//! match tick where the CPU's word is not its keys', so the gate sees the AI.
 
 mod shell_common;
 mod shell_e1_cases;
 mod shell_e2_cases;
+mod shell_f1_cases;
 
 use render::present::fade_argb;
 use shell_common as sc;
 use shell_e1_cases as e1;
 use shell_e2_cases as e2;
+use shell_f1_cases as f1;
 
 const FIELDS: [&str; 11] = [
     "f",
@@ -291,14 +299,113 @@ fn the_committed_scripts_are_the_generators() {
             );
         }
     }
+    // Step 4½f-1: the f-1 4 against gen_slice4_5f1_shell, with their inputs.
+    for c in f1::cases() {
+        assert_eq!(
+            sc::read_script(c.name),
+            c.script,
+            "{}: regenerate with gen_slice4_5f1_shell",
+            c.name
+        );
+        for (file, bytes) in &c.files {
+            assert_eq!(
+                std::fs::read(format!("{}/{file}", sc::GOLDEN)).unwrap(),
+                *bytes,
+                "{}: {file} — regenerate with gen_slice4_5f1_shell",
+                c.name
+            );
+        }
+    }
     let mut want: Vec<String> = sc::CASES_NAMES
         .iter()
         .chain(e1::NAMES.iter())
         .chain(e2::NAMES.iter())
+        .chain(f1::NAMES.iter())
         .map(|s| s.to_string())
         .collect();
     want.sort();
+    assert_eq!(
+        want.len(),
+        32,
+        "the 4½d 11, the e-1 11, the e-2 6 and the f-1 4"
+    );
     assert_eq!(on_disk, want);
+}
+
+/// The f-1 case `name` on the committed script.
+fn f1_case(name: &str) -> f1::Case {
+    f1::cases()
+        .into_iter()
+        .find(|c| c.name == name)
+        .expect("an f-1 case")
+}
+
+#[test]
+fn the_f1_milestone_is_bit_exact() {
+    // 🎯 f-1: a human vs the CPU (KEEP, ready at once) through the real C++ frame loop: selection
+    // → play (P1 walks, fires, ropes, changes; P2's keys are never pressed) → Esc → the fade →
+    // RESUME → play → Esc → QUIT → the exit save; each worm dies, the CPU respawns by itself.
+    let case = f1_case("cpu_match");
+    let run = sc::drive(&case.script, None);
+    let l = &run.ledger;
+    assert_eq!(
+        (l.new_games, l.resumes, l.quit, l.p2_keys, run.files.len()),
+        (1, 1, true, false, 1),
+        "the milestone path"
+    );
+    if let Err(e) = f1::witnesses(&case, &run) {
+        panic!("cpu_match: {e}");
+    }
+    check("cpu_match");
+}
+
+#[test]
+fn every_g2f1_case_is_bit_exact() {
+    for c in f1::cases().iter().filter(|c| c.name != "cpu_match") {
+        let run = sc::drive(&c.script, None);
+        if let Err(e) = f1::witnesses(c, &run) {
+            panic!("{}: {e}", c.name);
+        }
+        check(c.name);
+    }
+}
+
+#[test]
+#[should_panic(expected = "the gate sees the AI")]
+fn the_cpu_match_without_its_ai_diverges() {
+    // The negative control (plan T8 Step 6): the milestone driven with `Match`'s AIs switched off
+    // (`ShellDebug::ais`), so the CPU worm plays on its keys' word — with no P2 key, 0. The gate
+    // must fail on the first match tick where the real run's CPU word is not 0 (the word is in
+    // `state8`, `hash.rs`), and not before.
+    let name = "cpu_match";
+    let script = sc::read_script(name);
+    let real = sc::drive(&script, None);
+    let want_frame = (1..real.lines.len())
+        .find(|&f| {
+            real.worms[f].is_some()
+                && real.worms[f - 1].is_some()
+                && real.ledger.words[f].is_some_and(|w| w[1] != 0)
+        })
+        .expect("the CPU presses a key") as u32;
+    let run = sc::drive_with(
+        &script,
+        None,
+        sc::Opts {
+            ais: false,
+            ..sc::Opts::default()
+        },
+    );
+    assert!(
+        run.ledger.ai_traces.iter().all(|t| !t[1].ran),
+        "the AI is off"
+    );
+    match compare(name, &golden(name), &run) {
+        Ok(()) => {}
+        Err((frame, msg)) => {
+            assert_eq!(frame, want_frame, "the first divergence: {msg}");
+            panic!("the gate sees the AI at frame {frame}: {msg}");
+        }
+    }
 }
 
 #[test]

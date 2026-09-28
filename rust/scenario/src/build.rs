@@ -43,9 +43,10 @@ pub enum BuildError {
     InvalidGameMode(u32),
     /// A playing worm's `health < 1` (C++ divides by it and loops on it in Scales).
     InvalidHealth(i32),
-    /// The two players' healths differ: the sim carries one `settings_health` (design
-    /// §1.3 finding 4); lifted with the player-menu HEALTH item in 4½f.
-    AsymmetricHealth { p1: i32, p2: i32 },
+    /// A playing worm's `controller == 2`, the unported "AI" (`FollowAI`, `localController.cpp:
+    /// 23-25`; 4½f Q2). Only [`refuse_follow_ai`] returns it — the menu's NEW GAME gate — never
+    /// [`validate`] (4½f-1 D1: committed sim setups play a controller-2 player as a human).
+    FollowAiUnsupported { worm: usize },
     /// A weapon pick outside `1..=weap_order.len()` (`worm.cpp:704` indexes unchecked) — or, in
     /// front of a selection ([`new_match`]), outside `0..=weap_order.len()`.
     InvalidWeapon {
@@ -65,8 +66,11 @@ impl std::fmt::Display for BuildError {
             BuildError::HoldazoneUnsupported => write!(f, "Holdazone is not supported yet"),
             BuildError::InvalidGameMode(m) => write!(f, "unknown game mode {m}"),
             BuildError::InvalidHealth(h) => write!(f, "worm health {h} must be at least 1"),
-            BuildError::AsymmetricHealth { p1, p2 } => {
-                write!(f, "player healths differ ({p1} vs {p2}); not supported yet")
+            BuildError::FollowAiUnsupported { worm } => {
+                write!(
+                    f,
+                    "player {worm} is an AI (FollowAI) player; not supported yet"
+                )
             }
             BuildError::InvalidWeapon { worm, slot, value } => {
                 write!(
@@ -104,6 +108,21 @@ pub fn validate_for_selection(cfg: &MatchConfig, n_weapons: usize) -> Result<(),
     validate_with(cfg, n_weapons, Picks::AllowUnset)
 }
 
+/// The menu's NEW GAME refusal of an "AI" (FollowAI, `controller == 2`) player (4½f Q2; 4½f-1
+/// D1): the first of players 0 and 1 that is one. The network player never plays a local match.
+/// Not part of [`validate`]: `build_match` and every sim harness take a controller-2 player as a
+/// human (the C++ dumper never makes an AI without `ai`), and RESUME never refuses it (CONTROLLER
+/// does not reach a running match, design finding 7).
+pub fn refuse_follow_ai(s: &Settings) -> Result<(), BuildError> {
+    match s.worm_settings[..2]
+        .iter()
+        .position(|ws| ws.controller == 2)
+    {
+        Some(worm) => Err(BuildError::FollowAiUnsupported { worm }),
+        None => Ok(()),
+    }
+}
+
 fn validate_with(cfg: &MatchConfig, n_weapons: usize, picks: Picks) -> Result<(), BuildError> {
     let s = &cfg.settings;
     if s.game_mode == GM_HOLDAZONE {
@@ -112,14 +131,11 @@ fn validate_with(cfg: &MatchConfig, n_weapons: usize, picks: Picks) -> Result<()
     if s.game_mode > GM_SCALES_OF_JUSTICE {
         return Err(BuildError::InvalidGameMode(s.game_mode));
     }
-    let (p1, p2) = (s.worm_settings[0].health, s.worm_settings[1].health);
-    for h in [p1, p2] {
-        if h < 1 {
-            return Err(BuildError::InvalidHealth(h));
+    // Each worm has its own max health (4½f-1): the two may differ.
+    for ws in &s.worm_settings[..2] {
+        if ws.health < 1 {
+            return Err(BuildError::InvalidHealth(ws.health));
         }
-    }
-    if p1 != p2 {
-        return Err(BuildError::AsymmetricHealth { p1, p2 });
     }
     if n_weapons > WEAP_TABLE_LEN {
         return Err(BuildError::TooManyWeapons(n_weapons));
@@ -232,11 +248,13 @@ fn new_match_with(
     state.bonus_explode_risk = tc.constants.BonusExplodeRisk;
     state.h_bonus_reload_only = tc.hacks.BonusReloadOnly;
     state.sound_hooks = tc.sound_hooks.clone();
+    // Step 4½f-1 (D11): the CPU player's toggle odds. Unhashed, read only by `sim::ai`.
+    state.ai_params = crate::loader::ai_params(&tc);
 
     // Settings (design §4.2): the live-read set through the one choke point RESUME shares
-    // (Step 4½e-1). The blood pool is `enter_game`'s (StartGame, game.cpp:513).
+    // (Step 4½e-1), each worm's own max health included (4½f-1). The blood pool is
+    // `enter_game`'s (StartGame, game.cpp:513).
     apply_live_settings(&mut state, s);
-    state.settings_health = s.worm_settings[0].health; // == [1] (validated); per-worm, 4½f
 
     // Palette (design §4.1): the level's POWERLEVEL palette only when
     // load_powerlevel_palette (level.cpp:281-294), else exepal == small.tga's palette
@@ -257,10 +275,12 @@ fn new_match_with(
 }
 
 /// Write the settings a running C++ `Game` reads **live** from `gfx.settings` (design finding 1,
-/// confirmed by the T0 probe) onto `state`: exactly the eight per-tick sim fields, nothing else.
+/// confirmed by the T0 probe) onto `state`: exactly the eight per-tick sim fields and each worm's
+/// `max_health` (4½f-1 T3; its T0 P5), nothing else.
 /// [`new_match`]'s one settings choke point (Step 4½e-1), and what the shell's RESUME runs so a
 /// paused match sees the menu's edits, as the C++ one does. None of these fields is hashed, so
-/// the call is hash-neutral by construction; it draws nothing.
+/// the call is hash-neutral by construction; it draws nothing. A worm's `health` itself is left to
+/// the next tick's clamp (`worm.cpp:213`), as in C++.
 ///
 /// Every C++ `settings->` read in the simulation and the viewport (`grep -n 'settings->'
 /// game.cpp worm.cpp weapon.cpp nobject.cpp sobject.cpp bonus.cpp viewport.cpp`, re-derived
@@ -286,7 +306,7 @@ fn new_match_with(
 /// | `game.cpp:159` | `lives` | kStateGame only (`ResetWorms` is Rollback-only; `LocalController` reads it once, `localController.cpp:234`: [`enter_game`]) |
 /// | `game.cpp:513` | `blood_particle_max` | kStateGame / `StartGame` only ([`enter_game`]) |
 /// | `game.cpp:427-432`, `:499` | `zone_timeout` | Holdazone (unported) |
-/// | `game.cpp:158`, `:558-563`, `:607`; `worm.cpp:213`, `:292-296`, `:355`, `:386`, `:795`; `viewport.cpp:85` | `worm.settings->health` | per-worm (4½f; `SimState::settings_health`, set by [`new_match`] only) |
+/// | `game.cpp:158`, `:558-563`, `:607`; `worm.cpp:213`, `:292-296`, `:355`, `:386`, `:795`; `viewport.cpp:85` | `worm.settings->health` | `WormState::max_health` of worms 0 and 1 (here; 4½f-1 T3) |
 /// | `game.cpp:63-96`; `worm.cpp:704`; `viewport.cpp:135-139`, `:261`, `:265` | `worm.settings->{input_device, controls, weapons, name, color}` | per-worm (input / `InitWeapons` / names; not live sim settings) |
 pub fn apply_live_settings(state: &mut SimState, s: &Settings) {
     state.settings_max_bonuses = s.max_bonuses;
@@ -297,6 +317,9 @@ pub fn apply_live_settings(state: &mut SimState, s: &Settings) {
     state.settings_loading_time = s.loading_time;
     state.load_change = s.load_change;
     state.shadow = s.shadow;
+    for (worm, ws) in state.worms.iter_mut().zip(&s.worm_settings[..2]) {
+        worm.max_health = ws.health;
+    }
 }
 
 /// `ChangeState(kStateGame)` after weapon selection (`localController.cpp:232-235`: `lives =
@@ -389,15 +412,87 @@ mod tests {
     }
 
     #[test]
-    fn health_must_be_positive_and_equal_for_both_players() {
+    fn health_must_be_positive_and_may_differ_between_the_players() {
         let mut c = cfg();
         c.settings.worm_settings[0].health = 0;
         assert_eq!(validate(&c, 40), Err(BuildError::InvalidHealth(0)));
         let mut c = cfg();
         c.settings.worm_settings[1].health = 150;
+        assert_eq!(validate(&c, 40), Ok(()), "4½f-1 T3: unequal healths play");
+        assert_eq!(validate_for_selection(&c, 40), Ok(()));
+    }
+
+    #[test]
+    fn unequal_healths_build_each_worm_at_its_own_max() {
+        let mut c = cfg();
+        c.settings.worm_settings[0].health = 30;
+        c.settings.worm_settings[1].health = 250;
+        for st in [
+            build_match(Path::new(TC_ROOT), &c, &level()).unwrap().state,
+            new_match(Path::new(TC_ROOT), &c, &level()).unwrap().state,
+        ] {
+            assert_eq!((st.worms[0].health, st.worms[1].health), (30, 250));
+            assert_eq!((st.worms[0].max_health, st.worms[1].max_health), (30, 250));
+        }
+    }
+
+    // ---- 4½f-1 T3 Step 3: the FollowAI refusal (D1; John's Q2) ------------------------
+
+    #[test]
+    fn refuse_follow_ai_names_the_first_playing_follow_ai() {
+        assert_eq!(refuse_follow_ai(&Settings::default()), Ok(()));
+        for worm in 0..2 {
+            for controller in [0, 1] {
+                let mut s = Settings::default();
+                s.worm_settings[worm].controller = controller;
+                assert_eq!(refuse_follow_ai(&s), Ok(()), "worm {worm} {controller}");
+            }
+            let mut s = Settings::default();
+            s.worm_settings[worm].controller = 2;
+            assert_eq!(
+                refuse_follow_ai(&s),
+                Err(BuildError::FollowAiUnsupported { worm })
+            );
+        }
+        let mut s = Settings::default();
+        s.worm_settings[0].controller = 2;
+        s.worm_settings[1].controller = 2;
         assert_eq!(
-            validate(&c, 40),
-            Err(BuildError::AsymmetricHealth { p1: 100, p2: 150 })
+            refuse_follow_ai(&s),
+            Err(BuildError::FollowAiUnsupported { worm: 0 }),
+            "the first one"
+        );
+        let mut s = Settings::default();
+        s.worm_settings[2].controller = 2;
+        assert_eq!(
+            refuse_follow_ai(&s),
+            Ok(()),
+            "the network player never plays"
+        );
+        assert_eq!(
+            BuildError::FollowAiUnsupported { worm: 1 }.to_string(),
+            "player 1 is an AI (FollowAI) player; not supported yet"
+        );
+    }
+
+    #[test]
+    fn the_builders_still_accept_a_follow_ai_setup() {
+        // Fact 15: three committed sim setups have [player2] controller = 2 and go through
+        // build_match; the refusal is the menu's NEW GAME gate only (D1).
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../oracle-tests/golden/sim_slice4_5a_killemall_setup.cfg"
+        ))
+        .unwrap();
+        let settings = crate::settings_toml::settings_from_toml(&text).unwrap();
+        assert_eq!(settings.worm_settings[1].controller, 2, "non-vacuous");
+        let c = MatchConfig { settings, seed: 7 };
+        assert_eq!(validate(&c, 40), Ok(()));
+        assert_eq!(validate_for_selection(&c, 40), Ok(()));
+        assert!(build_match(Path::new(TC_ROOT), &c, &level()).is_ok());
+        assert!(
+            refuse_follow_ai(&c.settings).is_err(),
+            "the gate's own check"
         );
     }
 
@@ -499,9 +594,15 @@ mod tests {
         assert_eq!(st.settings_max_bonuses, 6);
         assert_eq!(st.weap_table.len(), 40);
         assert_eq!(st.weap_table[5], 2);
+        assert_eq!((st.worms[0].max_health, st.worms[1].max_health), (150, 150));
+        assert_eq!((st.game_mode, st.time_to_lose), (3, 99));
         assert_eq!(
-            (st.settings_health, st.game_mode, st.time_to_lose),
-            (150, 3, 99)
+            st.ai_params,
+            [
+                [120, 120, 50, 50, 80, 300, 400],
+                [20, 20, 20, 20, 80, 60, 1]
+            ],
+            "the openliero TC's aiparams (D11)"
         );
         assert!(!st.shadow);
         assert_eq!(st.bobjects.capacity(), 300);
@@ -632,7 +733,8 @@ mod tests {
         assert_eq!(split.worms[1].lives, 7);
     }
 
-    /// A `Settings` whose eight live fields all differ from `Settings::default()`'s.
+    /// A `Settings` whose nine live fields (the eight sim fields and both worms' health) all
+    /// differ from `Settings::default()`'s.
     fn live_edited() -> Settings {
         let mut s = Settings::default();
         s.max_bonuses += 3;
@@ -644,18 +746,18 @@ mod tests {
         s.loading_time += 25;
         s.load_change = !s.load_change;
         s.shadow = !s.shadow;
+        s.worm_settings[0].health += 5;
+        s.worm_settings[1].health += 7;
         // Not live: none of these may reach the state.
         s.lives += 4;
         s.blood_particle_max += 11;
-        s.worm_settings[0].health += 5;
-        s.worm_settings[1].health += 5;
         s.map = !s.map;
         s.names_on_bonuses = !s.names_on_bonuses;
         s
     }
 
     #[test]
-    fn apply_live_settings_writes_exactly_the_eight_live_fields() {
+    fn apply_live_settings_writes_exactly_the_live_fields() {
         let mut state = new_match(Path::new(TC_ROOT), &cfg(), &level())
             .expect("new_match")
             .state;
@@ -674,9 +776,11 @@ mod tests {
         assert_ne!(e.loading_time, d.loading_time);
         assert_ne!(e.load_change, d.load_change);
         assert_ne!(e.shadow, d.shadow);
+        for i in 0..2 {
+            assert_ne!(e.worm_settings[i].health, d.worm_settings[i].health);
+        }
 
         let worms_before = state.worms.clone();
-        let settings_health = state.settings_health;
         apply_live_settings(&mut state, &e);
 
         assert_eq!(state.settings_max_bonuses, e.max_bonuses);
@@ -691,10 +795,23 @@ mod tests {
         assert_eq!(state.load_change, e.load_change);
         assert_eq!(state.shadow, e.shadow);
 
-        // Nothing else: the worms (lives, health), the per-worm health, the rand, the level,
-        // the cycles and the pools, and the state hash (none of the eight is hashed).
-        assert_eq!(state.worms, worms_before);
-        assert_eq!(state.settings_health, settings_health);
+        // Each worm's own max (4½f-1 T3; T0 P5: HEALTH reaches a paused match at RESUME).
+        assert_eq!(
+            (state.worms[0].max_health, state.worms[1].max_health),
+            (e.worm_settings[0].health, e.worm_settings[1].health)
+        );
+
+        // Nothing else: the worms' other fields (lives, health: the next tick's clamp is the
+        // sim's), the rand, the level, the cycles and the pools, and the state hash (none of the
+        // live fields is hashed).
+        let mut want_worms = worms_before;
+        for (w, ws) in want_worms.iter_mut().zip(&e.worm_settings) {
+            w.max_health = ws.health;
+        }
+        assert_eq!(
+            state.worms, want_worms,
+            "only max_health moves on the worms"
+        );
         assert_eq!((state.rand.draws(), state.rand.last()), before_rand);
         assert!(state.level == before_level);
         assert_eq!(state.cycles, 0);
@@ -723,6 +840,39 @@ mod tests {
         assert_eq!(
             (state.settings_loading_time, state.load_change, state.shadow),
             (fresh.settings_loading_time, fresh.load_change, fresh.shadow)
+        );
+        assert_eq!(state.worms, fresh.worms, "the maxes are back to 100");
+    }
+
+    #[test]
+    fn a_health_edit_reaches_the_sim_live_and_the_next_tick_clamps() {
+        // T0 P5: HEALTH 30 while paused reads 30 at once; the first resumed tick clamps the
+        // worm's 100 to 30 (worm.cpp:213), and the other worm keeps its health under 250.
+        let mut state = build_match(Path::new(TC_ROOT), &cfg(), &level())
+            .expect("build_match")
+            .state;
+        let mut s = Settings::default();
+        s.worm_settings[0].health = 30;
+        s.worm_settings[1].health = 250;
+        let draws = state.rand.draws();
+        let hash = sim::hash::hash_game_state(&state);
+        apply_live_settings(&mut state, &s);
+        assert_eq!(
+            (state.worms[0].max_health, state.worms[1].max_health),
+            (30, 250)
+        );
+        assert_eq!(
+            (state.worms[0].health, state.worms[1].health),
+            (100, 100),
+            "health itself waits for the tick"
+        );
+        assert_eq!(state.rand.draws(), draws, "it draws nothing");
+        assert_eq!(sim::hash::hash_game_state(&state), hash, "hash-neutral");
+        state.process_frame(&[sim::state::ControlState::default(); 2]);
+        assert_eq!(
+            (state.worms[0].health, state.worms[1].health),
+            (30, 100),
+            "the clamp is each worm's own max; nothing heals toward 250"
         );
     }
 
@@ -755,6 +905,10 @@ mod tests {
                 direct.shadow
             ),
             (via.settings_loading_time, via.load_change, via.shadow)
+        );
+        assert_eq!(
+            (direct.worms[0].max_health, direct.worms[1].max_health),
+            (via.worms[0].max_health, via.worms[1].max_health)
         );
         assert_eq!(
             sim::hash::hash_game_state(&direct),
@@ -902,6 +1056,53 @@ mod tests {
         assert_eq!(
             l.checked_mat_background(0, 64),
             (l.material_flags[0] & sim::state::MAT_BACKGROUND) != 0
+        );
+    }
+
+    // ---- 4½f-1 T2 Step 3: the CPU smoke (sim::ai over a real match) --------------------
+
+    /// Two CPUs, fed only by `sim::ai::run_ais` (D8's flow: last tick's post-tick words, no
+    /// key edges), on a generated 504 x 350 level for 2,000 ticks. Returns every tick's state
+    /// hash, whether each worm was ever visible, and whether each word was ever non-zero.
+    fn cpu_smoke() -> (Vec<u32>, [bool; 2], [bool; 2]) {
+        use sim::ai::{run_ais, DumbLieroAi};
+        let (s, level) = generated(504, 350, 4501);
+        let c = MatchConfig {
+            settings: s,
+            seed: 4502,
+        };
+        let mut st = build_match(Path::new(TC_ROOT), &c, &level)
+            .expect("the default setup builds")
+            .state;
+        let mut ais = [Some(DumbLieroAi::new()), Some(DumbLieroAi::new())];
+        let (mut visible, mut pressed) = ([false; 2], [false; 2]);
+        let mut hashes = Vec::with_capacity(2000);
+        for _ in 0..2000 {
+            let mut inputs = [st.worms[0].control_states, st.worms[1].control_states];
+            run_ais(&mut ais, &st, &mut inputs);
+            st.process_frame(&inputs);
+            for i in 0..2 {
+                pressed[i] |= inputs[i].pack() != 0;
+                visible[i] |= st.worms[i].visible;
+            }
+            hashes.push(sim::hash::hash_game_state(&st));
+        }
+        (hashes, visible, pressed)
+    }
+
+    #[test]
+    fn two_cpus_play_2000_ticks_deterministically() {
+        let (a, visible, pressed) = cpu_smoke();
+        assert_eq!(
+            visible,
+            [true, true],
+            "both CPUs spawned (they press Fire while dead)"
+        );
+        assert_eq!(pressed, [true, true], "both CPUs pressed something");
+        let (b, _, _) = cpu_smoke();
+        assert_eq!(
+            a, b,
+            "the same seeds give the same state hash on every tick"
         );
     }
 }

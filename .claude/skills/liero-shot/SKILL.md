@@ -127,7 +127,8 @@ at 12 then every 3 frames), fire on Randomize re-rolls all five (it draws the
 SIM RNG), fire on DONE! readies — both players. F5 and the post-match restart
 go back to selection with the picks kept. `--live --record` skips it (stderr
 says so) and the browser's `?weapons=` skips it; a touch-only page makes
-player 2 a bot that is ready at once. Headless: `cargo run -p shot --
+player 2 a bot that is ready at once (since 4½f-1: the real CPU with RANDOM
+weapons, see below). Headless: `cargo run -p shot --
 --weapsel --scenario-path <settings scenario> --out x.png` renders the initial
 screen on the faithful path (`new_match`, invisible worms, the worm colour
 ramps). The goldens are `oracle-tests/golden/weapsel_*` (C++
@@ -156,7 +157,7 @@ reach a paused match at RESUME (C++ shares `gfx.settings`). `Setups/liero.cfg` i
 written at exit: `--config-root <dir>` (or `=<dir>`) is one directory, otherwise the C++ config
 root (`OPENLIERO_TEST_USER_DIR` / the pref path over `OPENLIERO_DATADIR` / `data/`); the browser
 keeps settings in memory until reload. NEW GAME / RESUME on a setup Rust cannot play yet
-(Holdazone, unequal health, no weapon) shows a Rust-only refusal box (`console.warn` in the
+(Holdazone, no weapon; unequal health until 4½f-1) shows a Rust-only refusal box (`console.warn` in the
 browser). NAMES ON BONUSES draws the bonus / booby-trap names, and a held Change shows the weapon
 name over the worm. On a phone a number box raises the device keyboard (iPhone: TAP TO TYPE),
 FIRE confirms and MENU cancels; a held pad Up/Down repeats in menus. The browser page publishes
@@ -185,6 +186,30 @@ are `shell_*` G2e-2 (6 `fs` cases with every frame, `d` line and saved file vs t
 `Gfx::RunOneFrame`; `gen_slice4_5e2_shell -- check|write`, `gen_shell_golden.sh`, 28 cases) and the
 Q4 twin in `shell_golden.rs` (`level_pick` and the milestone re-driven with the level only in the
 system layer, played exactly as C++ plays a user copy).
+
+**The CPU player and per-player health (Step 4½f-1).** A `liero.cfg` player with `controller = 1`
+is the C++ CPU, `DumbLieroAI`: `sim::ai::DumbLieroAi` (its own `mt19937(0x1337)`, fresh per CPU
+per NEW GAME, never reseeded) runs inside `ui::shell::playing::Match::process` after the key edges
+and before the tick, in `LocalController`'s alternating order, never in weapon selection. It walks
+toward the nearest worm, fires in range, changes weapons and respawns by itself (it toggles FIRE
+while dead); BOT WEAPONS decides its picks (RANDOM / PICK with that player's keys / KEEP). Each
+worm has its own max health (`WormState::max_health`), so unequal healths boot and play, and
+RESUME brings the settings' healths into an attached paused match (the HEALTH row that edits them
+is 4½f-2's player menu). A controller-2 ("AI", FollowAI) player gets the
+Rust-only `AI PLAYERS ARE NOT SUPPORTED YET` box at NEW GAME (it still boots and resumes). On a
+phone (touch-only page) player 2 **is** the CPU with RANDOM weapons every match (also after LOAD
+SETUP); the 4½c stand-in is gone, and "FIRE to respawn" shows only for a human player 1. The
+browser takes `?cpu=0|1|2` (both human / player 2 the CPU / both CPUs; it does not skip the menu
+and keeps the setup's BOT WEAPONS, so on a keyboard `?cpu=1` needs player 2's keys to pick the
+CPU's weapons: the arrows, then Right Ctrl on DONE!) and publishes read-only `window.lieroWorms`
+(`x`, `y`, `visible`, `word`, `health`, `lives` per worm), `lieroControllers` and `lieroWeapsel`.
+The oracle-only `ai` scenario directive (with `settings`) gives each controller-1 player a real
+C++ `DumbLieroAI` in `oracle_dump_sim_physics` and adds four columns (the CPU's word after its AI
+step and its AI's `rand.last`). The gates are `sim_slice4_5f_*` G-AI (5 cases, among them
+`ai_vs_human`, Hard gate 4's human-vs-CPU golden) + G-HP (3 unequal-health cases;
+`gen_slice4_5f1_sim`, `gen_sim_slice4_5f_golden.sh`) and `shell_*` G2f-1 (4 cases through the
+real `Gfx::RunOneFrame` with the real `LocalController` running the real `DumbLieroAI`, 🎯
+`shell_cpu_match`; `gen_slice4_5f1_shell -- check|write`, `gen_shell_golden.sh`, 32 cases).
 
 ```
 cargo run --manifest-path rust/Cargo.toml -p game -- --live [name]

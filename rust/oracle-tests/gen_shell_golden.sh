@@ -14,8 +14,13 @@
 # Slice 4½e-2 adds the tops L (the level selector) and P (the LOAD SETUP options selector), and no
 # line kind (formats: docs/superpowers/plans/2026-09-26-liero-rs-step4.5-slice4.5e2-plan.md,
 # §Formats pinned); its scripts come from `--example gen_slice4_5e2_shell -- write <golden dir>`.
-# EXPECTED_SHELL_CASES (default 28: the 4½d 11 + the e-1 11, i.e. the plan's 10 and Batch 5's
-# key_edges, + the e-2 6) overrides the expected script count.
+# Slice 4½f-1 adds no top or line kind: its CPU cases run the REAL DumbLieroAI inside
+# LocalController, with intervention 3′ (zero the new game's uninitialised `reacts`), check 3″
+# (every new DumbLieroAI's RNG is a fresh mt19937(0x1337)) and the FollowAI guard
+# (docs/superpowers/plans/2026-09-27-liero-rs-step4.5-slice4.5f1-plan.md, §Formats pinned); its
+# scripts come from `--example gen_slice4_5f1_shell -- write <golden dir>`.
+# EXPECTED_SHELL_CASES (default 32: the 4½d 11 + the e-1 11, i.e. the plan's 10 and Batch 5's
+# key_edges, + the e-2 6 + the f-1 4) overrides the expected script count.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PRESET="${PRESET:-macos-arm64}"
@@ -90,5 +95,5 @@ for scn in rust/oracle-tests/golden/shell_*_script.txt; do
   echo "wrote $out"
   n=$((n + 1))
 done
-want="${EXPECTED_SHELL_CASES:-28}"
+want="${EXPECTED_SHELL_CASES:-32}"
 test "$n" -eq "$want" || { echo "FAIL: $n shell scripts (want $want)"; exit 1; }

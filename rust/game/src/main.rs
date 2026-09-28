@@ -186,9 +186,6 @@ struct ShellRes {
     /// Holding DIG during play keeps digging (`game::touch::DigRepeat`).
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the browser has touch
     dig_repeat: game::touch::DigRepeat,
-    /// The touch-only page's player-2 stand-in presses FIRE to respawn (`game::touch::BotRespawn`).
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // only the browser has touch
-    bot_respawn: game::touch::BotRespawn,
     refusal_shown: bool,
     saved: bool,
 }
@@ -538,6 +535,9 @@ fn setup(
         let store = shell_store(&config_root);
         let mut settings = game::config::load_settings(&*store);
         preview.0.apply_level(&mut settings, store.root_label());
+        // Step 4½f-1 D4: `?cpu=` switches players to the CPU; without it a touch-only page makes
+        // player 2 the CPU (D3's settings half; `Shell` re-applies it after LOAD SETUP).
+        preview.0.apply_cpu(&mut settings, touch_only());
         let seeds = preview.0.seed.map_or(SeedSource::Fresh, SeedSource::Fixed);
         let options = StartOptions {
             skip_selection: preview.0.skips_weapon_selection(),
@@ -582,7 +582,6 @@ fn setup(
             touch: game::touch::TouchKeys::default(),
             weapon_tap: game::touch::WeaponTap::default(),
             dig_repeat: game::touch::DigRepeat::default(),
-            bot_respawn: game::touch::BotRespawn::default(),
             refusal_shown: false,
             saved: false,
         });
@@ -1256,8 +1255,7 @@ fn tick_shell(
         matches!(e, ui::shell::InputEvent::Key(k)
             if k.dos == ui::keys::DK_F5 && k.down && !k.repeat)
     });
-    #[allow(unused_mut)] // only the wasm build adds the touch bot's FIRE
-    let mut sampled = sample_inputs_touch(
+    let sampled = sample_inputs_touch(
         source,
         0,
         keys,
@@ -1265,12 +1263,6 @@ fn tick_shell(
         sh.dig_repeat
             .apply(sh.weapon_tap.apply(page_touch(), sh.phase), sh.phase),
     );
-    #[cfg(target_arch = "wasm32")]
-    if touch_only()
-        && let Some(bot) = sim.worms.get(1)
-    {
-        sampled[1] = sh.bot_respawn.apply(sampled[1], bot, sh.phase);
-    }
     let input = ShellInput {
         events: &events,
         sampled,
@@ -1317,9 +1309,14 @@ fn tick_shell(
         publish_top(&sh.shell);
         if out.phase == Phase::Game {
             publish_weapon(sim.worms[0].current_weapon);
+            if out.present.is_some() {
+                publish_worms(sim);
+            }
         }
+        // Plan D15: the banner is a human player 1's (a CPU player 1, `?cpu=2`, readies itself).
         publish_respawn(
             out.phase == Phase::Game
+                && sh.shell.current().is_some_and(|m| !m.is_cpu(0))
                 && sim
                     .worms
                     .first()
@@ -1433,8 +1430,9 @@ fn page_touch() -> u32 {
 }
 
 /// The page's touch-only flag (`window.lieroTouchOnly`, set by `web/index.html` before the game
-/// starts): player 2 then has no input, so it becomes a bot that readies at once (Q8). Natively
-/// always false.
+/// starts): player 2 then has no input, so it is the CPU with random weapons each match (Step
+/// 4½f-1, John's Q3: `MatchParams::apply_cpu` without `?cpu=`, and NEW GAME's BOT WEAPONS
+/// RANDOM). Natively always false.
 #[cfg(target_arch = "wasm32")]
 fn touch_only() -> bool {
     js_sys::Reflect::get(&js_sys::global(), &"lieroTouchOnly".into())
@@ -1513,6 +1511,28 @@ fn publish_respawn(waiting: bool) {
     let _ = js_sys::Reflect::set(&js_sys::global(), &"lieroRespawn".into(), &waiting.into());
 }
 
+/// Step 4½f-1 (plan D16): both worms as `window.lieroWorms` (`game::touch::worm_hooks`: `x`, `y`,
+/// `visible`, `word`, `health`, `lives`) on every presented frame of play — a read-only hook for
+/// the headless walk (the CPU moves, fires, dies and respawns by itself).
+#[cfg(target_arch = "wasm32")]
+fn publish_worms(sim: &SimState) {
+    let list = js_sys::Array::new();
+    for w in game::touch::worm_hooks(sim) {
+        let o = js_sys::Object::new();
+        let set = |key: &str, value: js_sys::wasm_bindgen::JsValue| {
+            let _ = js_sys::Reflect::set(&o, &key.into(), &value);
+        };
+        set("x", w.x.into());
+        set("y", w.y.into());
+        set("visible", w.visible.into());
+        set("word", w.word.into());
+        set("health", w.health.into());
+        set("lives", w.lives.into());
+        list.push(&o);
+    }
+    let _ = js_sys::Reflect::set(&js_sys::global(), &"lieroWorms".into(), &list);
+}
+
 /// Step 4½e-1: player 1's current weapon slot as `window.lieroWeapon` while a match plays — a
 /// read-only hook, like `window.lieroPhase`, for the headless browser check (a held WEAPON plus
 /// one pad tap steps exactly one weapon).
@@ -1530,7 +1550,9 @@ fn publish_weapon(slot: i32) {
 /// settings' GAME MODE (0 Kill'em All … 3 Scales of Justice). Step 4½e-2 (plan D11):
 /// `window.lieroFolder` (a selector's folder), `window.lieroSetup`, `window.lieroLevel`, and
 /// `window.lieroTextMode` (`numeric` / `text`), from which the page picks the phone keyboard
-/// (`game::touch::hooks` has them all).
+/// (`game::touch::hooks` has them all). Step 4½f-1 (plan D16): `window.lieroControllers`, the
+/// settings' `[player 1, player 2]` controllers (0 human, 1 CPU), and `window.lieroWeapsel`, each
+/// player's `{cursor, ready}` in weapon selection (`null` outside it).
 #[cfg(target_arch = "wasm32")]
 fn publish_top(shell: &Shell) {
     let h = game::touch::hooks(shell);
@@ -1545,6 +1567,24 @@ fn publish_top(shell: &Shell) {
     set("lieroSetup", h.setup.into());
     set("lieroLevel", h.level.into());
     set("lieroTextMode", h.text_mode.into());
+    set(
+        "lieroControllers",
+        js_sys::Array::of2(&h.controllers[0].into(), &h.controllers[1].into()).into(),
+    );
+    let weapsel = match h.weapsel {
+        None => js_sys::wasm_bindgen::JsValue::NULL,
+        Some(players) => {
+            let list = js_sys::Array::new();
+            for (cursor, ready) in players {
+                let o = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&o, &"cursor".into(), &cursor.into());
+                let _ = js_sys::Reflect::set(&o, &"ready".into(), &ready.into());
+                list.push(&o);
+            }
+            list.into()
+        }
+    };
+    set("lieroWeapsel", weapsel);
 }
 
 /// Publish the live phase as `window.lieroPhase` (`"menu"` / `"text"` (Step 4½e-1: a number box,

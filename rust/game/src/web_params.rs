@@ -8,12 +8,19 @@
 //! ?weapons=MISSILE,LASER,BIG%20NUKE&level=water_stage&seed=7
 //! ?level=water_stage&menu=1   (the main menu, over the water level)
 //! ?demo            (the old scripted `blood` demo instead of a live match)
+//! ?cpu=1           (player 2 is the CPU; `cpu=2` both players, `cpu=0` both human)
 //! ```
 //!
 //! Every NEW GAME starts like C++ NEW GAME (`ui::shell`): a generated level, a fresh seed, then
 //! weapon selection (4½c). `weapons=` skips selection (John's Q3 ruling) and loads the named
 //! weapons; `level=` loads a stock level instead of generating one; `seed=` fixes the seed.
 //! With `menu=1` they configure the boot level and every NEW GAME from the menu.
+//!
+//! Step 4½f-1 (plan D4, John's ruling on the plan's open question): `cpu=` only switches players
+//! to the CPU (C++ `WormSettings::controller`), in the loaded settings. It does not skip the menu
+//! and does not touch BOT WEAPONS, which follows the setup (PICK in the shipped one, as in C++),
+//! so on a keyboard a CPU's weapons are picked with that player's keys. Without `cpu=` a
+//! touch-only page makes player 2 the CPU (`ui::shell::selection::touch_settings`).
 //!
 //! This module is Bevy-free and target-independent so it is unit-tested natively;
 //! `main.rs` feeds it `window.location.search` on wasm. Nothing here touches the
@@ -22,6 +29,7 @@
 //! exactly as deterministic as any other match with the same seed.
 
 use sim::state::NUM_WEAPONS;
+use ui::shell::selection::{CONTROLLER_BOT, touch_settings};
 
 pub use ui::shell::loadout::apply_weapons;
 
@@ -49,6 +57,9 @@ pub struct MatchParams {
     pub seed: Option<u32>,
     /// `menu`: force the main menu even with `weapons`/`level`/`seed` (Step 4½d, Q4).
     pub menu: bool,
+    /// `cpu=`: `0` both players human, `1` player 2 the CPU, `2` both CPUs (Step 4½f-1, D4);
+    /// see [`MatchParams::apply_cpu`].
+    pub cpu: Option<u8>,
     /// Human-readable notes about ignored values (logged to the console).
     pub warnings: Vec<String>,
 }
@@ -95,6 +106,14 @@ impl MatchParams {
                     Ok(s) => p.seed = Some(s),
                     Err(_) => p.warnings.push(format!("seed: not a number: {value:?}")),
                 },
+                "cpu" => match value.trim() {
+                    "0" => p.cpu = Some(0),
+                    "1" => p.cpu = Some(1),
+                    "2" => p.cpu = Some(2),
+                    _ => p
+                        .warnings
+                        .push(format!("cpu: not 0, 1 or 2: {value:?} (ignored)")),
+                },
                 _ => {}
             }
         }
@@ -119,6 +138,26 @@ impl MatchParams {
         if let Some(file) = self.level_file(root_label) {
             s.random_level = false;
             s.level_file = file;
+        }
+    }
+
+    /// Step 4½f-1 (plan D4): `?cpu=` on the loaded settings (the in-memory copy only, like
+    /// `?level=`; the file is saved only from what the menu holds). `0`: both players human;
+    /// `1`: player 1 human, player 2 the CPU; `2`: both CPUs. Without it a touch-only page makes
+    /// player 2 the CPU ([`touch_settings`], John's Q3), and a desktop keeps the loaded setup.
+    /// BOT WEAPONS is left as the setup has it (John's ruling: the original's weapon picking).
+    pub fn apply_cpu(&self, s: &mut scenario::settings::Settings, touch_only: bool) {
+        let cpus = match self.cpu {
+            Some(n) => [n >= 2, n >= 1],
+            None => {
+                if touch_only {
+                    touch_settings(s);
+                }
+                return;
+            }
+        };
+        for (w, cpu) in s.worm_settings.iter_mut().zip(cpus) {
+            w.controller = if cpu { CONTROLLER_BOT } else { 0 };
         }
     }
 
@@ -359,6 +398,74 @@ mod tests {
         assert_eq!(
             state.worms[0].weapons[2], before,
             "an unknown name leaves its slot"
+        );
+    }
+
+    #[test]
+    fn cpu_parses_0_1_2_and_warns_on_anything_else() {
+        for (q, want) in [
+            ("?cpu=0", Some(0)),
+            ("?cpu=1", Some(1)),
+            ("?cpu=2", Some(2)),
+        ] {
+            let p = MatchParams::parse(q);
+            assert_eq!(p.cpu, want, "{q}");
+            assert!(p.warnings.is_empty(), "{q}: {:?}", p.warnings);
+        }
+        for q in ["?cpu=3", "?cpu=x", "?cpu", "?cpu=-1"] {
+            let p = MatchParams::parse(q);
+            assert_eq!(p.cpu, None, "{q}");
+            assert_eq!(p.warnings.len(), 1, "{q}: {:?}", p.warnings);
+            assert!(p.warnings[0].starts_with("cpu:"), "{:?}", p.warnings);
+        }
+    }
+
+    #[test]
+    fn cpu_switches_only_the_controllers_of_the_loaded_settings() {
+        // D4 and John's ruling: `?cpu=` sets players 1/2 Human or CPU and nothing else (BOT
+        // WEAPONS stays the setup's: PICK in the shipped liero.cfg).
+        let store = crate::config::browser_store();
+        let loaded = crate::config::load_settings(&store);
+        assert_eq!(loaded.select_bot_weapons, 1, "the shipped setup: PICK");
+        let controllers = |q: &str, touch_only: bool| {
+            let mut s = loaded.clone();
+            s.worm_settings[0].controller = 1; // a loaded CPU player 1: `cpu=` overrides it
+            MatchParams::parse(q).apply_cpu(&mut s, touch_only);
+            let mut rest = s.clone();
+            for (w, l) in rest.worm_settings.iter_mut().zip(&loaded.worm_settings) {
+                w.controller = l.controller;
+            }
+            assert_eq!(
+                rest, loaded,
+                "{q} touch_only {touch_only}: only the controllers"
+            );
+            s.worm_settings.map(|w| w.controller)
+        };
+        for touch_only in [false, true] {
+            assert_eq!(controllers("?cpu=0", touch_only), [0, 0, 0]);
+            assert_eq!(controllers("?cpu=1", touch_only), [0, 1, 0]);
+            assert_eq!(controllers("?cpu=2", touch_only), [1, 1, 0]);
+        }
+        assert_eq!(
+            controllers("", true),
+            [1, 1, 0],
+            "no ?cpu= on a touch-only page: player 2 is the CPU (touch_settings)"
+        );
+        assert_eq!(
+            controllers("?seed=3", false),
+            [1, 0, 0],
+            "no ?cpu= on a desktop: the loaded setup as it is"
+        );
+    }
+
+    #[test]
+    fn cpu_does_not_skip_the_menu() {
+        assert!(!MatchParams::parse("?cpu=1").skips_menu());
+        assert!(!MatchParams::parse("?cpu=2&touch=1").skips_menu());
+        assert!(!MatchParams::parse("?cpu=1").skips_weapon_selection());
+        assert!(
+            MatchParams::parse("?cpu=2&seed=7").skips_menu(),
+            "seed= still does"
         );
     }
 

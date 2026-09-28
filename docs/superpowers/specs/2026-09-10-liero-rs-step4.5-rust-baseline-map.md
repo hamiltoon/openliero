@@ -127,7 +127,10 @@ spawn-rect consts, min-spawn-dists, `game_mode` (`:172-182`).
 themselves, e.g. `oracle-tests/tests/sim_slice5c_golden.rs:243`):
 - `settings_max_bonuses` / `bonus_drop_chance` / `bonus_*` consts / `weap_table` → **bonuses never spawn in the live game**.
 - `state.sound_hooks` left `SoundHooks::default()` (all zeros) → `play_bump/alive/reloaded/ninjarope_throw` all fire sample index 0 (`"shotgun"`). **Confirmed live bug** — `TcConfig` *does* resolve the hooks (`assets/src/tc.rs:467-…`), including `MenuMoveUp`/`MenuMoveDown`/`MenuSelect`.
-- `settings_health` stays 100, `settings_loading_time` 0 (instant reload), `laser_weapon` 0.
+- `settings_health` stays 100, `settings_loading_time` 0 (instant reload), `laser_weapon` 0. (**4½f-1:**
+  `settings_health` is gone; each worm's `max_health` is 100 from `WormState::from_init` — the C++ `WormSettings`
+  default, **not** the `worm` line's start health — and `loader::load` sets `ai_params` from the TC like
+  `new_match_with`.)
 
 **Asset seam / wasm**: every TC read funnels through `scenario::assets::read_asset(tc_root, rel)`
 (`assets.rs:16-27` native; `:48-103` wasm). The wasm embed is a curated manifest: `include_dir!` of
@@ -193,6 +196,46 @@ There is no shipped stock-level corpus for a level picker, and only one TC.
 `weap_table` *contents*, the whole `WormSettings` (name, colours, controls, per-worm weapon
 choices), `GameplayExtensions`/`AppSettings`. Game mode 2 (Holdazone) is an explicit
 `unimplemented!()` (`state.rs:2250-2252`).
+
+**Step 4½f-1 (the CPU player; per-worm health).**
+- `sim::ai` (`rust/sim/src/ai.rs`): `DumbLieroAi { rand: Rand }` (`Rand::new()` = `mt19937(0x1337)`, `last = 0`),
+  `process(&mut self, &SimState, worm, cs) -> ControlState` — C++ `DumbLieroAI::Process` (`worm.cpp:477-696`) line
+  for line; it reads `cs` (last tick's post-tick word plus this tick's key edges), **never**
+  `state.worms[w].control_states`, and only reads the state. `run_ais` / `run_ais_traced` are `LocalController`'s
+  loop (`ai_order(cycles)`: worm 0 first on even `cycles`); `AiTrace` (target, `max_dist` and its arm and floor,
+  `real_dist`, the Fire draw, `dir`, the fallback arm, Change, the rope arm, the two `reacts` arms, the draw count) is
+  behaviour-free, for unit tests and the gate ledgers. The AI is **not** in `SimState` and not hashed (C++ keeps
+  `Worm::ai` out of snapshots). Fixed point only; no floats, no hash containers, no clock.
+- `WormState::reacts: [i32; 4]` is stored where `worm_reactions` computes it (`state.rs`) and kept between ticks: 0
+  from `from_init`, rewritten only by a visible `Process`, never reset on death, respawn or `ResetWorms`; not hashed.
+- `WormState::max_health: i32` replaces the `SimState::settings_health` scalar at every read site (`do_damage`,
+  `do_healing`, the clamp, respawn, the low-health blood gate, Scales' extra life, `bonus::do_healing_direct` and the
+  health bonus, the `nobject` / `sobject` threading, `render::hud`'s lifebar); not hashed.
+  `scenario::build::new_match_with` and `apply_live_settings` write `worm_settings[i].health` into it (so RESUME
+  brings both maxes). The frozen generator `gen_slice4_5e1_sim.rs` changed in exactly one line for it (plan D6).
+- `SimState::ai_params: [[i32; 7]; 2]` (`[pressed][control]`, from `tc.aiparams.ordered()`), set by both builders;
+  not hashed.
+- `scenario::build::refuse_follow_ai(&Settings)` → `BuildError::FollowAiUnsupported { worm }` for a controller-2
+  player; called only by the RefusalGate's NEW GAME arm (`ui::shell::overlay`), never by `validate*` (three committed
+  sim setups have a controller-2 player 2) and never at RESUME. `BuildError::AsymmetricHealth` is gone.
+- `scenario::parser`: the oracle-only `ai` directive (`Scenario::ai()`; needs `settings`, which `scenario::load`
+  refuses, so only the gate harnesses read it).
+- `ui::shell::playing::Match { ais: [Option<DumbLieroAi>; 2], traces }`: made at `Match::start` for every
+  `controller == 1` player (both routes, once per NEW GAME); `process` runs `run_ais_traced` after
+  `KeyEdges::apply` and before `tick_viewports`, never in selection nor on the frame that finalises it;
+  `resync` / LOAD SETUP never touch it. `Match::focus` re-runs `focus_palette` on every RESUME (`Game::Focus`), and
+  the shell copies the match's palette into the menus'. `ShellDebug::ais` is the test-only off switch (the G2f-1
+  negative control). `Match::{is_cpu, ai, ai_traces, weapon_selection}` are read-only.
+- The touch rule split (plan D3): `ui::shell::selection::touch_settings` makes player 2 the CPU in the **settings**
+  (the `game` boot through `?cpu=`'s default, and `Shell` again after every successful LOAD SETUP on a touch-only
+  page); `new_game_config(settings, touch_only)` sets BOT WEAPONS RANDOM (`BOT_WEAPONS_RANDOM = 0`) on a touch-only
+  page and no longer forces the controller; `live_config` keeps the 4½c rule (controller 1 + KEEP) for the native
+  `--live <scenario>` path only.
+- `game::web_params::MatchParams::cpu` (`?cpu=0|1|2`) and `apply_cpu(&mut Settings, touch_only)`: 0 both human, 1
+  player 2 the CPU, 2 both CPUs, none → `touch_settings` on a touch-only page, else the loaded setup; BOT WEAPONS is
+  left as the setup has it (John's ruling), and it does not skip the menu. `game::touch::BotRespawn` is deleted;
+  `game::touch::worm_hooks` feeds `window.lieroWorms`, `Hooks::{controllers, weapsel}` feed `lieroControllers` /
+  `lieroWeapsel`, and "FIRE to respawn" (`lieroRespawn`) shows only for a human player 1.
 
 **Match-over detection: none.** The game-mode tail switch (`state.rs:2226-2256`) only bumps the
 GameOfTag "it" timer. The lives gate merely *skips processing* a worm with `lives <= 0`

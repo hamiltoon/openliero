@@ -12,8 +12,8 @@
 //! The GameOfTag/Holdazone timer texts are ported (Step 4½d: the G2 boot cases).
 //!
 //! The HUD is a **pure consumer** of `SimState`: it reads `worm.health/kills/
-//! lives/killed_timer/visible/stats_x/weapons/current_weapon`, `state.cycles`,
-//! `state.settings_health`, `state.game_mode`, `state.settings_loading_time`, and
+//! lives/killed_timer/visible/stats_x/weapons/current_weapon/max_health`,
+//! `state.cycles`, `state.game_mode`, `state.settings_loading_time`, and
 //! the current weapon's `Weapon::{ammo, loading_time}` — all existing, all
 //! hash-silent for HUD purposes (no new sim field).
 
@@ -142,10 +142,10 @@ pub fn draw_hud(
     // --- Life bar (viewport.cpp:84-95) ---
     if worm.visible {
         // viewport.cpp:85 — kLifebarWidth = worm.health * 100 / worm.settings->health.
-        // `worm.settings->health` is the per-worm max health; the framehash layout
-        // carries it as the single `state.settings_health` scalar (WormSettings
-        // default 100, never overridden by the dumper).
-        let lifebar_width = worm.health * 100 / state.settings_health;
+        // `worm.settings->health` is this worm's own max health, carried per worm as
+        // `WormState::max_health` (4½f-1; the WormSettings default 100 unless the
+        // match's settings say otherwise).
+        let lifebar_width = worm.health * 100 / worm.max_health;
         // viewport.cpp:86-87 — the 4-arg DrawBar overload (blit.cpp:101-102) => height 2;
         // colour kLifebarWidth/10 + 234.
         draw_bar(
@@ -532,7 +532,7 @@ mod tests {
         let lbl = labels();
         let worms = [worm_init(0, 0, 60, true), worm_init(1, 218, 100, false)];
         let mut state = base_state(&worms, vec![]);
-        // KillEmAll (default), settings_health 100 (default).
+        // KillEmAll (default), max_health 100 (default).
         state.worms[0].kills = 5;
         state.worms[0].lives = 3;
         state.worms[0].current_weapon = 0;
@@ -610,6 +610,61 @@ mod tests {
             px(&b, 218, 178),
             0xFF00_0000 | 6,
             "worm1 lives glyph pal[6]"
+        );
+    }
+
+    #[test]
+    fn lifebar_divides_by_each_worms_own_max_health() {
+        // viewport.cpp:85 reads `worm.settings->health`, the worm's OWN max
+        // (4½f-1): worm 0 at 150 of 300 -> width 50, colour 50/10+234 = 239;
+        // worm 1 at 30 of 30 -> width 100, colour 244 (a shared 100 would give 30).
+        let pal = ramp_pal();
+        let font = origin_font();
+        let lbl = labels();
+        let worms = [worm_init(0, 0, 150, true), worm_init(1, 218, 30, true)];
+        let mut state = base_state(&worms, vec![]);
+        state.worms[0].max_health = 300;
+        state.worms[1].max_health = 30;
+        for w in state.worms.iter_mut() {
+            w.current_weapon = 0;
+            w.weapons[0] = WormWeapon {
+                ty: None,
+                ammo: 0,
+                delay_left: 0,
+                loading_left: 0,
+            };
+        }
+
+        let mut b = filled(320, 200);
+        draw_hud(&mut b, &pal, &state, 0, &font, &lbl, 200, 1);
+        draw_hud(&mut b, &pal, &state, 1, &font, &lbl, 200, 1);
+        let px = |b: &Bitmap, x: i32, y: i32| b.pixels[(y * b.pitch + x) as usize];
+
+        assert_eq!(
+            px(&b, 0, 161),
+            0xFF00_0000 | 239,
+            "worm 0 bar colour 50/10+234"
+        );
+        assert_eq!(px(&b, 49, 161), 0xFF00_0000 | 239, "worm 0 bar is 50 wide");
+        assert_eq!(
+            px(&b, 50, 161),
+            SENTINEL,
+            "worm 0 bar ends at 50 (150 * 100 / 300)"
+        );
+        assert_eq!(
+            px(&b, 218, 161),
+            0xFF00_0000 | 244,
+            "worm 1 bar colour 100/10+234"
+        );
+        assert_eq!(
+            px(&b, 317, 161),
+            0xFF00_0000 | 244,
+            "worm 1 bar is 100 wide"
+        );
+        assert_eq!(
+            px(&b, 318, 161),
+            SENTINEL,
+            "worm 1 bar ends at 100 (30 * 100 / 30)"
         );
     }
 

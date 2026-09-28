@@ -3,7 +3,9 @@
 //! and one shared fade tail. `process` is `LocalController::Process` (`localController.cpp:
 //! 122-200`); `draw` is `LocalController::Draw` for the main window (`:203-212`), which also sets
 //! the play renderer's fade. Plus the boot: the never-focused `LocalController` whose game the
-//! first menu is drawn over (`gfx.cpp:1439-1465`).
+//! first menu is drawn over (`gfx.cpp:1439-1465`). Step 4½f-1: the match's CPU players
+//! (`DumbLieroAI`, `sim::ai`) run in `process`, after the key edges and before the tick, as
+//! `LocalController::Process` runs them (`localController.cpp:156-175`; plan D8).
 
 use std::path::Path;
 
@@ -16,12 +18,14 @@ use render::viewport::Viewport;
 use scenario::build::{BuildError, build_match, enter_game, new_match, validate_for_selection};
 use scenario::settings::{GM_HOLDAZONE, GM_KILL_EM_ALL, MatchConfig, Settings, WEAP_TABLE_LEN};
 use scenario::{Loaded, SceneData};
+use sim::ai::{AiTrace, DumbLieroAi, run_ais_traced};
 use sim::state::{ControlState, NUM_WEAPONS, SimState};
+use sim::weapsel::WeaponSelection;
 
 use super::HudFlags;
 use super::loadout::apply_weapons;
 use super::match_flow::{FlowStep, MatchFlow};
-use super::selection::{Selection, new_game_config};
+use super::selection::{CONTROLLER_BOT, Selection, new_game_config};
 use super::viewport_step::tick_viewports;
 use crate::keys::{KeyEdges, ReleaseLatch};
 
@@ -49,7 +53,6 @@ fn focus_palette(scene: &mut SceneData, settings: &Settings) {
 /// - Holdazone is built as Kill'em All — the sim's Holdazone arm is unported — and only
 ///   `state.game_mode` (read by the HUD's timer arm) carries the 2 (Step 4½d G2
 ///   `shell_holdazone_boot`).
-/// - Unequal healths both take player 1's (the sim carries one `settings_health`).
 /// - Any other `validate_for_selection` refusal takes that field from `Settings::default()`.
 ///
 /// The refusal box comes at NEW GAME (plan T4 Step 5), not here.
@@ -78,7 +81,12 @@ fn bootable(settings: &Settings) -> Settings {
             seed: 0,
         };
         match validate_for_selection(&cfg, WEAP_TABLE_LEN) {
-            Ok(()) | Err(BuildError::TooManyWeapons(_)) => break,
+            // `FollowAiUnsupported` is `refuse_follow_ai`'s only (the NEW GAME gate), never
+            // `validate_for_selection`'s: a FollowAI player boots (4½f-1 D1).
+            Ok(())
+            | Err(BuildError::TooManyWeapons(_) | BuildError::FollowAiUnsupported { .. }) => {
+                break;
+            }
             Err(BuildError::HoldazoneUnsupported | BuildError::InvalidGameMode(_)) => {
                 s.game_mode = defaults.game_mode;
             }
@@ -89,7 +97,6 @@ fn bootable(settings: &Settings) -> Settings {
                     }
                 }
             }
-            Err(BuildError::AsymmetricHealth { p1, .. }) => s.worm_settings[1].health = p1,
             Err(BuildError::InvalidWeapon { worm, slot, .. }) => {
                 s.worm_settings[worm].weapons[slot] = defaults.worm_settings[worm].weapons[slot];
             }
@@ -135,6 +142,13 @@ pub struct Match {
     /// C++ `OnKey`'s edges over the sampled words (`keys::apply_key_edges`): a bit the sim
     /// consumed stays clear while its key is held.
     edges: KeyEdges,
+    /// `Worm::ai` of each worm (`CreateAi`, `localController.cpp:19-28`): a `DumbLieroAI` for a
+    /// controller-1 player, made at [`Match::start`] and kept for the whole match. RESUME and
+    /// LOAD SETUP never touch it: CONTROLLER does not reach a running match (design finding 7).
+    ais: [Option<DumbLieroAi>; 2],
+    /// The AI step of the last `process` call (`ran == false` for a human, and on a frame with no
+    /// match tick): behaviour-free, for tests and the G2 ledgers (plan D12).
+    traces: [AiTrace; 2],
     hud: HudFlags,
     /// The match's copy of the settings: the `kStateGame` lives and blood pool, the selection's
     /// level label, the draw's shadow gate and `names_on_bonuses`. RESUME refreshes it while
@@ -153,7 +167,9 @@ impl Match {
     /// `kStateInitial` → weapon selection (the `WeaponSelection` constructor draws `state.rand`),
     /// `Game::Focus`'s worm ramps, fade 0. `held` arms the release latch: key-downs made in the
     /// menu never reached the controller (design §4.11). The skip route (`?weapons=`, Rust only)
-    /// starts at match tick 0 like 4½c.
+    /// starts at match tick 0 like 4½c. The constructor's `CreateAi` (`localController.cpp:
+    /// 19-45`): a fresh `DumbLieroAI` (`mt19937(0x1337)`) for every controller-1 player, once
+    /// per NEW GAME (4½f-1 D8; T0 P1).
     pub fn start(
         tc_root: &Path,
         settings: &Settings,
@@ -163,10 +179,23 @@ impl Match {
         begin: i32,
         held: &[ControlState; 2],
     ) -> (Match, SimState) {
+        // 4½f-1 D1: `CreateAi`'s FollowAI arm (controller 2) is unported. The menu's NEW GAME
+        // gate refuses it (`build::refuse_follow_ai`), and the skip route cannot meet it (the
+        // browser store holds only the shipped setups and `?cpu=` sets 0 or 1; plan fact 17). Were
+        // it reached, that player would play as an input-less human.
+        debug_assert!(
+            settings.worm_settings[..2]
+                .iter()
+                .all(|w| w.controller != 2),
+            "a FollowAI player reached Match::start (4½f Q2: refused at NEW GAME)"
+        );
         let cfg = MatchConfig {
             settings: settings.clone(),
             seed,
         };
+        let ais = [0, 1].map(|i| {
+            (settings.worm_settings[i].controller == CONTROLLER_BOT).then(DumbLieroAi::new)
+        });
         let built = if opts.skip_selection {
             build_match(tc_root, &cfg, level)
         } else {
@@ -200,6 +229,8 @@ impl Match {
             scene,
             latch,
             edges: KeyEdges::default(),
+            ais,
+            traces: [AiTrace::default(); 2],
             hud,
             cfg,
             begin,
@@ -210,6 +241,26 @@ impl Match {
 
     pub fn in_selection(&self) -> bool {
         self.selection.as_ref().is_some_and(Selection::is_active)
+    }
+
+    /// The running weapon selection, if any.
+    pub fn weapon_selection(&self) -> Option<&WeaponSelection> {
+        self.selection.as_ref().and_then(Selection::active)
+    }
+
+    /// Whether worm `i` is a CPU player (`worm->ai` is a `DumbLieroAI`).
+    pub fn is_cpu(&self, i: usize) -> bool {
+        self.ais[i].is_some()
+    }
+
+    /// Worm `i`'s AI (its RNG), if it is a CPU player.
+    pub fn ai(&self, i: usize) -> Option<&DumbLieroAi> {
+        self.ais[i].as_ref()
+    }
+
+    /// What each AI did in the last [`Match::process`] call (see the field).
+    pub fn ai_traces(&self) -> &[AiTrace; 2] {
+        &self.traces
     }
 
     pub fn running(&self) -> bool {
@@ -275,14 +326,18 @@ impl Match {
         self.flow.esc();
     }
 
-    /// RESUME (`gfx.cpp:1525-1530` → `LocalController::Focus`): the flow, a running selection's
-    /// `Focus`, and the latch over the keys held at the boundary.
+    /// RESUME (`gfx.cpp:1525-1530` → `LocalController::Focus`, `localController.cpp:100-120`):
+    /// the flow, a running selection's `Focus`, the latch over the keys held at the boundary,
+    /// and `Game::Focus`'s worm ramps from the match's settings, on every RESUME as C++ does
+    /// (4½f-1 D9, T0 P6). Attached, [`Match::resync`] has just refreshed them, so a colour edited
+    /// in the menu shows from the first resumed frame; detached, they are the old ones.
     pub fn focus(&mut self, held: &[ControlState; 2]) {
         self.flow.focus();
         if let Some(sel) = self.selection.as_mut().filter(|s| s.is_active()) {
             sel.focus();
         }
         self.latch.arm(held);
+        focus_palette(&mut self.scene, &self.cfg.settings);
     }
 
     /// `LocalController::Unfocus` (`localController.cpp:90-97`).
@@ -295,17 +350,22 @@ impl Match {
     /// `LocalController::Process` (`localController.cpp:122-200`) on this frame's sampled words:
     /// the latch, then the selection step (the frame the last player readies runs
     /// `ChangeState(kStateGame)`: Finalize, lives, `StartGame`'s blood pool and `SoundBegin`,
-    /// fade 33) or one match tick (`tick_viewports` + game over) on `OnKey`'s edges
-    /// ([`KeyEdges`]; the selection keeps its own 4½c key repeat), then the shared tail. Returns
-    /// (keep running, the sim ticked).
+    /// fade 33) or one match tick on `OnKey`'s edges ([`KeyEdges`]; the selection keeps its own
+    /// 4½c key repeat): the AIs (`:156-164`, [`run_ais_traced`]: a CPU worm's word is its
+    /// post-tick `control_states` plus the edges of any key bound to it, fact 6), then
+    /// `tick_viewports` + game over (`:175`). No AI runs in selection, nor on the frame that
+    /// finalises it (`if … else if`, `:123-153`). Then the shared tail. `ais` false skips the AI
+    /// step (a test-only switch, `ShellDebug::ais`). Returns (keep running, the sim ticked).
     pub fn process(
         &mut self,
         sim: &mut SimState,
         sampled: [ControlState; 2],
+        ais: bool,
         sounds: &mut Vec<i32>,
     ) -> (bool, bool) {
         let mut inputs = sampled;
         self.latch.apply(&mut inputs);
+        self.traces = [AiTrace::default(); 2];
         let mut ticked = false;
         if self.in_selection() {
             let sel = self.selection.as_mut().expect("in selection");
@@ -318,7 +378,10 @@ impl Match {
                 self.latch.arm(&sampled);
             }
         } else {
-            let inputs = self.edges.apply(&inputs, &sim.worms);
+            let mut inputs = self.edges.apply(&inputs, &sim.worms);
+            if ais {
+                run_ais_traced(&mut self.ais, sim, &mut inputs, &mut self.traces);
+            }
             tick_viewports(&mut self.viewports, sim, &inputs);
             self.flow.check_game_over(sim);
             ticked = true;

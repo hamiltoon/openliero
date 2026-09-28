@@ -204,6 +204,8 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
     // `SoundHooks::default()` every hook played sample 0. Unhashed (sound never
     // enters the hash), so every golden stays byte-identical.
     state.sound_hooks = tc.sound_hooks.clone();
+    // Step 4½f-1 (D11): the CPU player's toggle odds. Unhashed, read only by `sim::ai`.
+    state.ai_params = ai_params(&tc);
 
     // NOTE: killed_timer is left at its `WormInit` default (150) — the camera
     // stays pinned at (0,0). Resetting it would centre the viewport and diverge.
@@ -214,6 +216,15 @@ pub fn load(tc_root: &Path, scenario: &Scenario) -> Loaded {
         viewports: Viewport::player_layout(),
         scene,
     }
+}
+
+/// The TC's `[constants.aiparams]` as `SimState::ai_params`: `[0][c]` is `off`, `[1][c]`
+/// is `on`, the controls in `ControlState` bit order (Up, Down, Left, Right, Fire, Change,
+/// Jump) — C++ `common.ai_params.k[pressed][control]` (`common_model.hpp:521-531`). Shared
+/// by [`load`] and `crate::build::new_match` (Step 4½f-1, D11).
+pub(crate) fn ai_params(tc: &TcConfig) -> [[i32; 7]; 2] {
+    let keys = tc.aiparams.ordered();
+    [keys.map(|(_, off)| off), keys.map(|(on, _)| on)]
 }
 
 /// The owned Scene ingredients for a loaded TC — shared by [`load`] and
@@ -354,5 +365,20 @@ weapon 0 DART
         );
         assert_eq!(loaded.state.wobject_consts.splinter_larpa_vel_div, 3);
         assert_eq!(loaded.state.laser_weapon, tc.constants.LaserWeapon);
+    }
+
+    #[test]
+    fn load_assigns_the_tc_ai_params() {
+        // Step 4½f-1 (D11): `[off; 7]` then `[on; 7]` in the control order Up, Down,
+        // Left, Right, Fire, Change, Jump — the openliero TC's tc.cfg:85-118 values.
+        let scenario = Scenario::parse(SAMPLE).expect("scenario parses");
+        let loaded = load(Path::new(TC_ROOT), &scenario);
+        assert_eq!(
+            loaded.state.ai_params,
+            [
+                [120, 120, 50, 50, 80, 300, 400],
+                [20, 20, 20, 20, 80, 60, 1]
+            ]
+        );
     }
 }

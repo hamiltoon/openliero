@@ -159,6 +159,8 @@ mod tests {
             animate: false,
             hotspot_x: 0,
             hotspot_y: 0,
+            reacts: [0; 4],
+            max_health: 100,
         }
     }
 

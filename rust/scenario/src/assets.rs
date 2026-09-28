@@ -93,6 +93,69 @@ pub static EMBEDDED_LEVELS: &[(&str, &[u8])] = &[
     ),
 ];
 
+/// The eight shipped profiles (Step 4½f-2, plan T4 Step 5), keyed as config paths
+/// (`Profiles/<name>.toml`) in bytewise order: the browser's LOAD PROFILE lists them as the C++
+/// web build's preloaded `data/Profiles` does. About 400 bytes each; compiled on every target,
+/// like [`EMBEDDED_SETUPS`], so the native tests pin them.
+pub static EMBEDDED_PROFILES: &[(&str, &[u8])] = &[
+    (
+        "Profiles/AI (L).toml",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Profiles/AI (L).toml"
+        )),
+    ),
+    (
+        "Profiles/AI (R).toml",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Profiles/AI (R).toml"
+        )),
+    ),
+    (
+        "Profiles/Joystick0.toml",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Profiles/Joystick0.toml"
+        )),
+    ),
+    (
+        "Profiles/Joystick1.toml",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Profiles/Joystick1.toml"
+        )),
+    ),
+    (
+        "Profiles/Lefty (L).toml",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Profiles/Lefty (L).toml"
+        )),
+    ),
+    (
+        "Profiles/Lefty (R).toml",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Profiles/Lefty (R).toml"
+        )),
+    ),
+    (
+        "Profiles/Righty (L).toml",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Profiles/Righty (L).toml"
+        )),
+    ),
+    (
+        "Profiles/Righty (R).toml",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../data/Profiles/Righty (R).toml"
+        )),
+    ),
+];
+
 /// Every directory of the shipped `data/` (Step 4½e-2, plan D9, fact 23), the root excluded:
 /// the C++ web build preloads `data/{Profiles,Resources,Setups,TC}` under `/openliero`, so its
 /// selectors list these folders even where the browser store holds no file under them.
@@ -116,13 +179,15 @@ const OBJECT_DIRS: [&str; 3] = ["weapons", "nobjects", "sobjects"];
 /// The browser config store's files (Step 4½e-2, plan D9), keyed as config paths and sorted by
 /// key: the two setups, the four small levels, `TC/openliero/tc.cfg`, and every `.cfg` of
 /// `TC/openliero/{weapons,nobjects,sobjects}` — each `data/` file the level selector's `LEV`
-/// or LOAD SETUP's `CFG` filter shows, minus `modern_test.lev` (ruling Q6). On wasm the TC files
+/// or LOAD SETUP's `CFG` filter shows, minus `modern_test.lev` (ruling Q6) — and (Step 4½f-2)
+/// the eight profiles LOAD PROFILE's `TOML` filter shows. On wasm the TC files
 /// come from the embedded trees; natively they are read from [`crate::paths::DATA_ROOT`] (tests
 /// and parity).
 pub fn browser_system_files() -> Vec<(String, Vec<u8>)> {
     let mut files: Vec<(String, Vec<u8>)> = EMBEDDED_SETUPS
         .iter()
         .chain(EMBEDDED_LEVELS)
+        .chain(EMBEDDED_PROFILES)
         .map(|(rel, bytes)| (rel.to_string(), bytes.to_vec()))
         .collect();
     files.extend(tc_config_files());
@@ -388,10 +453,30 @@ mod tests {
     }
 
     #[test]
+    fn the_embedded_profiles_are_the_eight_shipped_files() {
+        let rels: Vec<&str> = EMBEDDED_PROFILES.iter().map(|(rel, _)| *rel).collect();
+        let want: Vec<String> = walk(false)
+            .into_iter()
+            .filter(|rel| rel.starts_with("Profiles/"))
+            .collect();
+        assert_eq!(rels, want);
+        assert_eq!(rels.len(), 8);
+        for (rel, bytes) in EMBEDDED_PROFILES {
+            assert_eq!(
+                *bytes,
+                std::fs::read(Path::new(DATA).join(rel)).unwrap().as_slice(),
+                "{rel}"
+            );
+        }
+    }
+
+    #[test]
     fn the_browser_files_are_every_shown_data_file_but_modern_test() {
         let shown = |rel: &String| {
             rel.rsplit_once('.').is_some_and(|(_, ext)| {
-                ext.eq_ignore_ascii_case("lev") || ext.eq_ignore_ascii_case("cfg")
+                ext.eq_ignore_ascii_case("lev")
+                    || ext.eq_ignore_ascii_case("cfg")
+                    || ext.eq_ignore_ascii_case("toml")
             })
         };
         let want: Vec<String> = walk(false)
@@ -404,8 +489,8 @@ mod tests {
         assert_eq!(keys, want);
         assert_eq!(
             files.len(),
-            2 + 4 + 1 + 78,
-            "setups, levels, tc.cfg, object configs"
+            2 + 4 + 1 + 78 + 8,
+            "setups, levels, tc.cfg, object configs, profiles"
         );
         for (rel, bytes) in &files {
             assert_eq!(

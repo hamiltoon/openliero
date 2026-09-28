@@ -17,7 +17,8 @@
 //! merged layers ([`ConfigStore::list`], the level and options selectors' tree); the
 //! [`MemoryStore`] gains directories and a single-layer mode (the C++ web build's
 //! `--config-root /openliero`); the [`NativeStore`] names the root its `ShadowsSystem` consults
-//! ([`NativeStore::with_shadow_root`]); and [`placeable_leaf`] is the SAVE SETUP AS… name rule.
+//! ([`NativeStore::with_shadow_root`]); and [`placeable_leaf`] is the SAVE SETUP AS… name rule
+//! (4½f-2: and SAVE PROFILE AS…'s).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -144,15 +145,16 @@ pub fn is_reserved(subdir: &str, leaf: &str) -> bool {
     subdir == "Setups" && leaf.eq_ignore_ascii_case("liero.cfg")
 }
 
-/// SAVE SETUP AS…'s name rule (Step 4½e-2, plan D7): a leaf the store can place as
-/// `Setups/<leaf>` — non-empty, without `/`, `\` or `:`, without a control byte (`< 0x20` or
+/// The Save-As dialogs' name rule (Step 4½e-2, plan D7; 4½f-2 D7 adds `subdir`: `Setups` for
+/// SAVE SETUP AS…, `Profiles` for SAVE PROFILE AS…): a leaf the store can place as
+/// `<subdir>/<leaf>` — non-empty, without `/`, `\` or `:`, without a control byte (`< 0x20` or
 /// `0x7f`), and accepted by the config-root guard. C++ would create sub-directories or leave
 /// the root for the refused names; the dialog shows them the `RESERVED` box instead.
-pub fn placeable_leaf(leaf: &str) -> bool {
+pub fn placeable_leaf(subdir: &str, leaf: &str) -> bool {
     !leaf.is_empty()
         && !leaf.contains(['/', '\\', ':'])
         && !leaf.bytes().any(|b| b < 0x20 || b == 0x7f)
-        && under(Path::new(""), &format!("Setups/{leaf}")).is_some()
+        && under(Path::new(""), &format!("{subdir}/{leaf}")).is_some()
 }
 
 /// `rel` under `root`, or `None` for a path that is empty, absolute, drive-qualified,
@@ -1143,7 +1145,7 @@ mod tests {
             "..cfg",
             "\u{e9}t\u{e9}.cfg",
         ] {
-            assert!(placeable_leaf(good), "{good:?}");
+            assert!(placeable_leaf("Setups", good), "{good:?}");
         }
         for bad in [
             "",
@@ -1156,7 +1158,13 @@ mod tests {
             "..",
             "/x.cfg",
         ] {
-            assert!(!placeable_leaf(bad), "{bad:?}");
+            assert!(!placeable_leaf("Setups", bad), "{bad:?}");
+        }
+        // 4½f-2 D7: SAVE PROFILE AS…'s subdir.
+        assert!(placeable_leaf("Profiles", "mine.toml"));
+        assert!(placeable_leaf("Profiles", "Lefty (L).toml"));
+        for bad in ["a/b.toml", "", "..", "c:.toml"] {
+            assert!(!placeable_leaf("Profiles", bad), "{bad:?}");
         }
     }
 }

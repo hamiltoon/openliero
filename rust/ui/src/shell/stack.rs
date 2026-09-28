@@ -2,9 +2,9 @@
 //! every dispatch is an exhaustive `match`, so a screen 4½e/4½f/4½g adds cannot be forgotten.
 //! The stack is plain data; `Shell` runs `enter` before `push` (`Push` calls `Enter`,
 //! `state.hpp:50-54`). No screen has a `Leave`. Step 4½e-1 adds the settings menu's sub-screens;
-//! 4½f-2 the player menu's PRESS A KEY box.
+//! 4½f-2 the player menu's PRESS A KEY box and LOAD PROFILE's selector.
 
-use super::files::{LevelSelectorState, SetupSelectorState};
+use super::files::{LevelSelectorState, ProfileSelectorState, SetupSelectorState};
 use super::main_menu::MainMenuState;
 use super::overlay::{InfoBoxState, InputStringState, WaitForKeyState};
 use super::weapon_options::WeaponMenuState;
@@ -25,6 +25,8 @@ pub enum Screen {
     SetupSelect(SetupSelectorState),
     /// `WaitForKeyState` (4½f-2): a player-menu key row's PRESS A KEY box (top `K`).
     WaitForKey(WaitForKeyState),
+    /// `ProfileSelectorState` (4½f-2): LOAD PROFILE's file tree, over the main menu (top `F`).
+    ProfileSelect(ProfileSelectorState),
 }
 
 impl Screen {
@@ -212,6 +214,7 @@ mod tests {
         let weapons = Screen::WeaponOptions(WeaponMenuState::default());
         let level = Screen::LevelSelect(LevelSelectorState::default());
         let setup = Screen::SetupSelect(SetupSelectorState::default());
+        let profile = Screen::ProfileSelect(ProfileSelectorState::new(1));
         let key = Screen::WaitForKey(WaitForKeyState::new(crate::shell::overlay::KeyTarget {
             player: 0,
             control: 0,
@@ -219,14 +222,14 @@ mod tests {
         assert!(input().is_overlay());
         assert!(!info().is_overlay() && !weapons.is_overlay() && !menu().is_overlay());
         assert!(
-            !level.is_overlay() && !setup.is_overlay(),
+            !level.is_overlay() && !setup.is_overlay() && !profile.is_overlay(),
             "the selectors draw alone"
         );
         assert!(
             !key.is_overlay(),
             "PRESS A KEY draws alone (inputState.hpp:23)"
         );
-        for sc in [menu(), weapons, input(), info(), level, setup, key] {
+        for sc in [menu(), weapons, input(), info(), level, setup, key, profile] {
             assert!(sc.wants_menu_flip());
         }
         let mut s = ScreenStack::default();

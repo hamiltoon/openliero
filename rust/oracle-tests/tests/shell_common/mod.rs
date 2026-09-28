@@ -1592,7 +1592,7 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 match e.closed {
                     Some(true) if !e.buf.is_empty() => {
                         let name = String::from_utf8_lossy(&e.buf).into_owned();
-                        if !e.buf.is_ascii() || !placeable_leaf(&format!("{name}.cfg")) {
+                        if !e.buf.is_ascii() || !placeable_leaf("Setups", &format!("{name}.cfg")) {
                             v(
                                 &mut run,
                                 frame,

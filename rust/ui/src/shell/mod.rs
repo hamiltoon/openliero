@@ -16,7 +16,8 @@
 //!
 //! Step 4½f-2 (T3): the player menus (`player_menu`, `CurMenu::Player`), PRESS A KEY
 //! (`Screen::WaitForKey`, top `K`), the player menu's overlays and the network player's slot-0
-//! menu palette.
+//! menu palette. T4: the profiles — LOAD PROFILE (`Screen::ProfileSelect`, top `F`), SAVE
+//! PROFILE, SAVE PROFILE AS… and the loaded refs (`MenuWorld::profiles`), and Q7.
 pub mod files;
 pub mod level_path;
 pub mod level_slot;
@@ -43,7 +44,9 @@ use render::menu::menu_palette_with;
 use scenario::SceneData;
 use scenario::build::apply_live_settings;
 use scenario::settings::Settings;
-use scenario::settings_toml::{settings_from_toml, settings_to_toml};
+use scenario::settings_toml::{
+    load_profile, settings_from_toml, settings_to_toml, worm_settings_to_toml,
+};
 use scenario::storage::{self, ConfigStore};
 use sim::state::{ControlState, SimState};
 
@@ -242,8 +245,8 @@ pub struct MenuWorld {
     /// `gfx.player_menu` (Step 4½f-2): one menu, re-pointed by `cur_menu`'s player.
     pub player_menu: Menu,
     pub cur_menu: CurMenu,
-    /// Each player's loaded profile (C++ `WormSettings::profile_node`; plan D5): `None` at boot;
-    /// Task 4 sets and clears them.
+    /// Each player's loaded profile (C++ `WormSettings::profile_node`; plan D5): `None` at boot,
+    /// set by LOAD PROFILE, SAVE PROFILE and SAVE PROFILE AS…, cleared by LOAD SETUP.
     pub profiles: [Option<ProfileRef>; 3],
     pub settings: Settings,
     pub tc: UiTc,
@@ -541,9 +544,11 @@ impl Shell {
                     pushes: Vec::new(),
                     now_ms: input.now_ms,
                     gate,
+                    notes: Vec::new(),
                 };
                 let keep = s.update(&mut cx);
                 pushes = cx.pushes;
+                out.notes.append(&mut cx.notes);
                 keep
             }
             Screen::Playing => {
@@ -563,6 +568,7 @@ impl Shell {
                     pushes: Vec::new(),
                     now_ms: input.now_ms,
                     gate,
+                    notes: Vec::new(),
                 };
                 let keep = s.update(&mut cx);
                 pushes = cx.pushes;
@@ -600,6 +606,7 @@ impl Shell {
                     pushes: Vec::new(),
                     now_ms: input.now_ms,
                     gate,
+                    notes: Vec::new(),
                 });
                 picked = o.picked;
                 o.keep
@@ -614,6 +621,22 @@ impl Shell {
                     pushes: Vec::new(),
                     now_ms: input.now_ms,
                     gate,
+                    notes: Vec::new(),
+                });
+                picked = o.picked;
+                o.keep
+            }
+            Screen::ProfileSelect(s) => {
+                let o = s.update(&mut MenuCtx {
+                    w: &mut self.world,
+                    store: &*self.store,
+                    font: &self.boot_scene.font,
+                    running,
+                    sounds: &mut out.menu_sounds,
+                    pushes: Vec::new(),
+                    now_ms: input.now_ms,
+                    gate,
+                    notes: Vec::new(),
                 });
                 picked = o.picked;
                 o.keep
@@ -817,14 +840,15 @@ impl Shell {
         }
     }
 
-    /// `MakeSaveAsState`'s callback and SAVE SETUP AS…'s `on_complete` (`mainMenuState.cpp:
-    /// 69-91`, `:295-306`; plan facts 12, 15, D7). An accepted non-empty name whose leaf the
-    /// store refuses — a shipped or reserved name, or (Rust only) one it cannot place — schedules
-    /// the black `NAME '<leaf>' IS RESERVED` box, with no sound and no completion. Otherwise
-    /// the completion: a non-empty accepted name saves the settings to `Setups/<name>.cfg` and
-    /// becomes the setup's name (a write error is a note and keeps the name); then, always,
-    /// `MenuSelect` + `UpdateItems`. SAVE PROFILE AS… (`SaveAsKind::Profile`) is pushed from Task
-    /// 4 on (plan D4), which adds its arm.
+    /// `MakeSaveAsState`'s callback and the two `on_complete`s (`mainMenuState.cpp:69-91`; SAVE
+    /// SETUP AS… `:295-306`, plan facts 12, 15, D7; SAVE PROFILE AS… `:356-364`, 4½f-2 D4). An
+    /// accepted non-empty name whose leaf the store refuses — a shipped or reserved name, or
+    /// (Rust only) one it cannot place — schedules the black `NAME '<leaf>' IS RESERVED` box,
+    /// with no sound and no completion. Otherwise the completion: a non-empty accepted name is
+    /// saved — the settings to `Setups/<name>.cfg`, which becomes the setup's name, or player
+    /// `p`'s `WormSettings::SaveProfile` to `Profiles/<name>.toml`, which becomes its loaded
+    /// profile (a write error is a note and keeps the old name or profile); then, always,
+    /// `MenuSelect` + that menu's `UpdateItems`.
     fn save_as(
         &mut self,
         kind: SaveAsKind,
@@ -834,14 +858,15 @@ impl Shell {
         y: i32,
         out: &mut FrameOut,
     ) {
-        if let SaveAsKind::Profile(_) = kind {
-            unreachable!("SAVE PROFILE AS… opens no name box before Task 4 (plan D4)");
-        }
+        let (subdir, ext) = match kind {
+            SaveAsKind::Setup => ("Setups", "cfg"),
+            SaveAsKind::Profile(_) => ("Profiles", "toml"),
+        };
         if accepted && !buffer.is_empty() {
             let name = dos_to_text(buffer);
-            let leaf = format!("{name}.cfg");
-            if self.store.shadows_system("Setups", &leaf) || !storage::placeable_leaf(&leaf) {
-                let text = format!("NAME '{}.cfg' IS RESERVED", dos_display(buffer));
+            let leaf = format!("{name}.{ext}");
+            if self.store.shadows_system(subdir, &leaf) || !storage::placeable_leaf(subdir, &leaf) {
+                let text = format!("NAME '{}.{ext}' IS RESERVED", dos_display(buffer));
                 self.stack
                     .schedule_replace_top(Screen::InfoBox(InfoBoxState::new(
                         &text,
@@ -857,28 +882,51 @@ impl Shell {
                     )));
                 return;
             }
-            let toml = settings_to_toml(&self.world.settings);
-            match self.store.write(&format!("Setups/{leaf}"), toml.as_bytes()) {
-                Ok(()) => self.world.setup_name = name,
-                Err(e) => out.notes.push(format!("SAVE SETUP AS: Setups/{leaf}: {e}")),
+            let rel = format!("{subdir}/{leaf}");
+            match kind {
+                SaveAsKind::Setup => {
+                    let toml = settings_to_toml(&self.world.settings);
+                    match self.store.write(&rel, toml.as_bytes()) {
+                        Ok(()) => self.world.setup_name = name,
+                        Err(e) => out.notes.push(format!("SAVE SETUP AS: {rel}: {e}")),
+                    }
+                }
+                SaveAsKind::Profile(p) => {
+                    let toml = worm_settings_to_toml(&self.world.settings.worm_settings[p]);
+                    match self.store.write(&rel, toml.as_bytes()) {
+                        Ok(()) => self.world.profiles[p] = Some(ProfileRef { rel }),
+                        Err(e) => out.notes.push(format!("SAVE PROFILE AS: {rel}: {e}")),
+                    }
+                }
             }
         }
         let w = &mut self.world;
         main_menu::play(&mut out.menu_sounds, w.tc.hooks.select);
-        w.settings_menu.update_items(&mut SettingsModel {
-            settings: &mut w.settings,
-            tc: &w.tc,
-            setup_name: &w.setup_name,
-        });
+        match kind {
+            SaveAsKind::Setup => w.settings_menu.update_items(&mut SettingsModel {
+                settings: &mut w.settings,
+                tc: &w.tc,
+                setup_name: &w.setup_name,
+            }),
+            SaveAsKind::Profile(p) => w.player_update_items(p),
+        }
     }
 
-    /// A selector's `OnSelected` (plan D4), then `settings_menu.UpdateItems`.
+    /// A selector's `OnSelected` (plan D4), then `settings_menu.UpdateItems` — or, for a profile,
+    /// `player_menu.UpdateItems` alone.
     /// - `LevelSelectorState::OnSelected` (`fileSelectorState.cpp:95-103`): `[RANDOM]` sets
     ///   `random_level` and clears `level_file`; a file sets `level_file` to its `full_path`.
     /// - `OptionsSelectorState::OnSelected` (`:222-226` → `Gfx::LoadSettings`, `gfx.cpp:
     ///   1693-1697`; plan fact 13, D8, D17): a fresh `Settings` from the file and the setup's
     ///   name. The current match keeps the old settings object — it is detached (T0 P8). A file
     ///   that does not parse is a note and changes nothing (C++ swaps in a half-read object).
+    ///   The fresh settings have no loaded profiles (4½f-2 D5).
+    /// - `ProfileSelectorState::OnSelected` (`:201-206` → `WormSettings::LoadProfile`,
+    ///   `worm.cpp:73-95`; 4½f-2 D5, R2-18): a file that reads becomes the player's profile
+    ///   (PROFILE LOADED) even when it does not parse, and then changes no field; one that parses
+    ///   loads over the player's settings, `color` kept. An unreadable file changes nothing (a
+    ///   note). Then John's Q7 (D10): on a touch-only page RIGHT PLAYER stays the CPU. No
+    ///   `MoveToFirstVisible`.
     fn apply_picked(&mut self, p: Picked, out: &mut FrameOut) {
         match p {
             Picked::Random => {
@@ -899,6 +947,7 @@ impl Shell {
                 match parsed {
                     Ok(s) => {
                         self.world.settings = s;
+                        self.world.profiles = Default::default();
                         // 4½f-1 D3: a phone cannot drive a setup's human player 2.
                         if self.options.touch_only {
                             selection::touch_settings(&mut self.world.settings);
@@ -912,6 +961,29 @@ impl Shell {
                     }
                     Err(e) => out.notes.push(format!("LOAD SETUP: {rel}: {e}")),
                 }
+            }
+            Picked::Profile { player, rel } => {
+                let w = &mut self.world;
+                match self.store.read(&rel) {
+                    None => out
+                        .notes
+                        .push(format!("LOAD PROFILE: {rel}: cannot be read")),
+                    Some(bytes) => {
+                        let ws = &mut w.settings.worm_settings[player];
+                        let loaded = String::from_utf8(bytes)
+                            .map_err(|e| e.to_string())
+                            .and_then(|t| load_profile(&t, ws).map_err(|e| e.to_string()));
+                        if let Err(e) = loaded {
+                            out.notes.push(format!("LOAD PROFILE: {rel}: {e}"));
+                        }
+                        w.profiles[player] = Some(ProfileRef { rel });
+                        if player == 1 && self.options.touch_only {
+                            selection::touch_settings(&mut w.settings);
+                        }
+                    }
+                }
+                w.player_update_items(player);
+                return;
             }
         }
         let w = &mut self.world;
@@ -938,6 +1010,7 @@ impl Shell {
                     pushes: Vec::new(),
                     now_ms: 0,
                     gate,
+                    notes: Vec::new(),
                 });
             }
             Screen::Playing => unreachable!("only the router pushes Playing"),
@@ -945,9 +1018,11 @@ impl Shell {
             // `InputStringState::Enter` is `SDL_StartTextInput` (the page's text field keys on
             // `Phase::Text`, D9); `InfoBoxState::Enter` is empty.
             Screen::InputString(_) | Screen::InfoBox(_) => {}
-            // `LevelSelectorState::Enter`, `OptionsSelectorState::Enter`.
+            // `LevelSelectorState::Enter`, `OptionsSelectorState::Enter`,
+            // `ProfileSelectorState::Enter`.
             Screen::LevelSelect(s) => s.enter(&mut self.world, &*self.store),
             Screen::SetupSelect(s) => s.enter(&mut self.world, &*self.store),
+            Screen::ProfileSelect(s) => s.enter(&mut self.world, &*self.store),
             // `WaitForKeyState::Enter` is empty (`inputState.cpp:104`).
             Screen::WaitForKey(_) => {}
         }
@@ -1090,6 +1165,7 @@ impl Shell {
                         pushes: Vec::new(),
                         now_ms: 0,
                         gate,
+                        notes: Vec::new(),
                     });
                 }
                 Screen::Playing => {
@@ -1120,6 +1196,9 @@ impl Shell {
                     s.draw(&mut self.world, &*self.store, &self.boot_scene.font);
                 }
                 Screen::SetupSelect(s) => {
+                    s.draw(&mut self.world, &*self.store, &self.boot_scene.font);
+                }
+                Screen::ProfileSelect(s) => {
                     s.draw(&mut self.world, &*self.store, &self.boot_scene.font);
                 }
                 Screen::WaitForKey(k) => {
@@ -1198,7 +1277,8 @@ impl Shell {
                 | Screen::InfoBox(_)
                 | Screen::LevelSelect(_)
                 | Screen::SetupSelect(_)
-                | Screen::WaitForKey(_),
+                | Screen::WaitForKey(_)
+                | Screen::ProfileSelect(_),
             ) => Phase::Menu,
             Some(Screen::InputString(_)) => Phase::Text,
             Some(Screen::Playing) => {
@@ -1211,9 +1291,10 @@ impl Shell {
         }
     }
 
-    /// `M` / `G` / `O` / `I` / `B` / `L` / `P` / `K` / `-` (the G2 golden's `<top>`; `O`, `I`, `B`
-    /// are WEAPON OPTIONS, an `InputStringState` and an `InfoBoxState`, Step 4½e-1; `L`, `P` the
-    /// level and options selectors, Step 4½e-2; `K` PRESS A KEY, Step 4½f-2).
+    /// `M` / `G` / `O` / `I` / `B` / `L` / `P` / `K` / `F` / `-` (the G2 golden's `<top>`; `O`,
+    /// `I`, `B` are WEAPON OPTIONS, an `InputStringState` and an `InfoBoxState`, Step 4½e-1; `L`,
+    /// `P` the level and options selectors, Step 4½e-2; `K` PRESS A KEY and `F` the profile
+    /// selector, Step 4½f-2).
     pub fn top_char(&self) -> char {
         match self.stack.top() {
             None => '-',
@@ -1225,6 +1306,7 @@ impl Shell {
             Some(Screen::LevelSelect(_)) => 'L',
             Some(Screen::SetupSelect(_)) => 'P',
             Some(Screen::WaitForKey(_)) => 'K',
+            Some(Screen::ProfileSelect(_)) => 'F',
         }
     }
 
@@ -1234,6 +1316,7 @@ impl Shell {
         match self.stack.top() {
             Some(Screen::LevelSelect(s)) => Some(s.view()),
             Some(Screen::SetupSelect(s)) => Some(s.view()),
+            Some(Screen::ProfileSelect(s)) => Some(s.view()),
             _ => None,
         }
     }
@@ -5175,14 +5258,367 @@ mod tests {
             assert_eq!(sh.settings().worm_settings[0].health, 10000);
         }
 
+        // The profiles (plan T4; T0 P3, P5).
+
+        /// The shipped profiles' rows inside `Profiles` (T0 P5's `CiLess` order).
+        const AI_L: usize = 0;
+        const AI_R: usize = 1;
+        const JOYSTICK0: usize = 2;
+        const LEFTY_L: usize = 4;
+        const LEFTY_R: usize = 5;
+
+        /// Boot on `store` (root label `./user`), `touch_only` or not, fade the menu in, then
+        /// F5 / F6 / F9 for player `p`.
+        fn on_store(
+            store: impl ConfigStore + 'static,
+            touch_only: bool,
+            p: usize,
+        ) -> (Shell, SimState) {
+            let seeds = SeedSource::Scripted {
+                boot: 11,
+                matches: VecDeque::from([21, 22, 23]),
+            };
+            let options = StartOptions {
+                touch_only,
+                ..StartOptions::default()
+            };
+            let (mut sh, mut sim, _) = Shell::boot(
+                tc(),
+                Settings::default(),
+                Box::new(store),
+                seeds,
+                0,
+                options,
+            );
+            idle(&mut sh, &mut sim, 40);
+            tap(&mut sh, &mut sim, [DK_F5, DK_F6, DK_F9][p]);
+            assert_eq!(sh.cur_menu(), CurMenu::Player(p));
+            (sh, sim)
+        }
+
+        /// LOAD PROFILE (MenuSelect + the selector inside `Profiles`), Down ×`downs`, Return;
+        /// the Return frame.
+        fn pick_profile(sh: &mut Shell, sim: &mut SimState, downs: usize) -> FrameOut {
+            let o = enter_row(sh, sim, PL_LOAD_PROFILE);
+            assert_eq!(
+                (o.menu_sounds, o.phase, sh.top_char()),
+                (vec![hooks().hooks.select], Phase::Menu, 'F')
+            );
+            assert_eq!(
+                view(sh),
+                ('F', "./user/Profiles".into(), 0),
+                "inside Profiles"
+            );
+            taps(sh, sim, DK_DOWN, downs);
+            tap(sh, sim, DK_RETURN)
+        }
+
+        fn profile(sh: &Shell, p: usize) -> Option<&str> {
+            sh.world.profiles[p].as_ref().map(|r| r.rel.as_str())
+        }
+
+        fn shown(sh: &Shell) -> usize {
+            sh.player_menu().items.iter().filter(|i| i.visible).count()
+        }
+
         #[test]
-        fn the_profile_rows_only_play_select_until_task_4() {
-            let (mut sh, mut sim) = focused(0);
+        fn load_profile_loads_lefty_keeps_the_colour_index_and_the_cursor() {
+            let (mut sh, mut sim) = on_store(files::tests::install_profiles(), false, 0);
             let select = hooks().hooks.select;
-            for id in [PL_LOAD_PROFILE, PL_SAVE_PROFILE_AS] {
-                let o = enter_row(&mut sh, &mut sim, id);
-                assert_eq!((o.menu_sounds, sh.top_char()), (vec![select], 'M'));
+            assert_eq!(
+                (shown(&sh), row(&sh, PL_LOADED_PROFILE)),
+                (22, String::new())
+            );
+            let o = pick_profile(&mut sh, &mut sim, LEFTY_L);
+            assert_eq!((o.menu_sounds, sh.top_char()), (vec![select], 'M'));
+            let ws = &sh.settings().worm_settings[0];
+            let d = &Settings::default().worm_settings[0];
+            assert_eq!(
+                (ws.name.as_str(), ws.color, ws.rgb, ws.controls_ex),
+                (
+                    "etc",
+                    d.color,
+                    [160, 40, 220],
+                    [17, 31, 30, 32, 21, 22, 23, 0]
+                ),
+                "the colour index kept, the legacy rgb ×4 (T0 P5)"
+            );
+            assert_eq!(profile(&sh, 0), Some("Profiles/Lefty (L).toml"));
+            assert_eq!(row(&sh, PL_LOADED_PROFILE), "Lefty (L)");
+            assert_eq!(shown(&sh), 24, "PROFILE LOADED and SAVE PROFILE appear");
+            assert_eq!(
+                (sh.player_menu().selected_id(), sh.player_menu().selection()),
+                (PL_LOAD_PROFILE, 3),
+                "no MoveToFirstVisible (pitfall 20)"
+            );
+            assert_eq!(
+                sh.settings().worm_settings[1],
+                Settings::default().worm_settings[1]
+            );
+            assert_eq!(profile(&sh, 1), None);
+            // Re-entering the menu moves to the first visible row: PROFILE LOADED.
+            tap(&mut sh, &mut sim, DK_F5);
+            assert_eq!(sh.player_menu().selected_id(), PL_LOADED_PROFILE);
+        }
+
+        #[test]
+        fn save_profile_as_reopens_the_profile_box_on_a_reserved_name_and_saves_the_rest() {
+            let (mut sh, mut sim) = on_store(files::tests::install_profiles(), false, 0);
+            let select = hooks().hooks.select;
+            let o = enter_row(&mut sh, &mut sim, PL_SAVE_PROFILE_AS);
+            let m = sh.player_menu();
+            let (x, y) = m
+                .item_position(m.index_from_id(PL_SAVE_PROFILE_AS) as usize)
+                .unwrap();
+            let purpose = InputPurpose::SaveAs {
+                kind: SaveAsKind::Profile(0),
+                x: x + 97,
+                y,
+            };
+            let e = entry(&sh);
+            assert_eq!(
+                (o.menu_sounds, e.buffer.len(), e.max_len, e.filter.is_none()),
+                (vec![select], 0, 30, true)
+            );
+            assert_eq!(
+                (e.purpose.clone(), sh.text_mode()),
+                (purpose.clone(), Some(TextMode::Text))
+            );
+            // A shipped name: one MenuSelect (the entry's own), the black box, no completion.
+            type_str(&mut sh, &mut sim, "Joystick0");
+            let o = tap(&mut sh, &mut sim, DK_RETURN);
+            assert_eq!(
+                (o.menu_sounds, sh.top_char(), top_box(&sh).text.as_str()),
+                (vec![select], 'B', "NAME 'Joystick0.toml' IS RESERVED"),
+                "T0 P3: reserved 1"
+            );
+            // Any key: the PROFILE box again (not the setup's), on what was typed.
+            let o = tap(&mut sh, &mut sim, 57);
+            assert_eq!((o.menu_sounds.len(), sh.top_char()), (0, 'I'));
+            assert_eq!(
+                (entry(&sh).buffer.as_slice(), entry(&sh).purpose.clone()),
+                (&b"Joystick0"[..], purpose.clone())
+            );
+            // `mine`: two MenuSelects, the user copy, PROFILE LOADED `mine`.
+            let o = retype(&mut sh, &mut sim, 9, "mine");
+            assert_eq!((o.menu_sounds, sh.top_char()), (vec![select, select], 'M'));
+            let want = worm_settings_to_toml(&sh.settings().worm_settings[0]);
+            let store = sh.store();
+            assert_eq!(store.read("Profiles/mine.toml"), Some(want.into_bytes()));
+            assert_eq!(
+                store.read("Profiles/Joystick0.toml"),
+                Some(data_file("Profiles/Joystick0.toml"))
+            );
+            assert_eq!(profile(&sh, 0), Some("Profiles/mine.toml"));
+            assert_eq!(
+                (row(&sh, PL_LOADED_PROFILE), shown(&sh)),
+                ("mine".into(), 24)
+            );
+            // Esc saves nothing: two MenuSelects.
+            enter_row(&mut sh, &mut sim, PL_SAVE_PROFILE_AS);
+            type_str(&mut sh, &mut sim, "other");
+            let o = tap(&mut sh, &mut sim, DK_ESCAPE);
+            assert_eq!((o.menu_sounds, sh.top_char()), (vec![select, select], 'M'));
+            assert_eq!(sh.store().read("Profiles/other.toml"), None);
+            assert_eq!(profile(&sh, 0), Some("Profiles/mine.toml"));
+            // Rust only (D7): a name the store cannot place gets the same box.
+            enter_row(&mut sh, &mut sim, PL_SAVE_PROFILE_AS);
+            let o = retype(&mut sh, &mut sim, 0, "a/b");
+            assert_eq!(
+                (o.menu_sounds, top_box(&sh).text.as_str()),
+                (vec![select], "NAME 'a/b.toml' IS RESERVED")
+            );
+        }
+
+        #[test]
+        fn save_profile_writes_the_user_copy_of_a_shipped_profile() {
+            let (mut sh, mut sim) = on_store(files::tests::install_profiles(), false, 1);
+            let select = hooks().hooks.select;
+            pick_profile(&mut sh, &mut sim, LEFTY_R);
+            sh.settings_mut().worm_settings[1].name = "EDITED".into();
+            let o = enter_row(&mut sh, &mut sim, PL_SAVE_PROFILE);
+            assert_eq!((o.menu_sounds, sh.top_char()), (vec![select], 'M'));
+            let want = worm_settings_to_toml(&sh.settings().worm_settings[1]);
+            let store = sh.store();
+            let saved = store.read("Profiles/Lefty (R).toml");
+            assert_eq!(saved, Some(want.into_bytes()));
+            assert_ne!(
+                saved,
+                Some(data_file("Profiles/Lefty (R).toml")),
+                "the edited name"
+            );
+            assert_eq!(profile(&sh, 1), Some("Profiles/Lefty (R).toml"));
+            assert_eq!(profile(&sh, 0), None);
+        }
+
+        #[test]
+        fn a_native_store_takes_the_user_copies_and_refuses_the_shipped_names() {
+            use scenario::storage::NativeStore;
+            let dir = std::env::temp_dir()
+                .join(format!("liero_rs_profiles_native_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let (user, sys) = (dir.join("user"), dir.join("sys"));
+            std::fs::create_dir_all(sys.join("Profiles")).unwrap();
+            for rel in files::tests::PROFILES {
+                std::fs::write(sys.join(rel), data_file(rel)).unwrap();
             }
+            let store =
+                NativeStore::split(user.clone(), Some(sys.clone())).with_root_label("./user");
+            let (mut sh, mut sim) = on_store(store, false, 0);
+            let select = hooks().hooks.select;
+            pick_profile(&mut sh, &mut sim, LEFTY_L);
+            assert_eq!(sh.settings().worm_settings[0].name, "etc");
+            let o = enter_row(&mut sh, &mut sim, PL_SAVE_PROFILE);
+            assert_eq!((o.menu_sounds, o.notes.len()), (vec![select], 0));
+            let want = worm_settings_to_toml(&sh.settings().worm_settings[0]);
+            let lefty = "Profiles/Lefty (L).toml";
+            assert_eq!(std::fs::read(user.join(lefty)).unwrap(), want.as_bytes());
+            assert_eq!(std::fs::read(sys.join(lefty)).unwrap(), data_file(lefty));
+            // SAVE PROFILE AS… a shipped name: the box; then a free one: the user layer.
+            enter_row(&mut sh, &mut sim, PL_SAVE_PROFILE_AS);
+            retype(&mut sh, &mut sim, 0, "Joystick1");
+            assert_eq!(top_box(&sh).text, "NAME 'Joystick1.toml' IS RESERVED");
+            tap(&mut sh, &mut sim, 57);
+            let o = retype(&mut sh, &mut sim, 9, "mine");
+            assert_eq!(o.menu_sounds, [select, select]);
+            assert_eq!(
+                std::fs::read(user.join("Profiles/mine.toml")).unwrap(),
+                want.as_bytes()
+            );
+            assert!(!sys.join("Profiles/mine.toml").exists());
+            assert_eq!(profile(&sh, 0), Some("Profiles/mine.toml"));
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn a_broken_profile_is_loaded_but_changes_nothing_and_an_unreadable_one_is_a_note() {
+            let store = files::tests::install_profiles();
+            store
+                .write("Profiles/broken.toml", b"name = \"broken\nhealth = [")
+                .unwrap();
+            let (mut sh, mut sim) = on_store(store, false, 0);
+            // R2-18: PROFILE LOADED `broken`, no field changes.
+            let o = pick_profile(&mut sh, &mut sim, 2);
+            let d = Settings::default().worm_settings[0].clone();
+            assert_eq!(sh.settings().worm_settings[0], d);
+            assert_eq!(profile(&sh, 0), Some("Profiles/broken.toml"));
+            assert_eq!(row(&sh, PL_LOADED_PROFILE), "broken");
+            assert_eq!(o.notes.len(), 1, "{:?}", o.notes);
+            // A file the store cannot read (fact 20: never gated): nothing changes but a note.
+            let mut out = FrameOut::new(Phase::Menu);
+            sh.apply_picked(
+                Picked::Profile {
+                    player: 0,
+                    rel: "Profiles/gone.toml".into(),
+                },
+                &mut out,
+            );
+            assert_eq!(
+                out.notes,
+                ["LOAD PROFILE: Profiles/gone.toml: cannot be read"]
+            );
+            assert_eq!(profile(&sh, 0), Some("Profiles/broken.toml"));
+            assert_eq!(sh.settings().worm_settings[0], d);
+        }
+
+        #[test]
+        fn load_setup_clears_every_loaded_profile() {
+            let (mut sh, mut sim) = on_store(files::tests::install_profiles(), false, 0);
+            pick_profile(&mut sh, &mut sim, LEFTY_L);
+            tap(&mut sh, &mut sim, DK_F6);
+            pick_profile(&mut sh, &mut sim, LEFTY_R);
+            tap(&mut sh, &mut sim, DK_F9);
+            pick_profile(&mut sh, &mut sim, JOYSTICK0);
+            assert!((0..3).all(|p| profile(&sh, p).is_some()));
+            tap(&mut sh, &mut sim, DK_ESCAPE);
+            load_setup(&mut sh, &mut sim, 1);
+            assert_eq!(sh.setup_name(), "orbmit");
+            assert!(
+                (0..3).all(|p| profile(&sh, p).is_none()),
+                "fresh WormSettings objects"
+            );
+            tap(&mut sh, &mut sim, DK_F5);
+            assert_eq!(
+                (shown(&sh), sh.player_menu().selected_id()),
+                (22, PL_SAVE_PROFILE_AS)
+            );
+        }
+
+        #[test]
+        fn a_paused_match_takes_a_profiles_health_and_name_at_resume_but_never_its_controller() {
+            let store = files::tests::install_profiles();
+            store
+                .write(
+                    "Profiles/tough.toml",
+                    b"name = \"TOUGH\"\nhealth = 300\ncontroller = 1\nrgbDepth = 8\n",
+                )
+                .unwrap();
+            let (mut sh, mut sim) = on_store(store, false, 0);
+            tap(&mut sh, &mut sim, DK_ESCAPE);
+            sh.main_menu_mut().move_to_id(MA_NEW_GAME);
+            start_match(&mut sh, &mut sim);
+            to_menu(&mut sh, &mut sim);
+            tap(&mut sh, &mut sim, DK_F5);
+            pick_profile(&mut sh, &mut sim, 8);
+            let ws = &sh.settings().worm_settings[0];
+            assert_eq!(
+                (ws.name.as_str(), ws.health, ws.controller),
+                ("TOUGH", 300, 1)
+            );
+            assert_eq!(maxes(&sim)[0], 100, "not before RESUME");
+            let outs = until_routed(&mut sh, &mut sim, DK_F1);
+            assert_eq!(outs.last().unwrap().routed, Some(Route::Resume));
+            assert_eq!(maxes(&sim)[0], 300, "apply_live_settings");
+            let m = sh.current().unwrap();
+            assert_eq!(m.settings().worm_settings[0].name, "TOUGH", "resync");
+            assert!(
+                !m.is_cpu(0),
+                "CONTROLLER never reaches a running match (finding 7)"
+            );
+        }
+
+        #[test]
+        fn a_profile_loaded_into_right_player_on_a_phone_keeps_player_2_the_cpu() {
+            // John's Q7 (plan D10): only RIGHT PLAYER, only touch-only.
+            for (touch_only, row_, want) in [
+                (true, LEFTY_R, 1),
+                (true, AI_R, 1),
+                (false, LEFTY_R, 0),
+                (false, AI_R, 2),
+            ] {
+                let (mut sh, mut sim) = on_store(files::tests::install_profiles(), touch_only, 1);
+                pick_profile(&mut sh, &mut sim, row_);
+                let ws = &sh.settings().worm_settings[1];
+                assert_eq!(ws.controller, want, "touch_only {touch_only}, row {row_}");
+                assert_eq!(ws.controls_ex[..7], [160, 168, 163, 165, 79, 80, 81]);
+                let rgb = if row_ == AI_R {
+                    [80, 80, 160]
+                } else {
+                    [160, 40, 220]
+                };
+                assert_eq!(ws.rgb, rgb, "loaded as in C++");
+                assert_eq!(
+                    row(&sh, PL_CONTROLLER),
+                    ["Human", "CPU", "AI"][want as usize]
+                );
+                // CONTROLLER stays editable by hand.
+                sh.player_menu_mut().move_to_id(PL_CONTROLLER);
+                tap(&mut sh, &mut sim, DK_RIGHT);
+                assert_eq!(sh.settings().worm_settings[1].controller, (want + 1) % 3);
+            }
+            // LEFT PLAYER on a phone takes the file's controller: AI (L) is "AI", which NEW GAME
+            // refuses (Q2).
+            let (mut sh, mut sim) = on_store(files::tests::install_profiles(), true, 0);
+            pick_profile(&mut sh, &mut sim, AI_L);
+            assert_eq!(sh.settings().worm_settings[0].controller, 2);
+            tap(&mut sh, &mut sim, DK_ESCAPE);
+            tap(&mut sh, &mut sim, DK_F1);
+            assert_eq!(
+                sh.top_refusal(),
+                Some(&overlay::Refusal::Build(
+                    scenario::build::BuildError::FollowAiUnsupported { worm: 0 }
+                ))
+            );
         }
 
         // The network player's slot 0 (plan fact 5; T0 P8).

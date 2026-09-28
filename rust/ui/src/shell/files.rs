@@ -1,6 +1,7 @@
 //! Step 4½e-2 — C++ `FileNode` / `FileSelector` (`menu/fileSelector.hpp`) and the two selector
 //! states the settings menu pushes (`fileSelectorState.cpp`): `LevelSelectorState` (LEVEL) and
 //! `OptionsSelectorState` (LOAD SETUP, here [`SetupSelectorState`]). Plan facts 1-10, D4, D5.
+//! Step 4½f-2 adds `ProfileSelectorState` (LOAD PROFILE, [`ProfileSelectorState`]).
 //!
 //! The tree is an arena of [`FileNode`]s filled lazily through the [`ConfigStore`] (C++
 //! `EnsureFilled` / `GetMenu`): a real user folder may hold thousands of replays or a symlink
@@ -35,6 +36,11 @@ pub fn lev_filter(_name: &str, ext: &str) -> bool {
 /// The options selector's filter (`fileSelectorState.cpp:216-217`).
 pub fn cfg_filter(_name: &str, ext: &str) -> bool {
     ci_compare(ext, "CFG")
+}
+
+/// The profile selector's filter (`fileSelectorState.cpp:194-195`; Step 4½f-2).
+pub fn toml_filter(_name: &str, ext: &str) -> bool {
+    ci_compare(ext, "TOML")
 }
 
 /// The HUD minimap's box (`Level::kHudMinimapW/H`): the preview's first clear
@@ -408,6 +414,9 @@ pub enum Picked {
     Level(String),
     /// A setup file (LOAD SETUP, 4½e-2 T4): its store path and `GetBasename(GetLeaf(..))`.
     Setup { rel: String, name: String },
+    /// A profile file (LOAD PROFILE, 4½f-2 D5): the player the selector was pushed for (C++
+    /// binds `ws_` at push time) and the file's store path.
+    Profile { player: usize, rel: String },
 }
 
 /// A selector's `Update` result (plan D4).
@@ -420,7 +429,7 @@ pub struct SelectorOut {
 /// What the harness and the glue read of a selector on top (`Shell::selector_view`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectorView {
-    /// `L` or `P` (the G2 top).
+    /// `L`, `P` or `F` (the G2 top).
     pub top: char,
     /// The current folder's `full_path`.
     pub folder: String,
@@ -670,6 +679,70 @@ impl SetupSelectorState {
     }
 }
 
+/// C++ `ProfileSelectorState` (`fileSelectorState.cpp:186-204`; Step 4½f-2 plan D5, fact 9):
+/// LOAD PROFILE, for the player whose menu pushed it.
+#[derive(Clone, Debug)]
+pub struct ProfileSelectorState {
+    selector: FileSelector,
+    /// `ws_`: the player menu's player at push time.
+    player: usize,
+}
+
+impl ProfileSelectorState {
+    /// The C++ literal title (`fileSelectorState.cpp:189`).
+    pub const TITLE: &'static str = "Select profile:";
+
+    pub fn new(player: usize) -> ProfileSelectorState {
+        ProfileSelectorState {
+            selector: FileSelector::empty(),
+            player,
+        }
+    }
+
+    pub fn selector(&self) -> &FileSelector {
+        &self.selector
+    }
+
+    /// The player this selector loads into.
+    pub fn player(&self) -> usize {
+        self.player
+    }
+
+    /// `Enter` (`:191-199`): fill the whole config root with `TOML` (case-insensitive), the root
+    /// current, then `Select(JoinPath(root, "Profiles"))` — it opens inside `Profiles`.
+    pub fn enter(&mut self, _w: &mut MenuWorld, store: &dyn ConfigStore) {
+        let mut sel = FileSelector::new(store, toml_filter);
+        sel.set_folder(FileSelector::ROOT);
+        let profiles = join_path(store.root_label(), "Profiles");
+        sel.select(store, &profiles);
+        self.selector = sel;
+    }
+
+    /// `FileSelectorState::Update`; a file row is `Picked::Profile` (`OnSelected`, `:201-206`).
+    pub fn update(&mut self, cx: &mut MenuCtx) -> SelectorOut {
+        let (keep, pick) = selector_update(&mut self.selector, cx);
+        let picked = pick.map(|n| Picked::Profile {
+            player: self.player,
+            rel: self.selector.node(n).rel.clone(),
+        });
+        SelectorOut { keep, picked }
+    }
+
+    /// `FileSelectorState::Draw` (`:52-67`): the frozen screen, the framed `"Select profile:"`
+    /// title (+ the path), the selector.
+    pub fn draw(&mut self, w: &mut MenuWorld, store: &dyn ConfigStore, font: &Font) {
+        copy_frozen(w);
+        let path = &self.selector.node(self.selector.current()).full_path;
+        let t = title(Self::TITLE, path);
+        font.draw_framed_text(&mut w.surface, &w.pal32, &t, 178, 20, 50);
+        self.selector.draw(store, &mut w.surface, &w.pal32, font);
+    }
+
+    pub fn view(&self) -> SelectorView {
+        view('F', &self.selector)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::path::Path;
@@ -727,8 +800,30 @@ pub(crate) mod tests {
 
     /// The plan's `Fs::install()` system layer (§Formats), root label `./user`.
     pub(crate) fn install() -> MemoryStore {
+        install_with(&[])
+    }
+
+    /// The eight shipped profiles' store paths (`data/Profiles`, bytewise).
+    pub(crate) const PROFILES: [&str; 8] = [
+        "Profiles/AI (L).toml",
+        "Profiles/AI (R).toml",
+        "Profiles/Joystick0.toml",
+        "Profiles/Joystick1.toml",
+        "Profiles/Lefty (L).toml",
+        "Profiles/Lefty (R).toml",
+        "Profiles/Righty (L).toml",
+        "Profiles/Righty (R).toml",
+    ];
+
+    /// [`install`] + `profiles sys` (4½f-2 D13): the eight shipped profiles in the system layer.
+    pub(crate) fn install_profiles() -> MemoryStore {
+        install_with(&PROFILES)
+    }
+
+    fn install_with(extra: &[&str]) -> MemoryStore {
         let mut files: Vec<(String, Vec<u8>)> = ["Setups/liero.cfg", "Setups/orbmit.cfg"]
             .iter()
+            .chain(extra)
             .map(|r| (r.to_string(), data(r)))
             .collect();
         files.push(("TC/openliero/tc.cfg".into(), data("TC/openliero/tc.cfg")));
@@ -876,6 +971,7 @@ pub(crate) mod tests {
             pushes: Vec::new(),
             now_ms: 0,
             gate: gate(),
+            notes: Vec::new(),
         });
         (keep, sounds)
     }
@@ -1419,6 +1515,7 @@ pub(crate) mod tests {
             pushes: Vec::new(),
             now_ms: 0,
             gate: gate(),
+            notes: Vec::new(),
         });
         (o, sounds)
     }
@@ -1521,6 +1618,7 @@ pub(crate) mod tests {
             pushes: Vec::new(),
             now_ms: 0,
             gate: gate(),
+            notes: Vec::new(),
         });
         assert_eq!(
             o.picked,
@@ -1528,6 +1626,114 @@ pub(crate) mod tests {
                 rel: "Setups/orbmit.cfg".into(),
                 name: "orbmit".into()
             })
+        );
+    }
+
+    #[test]
+    fn the_profile_selector_opens_inside_profiles_on_toml_files_only() {
+        // 4½f-2 T0 P5: `Select profile: ./user/Profiles`, `.toml` only (any case), CiLess order
+        // with folders first, both layers merged; Left shows the root on Profiles.
+        let store = install_profiles();
+        for rel in [
+            "Profiles/mine.toml",
+            "Profiles/UPPER.TOML",
+            "Profiles/notes.txt",
+            "Profiles/sub/deep.toml",
+            "Setups/stray.toml",
+        ] {
+            store.write(rel, b"name = \"x\"\n").unwrap();
+        }
+        let mut w = world();
+        let font = font();
+        let mut ps = ProfileSelectorState::new(1);
+        ps.enter(&mut w, &store);
+        let frozen = w.frozen.clone();
+        ps.draw(&mut w, &store, &font);
+        assert_eq!(
+            ps.view(),
+            SelectorView {
+                top: 'F',
+                folder: "./user/Profiles".into(),
+                selection: 0
+            }
+        );
+        assert_eq!(
+            names(&mut ps.selector, &store),
+            [
+                "sub",
+                "AI (L)",
+                "AI (R)",
+                "Joystick0",
+                "Joystick1",
+                "Lefty (L)",
+                "Lefty (R)",
+                "mine",
+                "Righty (L)",
+                "Righty (R)",
+                "UPPER"
+            ]
+        );
+        let mut want = frozen.clone();
+        font.draw_framed_text(
+            &mut want,
+            &w.pal32,
+            "Select profile: ./user/Profiles",
+            178,
+            20,
+            50,
+        );
+        let mut sel = ps.selector.clone();
+        font.draw_framed_text(&mut want, &w.pal32, "Parent directory", 28, 20, 50);
+        sel.get_menu(&store, FileSelector::ROOT).draw(
+            &PlainModel,
+            &mut want,
+            &w.pal32,
+            &font,
+            true,
+            28,
+            true,
+        );
+        sel.current_menu(&store)
+            .draw(&PlainModel, &mut want, &w.pal32, &font, false, 178, false);
+        assert_eq!(w.surface, want);
+        // The whole root is filled with TOML: Setups' stray file is listed too.
+        assert!(ps.selector.select(&store, "./user/Setups"));
+        assert_eq!(names(&mut ps.selector, &store), ["stray"]);
+        assert!(ps.selector.select(&store, "./user/Profiles"));
+        assert!(ps.selector.exit());
+        assert_eq!(
+            names(&mut ps.selector, &store),
+            ["Profiles", "Resources", "Setups", "TC"]
+        );
+        assert_eq!(ps.view().selection, 0, "the cursor on Profiles");
+        // A pick: `Picked::Profile` for the player the selector was pushed for.
+        ps.selector.enter(&store);
+        ps.selector.current_menu(&store).move_to(5);
+        let mut w2 = world();
+        w2.keys.begin_frame();
+        w2.keys.key_down(DK_RETURN, TypedKey::Sym(0));
+        let mut sounds = Vec::new();
+        let o = ps.update(&mut MenuCtx {
+            w: &mut w2,
+            store: &store,
+            font: &font,
+            running: false,
+            sounds: &mut sounds,
+            pushes: Vec::new(),
+            now_ms: 0,
+            gate: gate(),
+            notes: Vec::new(),
+        });
+        assert_eq!(
+            (o.keep, o.picked, sounds),
+            (
+                false,
+                Some(Picked::Profile {
+                    player: 1,
+                    rel: "Profiles/Lefty (L).toml".into()
+                }),
+                vec![w2.tc.hooks.select]
+            )
         );
     }
 }

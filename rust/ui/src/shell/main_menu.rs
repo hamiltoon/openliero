@@ -1,19 +1,21 @@
 //! The main menu (`MainMenu`, `mainMenu.hpp:9-25`; items `gfx.cpp:505-521`; design §3.3). T7 adds
 //! `MainMenuState`. Step 4½f-2 (T3): the player-menu focus (`CurMenu::Player`), its Enter arms,
-//! F5 / F6 / F9 in C++ order, and its draw.
+//! F5 / F6 / F9 in C++ order, and its draw. T4: the three profile rows (LOAD PROFILE, SAVE
+//! PROFILE, SAVE PROFILE AS…).
 
 use render::bitmap::Rect;
 use render::font::Font;
+use scenario::settings_toml::worm_settings_to_toml;
 use scenario::storage::ConfigStore;
 
-use super::files::{LevelSelectorState, SetupSelectorState};
+use super::files::{LevelSelectorState, ProfileSelectorState, SetupSelectorState};
 use super::overlay::{
     EntryTarget, InfoBoxState, InfoPurpose, InputPurpose, InputStringState, KeyTarget, RefusalGate,
     SaveAsKind, WaitForKeyState, filter_digits,
 };
 use super::player_menu::{
     PL_DIG, PL_LOAD_PROFILE, PL_NAME, PL_SAVE_PROFILE, PL_SAVE_PROFILE_AS, PL_UP, PL_WEAP0,
-    PlayerMenuModel,
+    PlayerMenuModel, ProfileRef,
 };
 use super::settings_menu::{
     LOAD_OPTIONS, SAVE_OPTIONS, SI_LEVEL, SI_WEAPON_OPTIONS, SettingsModel,
@@ -85,7 +87,8 @@ pub type MainModel = PlainModel;
 /// Step 4½e-1: `pushes` are the screens an update pushes (C++ `state_stack.Push` inside
 /// `Update`, plan fact 4), in order; the shell runs each one's `enter` and pushes it after the
 /// update. `now_ms` is the type-to-search clock (WEAPON OPTIONS, the selectors), and `gate` the
-/// Rust-only refusal check (plan T4 Step 5).
+/// Rust-only refusal check (plan T4 Step 5). Step 4½f-2: `notes` are the Rust-only messages
+/// for the glue to log (a SAVE PROFILE write error), which the shell moves into `FrameOut`.
 pub struct MenuCtx<'a> {
     pub w: &'a mut MenuWorld,
     /// Step 4½e-2: the config store the selectors list and read (C++ `GetConfigNode()`).
@@ -96,6 +99,7 @@ pub struct MenuCtx<'a> {
     pub pushes: Vec<Screen>,
     pub now_ms: u64,
     pub gate: RefusalGate,
+    pub notes: Vec<String>,
 }
 
 impl MenuCtx<'_> {
@@ -255,7 +259,13 @@ impl MainMenuState {
             }
             return false;
         }
-        let MenuCtx { w, sounds, .. } = cx;
+        let MenuCtx {
+            w,
+            sounds,
+            store,
+            notes,
+            ..
+        } = cx;
         let hooks = w.tc.hooks;
         // :171-179 (Esc, or any keyboard player's jump): main focus — the cursor to QUIT TO OS;
         // settings focus — back to the main menu, no sound.
@@ -305,7 +315,7 @@ impl MainMenuState {
                     _ => {}
                 }
             } else if let CurMenu::Player(p) = w.cur_menu {
-                push = self.player_enter(w, p, sounds);
+                push = self.player_enter(w, p, sounds, *store, notes);
             } else {
                 match w.settings_menu.selected_id() {
                     // :275-278: MenuSelect + push WeaponMenuState.
@@ -457,24 +467,51 @@ impl MainMenuState {
         true
     }
 
-    /// The player menu's Enter (`mainMenuState.cpp:316-427`; plan facts 1-2, D3, D4), in source
+    /// The player menu's Enter (`mainMenuState.cpp:316-427`; plan facts 1-2, D3-D6), in source
     /// order: LOAD PROFILE, NAME, SAVE PROFILE AS…, the eight key rows, WEAPON n, else the row's
-    /// own `OnEnter` (`selected_ = …`). Every intercepted arm plays `MenuSelect` first; NAME,
-    /// SAVE PROFILE AS… and WEAPON n push only while the item is in view, the key rows always.
-    /// Returns the screen to push.
+    /// own `OnEnter` (`selected_ = …`), where SAVE PROFILE is intercepted (D6). Every
+    /// intercepted arm plays `MenuSelect` first; NAME, SAVE PROFILE AS… and WEAPON n push only
+    /// while the item is in view, LOAD PROFILE and the key rows always. Returns the screen to
+    /// push.
     fn player_enter(
         &mut self,
         w: &mut MenuWorld,
         p: usize,
         sounds: &mut Vec<i32>,
+        store: &dyn ConfigStore,
+        notes: &mut Vec<String>,
     ) -> Option<Screen> {
         let hooks = w.tc.hooks;
         let id = w.player_menu.selected_id();
         match id {
-            // :318-322, :348-366; SAVE PROFILE is the `else` arm's `ProfileSaveBehavior`
-            // (plan fact 2, D6). Task 4 makes them live; here: the MenuSelect alone.
-            PL_LOAD_PROFILE | PL_SAVE_PROFILE_AS | PL_SAVE_PROFILE => {
+            // :318-322: `ProfileSelectorState(*player_menu.ws)` — bound to this player.
+            PL_LOAD_PROFILE => {
                 play(sounds, hooks.select);
+                Some(Screen::ProfileSelect(ProfileSelectorState::new(p)))
+            }
+            // :348-366: `MakeSaveAsState("Profiles", ".toml", "", x, y, …)` (plan D4).
+            PL_SAVE_PROFILE_AS => {
+                play(sounds, hooks.select);
+                let (x, y) = player_value_pos(&w.player_menu, id)?;
+                Some(save_as_box(SaveAsKind::Profile(p), b"", x, y))
+            }
+            // The `else` arm's `ProfileSaveBehavior(save_as = false)::OnEnter` (`gfx.cpp:
+            // 207-221`; plan fact 2, D6): `MenuSelect`, the user copy `Profiles/<leaf>` whatever
+            // layer the profile came from (no shadow check, R2-19), the profile retargeted on a
+            // successful write, `UpdateItems`, -1.
+            PL_SAVE_PROFILE => {
+                play(sounds, hooks.select);
+                if let Some(r) = &w.profiles[p] {
+                    let leaf = r.rel.rsplit(['/', '\\']).next().unwrap_or(&r.rel);
+                    let rel = format!("Profiles/{leaf}");
+                    let toml = worm_settings_to_toml(&w.settings.worm_settings[p]);
+                    match store.write(&rel, toml.as_bytes()) {
+                        Ok(()) => w.profiles[p] = Some(ProfileRef { rel }),
+                        Err(e) => notes.push(format!("SAVE PROFILE: {rel}: {e}")),
+                    }
+                }
+                w.player_update_items(p);
+                self.selected = -1;
                 None
             }
             // :323-347: `InputStringState(ws.name, 20, x + 95 + 2, y, no filter)`.

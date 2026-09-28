@@ -19,8 +19,14 @@
 # (every new DumbLieroAI's RNG is a fresh mt19937(0x1337)) and the FollowAI guard
 # (docs/superpowers/plans/2026-09-27-liero-rs-step4.5-slice4.5f1-plan.md, §Formats pinned); its
 # scripts come from `--example gen_slice4_5f1_shell -- write <golden dir>`.
-# EXPECTED_SHELL_CASES (default 32: the 4½d 11 + the e-1 11, i.e. the plan's 10 and Batch 5's
-# key_edges, + the e-2 6 + the f-1 4) overrides the expected script count.
+# Slice 4½f-2 adds the tops K (WaitForKeyState, the PRESS A KEY box) and F (ProfileSelectorState),
+# the d line's cur letters 1 / 2 / N (the player menu editing player 1, player 2 or the network
+# player; ssel is then the player menu's selection), the manifest line `profiles <user|sys>`, the
+# key name APPLICATION and the non-fs profile guard; no intervention and no line kind (formats:
+# docs/superpowers/plans/2026-09-28-liero-rs-step4.5-slice4.5f2-plan.md, §Formats pinned); its
+# scripts come from `--example gen_slice4_5f2_shell -- write <golden dir>`.
+# EXPECTED_SHELL_CASES (default 41: the 4½d 11 + the e-1 11, i.e. the plan's 10 and Batch 5's
+# key_edges, + the e-2 6 + the f-1 4 + the f-2 9) overrides the expected script count.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PRESET="${PRESET:-macos-arm64}"
@@ -42,9 +48,9 @@ for scn in rust/oracle-tests/golden/shell_*_script.txt; do
   fs=$(awk '$1 == "fs" { f = 1 } END { print f + 0 }' "$scn")
   # C++-SIDE GATE (design §6.4): one 8-field boot line presenting once; 11-field f lines in frame
   # order with presents in {0,1}, '-' exactly when nothing was presented, upd in
-  # {M,W,G,O,I,B,L,P}, top in {M,G,O,I,B,L,P,-}; one end line agreeing with `expect`. With
-  # `detail`: exactly one 6-field d line right after each f line, same frame, cur in {M,S}, cfg16
-  # 16 hex, state8 8 hex or '-'.
+  # {M,W,G,O,I,B,L,P,K,F}, top in {M,G,O,I,B,L,P,K,F,-}; one end line agreeing with `expect`.
+  # With `detail`: exactly one 6-field d line right after each f line, same frame, cur in
+  # {M,S,1,2,N}, cfg16 16 hex, state8 8 hex or '-'.
   # With `fs`: at least one 3-field file line after the end line, rel strictly sorted bytewise,
   # fnv16 16 hex. With neither, the 4½d rules unchanged (no d or file line at all).
   LC_ALL=C awk -v c="$c" -v expect="$expect" -v detail="$detail" -v fs="$fs" '
@@ -60,7 +66,7 @@ for scn in rust/oracle-tests/golden/shell_*_script.txt; do
       if (ends) { printf "FAIL %s: f line after end\n", c; exit 1 }
       if (NF != 11) { printf "FAIL %s: f line with %d fields\n", c, NF; exit 1 }
       if ($2 != k) { printf "FAIL %s: frame %s out of order (want %d)\n", c, $2, k; exit 1 }
-      if ($3 !~ /^[MWGOIBLP]$/ || $9 !~ /^[MGOIBLP-]$/) { printf "FAIL %s: bad upd/top on frame %s\n", c, $2; exit 1 }
+      if ($3 !~ /^[MWGOIBLPKF]$/ || $9 !~ /^[MGOIBLPKF-]$/) { printf "FAIL %s: bad upd/top on frame %s\n", c, $2; exit 1 }
       if ($4 != "0" && $4 != "1") { printf "FAIL %s: presents %s\n", c, $4; exit 1 }
       if (($4 == "0") != ($5 == "-")) { printf "FAIL %s: presented vs presents on frame %s\n", c, $2; exit 1 }
       need_d = detail; k++; next
@@ -68,7 +74,7 @@ for scn in rust/oracle-tests/golden/shell_*_script.txt; do
     $1 == "d" {
       if (!need_d) { printf "FAIL %s: a d line not right after an f line\n", c; exit 1 }
       if (NF != 6 || $2 != k - 1) { printf "FAIL %s: bad d line for frame %d\n", c, k - 1; exit 1 }
-      if ($3 !~ /^[MS]$/ || $4 !~ /^[0-9]+$/ || !hex($5, 16) || ($6 != "-" && !hex($6, 8))) {
+      if ($3 !~ /^[MS12N]$/ || $4 !~ /^[0-9]+$/ || !hex($5, 16) || ($6 != "-" && !hex($6, 8))) {
         printf "FAIL %s: bad d fields on frame %s\n", c, $2; exit 1
       }
       need_d = 0; next
@@ -95,5 +101,5 @@ for scn in rust/oracle-tests/golden/shell_*_script.txt; do
   echo "wrote $out"
   n=$((n + 1))
 done
-want="${EXPECTED_SHELL_CASES:-32}"
+want="${EXPECTED_SHELL_CASES:-41}"
 test "$n" -eq "$want" || { echo "FAIL: $n shell scripts (want $want)"; exit 1; }

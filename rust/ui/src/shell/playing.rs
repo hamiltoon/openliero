@@ -27,7 +27,7 @@ use super::loadout::apply_weapons;
 use super::match_flow::{FlowStep, MatchFlow};
 use super::selection::{CONTROLLER_BOT, Selection, new_game_config};
 use super::viewport_step::tick_viewports;
-use crate::keys::{KeyEdges, ReleaseLatch};
+use crate::keys::{CleanEdges, ReleaseLatch, fold_dig};
 
 /// How a match starts (design §7.5): `skip_selection` (`?weapons=`), the preview loadout,
 /// and the touch-only rule (4½c Q8).
@@ -36,6 +36,14 @@ pub struct StartOptions {
     pub skip_selection: bool,
     pub loadout: Vec<String>,
     pub touch_only: bool,
+}
+
+/// Players 1 and 2's names (`WormSettings::name`), as the selection's name boxes show them.
+fn names_of(s: &Settings) -> [String; 2] {
+    [
+        s.worm_settings[0].name.clone(),
+        s.worm_settings[1].name.clone(),
+    ]
 }
 
 /// `Game::Focus` → `UpdateSettings` (`game.cpp:475-488`): both worms' ramps into `origpal`.
@@ -138,10 +146,15 @@ pub struct Match {
     selection: Option<Selection>,
     viewports: [Viewport; 2],
     scene: SceneData,
+    /// Over 8-bit clean words (Step 4½f-2, plan D1): a DIG key held at a boundary stays latched.
     latch: ReleaseLatch,
-    /// C++ `OnKey`'s edges over the sampled words (`keys::apply_key_edges`): a bit the sim
-    /// consumed stays clear while its key is held.
-    edges: KeyEdges,
+    /// C++ `OnKey`'s edges over the clean words (`keys::apply_clean_edges`, both arms of the DIG
+    /// rule): a bit the sim consumed stays clear while its key is held.
+    edges: CleanEdges,
+    /// The latched clean words of the last [`Match::process`] call, and the sim input of its last
+    /// match tick (after the edges and the AIs): behaviour-free, for tests (4½f-2 T2).
+    words: [u8; 2],
+    inputs: [ControlState; 2],
     /// `Worm::ai` of each worm (`CreateAi`, `localController.cpp:19-28`): a `DumbLieroAI` for a
     /// controller-1 player, made at [`Match::start`] and kept for the whole match. RESUME and
     /// LOAD SETUP never touch it: CONTROLLER does not reach a running match (design finding 7).
@@ -165,8 +178,9 @@ impl Match {
     /// NEW GAME's controller on `level` (`gfx.cpp:1507-1523`) and `GamePlayState::Enter` →
     /// `LocalController::Focus` (`gamePlayState.cpp:14`, `localController.cpp:100-120`):
     /// `kStateInitial` → weapon selection (the `WeaponSelection` constructor draws `state.rand`),
-    /// `Game::Focus`'s worm ramps, fade 0. `held` arms the release latch: key-downs made in the
-    /// menu never reached the controller (design §4.11). The skip route (`?weapons=`, Rust only)
+    /// `Game::Focus`'s worm ramps, fade 0. `held` (the clean words over these settings, 4½f-2
+    /// D1) arms the release latch: key-downs made in the menu never reached the controller
+    /// (design §4.11). The skip route (`?weapons=`, Rust only)
     /// starts at match tick 0 like 4½c. The constructor's `CreateAi` (`localController.cpp:
     /// 19-45`): a fresh `DumbLieroAI` (`mt19937(0x1337)`) for every controller-1 player, once
     /// per NEW GAME (4½f-1 D8; T0 P1).
@@ -177,7 +191,7 @@ impl Match {
         seed: u32,
         opts: &StartOptions,
         begin: i32,
-        held: &[ControlState; 2],
+        held: &[u8; 2],
     ) -> (Match, SimState) {
         // 4½f-1 D1: `CreateAi`'s FollowAI arm (controller 2) is unported. The menu's NEW GAME
         // gate refuses it (`build::refuse_follow_ai`), and the skip route cannot meet it (the
@@ -212,12 +226,13 @@ impl Match {
             (MatchFlow::new(), None)
         } else {
             let mut sel = Selection::new(new_game_config(settings, opts.touch_only));
+            sel.set_names(names_of(settings));
             sel.begin(&mut state)
                 .expect("the settings select over the TC");
             (MatchFlow::with_weapon_selection(), Some(sel))
         };
         let mut latch = ReleaseLatch::default();
-        latch.arm(held);
+        latch.arm_clean(held);
         let hud = HudFlags {
             draw_hud: true,
             map: settings.map,
@@ -228,7 +243,9 @@ impl Match {
             viewports,
             scene,
             latch,
-            edges: KeyEdges::default(),
+            edges: CleanEdges::default(),
+            words: [0; 2],
+            inputs: [ControlState::new(); 2],
             ais,
             traces: [AiTrace::default(); 2],
             hud,
@@ -256,6 +273,16 @@ impl Match {
     /// Worm `i`'s AI (its RNG), if it is a CPU player.
     pub fn ai(&self, i: usize) -> Option<&DumbLieroAi> {
         self.ais[i].as_ref()
+    }
+
+    /// The latched clean words of the last [`Match::process`] call (see the field).
+    pub fn words(&self) -> [u8; 2] {
+        self.words
+    }
+
+    /// The sim input of the last match tick (see the field).
+    pub fn inputs(&self) -> [ControlState; 2] {
+        self.inputs
     }
 
     /// What each AI did in the last [`Match::process`] call (see the field).
@@ -296,13 +323,24 @@ impl Match {
     /// facts 14-16), after `apply_live_settings` wrote the sim's live-read set: the whole
     /// `MatchConfig::settings` (the `kStateGame` lives and blood pool, the selection's
     /// `level_file`, the shadow gate, `names_on_bonuses`), the HUD's `map`, and a running
-    /// selection's `weap_table` (`weapsel.cpp:255`, `:278`, `:327` read it live).
+    /// selection's `weap_table` (`weapsel.cpp:255`, `:278`, `:327` read it live) and — Step
+    /// 4½f-2 (R-10) — its name boxes' names (`weapsel.cpp:199-203` reads them live too). The kill
+    /// banners read the refreshed copy in [`Match::draw`].
     pub fn resync(&mut self, s: &Settings) {
         self.cfg.settings = s.clone();
         self.hud.map = s.map;
         if let Some(sel) = self.selection.as_mut() {
             sel.set_weap_table(s.weap_table);
+            sel.set_names(names_of(s));
         }
+    }
+
+    /// The names the selection's name boxes show, while one runs (Step 4½f-2; tests).
+    pub fn selection_names(&self) -> Option<[&str; 2]> {
+        self.selection
+            .as_ref()
+            .filter(|s| s.is_active())
+            .map(Selection::names)
     }
 
     /// The selection's picks as the shared C++ `WormSettings::weapons` hold them now
@@ -327,16 +365,17 @@ impl Match {
     }
 
     /// RESUME (`gfx.cpp:1525-1530` → `LocalController::Focus`, `localController.cpp:100-120`):
-    /// the flow, a running selection's `Focus`, the latch over the keys held at the boundary,
+    /// the flow, a running selection's `Focus`, the latch over the keys held at the boundary (the
+    /// clean words over the match's settings after `resync`, 4½f-2 D1),
     /// and `Game::Focus`'s worm ramps from the match's settings, on every RESUME as C++ does
     /// (4½f-1 D9, T0 P6). Attached, [`Match::resync`] has just refreshed them, so a colour edited
     /// in the menu shows from the first resumed frame; detached, they are the old ones.
-    pub fn focus(&mut self, held: &[ControlState; 2]) {
+    pub fn focus(&mut self, held: &[u8; 2]) {
         self.flow.focus();
         if let Some(sel) = self.selection.as_mut().filter(|s| s.is_active()) {
             sel.focus();
         }
-        self.latch.arm(held);
+        self.latch.arm_clean(held);
         focus_palette(&mut self.scene, &self.cfg.settings);
     }
 
@@ -347,10 +386,11 @@ impl Match {
         }
     }
 
-    /// `LocalController::Process` (`localController.cpp:122-200`) on this frame's sampled words:
-    /// the latch, then the selection step (the frame the last player readies runs
+    /// `LocalController::Process` (`localController.cpp:122-200`) on this frame's clean words
+    /// (`keys::clean_words` over this match's settings, 4½f-2 D1): the latch, then the selection
+    /// step on the words with DIG folded into Left + Right (`keys::fold_dig`) (the frame the last player readies runs
     /// `ChangeState(kStateGame)`: Finalize, lives, `StartGame`'s blood pool and `SoundBegin`,
-    /// fade 33) or one match tick on `OnKey`'s edges ([`KeyEdges`]; the selection keeps its own
+    /// fade 33) or one match tick on `OnKey`'s edges ([`CleanEdges`]; the selection keeps its own
     /// 4½c key repeat): the AIs (`:156-164`, [`run_ais_traced`]: a CPU worm's word is its
     /// post-tick `control_states` plus the edges of any key bound to it, fact 6), then
     /// `tick_viewports` + game over (`:175`). No AI runs in selection, nor on the frame that
@@ -359,29 +399,31 @@ impl Match {
     pub fn process(
         &mut self,
         sim: &mut SimState,
-        sampled: [ControlState; 2],
+        words: [u8; 2],
         ais: bool,
         sounds: &mut Vec<i32>,
     ) -> (bool, bool) {
-        let mut inputs = sampled;
-        self.latch.apply(&mut inputs);
+        let mut w = words;
+        self.latch.apply_clean(&mut w);
+        self.words = w;
         self.traces = [AiTrace::default(); 2];
         let mut ticked = false;
         if self.in_selection() {
             let sel = self.selection.as_mut().expect("in selection");
-            if sel.step(sim, &inputs, sounds) {
+            if sel.step(sim, &w.map(fold_dig), sounds) {
                 enter_game(sim, &self.cfg);
                 if self.begin >= 0 {
                     sounds.push(self.begin);
                 }
                 self.flow.enter_game();
-                self.latch.arm(&sampled);
+                self.latch.arm_clean(&words);
             }
         } else {
-            let mut inputs = self.edges.apply(&inputs, &sim.worms);
+            let mut inputs = self.edges.apply(&w, &sim.worms);
             if ais {
                 run_ais_traced(&mut self.ais, sim, &mut inputs, &mut self.traces);
             }
+            self.inputs = inputs;
             tick_viewports(&mut self.viewports, sim, &inputs);
             self.flow.check_game_over(sim);
             ticked = true;
@@ -406,6 +448,9 @@ impl Match {
             .scene
             .as_scene(sim.screen_flash, self.cfg.settings.shadow);
         self.hud.apply(&mut scene);
+        // 4½f-2 D11: the kill banners' names, from the match's copy of the settings.
+        let ws = &self.cfg.settings.worm_settings;
+        scene.names = [&ws[0].name, &ws[1].name];
         if small_labels {
             scene.small_labels = Some(SmallLabels {
                 text: &self.scene.text_sprites,

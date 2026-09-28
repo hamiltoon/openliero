@@ -127,10 +127,26 @@ pub fn draw_scrollbar(
 /// `menu_cycles` is `Gfx::menu_cycles` (`unsigned`). Not the weapsel palette: that one has no
 /// worm step (plan-time fact 5).
 pub fn menu_palette(origpal: &Palette, menu_cycles: u32, worm_rgb: [[i32; 3]; 2]) -> Pal32 {
+    menu_palette_with(origpal, menu_cycles, worm_rgb, None)
+}
+
+/// [`menu_palette`], then — while the NETWORK PLAYER menu has focus (`cur_menu == &player_menu`
+/// and `player_menu.ws == settings->worm_settings[2]`, `gfx.cpp:990-993`; Step 4½f-2) —
+/// `SetWormColour(0, network player)` once more: `slot0` is that player's rgb. An extra call
+/// after both players, not a reordering (`gfx/palette.cpp:92-105`).
+pub fn menu_palette_with(
+    origpal: &Palette,
+    menu_cycles: u32,
+    worm_rgb: [[i32; 3]; 2],
+    slot0: Option<[i32; 3]>,
+) -> Pal32 {
     let mut pal = origpal.clone();
     rotate_from(&mut pal, origpal, ROTATE_FROM, ROTATE_TO, menu_cycles);
     for (i, rgb) in worm_rgb.iter().enumerate() {
         set_worm_colour(&mut pal, i, *rgb);
+    }
+    if let Some(rgb) = slot0 {
+        set_worm_colour(&mut pal, 0, rgb);
     }
     pack_pal32(&pal)
 }
@@ -367,6 +383,37 @@ mod tests {
         assert_eq!(
             menu_palette(&focused, 9, rgb),
             crate::weapsel::weapsel_palette(&focused, 9)
+        );
+    }
+
+    #[test]
+    fn the_network_players_slot_0_is_one_more_set_worm_colour_after_both() {
+        use assets::palette::{Color, Palette};
+        let mut p = Palette {
+            entries: [Color::default(); 256],
+        };
+        for (i, e) in p.entries.iter_mut().enumerate() {
+            (e.r, e.g) = (i as u8, 255 - i as u8);
+        }
+        let rgb = [[104, 104, 252], [60, 172, 60]];
+        let net = [64, 104, 252];
+        assert_eq!(
+            menu_palette_with(&p, 5, rgb, None),
+            menu_palette(&p, 5, rgb),
+            "None is menu_palette"
+        );
+        let mut want = p.clone();
+        crate::palette::rotate_from(&mut want, &p, 168, 174, 5);
+        crate::palette::set_worm_colour(&mut want, 0, rgb[0]);
+        crate::palette::set_worm_colour(&mut want, 1, rgb[1]);
+        crate::palette::set_worm_colour(&mut want, 0, net);
+        let got = menu_palette_with(&p, 5, rgb, Some(net));
+        assert_eq!(got, crate::palette::pack_pal32(&want));
+        assert_ne!(got, menu_palette(&p, 5, rgb), "non-vacuous: slot 0 moved");
+        assert_eq!(
+            got[41..44],
+            menu_palette(&p, 5, rgb)[41..44],
+            "worm 1's ramp is untouched"
         );
     }
 }

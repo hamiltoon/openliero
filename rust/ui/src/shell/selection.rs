@@ -95,7 +95,9 @@ fn live_touch_rule(cfg: &mut WeapselConfig, touch_only: bool) {
 /// The live phase and the in-memory picks (see the module doc).
 pub struct Selection {
     cfg: WeapselConfig,
-    /// `WormSettings::name` of players 0/1: `Settings::default()`'s (empty) until 4½f.
+    /// `WormSettings::name` of players 0/1, drawn in the name boxes (`weapsel.cpp:199-203`, read
+    /// live every frame): the match's settings at NEW GAME, refreshed by RESUME while attached
+    /// ([`Selection::set_names`]; 4½f-2 D11, R-10).
     names: [String; 2],
     active: Option<WeaponSelection>,
     /// `WeaponSelection::cached_background` (`weapsel.hpp:27`): the frozen background has been
@@ -114,6 +116,15 @@ impl Selection {
             cached_background: false,
             focused: true,
         }
+    }
+
+    /// The names the name boxes show ([`Selection::render`]).
+    pub fn set_names(&mut self, names: [String; 2]) {
+        self.names = names;
+    }
+
+    pub fn names(&self) -> [&str; 2] {
+        [self.names[0].as_str(), self.names[1].as_str()]
     }
 
     /// The saved picks and rules every new selection starts from.
@@ -488,5 +499,45 @@ mod tests {
             0xFF12_3456,
             "RESUME redraws over the menu's frozen screen"
         );
+    }
+
+    #[test]
+    fn render_draws_the_names_it_was_given() {
+        // weapsel.cpp:199-203 (4½f-2 T5): the name boxes show `set_names`' names.
+        let scenario::Loaded {
+            mut state, scene, ..
+        } = default_match();
+        let mut sel = Selection::new(live_config(&state, false));
+        assert_eq!(sel.names(), ["", ""], "empty until set");
+        sel.set_names(["A".into(), "BB".into()]);
+        sel.begin(&mut state).unwrap();
+        let s = scene.as_scene(0, false);
+        let (mut surface, mut frozen) = (Bitmap::new(320, 200), Bitmap::new(320, 200));
+        let lf = "Levels/render_stage.lev";
+        let pal = sel.render(
+            &mut surface,
+            &mut frozen,
+            &state,
+            &s,
+            &scene.weapsel_texts,
+            lf,
+            5,
+        );
+        let screen_with = |names: [&str; 2]| {
+            let mut b = Bitmap::new(320, 200);
+            screen::draw_screen(
+                &mut b,
+                &frozen,
+                &pal,
+                s.font,
+                &scene.weapsel_texts,
+                sel.active().unwrap(),
+                &state.weapons,
+                names,
+            );
+            b
+        };
+        assert_eq!(surface, screen_with(["A", "BB"]));
+        assert_ne!(surface, screen_with(["", ""]), "non-vacuous");
     }
 }

@@ -1,8 +1,9 @@
 // Generates the C++ side of the Rust shell gates G2 (Step 4½, slice 4½d; design §6.2-§6.6), G2e-1
-// (slice 4½e-1), G2e-2 (slice 4½e-2) and G2f-1 (slice 4½f-1; rust/oracle-tests/tests/
-// shell_golden.rs). The REAL Gfx::RunOneFrame runs headlessly — the REAL StateStack, MainMenuState
-// (and its settings focus), WeaponMenuState, InputStringState, InfoBoxState, LevelSelectorState,
-// OptionsSelectorState, GamePlayState, LocalController (weapon selection with its 12/3 repeat, its
+// (slice 4½e-1), G2e-2 (slice 4½e-2), G2f-1 (slice 4½f-1) and G2f-2 (slice 4½f-2; rust/
+// oracle-tests/tests/shell_golden.rs). The REAL Gfx::RunOneFrame runs headlessly — the REAL
+// StateStack, MainMenuState (and its settings and player focus), WeaponMenuState,
+// InputStringState, InfoBoxState, WaitForKeyState, LevelSelectorState, OptionsSelectorState,
+// ProfileSelectorState, GamePlayState, LocalController (weapon selection with its 12/3 repeat, its
 // DumbLieroAI CPU players, the Esc fade, game over), Game::ProcessFrame / Draw, UpdateMenuPalettes,
 // DrawBasicMenu and Flip -> Gfx::Draw -> ScaleDraw into a 320x200 ARGB surface through a software
 // renderer. Each frame the dumper pushes that frame's script events (SDL_PushEvent: key events and
@@ -52,6 +53,12 @@
 //   9. the exit save: when an `fs` case ends by quit, gfx.settings->save(user config node /
 //      "Setups" / "liero.cfg", gfx.rand) — gameEntry.cpp:78 verbatim, which the dumper never
 //      reaches (the Rust side is Shell::save_on_exit).
+// 4½f-2 adds no intervention (RD-8). Its non-fs profile guard (plan D12) only refuses: a case
+// without `fs` has no config node and runs with CWD data/TC/openliero, so it fails on a frame
+// whose top becomes F (LOAD PROFILE) or after which a `Profiles` path exists under the CWD (SAVE
+// PROFILE / SAVE PROFILE AS… would have written into the repo's data/). The REAL code crashes on
+// the null config node inside those pushes and writes, before a post-frame check could run, so
+// the guard also refuses, before the frame, an Enter on a profile row (EntersProfileRow).
 //
 // Opt-in script directives (4½e-1; a script without them writes the 4½d output byte-identically;
 // 4½e-2 adds the tops L = LevelSelectorState and P = OptionsSelectorState, and no directive):
@@ -71,13 +78,24 @@
 //                       does. After the end line (and intervention 9) it writes `file <rel>
 //                       <fnv16>` for every regular file under user/, rel sorted bytewise, then
 //                       removes the fixture.
+// 4½f-2 (docs/superpowers/plans/2026-09-28-liero-rs-step4.5-slice4.5f2-plan.md, §Formats pinned)
+// adds no directive, only:
+//   the tops K = WaitForKeyState and F = ProfileSelectorState;
+//   the d line's cur letters 1 / 2 / N when gfx.cur_menu is the player menu and player_menu.ws is
+//                       settings->worm_settings[0 / 1 / 2] (none: the case fails), with ssel then
+//                       player_menu.Selection() (settings_menu.Selection() for M / S, unchanged);
+//   the manifest line   `profiles <user|sys>`: every data/Profiles/*.toml (sorted bytewise) copied
+//                       into <layer>/Profiles/<same name> (the shipped names have spaces, which a
+//                       `file` line cannot carry); a destination that exists, or the layer given
+//                       twice, fails;
+//   the key name        APPLICATION (SDL_SCANCODE_APPLICATION, DOS 89, a blank key name).
 // The search-gap check (plan D4): C++'s menu search clears its prefix after 1500 ms of
 // SDL_GetTicks() (menu.cpp:21-24) and the Rust harness passes now_ms = 0, so a case fails when two
 // frames of one visit carry printable key-downs >= 1000 ms apart. A visit is one continuous stretch
-// of the same WeaponMenuState (InfoBox interludes included), LevelSelectorState or
-// OptionsSelectorState on top (the selectors push nothing). InputStringState::Enter's
-// SDL_StartTextInput(nullptr window) fails harmlessly headless; the pushed text events still
-// arrive.
+// of the same WeaponMenuState (InfoBox interludes included), LevelSelectorState,
+// OptionsSelectorState or ProfileSelectorState on top (the selectors push nothing).
+// InputStringState::Enter's SDL_StartTextInput(nullptr window) fails harmlessly headless; the
+// pushed text events still arrive.
 // Usage (from the repo root): oracle_dump_shell <script.txt> <out.txt> [--ppm-dir <dir>]
 // Built via OPENLIERO_BUILD_ORACLE_DUMP (rust/oracle-tests/gen_shell_golden.sh). Not part of the
 // default build.
@@ -261,6 +279,9 @@ SDL_Scancode ScancodeOf(std::string const& t) {
       {"F10", SDL_SCANCODE_F10},
       {"F11", SDL_SCANCODE_F11},
       {"F12", SDL_SCANCODE_F12},
+      // 4½f-2: the unmapped key (SDLToDOSKey -> 89, a blank key name). Never F13: this table stops
+      // at F12, while the Rust key_of would map any F<n> to 58 + n.
+      {"APPLICATION", SDL_SCANCODE_APPLICATION},
   };
   auto const kIt = kNames.find(t);
   if (kIt != kNames.end()) {
@@ -440,6 +461,12 @@ char TopOf(AppState* s) {
   if (dynamic_cast<MainMenuState*>(s) != nullptr) {
     return 'M';
   }
+  if (dynamic_cast<WaitForKeyState*>(s) != nullptr) {  // 4½f-2
+    return 'K';
+  }
+  if (dynamic_cast<ProfileSelectorState*>(s) != nullptr) {  // 4½f-2, before the other selectors
+    return 'F';
+  }
   if (dynamic_cast<GamePlayState*>(s) != nullptr) {
     return 'G';
   }
@@ -458,7 +485,7 @@ char TopOf(AppState* s) {
   if (dynamic_cast<OptionsSelectorState*>(s) != nullptr) {
     return 'P';
   }
-  Fail("a state 4½e-2 does not model is on the stack");
+  Fail("a state 4½f-2 does not model is on the stack");
 }
 
 // The fields every line shares: bmp16 fade menu_cycles top sel.
@@ -482,23 +509,75 @@ std::string Presented(std::string const& ppm_dir, std::string const& name) {
   return "1 " + Hex16(HashSurface(*gfx.sdl_draw_surface));
 }
 
-// The d line (plan D1): cur, ssel, cfg16, state8.
+// The d line (plan D1; 4½f-2 §Formats): cur, ssel, cfg16, state8. cur is M / S, or 1 / 2 / N for
+// the player menu editing settings->worm_settings[0 / 1 / 2]; ssel is that menu's Selection().
 std::string DetailLine(int frame) {
   char cur = 0;
+  int ssel = 0;
   if (gfx.cur_menu == &gfx.settings_menu) {
     cur = 'S';
+    ssel = gfx.settings_menu.Selection();
   } else if (gfx.cur_menu == &gfx.main_menu) {
     cur = 'M';
+    ssel = gfx.settings_menu.Selection();
+  } else if (gfx.cur_menu == &gfx.player_menu) {
+    static_assert(Settings::kNumWormSettings == 3);
+    for (int i = 0; i < Settings::kNumWormSettings; ++i) {
+      if (gfx.player_menu.ws == gfx.settings->worm_settings[i]) {
+        cur = "12N"[i];
+        break;
+      }
+    }
+    if (cur == 0) {
+      Fail("frame " + std::to_string(frame) +
+           ": the player menu edits none of the settings' three players");
+    }
+    ssel = gfx.player_menu.Selection();
   } else {
-    Fail("frame " + std::to_string(frame) + ": cur_menu is neither the main nor the settings menu");
+    Fail("frame " + std::to_string(frame) +
+         ": cur_menu is neither the main, the settings nor the player menu");
   }
   std::string state = "-";
   if (TopOf(gfx.state_stack.Top()) == 'G' && !gfx.controller->InWeaponSelection()) {
     state = Hex8(HashGameState(*gfx.controller->CurrentGame()));
   }
-  return "d " + std::to_string(frame) + " " + cur + " " +
-         std::to_string(gfx.settings_menu.Selection()) + " " +
+  return "d " + std::to_string(frame) + " " + cur + " " + std::to_string(ssel) + " " +
          Hex16(FnvBytes(gfx.settings->ToToml())) + " " + state + "\n";
+}
+
+// The non-fs profile guard's pre-frame half (plan D12). A non-fs case has no config node, so the
+// REAL push of LOAD PROFILE (ProfileSelectorState::Enter: GetConfigNode().FullPath()) and the REAL
+// SAVE PROFILE / SAVE PROFILE AS… writes dereference a null FsNode and crash inside
+// RunOneFrame, before any post-frame check. So a non-fs frame that starts with the player menu's
+// cursor on one of those rows and carries a key-down that MainMenuState's Enter arm reads
+// (mainMenuState.cpp:194-196: RETURN, KP_ENTER, a keyboard player's FIRE key) is refused first. It
+// only refuses (a Down or an Esc in the same frame would have moved away); it never runs code.
+bool EntersProfileRow(Case const& c, std::size_t first_ev, int frame) {
+  if (TopOf(gfx.state_stack.Top()) != 'M' || gfx.cur_menu != &gfx.player_menu) {
+    return false;
+  }
+  int const kId = gfx.player_menu.SelectedId();
+  if (kId != PlayerMenu::kPlSaveProfile && kId != PlayerMenu::kPlSaveProfileAs &&
+      kId != PlayerMenu::kPlLoadProfile) {
+    return false;
+  }
+  for (std::size_t i = first_ev; i < c.events.size() && c.events[i].frame == frame; ++i) {
+    ScriptEv const& e = c.events[i];
+    if (e.text >= 0 || !e.down) {
+      continue;
+    }
+    if (e.sc == SDL_SCANCODE_RETURN || e.sc == SDL_SCANCODE_KP_ENTER) {
+      return true;
+    }
+    uint32_t const kDos = SDLToDOSKey(e.sc);
+    for (auto const& ws : gfx.settings->worm_settings) {
+      if (ws->input_device == WormSettingsExtensions::kInputKeyboard &&
+          ws->controls_ex[WormSettingsExtensions::kFire] == kDos) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 // A manifest <rel>: non-empty, forward slashes, no absolute path, no `\`, no `.`/`..`/empty part.
@@ -531,6 +610,8 @@ std::filesystem::path MakeFixture(std::string const& manifest, std::string const
   fs::create_directories(kRoot / "sys");
   std::istringstream in(Slurp(manifest));
   std::string line;
+  bool profiles_user = false;
+  bool profiles_sys = false;
   while (std::getline(in, line)) {
     std::istringstream ls(line);
     std::vector<std::string> tok;
@@ -539,6 +620,34 @@ std::filesystem::path MakeFixture(std::string const& manifest, std::string const
       tok.push_back(t);
     }
     if (tok.empty()) {
+      continue;
+    }
+    if (tok[0] == "profiles") {
+      // 4½f-2 (plan D13): the shipped profiles into <layer>/Profiles, sorted bytewise.
+      if (tok.size() != 2 || (tok[1] != "user" && tok[1] != "sys")) {
+        Fail("bad fs manifest line: " + line);
+      }
+      bool& given = tok[1] == "user" ? profiles_user : profiles_sys;
+      if (given) {
+        Fail("fs manifest: profiles " + tok[1] + " given twice");
+      }
+      given = true;
+      std::vector<std::string> leaves;
+      for (auto const& e : fs::directory_iterator("data/Profiles")) {
+        std::string leaf = e.path().filename().string();
+        if (e.is_regular_file() && leaf.ends_with(".toml")) {
+          leaves.push_back(std::move(leaf));
+        }
+      }
+      std::ranges::sort(leaves);
+      for (auto const& leaf : leaves) {
+        fs::path const kDest = kRoot / tok[1] / "Profiles" / leaf;
+        if (fs::exists(kDest)) {
+          Fail("fs manifest: " + tok[1] + "/Profiles/" + leaf + " given twice");
+        }
+        fs::create_directories(kDest.parent_path());
+        fs::copy_file(fs::path("data/Profiles") / leaf, kDest);
+      }
       continue;
     }
     bool const kDir = tok[0] == "dir" && tok.size() == 3;
@@ -768,8 +877,8 @@ int main(int argc, char** argv) {
   std::size_t next_ev = 0;
   int end = kCase.frames;
   bool quit = false;
-  // The search-gap check (plan D4): the WeaponMenuState, LevelSelectorState or
-  // OptionsSelectorState of the current visit, its top, and the frame and SDL_GetTicks() of its
+  // The search-gap check (plan D4): the WeaponMenuState, LevelSelectorState, OptionsSelectorState
+  // or ProfileSelectorState of the current visit, its top, and the frame and SDL_GetTicks() of its
   // latest search key.
   AppState const* search_menu = nullptr;
   char search_top = '-';
@@ -785,7 +894,7 @@ int main(int argc, char** argv) {
     if (kTop == 'G') {
       upd = gfx.controller->InWeaponSelection() ? 'W' : 'G';
     }
-    bool const kSearchable = kTop == 'O' || kTop == 'L' || kTop == 'P';
+    bool const kSearchable = kTop == 'O' || kTop == 'L' || kTop == 'P' || kTop == 'F';
     if (kSearchable && kTopState != search_menu) {
       search_menu = kTopState;
       search_top = kTop;
@@ -794,6 +903,10 @@ int main(int argc, char** argv) {
       search_menu = nullptr;
       search_top = '-';
       search_frame = -1;
+    }
+    if (kCase.fs.empty() && EntersProfileRow(kCase, next_ev, frame)) {
+      Fail("frame " + std::to_string(frame) +
+           ": a profile row (LOAD PROFILE, SAVE PROFILE, SAVE PROFILE AS…) needs an fs case");
     }
     bool search_key = false;
     while (next_ev < kCase.events.size() && kCase.events[next_ev].frame == frame) {
@@ -854,6 +967,15 @@ int main(int argc, char** argv) {
     } else if (kTop == 'M' && kBefore != nullptr && TopOf(gfx.state_stack.Top()) == 'G' &&
                gfx.settings->game_mode == Settings::kGmHoldazone) {
       Fail(kAt + "a RESUME into Holdazone (unported in Rust)");
+    }
+    if (kCase.fs.empty()) {
+      // The non-fs profile guard (4½f-2 plan D12): no config node, CWD data/TC/openliero.
+      if (TopOf(gfx.state_stack.Top()) == 'F') {
+        Fail(kAt + "LOAD PROFILE needs an fs case");
+      }
+      if (std::filesystem::exists("Profiles")) {
+        Fail(kAt + "a profile was written without an fs fixture");
+      }
     }
     std::string sounds;
     for (int const kId : rec->played) {

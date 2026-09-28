@@ -110,7 +110,8 @@ pub fn store_for(config_root: Option<&Path>) -> Box<dyn ConfigStore> {
 
 /// The browser's store (Step 4½e-2, plan D9): the C++ web build's `--config-root /openliero`,
 /// in memory for the session. One layer holding the preloaded `data/` files the selectors show
-/// (`scenario::assets::browser_system_files`: the setups, the 4 small levels, the TC `.cfg`s)
+/// (`scenario::assets::browser_system_files`: the setups, the 4 small levels, the TC `.cfg`s
+/// and, Step 4½f-2, the 8 profiles)
 /// and its 11 directories, so LEVEL and LOAD SETUP list what the C++ web build lists minus
 /// `modern_test` (Q6). Saves shadow the preloaded files, and only the reserved `liero.cfg` is
 /// refused: a browser player may save over `orbmit`, kept until the page reloads.
@@ -313,9 +314,20 @@ mod tests {
         assert_eq!(names(""), dirs(&["Profiles", "Resources", "Setups", "TC"]));
         assert_eq!(
             names("Profiles"),
-            [],
-            "an empty shipped folder is still listed"
+            [
+                "AI (L).toml",
+                "AI (R).toml",
+                "Joystick0.toml",
+                "Joystick1.toml",
+                "Lefty (L).toml",
+                "Lefty (R).toml",
+                "Righty (L).toml",
+                "Righty (R).toml"
+            ]
+            .map(|n| (n.to_string(), false)),
+            "the 8 shipped profiles (4½f-2 T4 Step 5)"
         );
+        assert_eq!(names("Resources"), [], "an empty shipped folder is still listed");
         assert_eq!(
             names("TC/openliero/Levels"),
             [

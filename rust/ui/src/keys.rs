@@ -258,6 +258,167 @@ impl KeyEdges {
     }
 }
 
+// ---- Step 4½f-2 (plan D1; design RD-1, RD-2): the shell's live input from the bindings ------
+//
+// The shell no longer takes sampled 7-bit words: it holds the physical keyboard's DOS keys
+// ([`DosHeld`]) and computes C++ `clean_control_states` from the running match's bindings
+// ([`clean_words`], `Game::FindControlForKey`), 8 bits with DIG at bit 7. [`apply_clean_edges`] /
+// [`CleanEdges`] and [`ReleaseLatch::arm_clean`] / [`ReleaseLatch::apply_clean`] are the 8-bit
+// siblings of the 7-bit code above, which the non-shell paths (`--live <scenario>`, `--replay`,
+// Scripted, `?demo`) keep byte-for-byte (plan fact 13).
+
+/// C++ `WormSettings::kDig` in a clean word (`worm.hpp:45-55`): bits 0..6 are
+/// [`ControlState`]'s, bit 7 is DIG (the `controls_ex` order).
+pub const CLEAN_DIG: u8 = 1 << 7;
+
+/// The physical keyboard's held DOS keys (the shell's live sampler, plan D1). DOS 0 and keys
+/// outside `1..MAX_DOS_KEY` are never held.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DosHeld {
+    down: [bool; MAX_DOS_KEY as usize],
+}
+
+impl Default for DosHeld {
+    fn default() -> Self {
+        DosHeld::new()
+    }
+}
+
+impl DosHeld {
+    /// Nothing held.
+    pub const fn new() -> DosHeld {
+        DosHeld {
+            down: [false; MAX_DOS_KEY as usize],
+        }
+    }
+
+    /// Hold or release DOS key `dos` (0 and out-of-range keys are ignored).
+    pub fn set(&mut self, dos: u32, down: bool) {
+        if dos != 0 && dos < MAX_DOS_KEY {
+            self.down[dos as usize] = down;
+        }
+    }
+
+    /// Whether `dos` is held (never for 0).
+    pub fn is_down(&self, dos: u32) -> bool {
+        dos != 0 && dos < MAX_DOS_KEY && self.down[dos as usize]
+    }
+
+    /// Every key of `keys` held.
+    pub fn from_keys(keys: impl IntoIterator<Item = u32>) -> DosHeld {
+        let mut h = DosHeld::new();
+        for k in keys {
+            h.set(k, true);
+        }
+        h
+    }
+
+    /// The held keys, ascending.
+    pub fn keys(&self) -> impl Iterator<Item = u32> + '_ {
+        (1..MAX_DOS_KEY).filter(|&k| self.down[k as usize])
+    }
+}
+
+/// C++ `Game::FindControlForKey` (`game.cpp:75-106`, `Settings::kExtensions`): the first of
+/// worms 0 and 1 that is a keyboard player (`input_device == 0`; a pad player is skipped, Q5)
+/// and, in it, the first control `0..8` whose `controls_ex` equals `key`. The network player
+/// (index 2) never takes a key in play (plan fact 11). Key 0 never matches.
+pub fn find_control_for_key(key: u32, ws: &[WormSettings]) -> Option<(usize, usize)> {
+    if key == 0 {
+        return None;
+    }
+    ws.iter()
+        .take(2)
+        .enumerate()
+        .filter(|(_, w)| w.input_device == INPUT_KEYBOARD)
+        .find_map(|(i, w)| w.controls_ex.iter().position(|&k| k == key).map(|c| (i, c)))
+}
+
+/// C++ `clean_control_states` of both worms over every held key (plan D1): each held key sets
+/// the bit of its [`find_control_for_key`] match. 8 bits: bits 0..6 as [`ControlState`], bit 7
+/// ([`CLEAN_DIG`]) DIG.
+pub fn clean_words(held: &DosHeld, ws: &[WormSettings]) -> [u8; 2] {
+    let mut w = [0u8; 2];
+    for key in held.keys() {
+        if let Some((i, c)) = find_control_for_key(key, ws) {
+            w[i] |= 1 << c;
+        }
+    }
+    w
+}
+
+/// Weapon selection's word from a clean word: bits 0..6 kept, DIG pressing Left and Right (the
+/// 4½c level model; C++'s selection sees DIG only through `OnKey`'s `Press(kLeft/kRight)`, plan
+/// fact 12).
+pub fn fold_dig(w: u8) -> ControlState {
+    let mut cs = ControlState::unpack(u32::from(w));
+    if w & CLEAN_DIG != 0 {
+        cs.press(ControlState::LEFT);
+        cs.press(ControlState::RIGHT);
+    }
+    cs
+}
+
+/// C++ `LocalController::OnKey` (`localController.cpp:58-80`) on 8-bit clean words: every
+/// changed bit of 0..6 takes its new value (`SetControlState`), every unchanged one keeps
+/// `current` (the worm's post-tick `control_states`, possibly consumed); then, if any of the 8
+/// bits changed (an event reached `OnKey`), both arms of the DIG rule — DIG clean-held presses
+/// Left and Right, otherwise Left / Right are released unless clean-held. For words without
+/// DIG (`prev, now < 128`) this is exactly [`apply_key_edges`].
+pub fn apply_clean_edges(prev: u8, now: u8, current: ControlState) -> ControlState {
+    let (p, n, c) = (u32::from(prev), u32::from(now), current.pack());
+    let changed = p ^ n;
+    let changed7 = changed & 0x7f;
+    let mut eff = (c & !changed7) | (n & changed7);
+    if changed != 0 {
+        let lr = [ControlState::LEFT, ControlState::RIGHT];
+        if n & u32::from(CLEAN_DIG) != 0 {
+            for bit in lr {
+                eff |= 1 << bit;
+            }
+        } else {
+            for bit in lr {
+                if n & (1 << bit) == 0 {
+                    eff &= !(1 << bit);
+                }
+            }
+        }
+    }
+    ControlState::unpack(eff)
+}
+
+/// [`apply_clean_edges`] for both worms, remembering the previous tick's clean words.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CleanEdges {
+    prev: [u8; 2],
+}
+
+impl CleanEdges {
+    /// This tick's sim input from this tick's (latched) clean words and the worms' current
+    /// `control_states`.
+    pub fn apply(&mut self, now: &[u8; 2], worms: &[WormState]) -> [ControlState; 2] {
+        let out = [0, 1].map(|i| apply_clean_edges(self.prev[i], now[i], worms[i].control_states));
+        self.prev = *now;
+        out
+    }
+}
+
+impl ReleaseLatch {
+    /// [`ReleaseLatch::arm`] over 8-bit clean words: a DIG key held at the boundary stays
+    /// latched until released (C++ never saw its key-down, design RD-1).
+    pub fn arm_clean(&mut self, held: &[u8; 2]) {
+        self.mask = held.map(u32::from);
+    }
+
+    /// [`ReleaseLatch::apply`] over 8-bit clean words.
+    pub fn apply_clean(&mut self, words: &mut [u8; 2]) {
+        for (mask, w) in self.mask.iter_mut().zip(words.iter_mut()) {
+            *mask &= u32::from(*w);
+            *w &= !(*mask as u8);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +566,144 @@ mod tests {
             16,
             "pressed again: it passes (gfx.cpp:608 + game.cpp:110-118)"
         );
+    }
+
+    // ---- Step 4½f-2 (plan D1, T2 Step 1): the clean words, DIG, the 8-bit edges and latch ----
+
+    const RCTRL: u32 = DK_RCTRL;
+    const KEY_Q: u32 = 16;
+
+    #[test]
+    fn clean_words_take_the_first_keyboard_player_and_its_first_control() {
+        let mut s = Settings::default();
+        let w = |s: &Settings, keys: &[u32]| {
+            clean_words(&DosHeld::from_keys(keys.iter().copied()), &s.worm_settings)
+        };
+        assert_eq!(w(&s, &[19]), [1, 0], "R: worm 0's Up");
+        assert_eq!(w(&s, &[DK_UP]), [0, 1], "the arrow Up: worm 1's Up");
+        assert_eq!(w(&s, &[]), [0, 0]);
+        let all: Vec<u32> = (1..MAX_DOS_KEY).filter(|&k| k != 19).collect();
+        assert_eq!(
+            w(&s, &all)[0] & CLEAN_DIG,
+            0,
+            "DIG is unbound (0) and 0 never matches"
+        );
+        assert_eq!(find_control_for_key(0, &s.worm_settings), None);
+        let mut h = DosHeld::default();
+        h.set(0, true);
+        assert!(!h.is_down(0), "0 is never held");
+        // P1 FIRE rebound to RCTRL (T0 P4 `p_first`): the first worm wins, worm 1's Fire is dead.
+        s.worm_settings[0].controls_ex[K_FIRE] = RCTRL;
+        assert_eq!(w(&s, &[RCTRL]), [16, 0]);
+        // One key on two controls of one worm: only the first control's bit.
+        s.worm_settings[0].controls_ex[K_JUMP] = 19;
+        assert_eq!(w(&s, &[19]), [1, 0]);
+        // A pad player takes nothing; the next keyboard player does.
+        s.worm_settings[0].input_device = 1;
+        assert_eq!(w(&s, &[RCTRL]), [0, 16]);
+        assert_eq!(w(&s, &[19]), [0, 0], "R is only the pad player's");
+        // The network player (index 2) never takes a key in play (plan fact 11).
+        s.worm_settings[2].controls_ex[K_UP] = 30;
+        assert_eq!(w(&s, &[30]), [0, 0]);
+        // DIG bound to Q: bit 7.
+        let mut s = Settings::default();
+        s.worm_settings[0].controls_ex[K_DIG] = KEY_Q;
+        assert_eq!(w(&s, &[KEY_Q]), [CLEAN_DIG, 0]);
+        assert_eq!(w(&s, &[KEY_Q, 19, DK_UP]), [CLEAN_DIG | 1, 1]);
+    }
+
+    #[test]
+    fn fold_dig_presses_left_and_right_and_keeps_bits_0_to_6() {
+        let lr = (1 << ControlState::LEFT) | (1 << ControlState::RIGHT);
+        assert_eq!(fold_dig(CLEAN_DIG).pack(), lr);
+        assert_eq!(fold_dig(CLEAN_DIG | 0x11).pack(), lr | 0x11);
+        for w in 0..128u8 {
+            assert_eq!(fold_dig(w).pack(), u32::from(w));
+        }
+    }
+
+    #[test]
+    fn the_8_bit_edges_equal_the_7_bit_ones_whenever_dig_is_not_involved() {
+        // Plan fact 13: the shell's move to the 8-bit code is behaviour-identical for every
+        // prior case (DIG is never set in a 7-bit word).
+        for c in [0u32, 0x7f, 0x0c, 0x10, 0x55] {
+            for p in 0..128u8 {
+                for n in 0..128u8 {
+                    assert_eq!(
+                        apply_clean_edges(p, n, cs(c)),
+                        apply_key_edges(cs(u32::from(p)), cs(u32::from(n)), cs(c)),
+                        "p {p:#x} n {n:#x} c {c:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_dig_rule_both_arms() {
+        // Finding 9, T0 P4 `p_dig`: OnKey's rule on every event.
+        let e = |p: u8, n: u8, c: u32| apply_clean_edges(p, n, cs(c)).pack();
+        let left = 1 << ControlState::LEFT;
+        let right = 1 << ControlState::RIGHT;
+        let lr = left | right;
+        let dig = CLEAN_DIG;
+        let fire = FIRE as u8;
+        assert_eq!(e(0, dig, 0), lr, "DIG pressed: Left and Right set");
+        assert_eq!(
+            e(dig, dig | fire, lr),
+            lr | FIRE,
+            "DIG held + Fire: all three"
+        );
+        assert_eq!(
+            e(dig, dig, right),
+            right,
+            "Left consumed, no event: stays consumed"
+        );
+        assert_eq!(
+            e(dig, dig | fire, right),
+            lr | FIRE,
+            "any event presses both again"
+        );
+        assert_eq!(e(dig | fire, dig, 0), lr, "a release is an event too");
+        let l = left as u8;
+        assert_eq!(
+            e(dig | l, l, lr),
+            left,
+            "DIG released, Left clean-held: Left kept"
+        );
+        assert_eq!(e(dig, 0, lr), 0, "DIG released alone: both released");
+    }
+
+    #[test]
+    fn the_clean_latch_masks_dig_until_it_is_released() {
+        let mut l = ReleaseLatch::default();
+        l.arm_clean(&[CLEAN_DIG | 16, 0]);
+        let mut w = [CLEAN_DIG | 16 | 1, 16];
+        l.apply_clean(&mut w);
+        assert_eq!(w, [1, 16], "DIG and Fire latched, Up and worm 1 pass");
+        let mut w = [CLEAN_DIG, 0];
+        l.apply_clean(&mut w);
+        assert_eq!(w, [0, 0], "still held: still latched");
+        assert!(l.is_armed());
+        let mut w = [0, 0];
+        l.apply_clean(&mut w);
+        assert!(!l.is_armed());
+        let mut w = [CLEAN_DIG, 0];
+        l.apply_clean(&mut w);
+        assert_eq!(w, [CLEAN_DIG, 0], "pressed again: it passes");
+        // Without DIG it is the 7-bit latch.
+        for held in [[16u8, 0], [0x7f, 3], [0, 0]] {
+            for now in [[16u8, 16], [0x7f, 0], [4, 3]] {
+                let (mut a, mut b) = (ReleaseLatch::default(), ReleaseLatch::default());
+                a.arm_clean(&held);
+                b.arm(&held.map(|x| cs(u32::from(x))));
+                let mut wa = now;
+                let mut wb = now.map(|x| cs(u32::from(x)));
+                a.apply_clean(&mut wa);
+                b.apply(&mut wb);
+                assert_eq!(wa.map(|x| cs(u32::from(x))), wb);
+            }
+        }
     }
 
     // Live input edges (apply_key_edges): C++ OnKey semantics against the real sim.

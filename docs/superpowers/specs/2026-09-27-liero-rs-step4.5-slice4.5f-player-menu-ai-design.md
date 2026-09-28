@@ -805,3 +805,260 @@ All five recommendations were accepted:
 - **Q3 → A.** On a phone, player 2 starts as the real CPU, gets random weapons each match, and fights back. The RIGHT PLAYER menu shows it and it can be changed. The stand-in (`BotRespawn`) is removed.
 - **Q4 → A.** Fix the C++ DIG-binding overflow: DIG gets the key and WEAPON 1 is unchanged. This is an intended divergence only where C++ is undefined behaviour.
 - **Q5 → A.** Joystick profiles behave as in the original: the INPUT row shows the gamepad, the keyboard no longer moves that player, and Enter on INPUT switches it back to Keyboard.
+
+---
+
+## 4½f-2 refresh (2026-09-28, after 4½f-1 landed)
+
+Read at HEAD `d2de489` (the merge of 4½f-1 into `liero-rs-step-4-5`) against the f-1 plan
+(`plans/2026-09-27-liero-rs-step4.5-slice4.5f1-plan.md`, its Addendum T0, Addendum T9 and Known pitfalls), PROGRESS
+("4½f-1 LANDED", "Also open for John (4½f-1)"), the landed Rust and dumper code, and the C++ source again. Where this
+section and §3–§8 disagree, **this section wins**; John's rulings (Q1–Q5 above, and Addendum T9's `?cpu=`) stand
+unchanged. Findings of this refresh are cited **R-n**, its decisions **RD-n**.
+
+### R1. What changed since the design
+
+#### R1.1 Already landed in 4½f-1 — no longer 4½f-2 work
+
+- `sim::ai::DumbLieroAi` + `run_ais` (`rust/sim/src/ai.rs`), `WormState::{reacts, max_health}`, `SimState::ai_params`
+  (design §4.1 `sim`, §4.2, §4.3).
+- `AsymmetricHealth` removed, `apply_live_settings` writes both maxes, `refuse_follow_ai` at the NEW GAME gate only
+  (plan D1; `rust/ui/src/shell/playing.rs:72-112` `bootable`, `:186-192` the `debug_assert!`) — design §4.12 is done.
+- `Match` owns and runs the AIs (`playing.rs:143-150`, `:359-397`) — design §4.4 is done.
+- **RESUME's `Game::Focus` palette** (the colour part of design §4.11): `Match::focus` re-runs `focus_palette` on every
+  RESUME (`playing.rs:334-341`, plan D9, T0 P6). f-2 only has to *gate* the colour edit (`player_live`).
+- The touch rule split (plan D3): `selection::touch_settings` (`selection.rs:43-46`) at boot through
+  `MatchParams::apply_cpu` (`rust/game/src/web_params.rs:149-162`, called at `main.rs:540`) and again after every LOAD
+  SETUP on a touch-only page (`rust/ui/src/shell/mod.rs:751-753`); `new_game_config` sets BOT WEAPONS RANDOM on a
+  touch-only page (`selection.rs:76-82`); `BotRespawn` is gone — design §7.4 bullets 1–2 and §7.5 are done.
+- Oracle: `oracle_dump_shell` intervention 3′, check 3″ and the FollowAI guard
+  (`src/tools/oracle_dump/shell_dump.cpp:821-857`) — design §6.5's "Intervention 3′" and "FollowAI guard" bullets are
+  done.
+
+#### R1.2 Stale, wrong or underspecified
+
+- **R-1. The live-input seam is not where §4.5 puts it.** Three samplers exist, and none reads the menu's live settings:
+  - the shell harness ORs every binding (`rust/oracle-tests/tests/shell_common/mod.rs:1194-1210`, `words()`), called
+    with the **boot** settings (`:1539`, `words(&held, &settings)`), not `sh.settings()`; its menu-key validator set
+    `controls` (`:1385-1390`) and the `p2_keys` set `p2_controls` (`:1392-1397`) are also frozen at boot. After a
+    rebind all three are stale;
+  - the live game samples hard-coded Bevy keys (`InputSource::Live(default_bindings())`, `rust/game/src/input.rs:90-128`,
+    `:311-322`) in `sample_inputs_touch` (`main.rs:1403-1422`) and hands the words in as `ShellInput::sampled`
+    (`mod.rs:97-103`);
+  - `Match::process(sim, sampled, ais, sounds)` (`playing.rs:359-397`) feeds `KeyEdges` (`keys.rs:247-261`) and
+    `ReleaseLatch` (`keys.rs:184-207`), both 7-bit `ControlState`s: the DIG bit has nowhere to live.
+
+  Only the `Shell` holds the settings a rebind changes, so the words must be computed inside it (**RD-1**, §R3).
+- **R-2. §4.11's "unported subtlety" can be ported for free.** C++ `FindControlForKey` reads the *game's* worms'
+  `WormSettings` (`game.cpp:87-106`): the menu's objects while attached, the old ones after LOAD SETUP. Key events
+  reach `OnKey` only while `GamePlayState` is on top (`gamePlayState.cpp:16` passes the controller; the menu's
+  `HandleEvent` does not, `mainMenuState.cpp:150`), and edits happen only while paused. So reading the **match's copy**
+  (`Match::settings()`, `playing.rs:320-322`), which RESUME refreshes while attached (`resync`, `:300-306`), is exact in
+  both cases. **RD-2:** live clean words read `Match::settings()`; `player_live`'s detached half now gates that the old
+  bindings keep working after LOAD SETUP (T0 P7 confirms).
+- **R-3. The WaitForKey box appears on the push frame, not the next one** (design §3.3 is wrong there). The Enter arm
+  pushes inside `MainMenuState::Update` (`mainMenuState.cpp:371-389`); `StateStack::Draw` then starts at the topmost
+  non-overlay (`state.hpp:117-130`), which is the new `WaitForKeyState`, so the push frame presents the previous frame's
+  pixels with the box on top, and the menu is not redrawn. The pop frame redraws the menu with the new key name. The
+  same holds for `ProfileSelectorState` (as 4½e-2's selectors already do).
+- **R-4. The `d` line's `cur` letters `L`/`R`/`N` (§6.5) collide with the page hook.** `game::touch::hooks` publishes
+  `lieroSel` as `L<n>` for the level selector (`rust/game/src/touch.rs:353-359`), so `L3` would mean two things.
+  **RD-3:** `cur` ∈ {`M`, `S`, `1`, `2`, `N`} (player 1, player 2, the network player, from
+  `player_menu.ws == settings->worm_settings[i]`), in the `d` line and in `lieroSel` alike; the `d` line's `ssel` is
+  then `player_menu.Selection()`. The awk gate's `$3 !~ /^[MS]$/` (`rust/oracle-tests/gen_shell_golden.sh:71`) and the
+  upd/top sets `[MWGOIBLP]` / `[MGOIBLP-]` (`:63`) widen to `[MS12N]`, `[MWGOIBLPKF]`, `[MGOIBLPKF-]`.
+- **R-5. A saved file whose name has a space breaks the `file` line gate.** Six of the eight shipped profiles have a
+  space (`AI (L)`, `Lefty (R)`, …). SAVE PROFILE of a loaded one writes `user/Profiles/Lefty (L).toml`, and the dumper's
+  `file <rel> <fnv16>` line then has 4 fields, which `gen_shell_golden.sh:82` (`NF != 3`) refuses. The manifest side is
+  the same limit (`shell_dump.cpp:538-547` splits on whitespace), which the design's `profiles <user|sys>` line already
+  answers for inputs. **RD-4:** no format change; the harness refuses a case whose run writes a user file with a space
+  in its path, and `profile_io` (§6.7) SAVEs over `Joystick0` or a user-saved `mine` instead of `Lefty (L)` (LOADing
+  `Lefty (L)` is fine: it writes nothing).
+- **R-6. The search-gap check and its mirror must learn the profile selector.** `kSearchable` is `O|L|P`
+  (`shell_dump.cpp:788`), and the harness's "a player's key typed in a searchable menu" validator is
+  `matches!(top0, 'O' | 'L' | 'P')` (`shell_common/mod.rs:1507`). Both gain `F`.
+- **R-7. Key names for the scripts.** The dumper's `ScancodeOf` (`shell_dump.cpp:233-282`) and the harness's `key_of`
+  (`shell_common/mod.rs:153-194`) need a key that `SDLToDOSKey` maps to 89: **not** `F13`, because `key_of` turns any
+  `F<n>` into `58 + n` (`F13` → 71, keypad 7). Use `APPLICATION` (`SDL_SCANCODE_APPLICATION` is not in
+  `liero_to_sdl_keys`, `keys.cpp:9-60`, so it is 89 on both sides) and add `TAB` to `ALLOWED` (`:63-127`; C++ has it).
+  F5, F6 and F9 join `ALLOWED` (they were refused because Rust was inert); F10/F11 stay refused (C++ acts on them in
+  `ProcessEvent` whatever the state, `gfx.cpp:613-624`, and Rust has no F10 before 4½g). The harness never sets
+  `ShellInput::restart`, so the Rust-only F5 restart cannot fire in a gate.
+- **R-8. `IntegerEntry` cannot tell a player row from a settings row.** `ValueEntry` carries only `item_id`
+  (`rust/ui/src/menu/behavior.rs:19-30`) and `input_done` resolves it through `SettingsModel::int_field` and
+  `settings_menu.item_from_id_mut` (`mod.rs:652-677`); player ids 1–4 (HEALTH, Red, Green, Blue) are also settings ids.
+  The design's "`IntegerEntry` gains a target" (§4.1) is therefore required, not optional: `InputPurpose::IntegerEntry
+  { entry, target: Settings | Player(p) }`.
+- **R-9. The Save-As chain is hard-wired to setups.** `InfoPurpose::Reserved { typed, x, y }` (`overlay.rs:225-233`),
+  `save_as_box` (`mod.rs:283`), `save_setup_as` (`mod.rs:688-718`) and `storage::placeable_leaf` (which formats
+  `Setups/{leaf}`, `rust/scenario/src/storage.rs:151-156`) all assume SAVE SETUP AS…. The reserved box's reopen must
+  reopen the **profile** box for the same player, with `initial = typed` and the `Profiles`/`.toml` pair
+  (`mainMenuState.cpp:69-91`, `:356`). **RD-5:** one `SaveAsKind { Setup, Profile(player) }` threads through purpose,
+  box and reopen; `placeable_leaf(subdir, leaf)`.
+- **R-10. Names need a resync, not only a start value.** `Selection` keeps its own `names` (`selection.rs:97-99`,
+  default at `:112`); `Match::resync` refreshes only `cfg`, `hud` and `weap_table` (`playing.rs:300-306`). C++ draws
+  `ws.name` live on every weapon-selection frame (`weapsel.cpp:199-203`), so a match paused in selection must show a
+  renamed player after RESUME: `resync` sets the selection's names too.
+- **R-11. The Rust-only F5 restart bypasses the NEW GAME gate.** `Shell::frame` calls `new_game` directly on
+  `input.restart` (`mod.rs:415-418`), and `Match::start` `debug_assert!`s that no player is FollowAI
+  (`playing.rs:186-192`). D1 lets a paused match RESUME with a CONTROLLER = AI edit, so with the player menu a
+  pause → CONTROLLER AI → RESUME → F5 reaches that assert (a debug panic; natively a LOAD SETUP of a user file with
+  `controller = 2` already could). **RD-6:** the restart runs `RefusalGate::refusal(MA_NEW_GAME)` first and is ignored
+  (with a console note) when it would be refused. And since F5 can now be bound as a key, the restart also ignores an
+  F5 that is one of the running match's keyboard bindings (C++ has no restart to collide with).
+- **R-12. The page text is stale in one place.** `web/index.html:219` says "F5 restarts a match"; in the menu F5/F6/F9
+  now open the player menus. The help line becomes "in a match, F5 restarts it (Rust only); in the menu F5 / F6 / F9 open
+  LEFT / RIGHT / NETWORK PLAYER", plus the design's "Keys can be changed in LEFT/RIGHT PLAYER." (§7.3). The touch hint
+  table (`web/index.html:403-409`) gains a line for the key box (top `K`).
+- **R-13. The shell case count and the frozen set moved.** 32 prior shell cases (not 28) must regenerate
+  byte-identically under both C++ builds; `EXPECTED_SHELL_CASES` (`gen_shell_golden.sh:98`) becomes 32 + 9 = 41 (the 8
+  §6.7 cases and the milestone); `shell_f1_cases/`, `gen_slice4_5f1_shell.rs` and `gen_slice4_5f1_sim.rs` join the
+  frozen provenance, and the four `-- check`s (4½d, e-1, e-2, f-1) must stay clean.
+- **R-14. f-1's pitfalls that bind the f-2 corpus** (f-1 plan, Known pitfalls): no RANDOM bot in a shell case (15);
+  a CPU still receives the keys bound to it (16) — `key_bind` keeps player 2 human; both human players press DONE (T0 P5
+  note); release every worm key before Esc (19); no Holdazone NEW GAME/RESUME (20); no level under ~342 rows (21).
+- **R-15. Two DIG constraints for every generated case, not just `dig`.** A DIG binding may only be to the key whose
+  DOS code equals that player's WEAPON 1 at bind time (Q4 = A: Rust leaves WEAPON 1 alone, C++ overwrites it, R2-14), and
+  never to a key above 40 (the checked C++ build aborts on the out-of-range `weap_order` read in WEAPON 1's row, R2-14).
+  The generator validates both.
+
+### R2. Re-verified C++ facts for 4½f-2
+
+| # | Fact (C++) | Verdict | Source |
+|---|---|---|---|
+| R2-1 | 24 rows in the §0-12 order; ids `kPlName`=0 … `kPlLoadedProfile`=23; the four profile rows colour 3, dis 7, the rest 48/7; menu at (178, 20), `value_offset_x` 95 | CONFIRMED | `gfx.cpp:459-483`, `:268`, `:525`; `gfx.hpp:41-62` |
+| R2-2 | PROFILE LOADED and SAVE PROFILE are visible iff `profile_node`; PROFILE LOADED's value is `GetBasename(GetLeaf(FullPath))` | CONFIRMED | `gfx.cpp:223-227`, `:237-248` |
+| R2-3 | `PlayerSettings`: point `player_menu.ws`, `UpdateItems`, `MoveToFirstVisible`, focus. First visible = SAVE PROFILE AS… with no profile (f-1 T0 P5 walked Down ×3 to HEALTH), PROFILE LOADED with one | CONFIRMED | `gfx.cpp:1430-1437` |
+| R2-4 | HEALTH `IntegerBehavior(1, 10000, 1, %)`, `scroll_interval` 4; R/G/B classic `0..252` step 4, `display_div` 4, `scroll_interval` 4 (modern mode needs F10, which C++ reads globally in `ProcessEvent`) | CONFIRMED | `gfx.cpp:1370-1389`, `:621-624` |
+| R2-5 | INPUT: "Keyboard"; else a connected pad's display name, else `gamepad_name.substr(0, 20)`, else `"Gamepad (none)"`. Left/Right plays MoveUp for `dir > 0`, MoveDown for `dir < 0`, cycles, returns false; Enter plays MenuSelect, cycles +1, returns −1; with no pad the cycle always lands on Keyboard and clears name and serial, then `UpdateItems` | CONFIRMED, sharpened (the sound follows the direction) | `gfx.cpp:149-199` |
+| R2-6 | Key rows show `GetKeyName(controls_ex[i])`, or `GetGamepadKeyName(gamepad_controls[i])` for a pad player; DIG's behaviour uses `controls_ex[7]` for both refs. A Joystick profile's `[11, 12, 13, 14, 110, 10, 0, 9]` shows Up, Down, Left, Right, RT+, RB, A, LB | CONFIRMED | `gfx.cpp:56-63`, `:1392-1408`, `:842-859` |
+| R2-7 | WEAPON n: `EnumBehavior(v, 1, common.weapons.size(), broken_left_right = false)`, value `weapons[weap_order[v - 1]].name`. A file value of 0 or > 40 is an out-of-range `vector` read (UB); Rust shows an empty value there (safe edges) | CONFIRMED, sharpened | `gfx.cpp:253-262`; `common.hpp:157` |
+| R2-8 | CONTROLLER: `ArrayEnumBehavior` over `{"Human", "CPU", "AI"}`; a file value ≥ 3 is an out-of-range read (UB; Rust shows empty) | CONFIRMED | `gfx.cpp:1410-1411`; `common.cpp:214-216` |
+| R2-9 | The colour bar: `DrawRoundedBox(x + 24, y, selected ? 168 : 0, 7, (rgb >> 2) - 1)`, `FillRect(x + 25, y + 1, rgb >> 2, 5, ws->color)`; `color` is 32 / 41 / 32 by default | CONFIRMED | `gfx.cpp:1343-1360`; `settings.cpp:32-34` |
+| R2-10 | `UpdateMenuPalettes` re-applies `SetWormColours(*settings)` on **every** menu frame (so an R/G/B edit recolours the bars and the menu at once), then slot 0 from the network player while its menu is open. Rust's `menu_palette` already takes both players' rgb (`mod.rs:899-910`); it gains the slot-0 case | CONFIRMED | `gfx.cpp:978-1005`; `gfx/palette.cpp:92-118` |
+| R2-11 | Entry: Enter on LEFT/RIGHT/NETWORK PLAYER after the main MenuSelect; F5/F6/F9 from any focus, no sound, main cursor moved to the item. Esc or any keyboard player's Jump: back to main, cursor kept. Draw: the player menu enabled only while focused; with main focus the **settings** menu is drawn disabled | CONFIRMED | `mainMenuState.cpp:171-179`, `:207-216`, `:447-462`, `:614-626` |
+| R2-12 | The Enter arms: LOAD PROFILE, NAME (`InputString(ws.name, 20, x + 97, y)`), SAVE PROFILE AS… (`MakeSaveAsState("Profiles", ".toml", "", …)`, 30 bytes), the eight key rows (`WaitForKeyState(extended = true)`), WEAPON n (`InputString("", 10, x + 97, y)`), else `OnEnter` | CONFIRMED | `mainMenuState.cpp:316-429` |
+| R2-13 | **Sounds at close:** `InputStringState` plays MenuSelect itself before its callback (`inputState.cpp:78`), so NAME (accepted or Esc) and SAVE PROFILE AS… play **two** MenuSelects on the closing frame (the callbacks' `mainMenuState.cpp:343`, `:362`), WEAPON n one, and a key capture none (`WaitForKeyState::Update` plays nothing, `inputState.cpp:143-150`); each arm's push frame plays one | CONFIRMED, sharpened | as cited |
+| R2-14 | **The DIG overflow.** The callback writes `ws.controls[kEyIdx] = k` whenever `!IsExtendedKey(k)` and then `controls_ex[kEyIdx] = k` (`mainMenuState.cpp:375-388`). For DIG, `kEyIdx = 13 - 6 = 7`; `uint32_t controls[kMaxControl = 7]` is followed directly by `uint32_t weapons[5]` (`worm.hpp:54`, `:106-107`; all `uint32_t`, no padding), so the write lands in `weapons[0]` = WEAPON 1. Every keyboard key is < 177 (`SDLToDOSKey` returns a table index or 89, `keys.cpp:70-84`), so it is **always** written: formally UB for every DIG binding. In practice WEAPON 1 becomes the key's DOS code — a valid weapon for 2..40 (1 is Esc, which cancels), and for 41..176 an out-of-range `weap_order` read right away in WEAPON 1's `OnUpdate` (the callback's `UpdateItems`), then in weapon selection (`weapsel.cpp:66`) and `InitWeapons` (`worm.cpp:704`). Every default player 2 key (160, 168, 163, 165, 117, 144, 54) and every key from Z (44) on is > 40. T0 P1 probes the aliasing (`offsetof` delta 28) | CONFIRMED, sharpened | as cited |
+| R2-15 | `WaitForKeyState`: every `KEY_DOWN` (OS repeats included) sets `result_ = SDLToDOSKey(sc)` — the last key-down of the frame wins; Esc (1) is a no-op close; `Update` = `ClearKeys`, callback, pop; not an overlay; the box `DrawRoundedBox(cx, cy, 0, h + 1, w + 1)` + "PRESS A KEY" at colour 50 around (160, 100); gamepad arms unreachable without pads. **The box shows on the push frame** (R-3) | CONFIRMED except the push frame (CORRECTED) | `inputState.cpp:102-162`; `state.hpp:117-130` |
+| R2-16 | Key names: `Texts::key_names[177]` is static, Finnish-layout (`12 "+"`, `13 "`"`, `26 "Å"`, `27 "^"`, `29 "Left Crtl"`), and **`key_names[89]` is `""`**: an unmapped key binds as 89 and its row shows blank. `GetKeyName`: < 177 the table, ≥ 512 `"J<n>_<b>"`, 177..511 `""` | CONFIRMED, sharpened (the blank name) | `common.cpp:25-203`; `gfx.cpp:828-840` |
+| R2-17 | The fuzzy match: `Levenshtein` over bytes with `std::tolower` both sides, an `unsigned` matrix; `best` starts at the current value with distance `DBL_MAX`, strict `<` (ties to the lowest index; the first candidate always wins); divided by `name.length()` bytes. The openliero TC's 40 names are ASCII (no byte ≥ 0x80 in `data/TC/openliero/weapons/*.cfg`; at most 13 bytes), so the design's integer cross-multiplication is exact and **design T0 P9 is closed on the desk** | CONFIRMED | `mainMenuState.cpp:28-52`, `:398-417` |
+| R2-18 | **A failed profile load.** `LoadProfile` saves `color`, calls `ToReader()` **before** `profile_node = node` — an unreadable file throws first, so PROFILE LOADED does not change (a console warning only); a TOML syntax error throws in the `TomlInputArchive` constructor (`toml_archive.hpp:161-167`) **after** `profile_node` is set, so PROFILE LOADED shows the file and no field changes; a file that parses is lenient — a missing key or a wrong type keeps the field (`toml_archive.hpp:217-268`), and a file without `rgbDepth` shifts the rgb values `(v & 63) << 2` even when `rgb` itself is missing. `color` is restored in every case. Rust's `load_profile` already matches (`rust/scenario/src/settings_toml.rs:236-244`, `:150-156`) | CONFIRMED, sharpened (design finding 15 holds only once the file opens) | `worm.cpp:73-95`; `serialization/cereal_types.hpp:282-308` |
+| R2-19 | Profile schema: root keys `name, health, controller, randomName, color, inputDevice, gamepadName, gamepadSerial, rgbDepth` (written 8, read default 6), `rgb[3], weapons[5], controls[7], controlsEx[8], gamepadControls[8]`, sorted by `toml::table` on save; `SaveProfile` sets `profile_node` after `ToWriter()` succeeds. Locations: LOAD PROFILE lists the whole config root filtered to `TOML` (case-insensitive) and opens inside `<root>/Profiles`, title `Select profile:`, `OnSelected` = `LoadProfile` + `UpdateItems` (no `MoveToFirstVisible`); SAVE PROFILE writes `user/Profiles/<leaf>` with **no** shadow check; SAVE PROFILE AS… checks `ShadowsSystem(user, "Profiles", leaf)` | CONFIRMED | `worm.cpp:60-71`; `fileSelectorState.cpp:186-206`; `gfx.cpp:207-221`; `mainMenuState.cpp:69-91`, `:348-366` |
+| R2-20 | Names are drawn in the weapon-selection name box (colour `kWormColorBlocks[index].base + 1`) and the kill banners (`KilledMsg + name`, `name + CommittedSuicideMsg`); the HUD name is replay-only (`viewport.cpp:134-136`), the stats screen is 4½g, spectator/rematch unported | CONFIRMED | `weapsel.cpp:199-203`; `viewport.cpp:256-270` |
+| R2-21 | **No gamepad present.** The dumper inits `SDL_INIT_EVENTS` only (`shell_dump.cpp:664`), so `gfx.joysticks` is empty: WaitForKey's pad arms, `DispatchGamepadInput` and every `TestGamepad*` never fire. A pad-input player is skipped by `TestControl(Once)` (menus, `gfx.cpp:869-883`, `:954-968`) and `FindControlForKey` (play, `game.cpp:87-93`), but not by `ReleaseControl` (`:970-976`). **New consequences:** (a) the network player's default keys equal player 1's (`settings.cpp:52-60`), so after a Joystick profile in LEFT PLAYER, R/F/D/G/LCtrl/LAlt still drive the menus through the network player; (b) a human pad player can never press DONE, so a NEW GAME stays in weapon selection until Esc | CONFIRMED + two consequences (T0 P6) | as cited |
+| R2-22 | `Game::OnKey` (`game.cpp:58-72`, `controls[]`, every match) has no caller; only `LocalController::OnKey` → `FindControlForKey` (first match over `controls_ex[0..8]`) matters. OS repeats never reach it (`gfx.cpp:608`) | CONFIRMED | `localController.cpp:58-80` |
+
+### R3. The refreshed 4½f-2 task table
+
+**Decisions this refresh makes (engineering, "match the original"):**
+- **RD-1 (the input seam).** `ShellInput::sampled` becomes `held: &DosHeld` (the physical keyboard's held DOS keys: the
+  harness's `held` set; natively and on wasm Bevy's `ButtonInput<KeyCode>` through `dos_of_keycode`) plus `touch:
+  ControlState` (the Rust-only phone overlay, OR-ed into player 1's word exactly as today, `touch.rs` `merge`). The
+  `Shell` computes `clean_words(held, match_settings) -> [u8; 2]` (first keyboard player 0/1, first control 0..8, bit 7
+  DIG; pad players skipped, Q5), folds DIG into Left+Right for weapon selection (as `words()` does today), and hands
+  8-bit words to `Match`; `KeyEdges` and `ReleaseLatch` widen to 8 bits and `KeyEdges` ports both arms of the DIG rule
+  (a DIG key held across NEW GAME or RESUME stays latched, as C++ never saw its key-down). The harness drops `words()`
+  and recomputes `controls` / `p2_controls` from `sh.settings()` / the match every frame. `--live <scenario>`,
+  `--replay`, `Scripted` and `?demo` keep `default_bindings()` and stay byte-unchanged.
+- **RD-2** (R-2), **RD-3** (R-4), **RD-4** (R-5), **RD-5** (R-9), **RD-6** (R-11) as above.
+- **RD-7.** `WaitForKeyState` and `ProfileSelectorState` map to `Phase::Menu` (`mod.rs:983-1002`); the page's hint for top
+  `K` is its own line.
+- **RD-8.** No new dumper intervention is needed: every f-2 path is real C++ code with no clock or uninitialised read
+  (the numbering stays 1–9 with 3′, 3″ and 6′). The dumper gains only tops `K`/`F`, the `cur` letters, the `profiles
+  <user|sys>` manifest line (design §6.5), the key names of R-7, and `F` in the search-gap check.
+
+**T0 — the C++ probes** (the f-1 method: a temporarily patched `oracle_dump_shell` in the working tree and
+`$S/build-chk`, restored and re-proven byte-identical; results in the f-2 plan's Addendum T0):
+
+| Probe | Question | Expected (from R2) |
+|---|---|---|
+| P1 DIG | Where does the DIG write land, and what does each build do with a code > 40? | `offsetof(weapons) - offsetof(controls) == 28`; DIG = Q with WEAPON 1 = 1 → WEAPON 1 = 16 in `cfg16`; DIG = Z under the checked build aborts in `weap_order` (recorded, never gated) |
+| P2 key box | Push-frame draw; last key-down of a frame; a repeat binds; Esc; `APPLICATION` | box on the push frame (R-3); last wins; repeat binds; Esc changes nothing, no sound; `APPLICATION` → 89, blank name |
+| P3 sounds | The closing frame of NAME (Return, Esc, empty), SAVE PROFILE AS… (saved, reserved), WEAPON n, a key capture | 2 / 2 / 1 / 0 MenuSelects (R2-13) |
+| P4 play | First match and the DIG rule in play | P1 FIRE bound to RCtrl: RCtrl moves P1 only, P2's FIRE is dead; DIG held → L+R on every event of that worm; release → L/R released unless cleanly held |
+| P5 profiles | Selector root/title/listing in an `fs` fixture with `profiles sys`; a malformed and an unreadable `.toml`; SAVE PROFILE of a shipped one; SAVE PROFILE AS… a shipped name | opens inside `Profiles`, `.toml` only; R2-18's two failure shapes; the user copy; the reserved box and its reopen |
+| P6 pads | `Joystick0` in LEFT PLAYER with no pad | INPUT "Gamepad (none)"; rows Up … LB; Enter/Left/Right → Keyboard with sounds; R/F/D/G still move the menu (network player); a NEW GAME stays in selection until Esc |
+| P7 live edits | RESUME attached (a rename in a banner, a rebind acts at once) and detached after LOAD SETUP | attached: both reach the match; detached: the **old** bindings still act (RD-2), the new ones do not |
+| P8 F9 | The network player's slot-0 palette | slot 0 shows its colours only while its menu has focus |
+
+(Design T0 P9 — TC weapon names ASCII — is closed on the desk, R2-17.)
+
+| Task | Deliverable | Gate | Size |
+|---|---|---|---|
+| T0 | P1–P8 above; addendum | recorded; `src/` clean; prior goldens byte-identical | S–M |
+| T1 | `ui::text`: `KEY_NAMES[177]` verbatim (blank 89, "Left Crtl", "Å"), `get_key_name` (incl. `J<n>_<b>` and the blank 177..511), `get_gamepad_key_name`, `CONTROLLERS`, `levenshtein`, `weapon_fuzzy_match` (integer cross-multiplication) | unit (C++ vectors, T0) | S |
+| T2 | The input seam (RD-1, RD-2): `clean_words`, 8-bit `KeyEdges` + `ReleaseLatch` with the full DIG rule, `ShellInput { held, touch }`, `Match` reads its own settings copy; the harness and the live game switched; RD-6's restart gate | unit + **full re-diff** (all 32 shell goldens, `key_edges`, `record_regression`, `round_trip`); wasm | M–L (the risky one) |
+| T3 | `shell::player_menu` (24 rows, behaviours, bars, `CurMenu::Player(0\|1\|2)`), the §3.2 arms, F5/F6/F9, `WaitForKeyState` (top `K`), overlays `WormName` / `WeaponFuzzy` / `SaveProfileAs` / `IntegerEntry { target }` (R-8), `SaveAsKind` (R-9), the network palette slot, the Q4 fix (`controls[i]` only for `i < 7`) | headless unit flows | L |
+| T4 | Profiles: `ProfileSelectorState` (top `F`, `toml_filter`), a per-player loaded-profile ref in `MenuWorld` (set by LOAD even on a parse error, kept on an unreadable file, set by SAVE / SAVE AS, cleared by LOAD SETUP and the boot), `placeable_leaf(subdir, leaf)`, the eight shipped profiles in `browser_system_files` (~3 KB), Q7's phone rule | unit | M |
+| T5 | Names: `Selection` names from the match settings and refreshed by `resync` (R-10); `Scene::names` for the kill banners (empty → old goldens hold) | unit + **full re-diff** | S |
+| T6 | C++ `oracle_dump_shell`: `TopOf` K/F, `DetailLine` cur `1`/`2`/`N` + the player menu's `ssel`, `F` in the search-gap check, the `profiles` manifest line, `APPLICATION`/`TAB` key names; `gen_shell_golden.sh` regexes and the count 41 (32 until T7) | prior 32 shell goldens byte-identical under release + checked; clang-format 22 + clang-tidy | M |
+| T7 | G2f-2: `shell_f2_cases`, `gen_slice4_5f2_shell.rs`, the 8 §6.7 cases with R-5/R-14/R-15 applied + 🎯 `shell_player_setup`; validators (DIG rules, no space in a saved path, F10/F11 refused, ASCII text, no controller-2 NEW GAME); a negative control with `ShellDebug::live_bindings = false` (the 4½e default bindings) that must diverge in `key_bind` | **G2f-2 bit-exact** (every `f`/`d`/`file` line) under both C++ builds | L |
+| T8 | `game` + page: RD-1's live sampler, Q6's touch mapping, Q7, hooks (`lieroSel` with `1`/`2`/`N`, `F<n>`; a `lieroProfiles` or `lieroNames` read-back for the walk), the help lines (R-12), the `K` hint | `cargo test -p game`; wasm; Chromium: phone (RIGHT PLAYER shows CPU, NAME through the text field, LOAD PROFILE, a match), desktop (a live rebind acts at once; F5 in the menu opens LEFT PLAYER, in a match restarts) | M |
+| T9 | Xvfb side-by-sides of the milestone path, PROGRESS / overview / maps, broad review | CI board; golden audit (only `A`) | S–M |
+
+**Order:** T0 → (T1 ∥ T6, C++ only) → T2 → T3 → T4 → T5 → T7 → T8 → T9. T2 goes before the menu on purpose: it is
+the one change on every live player's path, and all 32 prior shell goldens plus `key_edges` must hold before the menu
+builds on it.
+
+### R4. The phone and the browser
+
+- **Reaching the menus.** A phone has no F5/F6/F9, but the pad reaches LEFT/RIGHT/NETWORK PLAYER and FIRE is Enter
+  (the main menu's `TestControlOnce(kFire)`), so the menus are reachable as C++ would have them. RIGHT PLAYER shows
+  "CPU" (the touch rule, R1.1).
+- **NAME and WEAPON n** use the 4½e phone text field unchanged: `Shell::text_mode` already picks the letter keyboard for
+  a box without a digit filter (`mod.rs:1080-1086`), `TouchKeys` makes FIRE = Return and MENU = Esc in phase `text`
+  (`touch.rs:123-165`), and `HINTS.name` fits. HEALTH and R/G/B get the number keyboard, as SETUP numbers do. Decided;
+  no question.
+- **Key capture — a real phone hazard (Q6).** To the menus the pad *is* player 1's keyboard: each button sends player
+  1's current `controls_ex` key (`touch.rs:74-97`). Binding one of player 1's controls to another button's key makes
+  both buttons one key: e.g. AIM UP = FIRE's Left Ctrl makes FIRE move the cursor up (the Up test consumes the key first,
+  `mainMenuState.cpp:181-197`), so nothing can be selected any more, and there is no keyboard to undo it. Today a reload
+  resets it (the browser store is in memory); once 4½h keeps settings in localStorage it would survive the reload.
+- **Joystick profiles on a phone (Q6).** A Joystick profile in LEFT PLAYER makes player 1 a pad player: the menus still
+  react only because the network player happens to share player 1's default keys (R2-21a), and in a match RD-1's
+  keyboard words skip player 1 while the touch overlay would still drive it. The Q5 ruling ("as the original") covers
+  keyboards; what the phone's buttons do is Q6.
+- **LOAD PROFILE into player 2 on a phone (Q7).** Six of the eight shipped profiles say "Human" (`controller = 0`),
+  two say "AI". Loaded into RIGHT PLAYER on a phone, a Human profile leaves player 2 without controls: the next NEW GAME
+  waits in weapon selection until MENU. LOAD SETUP already puts the CPU back on a phone (plan D3); LOAD PROFILE does not
+  yet.
+- **Profiles in the browser.** Decided (design §5, §9; the setups precedent): the browser store lists the eight shipped
+  profiles; SAVE PROFILE / SAVE PROFILE AS… write into the session's in-memory store, a single layer as in the C++ web
+  build, where only `liero.cfg` is reserved (4½e-2 D9) — so saving over a shipped name replaces it for the session; all
+  of it is lost on reload until 4½h adds localStorage for setups and profiles together. Desktop wasm behaves the same.
+- **The INPUT row.** Rust has no gamepad support and does not use the browser Gamepad API; Q5 (as the original with no pad
+  connected) applies on desktop and wasm alike: "Gamepad (none)", and Enter/Left/Right switch back to Keyboard.
+- **Desktop wasm key capture** works like native, except for keys the browser keeps for itself; the canvas already gets
+  F5 (the 4½c restart works there). RD-6 keeps a bound F5 from restarting the match.
+
+### R5. New open questions for John
+
+The recommendation is listed first each time. Q1–Q5 are answered above; these two are new.
+
+**Q6. On a phone, the on-screen buttons act as player 1's keys, and the new menu can change those keys. If a key is
+set to the same key as another button (for example AIM UP set to the FIRE button), that button stops working in the
+menus, and a phone has no keyboard to undo it — only reloading the page does, and not even that once settings are
+remembered in the browser (4½h). Loading a "Joystick" profile into LEFT PLAYER has a similar effect. What should the
+phone's buttons do?**
+- **A (recommended):** The buttons always work, whatever keys are set: in the menus they act as the arrow keys, Enter and
+  Esc; in a match they move player 1 directly, as they do today, even after a Joystick profile. The key rows still show
+  and change player 1's keyboard keys (for a keyboard plugged in later); on a phone, a button pressed in the PRESS A KEY
+  box sets the arrow or Enter key it stands for, and MENU cancels.
+- **B:** Hide the eight key rows and INPUT on a phone, so they cannot be changed there. Everything else as the original.
+- **C:** Exactly as the original: the buttons send player 1's current keys, and a bad choice is undone by reloading the
+  page.
+
+**Q7. On a phone, player 2 is the CPU. Most shipped profiles (Lefty, Righty, Joystick) are marked "Human". If one is
+loaded into RIGHT PLAYER on a phone, what should happen?**
+- **A (recommended):** Player 2 stays the CPU; the profile's name, colour, health, weapons and keys load. This is what
+  LOAD SETUP already does on a phone. You can still switch CONTROLLER to Human yourself.
+- **B:** As the original: player 2 becomes Human. A phone has no controls for it, so the next match waits in weapon
+  selection until you set CONTROLLER back to CPU.
+
+## Rulings (John, 2026-09-28, 4½f-2)
+
+Both recommendations were accepted:
+
+- **Q6 → A, the phone buttons always work.** On a touch-only page the on-screen buttons act as the arrow keys, Enter and Esc in the menus and move player 1 directly in a match, whatever keys are set and even after a Joystick profile. The eight key rows still show and change player 1's keyboard keys (for a keyboard plugged in later). In the PRESS A KEY box a button sets the arrow or Enter key it stands for, and MENU cancels.
+- **Q7 → A, player 2 stays the CPU on a phone.** Loading a Human profile into RIGHT PLAYER on a touch-only page loads its name, colour, health, weapons and keys, and keeps player 2 as CPU, as LOAD SETUP already does. CONTROLLER can still be switched to Human by hand.

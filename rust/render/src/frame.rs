@@ -56,6 +56,10 @@ pub struct Scene<'a> {
     /// `None` on every golden path — the sprite pass is then byte-identical to its pre-4½e-1
     /// self; `Some` draws them at their C++ points (`object_draw::sprite_pass_with`).
     pub small_labels: Option<SmallLabels<'a>>,
+    /// Step 4½f-2 (plan D11): the players' names (`WormSettings::name`, indexed by worm) the
+    /// kill banners concatenate (`viewport.cpp:256-270`). Empty on every golden path, where the
+    /// banners are exactly the pre-4½f-2 messages.
+    pub names: [&'a str; 2],
 }
 
 pub fn draw(bmp: &mut Bitmap, state: &SimState, viewports: &mut [Viewport], scene: &Scene) {
@@ -124,11 +128,11 @@ pub fn draw(bmp: &mut Bitmap, state: &SimState, viewports: &mut [Viewport], scen
         // (colour 50) at (+2,+0), size 1 — the C++ DrawString default. Keyed by
         // `last_killed_by_idx`. The own-worm YoureIt/GameOfTag arm
         // (viewport.cpp:249-254) is DEFERRED (needs got_changed + game-mode,
-        // spec §7). The worm-name suffix/prefix (`other_worm.settings->name`) is
-        // empty in every render scenario (the dumper leaves WormSettings::name
-        // default ""), so only the label draws; the C++ concatenation ORDER is
-        // preserved (prefix for a kill, suffix for a suicide) for when worm names
-        // are threaded later.
+        // spec §7). The dead worm's name (`other_worm.settings->name`, Step 4½f-2:
+        // `scene.names[worm]`) follows `KilledMsg` for a kill and precedes
+        // `CommittedSuicideMsg` for a suicide; it is empty in every render scenario
+        // (the dumper leaves WormSettings::name default ""), so only the label draws
+        // there.
         let this_index = state.worms[vp.worm_idx].index;
         for (other_idx, &(other_worm_idx, other_banner_y)) in banner_state.iter().enumerate() {
             if other_idx == self_idx {
@@ -136,17 +140,18 @@ pub fn draw(bmp: &mut Bitmap, state: &SimState, viewports: &mut [Viewport], scen
             }
             let other_worm = &state.worms[other_worm_idx];
             if other_worm.health <= 0 && other_banner_y > -8 {
-                let msg: &str = if other_worm.last_killed_by_idx == this_index {
-                    &scene.labels.killed_msg
+                let name = scene.names.get(other_worm_idx).copied().unwrap_or("");
+                let msg = if other_worm.last_killed_by_idx == this_index {
+                    format!("{}{name}", scene.labels.killed_msg)
                 } else {
-                    &scene.labels.committed_suicide_msg
+                    format!("{name}{}", scene.labels.committed_suicide_msg)
                 };
                 scene
                     .font
-                    .draw_string(bmp, &pal, msg, vp.rect.x1 + 3, other_banner_y + 1, 0, 1);
+                    .draw_string(bmp, &pal, &msg, vp.rect.x1 + 3, other_banner_y + 1, 0, 1);
                 scene
                     .font
-                    .draw_string(bmp, &pal, msg, vp.rect.x1 + 2, other_banner_y, 50, 1);
+                    .draw_string(bmp, &pal, &msg, vp.rect.x1 + 2, other_banner_y, 50, 1);
             }
         }
         // Pass 1: all shadows (world_offset = -kOffs). Scoped so its immutable
@@ -295,6 +300,7 @@ mod tests {
             draw_hud: false,
             map: false,
             small_labels: None,
+            names: ["", ""],
         };
         draw(&mut bmp, &state, &mut vps, &scene);
 
@@ -404,6 +410,7 @@ mod tests {
             draw_hud: false,
             map: false,
             small_labels: None,
+            names: ["", ""],
         };
         let scene_on = Scene {
             draw_hud: true,
@@ -449,5 +456,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Step 4½f-2 (plan T5 Step 1): the kill banners carry the dead worm's name — after
+    // `KilledMsg` for a kill, before `CommittedSuicideMsg` for a suicide (viewport.cpp:256-270).
+    // Drawing with names equals drawing the concatenated message with empty names.
+    #[test]
+    fn the_kill_banners_concatenate_the_dead_worms_name() {
+        let origpal = ramp_origpal();
+        let empty_bank = SpriteSet::default();
+        let font = origin_font();
+        let labels = |killed: &str, suicide: &str| HudLabels {
+            killed_msg: killed.to_string(),
+            committed_suicide_msg: suicide.to_string(),
+            ..hud_labels()
+        };
+        let draw_with = |labels: &HudLabels, names: [&str; 2], dead: usize, by: i32| {
+            let scene = Scene {
+                origpal: &origpal,
+                color_anim: &[],
+                fire_cone_sprites: &empty_bank,
+                bonus_frames: &[],
+                nr_begin: 0,
+                nr_end: 0,
+                laser_weapon: 0,
+                screen_flash: 0,
+                draw_shadow: false,
+                font: &font,
+                labels,
+                draw_hud: false,
+                map: false,
+                small_labels: None,
+                names,
+            };
+            let mut state = hud_state();
+            state.worms[dead].health = 0;
+            state.worms[dead].last_killed_by_idx = by;
+            let mut vps = Viewport::player_layout();
+            vps[dead].banner_y = 20;
+            let mut bmp = Bitmap::new(320, 200);
+            draw(&mut bmp, &state, &mut vps, &scene);
+            bmp
+        };
+        let (k, s) = ("KILLED ", " SUICIDE");
+        // Worm 1 killed by worm 0: worm 0's viewport shows `KILLED B`.
+        let named = draw_with(&labels(k, s), ["A", "B"], 1, 0);
+        assert_eq!(named, draw_with(&labels("KILLED B", s), ["", ""], 1, 0));
+        assert_ne!(
+            named,
+            draw_with(&labels(k, s), ["", ""], 1, 0),
+            "non-vacuous"
+        );
+        // Worm 0's suicide: worm 1's viewport shows `A SUICIDE`.
+        let named = draw_with(&labels(k, s), ["A", "B"], 0, 0);
+        assert_eq!(named, draw_with(&labels(k, "A SUICIDE"), ["", ""], 0, 0));
+        assert_ne!(
+            named,
+            draw_with(&labels(k, s), ["", ""], 0, 0),
+            "non-vacuous"
+        );
     }
 }

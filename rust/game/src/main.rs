@@ -901,7 +901,6 @@ fn tick_and_render(
             &mut sim.0,
             &mut sh,
             queue.into_inner(),
-            &source,
             &keys,
             &time,
             &mut images,
@@ -1213,14 +1212,14 @@ fn collect_keys(
 }
 
 /// One C++ `Gfx::RunOneFrame` of the live shell (design §7.1): this tick's key events (+ the
-/// touch edges), the sampled words (keyboard levels + touch, as 4½c), `Shell::frame`, then the
-/// present, the menu and sim sounds, the phase, a NEW GAME's log line, and QUIT.
+/// touch edges), the held DOS keys and the touch word (Step 4½f-2, plan D1: the shell turns
+/// them into the worms' words through the match's bindings), `Shell::frame`, then the present,
+/// the menu and sim sounds, the phase, a NEW GAME's log line, and QUIT.
 #[allow(clippy::too_many_arguments)]
 fn tick_shell(
     sim: &mut SimState,
     sh: &mut ShellRes,
     queue: &mut game::input::KeyQueue,
-    source: &InputSource,
     keys: &ButtonInput<KeyCode>,
     time: &Time<Real>,
     images: &mut Assets<Image>,
@@ -1255,17 +1254,18 @@ fn tick_shell(
         matches!(e, ui::shell::InputEvent::Key(k)
             if k.dos == ui::keys::DK_F5 && k.down && !k.repeat)
     });
-    let sampled = sample_inputs_touch(
-        source,
-        0,
-        keys,
-        Mode::Live,
+    // Step 4½f-2 (plan D1): the physical keyboard's held DOS keys, and the on-screen controls'
+    // word for player 1 (always 0 natively). `sample_inputs*` serve only the non-shell paths.
+    let held =
+        ui::keys::DosHeld::from_keys(keys.get_pressed().map(|&k| game::input::dos_of_keycode(k)));
+    let touch = game::touch::touch_state(
         sh.dig_repeat
             .apply(sh.weapon_tap.apply(page_touch(), sh.phase), sh.phase),
     );
     let input = ShellInput {
         events: &events,
-        sampled,
+        held: &held,
+        touch,
         fresh_seed: fresh_seed(),
         now_ms: time.elapsed().as_millis() as u64,
         restart,
@@ -1398,8 +1398,7 @@ fn sample_inputs(
     sample_inputs_touch(source, tick, keys, mode, page_touch())
 }
 
-/// [`sample_inputs`] with an explicit touch mask (the shell passes it through
-/// `game::touch::WeaponTap`).
+/// [`sample_inputs`] with an explicit touch mask.
 fn sample_inputs_touch(
     source: &InputSource,
     tick: u32,

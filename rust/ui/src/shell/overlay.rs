@@ -3,7 +3,8 @@
 //! the only overlay, and `InfoBoxState` (WEAPON OPTIONS' "no weapons" box, the Rust-only refusal
 //! boxes, SAVE SETUP AS…'s reserved-name box). C++ hands each a lambda capturing `gfx`; Rust tags
 //! each with a purpose, and the shell runs the continuation inside the overlay's update step
-//! (`ui::shell::Shell::frame`).
+//! (`ui::shell::Shell::frame`). Step 4½f-2 adds the player menu's purposes (NAME, WEAPON n, its
+//! number entry, SAVE PROFILE AS…) and the third sub-state, `WaitForKeyState` (PRESS A KEY).
 
 use std::fmt;
 
@@ -23,15 +24,40 @@ use crate::keys::{DK_BACKSPACE, DK_ESCAPE, DK_KP_ENTER, DK_RETURN};
 use crate::menu::ValueEntry;
 use crate::text::{dos_display, utf8_to_dos};
 
+/// Which menu an `IntegerEntry` writes back into (design R-8; Step 4½f-2): the settings menu,
+/// or the player menu of player `p` (whose HEALTH, Red, Green and Blue ids 1-4 are also settings
+/// ids).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryTarget {
+    Settings,
+    Player(usize),
+}
+
+/// Which `MakeSaveAsState` a name box is (design RD-5; Step 4½f-2): SAVE SETUP AS… (`"Setups"`,
+/// `".cfg"`) or SAVE PROFILE AS… of player `p` (`"Profiles"`, `".toml"`). The reserved box's
+/// reopen keeps the kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveAsKind {
+    Setup,
+    Profile(usize),
+}
+
 /// What an `InputStringState` edits: C++'s callback, as data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputPurpose {
-    /// `IntegerBehavior::OnEnter`'s entry (`integerBehavior.cpp:36-80`).
-    IntegerEntry(ValueEntry),
-    /// SAVE SETUP AS…'s name box (`MakeSaveAsState("Setups", ".cfg", …)`,
-    /// `mainMenuState.cpp:69-91`, `:287-311`; Step 4½e-2): its field's `(x, y)`, which the
-    /// reserved box's reopen reuses.
-    SaveSetupAs { x: i32, y: i32 },
+    /// `IntegerBehavior::OnEnter`'s entry (`integerBehavior.cpp:36-80`) and the menu it writes.
+    IntegerEntry {
+        entry: ValueEntry,
+        target: EntryTarget,
+    },
+    /// A `MakeSaveAsState` name box (`mainMenuState.cpp:69-91`; SAVE SETUP AS… `:287-311`, Step
+    /// 4½e-2; SAVE PROFILE AS… `:348-366`, 4½f-2): its field's `(x, y)`, which the reserved
+    /// box's reopen reuses.
+    SaveAs { kind: SaveAsKind, x: i32, y: i32 },
+    /// The player menu's NAME box (`mainMenuState.cpp:323-347`; 4½f-2).
+    WormName { player: usize },
+    /// A WEAPON n box and its fuzzy match (`mainMenuState.cpp:390-423`; 4½f-2).
+    WeaponFuzzy { player: usize, slot: usize },
 }
 
 /// `FilterDigits` (`integerBehavior.cpp:34`): `isdigit(k) ? k : 0`.
@@ -227,9 +253,15 @@ pub enum InfoPurpose {
     NoWeapons,
     /// A Rust-only refusal box (plan D5).
     Refused(Refusal),
-    /// SAVE SETUP AS…'s `NAME '<leaf>' IS RESERVED` box (`mainMenuState.cpp:79-85`; Step 4½e-2):
-    /// its `on_dismiss` schedules the name box again, on what was `typed`, at `(x, y)`.
-    Reserved { typed: Vec<u8>, x: i32, y: i32 },
+    /// A Save-As `NAME '<leaf>' IS RESERVED` box (`mainMenuState.cpp:79-85`; Step 4½e-2): its
+    /// `on_dismiss` schedules the name box of the same `kind` again, on what was `typed`, at
+    /// `(x, y)`.
+    Reserved {
+        kind: SaveAsKind,
+        typed: Vec<u8>,
+        x: i32,
+        y: i32,
+    },
 }
 
 /// C++ `InfoBoxState` (`inputState.cpp:166-217`; fact 12). Not an overlay: it draws alone, over
@@ -285,6 +317,56 @@ impl InfoBoxState {
     }
 }
 
+/// The player-menu key row a `WaitForKeyState` binds (Step 4½f-2): `worm_settings[player]`'s
+/// control `control` (0..8, `kEyIdx = item id - kPlUp`, DIG = 7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyTarget {
+    pub player: usize,
+    pub control: usize,
+}
+
+/// `WaitForKeyState::Draw`'s text (`inputState.cpp:152-162`).
+pub const PRESS_A_KEY: &str = "PRESS A KEY";
+
+/// C++ `WaitForKeyState` (`inputState.cpp:100-162`; plan fact 8, D3), pushed by a key row's
+/// Enter. Not an overlay: it draws alone, over whatever the surface last held — on its push frame
+/// too (design R-3, T0 P2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaitForKeyState {
+    pub target: KeyTarget,
+    /// `result_` once `done_`: the DOS code of the frame's last key-down.
+    pub result: Option<u32>,
+}
+
+impl WaitForKeyState {
+    pub fn new(target: KeyTarget) -> WaitForKeyState {
+        WaitForKeyState {
+            target,
+            result: None,
+        }
+    }
+
+    /// `HandleEvent`'s key-down arm (`inputState.cpp:111-118`), after `ProcessEvent`: every
+    /// key-down, OS repeats included, sets `result_ = SDLToDOSKey(sc)` (`extended_` is
+    /// `Settings::kExtensions`, true); the last one of the frame wins. No gamepad arms (Rust has
+    /// no pads; the dumper opens none, R2-21).
+    pub fn handle_key(&mut self, ev: &KeyEvent) {
+        if ev.down {
+            self.result = Some(ev.dos);
+        }
+    }
+
+    /// `Draw` (`inputState.cpp:152-162`): the box `DrawRoundedBox(cx, cy, 0, h + 1, w + 1)` around
+    /// (160, 100) and `PRESS A KEY` in colour 50.
+    pub fn draw(&self, surface: &mut Bitmap, pal: &Pal32, font: &Font) {
+        let (w, h) = font.get_dims_h(PRESS_A_KEY);
+        let cx = 160 - w / 2 - 2;
+        let cy = 100 - h / 2 - 2;
+        draw_rounded_box(surface, pal, cx, cy, 0, h + 1, w + 1);
+        font.draw_string(surface, pal, PRESS_A_KEY, cx + 2, cy + 2, 50, 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,17 +402,20 @@ mod tests {
             Some(filter_digits),
             "",
             false,
-            InputPurpose::IntegerEntry(ValueEntry {
-                item_id: 0,
-                initial: initial.into(),
-                digits: max_len as i32,
-                x: 100,
-                y: 50,
-                min: 0,
-                max: 999,
-                div: 1,
-                percentage: false,
-            }),
+            InputPurpose::IntegerEntry {
+                entry: ValueEntry {
+                    item_id: 0,
+                    initial: initial.into(),
+                    digits: max_len as i32,
+                    x: 100,
+                    y: 50,
+                    min: 0,
+                    max: 999,
+                    div: 1,
+                    percentage: false,
+                },
+                target: EntryTarget::Settings,
+            },
         )
     }
 
@@ -589,6 +674,71 @@ mod tests {
             surface.get_pixel(0, 0),
             pal[0],
             "Fill(bmp, 0) through the new palette"
+        );
+    }
+
+    #[test]
+    fn wait_for_key_takes_the_last_key_down_of_the_frame_repeats_included() {
+        let mut w = WaitForKeyState::new(KeyTarget {
+            player: 0,
+            control: 0,
+        });
+        w.handle_key(&key(46, false, false));
+        assert_eq!(w.result, None, "a key-up never binds");
+        w.handle_key(&key(46, true, false));
+        w.handle_key(&key(47, true, false));
+        assert_eq!(w.result, Some(47), "C + V down: V (T0 P2)");
+        let mut w = WaitForKeyState::new(KeyTarget {
+            player: 1,
+            control: 3,
+        });
+        w.handle_key(&key(45, true, true));
+        assert_eq!(w.result, Some(45), "an OS repeat binds");
+    }
+
+    #[test]
+    fn the_press_a_key_box_is_centred_on_160_100() {
+        let f = font();
+        let pal = ramp();
+        let w = WaitForKeyState::new(KeyTarget {
+            player: 0,
+            control: 0,
+        });
+        let mut got = Bitmap::new(320, 200);
+        got.pixels.fill(0xDEAD_BEEF);
+        w.draw(&mut got, &pal, &f);
+        let (tw, th) = f.get_dims_h(PRESS_A_KEY);
+        assert_eq!(th, 8);
+        let (cx, cy) = (160 - tw / 2 - 2, 100 - th / 2 - 2);
+        let mut want = Bitmap::new(320, 200);
+        want.pixels.fill(0xDEAD_BEEF);
+        // DrawRoundedBox(cx, cy, 0, h + 1, w + 1).
+        want.fill_rect(cx, cy + 1, tw + 4, th - 1, 0, &pal);
+        want.fill_rect(cx + 1, cy, tw + 2, 1, 0, &pal);
+        want.fill_rect(cx + 1, cy + th, tw + 2, 1, 0, &pal);
+        f.draw_string(&mut want, &pal, PRESS_A_KEY, cx + 2, cy + 2, 50, 1);
+        assert_eq!(got, want);
+        let changed: Vec<(i32, i32)> = (0..320)
+            .flat_map(|c| (0..200).map(move |r| (c, r)))
+            .filter(|&(c, r)| got.get_pixel(c, r) != 0xDEAD_BEEF)
+            .collect();
+        let (x0, x1) = (cx, cx + tw + 3);
+        let (y0, y1) = (cy, cy + th);
+        assert!(
+            changed
+                .iter()
+                .all(|&(c, r)| (x0..=x1).contains(&c) && (y0..=y1).contains(&r)),
+            "only inside ({x0}..={x1}, {y0}..={y1})"
+        );
+        assert!(
+            changed.contains(&(cx + 1, cy)) && !changed.contains(&(cx, cy)),
+            "open corners"
+        );
+        assert!(
+            (x0..=x1)
+                .flat_map(|c| (y0..=y1).map(move |r| (c, r)))
+                .any(|(c, r)| got.get_pixel(c, r) == pal[50]),
+            "the text in colour 50"
         );
     }
 }

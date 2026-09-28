@@ -20,13 +20,13 @@ use std::path::{Path, PathBuf};
 
 use render::bitmap::Bitmap;
 use render::hash::{hash_frame, FNV_OFFSET, FNV_PRIME};
-use scenario::settings::{Settings, GM_HOLDAZONE};
+use scenario::settings::{Settings, WormSettings, GM_HOLDAZONE};
 use scenario::settings_toml::{settings_from_toml, settings_to_toml};
 use scenario::storage::{load_setup, placeable_leaf, ConfigStore, MemoryStore, NativeStore};
 use sim::ai::AiTrace;
 use sim::hash::hash_game_state;
 use sim::state::{ControlState, SimState};
-use ui::keys::TypedKey;
+use ui::keys::{clean_words, DosHeld, TypedKey, INPUT_KEYBOARD};
 use ui::shell::files::{cfg_filter, lev_filter, FileSelector, SelectorView};
 use ui::shell::level_path::cpp_accepts;
 use ui::shell::level_slot::SeedSource;
@@ -1191,22 +1191,20 @@ fn tail(sh: &Shell) -> String {
     )
 }
 
-/// The sampled words from the held DOS keys through the settings' bindings (design §6.5): bit
-/// `c` iff `controls_ex[c]` is held; DIG (`controls_ex[7]`) presses Left + Right.
-fn words(held: &BTreeSet<u32>, s: &Settings) -> [ControlState; 2] {
-    [0, 1].map(|i| {
-        let ex = &s.worm_settings[i].controls_ex;
-        let on = |k: u32| k != 0 && held.contains(&k);
-        let mut cs = ControlState::new();
-        for (c, &k) in ex.iter().enumerate().take(7) {
-            cs.set(c as u32, on(k));
-        }
-        if on(ex[7]) {
-            cs.set(ControlState::LEFT, true);
-            cs.set(ControlState::RIGHT, true);
-        }
-        cs
-    })
+/// The settings the frame's match reads its keys through (Step 4½f-2, design RD-2): the running
+/// match's own copy, else the menu's.
+fn match_settings(sh: &Shell) -> &Settings {
+    sh.current().map_or(sh.settings(), |m| m.settings())
+}
+
+/// Every key bound to a control of `ws`' keyboard players (the menus' `TestControl` set when
+/// `ws` is all three players; Step 4½f-2 T2 Step 7 recomputes it every frame).
+fn bound_keys<'a>(ws: impl IntoIterator<Item = &'a WormSettings>) -> BTreeSet<u32> {
+    ws.into_iter()
+        .filter(|w| w.input_device == INPUT_KEYBOARD)
+        .flat_map(|w| w.controls_ex.iter().copied())
+        .filter(|&k| k != 0)
+        .collect()
 }
 
 /// Drive `script` through `ui::shell::Shell`: the golden-format lines, the ledger and the
@@ -1380,21 +1378,7 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
     let v = |run: &mut Run, frame: u32, what: String| {
         run.ledger.violations.push(format!("frame {frame}: {what}"))
     };
-    // Every keyboard player's bound DOS keys (a letter typed in WEAPON OPTIONS moves a worm's
-    // cursor there too, known pitfall 10).
-    let controls: BTreeSet<u32> = settings.worm_settings[..2]
-        .iter()
-        .flat_map(|w| w.controls_ex.iter().copied())
-        .filter(|&k| k != 0)
-        .collect();
-    // Step 4½f-1: player 2's bound keys, and the last match frame's visibility (deaths,
-    // respawns).
-    let p2_controls: BTreeSet<u32> = settings.worm_settings[1]
-        .controls_ex
-        .iter()
-        .copied()
-        .filter(|&k| k != 0)
-        .collect();
+    // Step 4½f-1: the last match frame's visibility (deaths, respawns).
     let mut last_visible: Option<[bool; 2]> = None;
     let mut game_over_seen = false;
     // Step 4½e-2: the boot's level checks, the LEVEL value, the preview rectangle.
@@ -1442,6 +1426,12 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
         let weap0 = sh.settings().weap_table;
         // Step 4½f-1: a frame whose controller runs a match tick (not selection).
         let match_frame = top0 == 'G' && sh.phase() == Phase::Game;
+        // Every keyboard player's bound DOS keys (a letter typed in WEAPON OPTIONS moves a worm's
+        // cursor there too, known pitfall 10), from the menu's settings as they are now (Step
+        // 4½f-2 T2 Step 7: a rebind changes them).
+        let controls = bound_keys(&sh.settings().worm_settings);
+        // Step 4½f-1: player 2's bound keys — the running match's, else the menu's (4½f-2).
+        let p2_controls = bound_keys(&match_settings(&sh).worm_settings[1..2]);
         let mut seen = BTreeSet::new();
         let mut events = Vec::new();
         let mut downs = 0;
@@ -1536,12 +1526,16 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 typed,
             }));
         }
-        let sampled = words(&held, &settings);
+        // Step 4½f-2 (design RD-1): the held keys; the shell reads them through the match's
+        // bindings. `live_words` is what it reads this frame (for the pop check below).
+        let dos_held = DosHeld::from_keys(held.iter().copied());
+        let live_words = clean_words(&dos_held, &match_settings(&sh).worm_settings);
         // Plan D4: `now_ms = 0`, so the search never times out (the dumper's gap check keeps C++
         // inside its 1500 ms too).
         let input = ShellInput {
             events: &events,
-            sampled,
+            held: &dos_held,
+            touch: ControlState::new(),
             fresh_seed: 0,
             now_ms: 0,
             restart: false,
@@ -1598,7 +1592,7 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 match e.closed {
                     Some(true) if !e.buf.is_empty() => {
                         let name = String::from_utf8_lossy(&e.buf).into_owned();
-                        if !e.buf.is_ascii() || !placeable_leaf(&format!("{name}.cfg")) {
+                        if !e.buf.is_ascii() || !placeable_leaf("Setups", &format!("{name}.cfg")) {
                             v(
                                 &mut run,
                                 frame,
@@ -1794,7 +1788,7 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
             Some(Route::Menu) => {
                 run.ledger.menus += 1;
                 run.ledger.pops += 1;
-                if sampled.iter().any(|c| c.pack() != 0) {
+                if live_words.iter().any(|&w| w != 0) {
                     v(
                         &mut run,
                         frame,
@@ -1822,9 +1816,12 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
             .push(format!("f {frame} {upd} {p} {} {sounds}", tail(&sh)));
         let in_match = top1 == 'G' && sh.phase() == Phase::Game;
         if script.detail {
-            let cur = match sh.cur_menu() {
-                CurMenu::Main => 'M',
-                CurMenu::Settings => 'S',
+            // 4½f-2 §Formats: `1`/`2`/`N` and the player menu's `ssel` while a player menu has
+            // focus; `M`/`S` and the settings menu's otherwise.
+            let (cur, ssel) = match sh.cur_menu() {
+                CurMenu::Main => ('M', sh.settings_menu().selection()),
+                CurMenu::Settings => ('S', sh.settings_menu().selection()),
+                CurMenu::Player(p) => (['1', '2', 'N'][p], sh.player_menu().selection()),
             };
             let state = if in_match {
                 format!("{:08x}", hash_game_state(&sim))
@@ -1832,8 +1829,7 @@ pub fn drive_with(script: &ShellScript, keep: Option<(u32, u32)>, opts: Opts) ->
                 "-".to_string()
             };
             run.details.push(format!(
-                "d {frame} {cur} {} {:016x} {state}",
-                sh.settings_menu().selection(),
+                "d {frame} {cur} {ssel} {:016x} {state}",
                 fnv64(settings_to_toml(sh.settings()).as_bytes())
             ));
         }

@@ -207,6 +207,7 @@ fn render_slice3a_frame_hash_matches_cpp_oracle() {
         draw_hud: false,
         map: false,
         small_labels: None,
+        names: ["", ""],
     };
 
     let render_tick = |bmp: &mut render::bitmap::Bitmap,

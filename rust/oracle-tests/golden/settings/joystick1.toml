@@ -1,0 +1,14 @@
+color = 0
+controller = 0
+controls = [ 160, 33, 32, 34, 29, 42, 56 ]
+controlsEx = [ 160, 33, 32, 34, 29, 42, 56, 0 ]
+gamepadControls = [ 11, 12, 13, 14, 110, 10, 0, 9 ]
+gamepadName = ''
+gamepadSerial = ''
+health = 100
+inputDevice = 1
+name = 'chucky'
+randomName = false
+rgb = [ 104, 104, 252 ]
+rgbDepth = 8
+weapons = [ 1, 1, 1, 1, 1 ]

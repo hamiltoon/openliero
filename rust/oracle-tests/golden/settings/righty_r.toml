@@ -1,0 +1,14 @@
+color = 0
+controller = 0
+controls = [ 76, 80, 79, 81, 163, 168, 165 ]
+controlsEx = [ 76, 80, 79, 81, 163, 168, 165, 0 ]
+gamepadControls = [ 11, 12, 13, 14, 110, 10, 0, 9 ]
+gamepadName = ''
+gamepadSerial = ''
+health = 100
+inputDevice = 0
+name = 'poukah'
+randomName = false
+rgb = [ 16, 32, 128 ]
+rgbDepth = 8
+weapons = [ 19, 36, 28, 9, 31 ]

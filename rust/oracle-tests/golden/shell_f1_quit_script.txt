@@ -1,0 +1,19 @@
+# Step 4½d G2 case f1_quit (design §6.4; plan Task 9) — written by gen_slice4_5d.
+# Rust ledger: 234 frames, end `end 233 quit`, NEW GAME 1, RESUME 1, back-to-menu 2 (game over: false), black presents 2
+setup default
+boot_seed 5
+match_seed 401
+frames 243
+expect quit
+key 30 down F1
+key 32 up F1
+key 74 down ESC
+key 76 up ESC
+key 116 down F1
+key 118 up F1
+key 160 down ESC
+key 162 up ESC
+key 192 down ESC
+key 194 up ESC
+key 200 down RETURN
+key 202 up RETURN

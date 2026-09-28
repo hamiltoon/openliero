@@ -7,20 +7,20 @@
 //! blinking "Reloading" text, the always-drawn kills text, and the KillEmAll/
 //! Scales lives text. Every colour constant (`w/10+234`, `w/10+245`, 50, 10, 6)
 //! and every y offset is load-bearing (a stray pixel is a frame-hash miss);
-//! each carries its `viewport.cpp` line. The Holdazone/GameOfTag/replay arms are
-//! **tripwired** (`debug_assert!`) — unreachable in our scenarios, never silently
-//! dropped (spec §6).
+//! each carries its `viewport.cpp` line. The replay arm is **tripwired**
+//! (`debug_assert!`) — unreachable in our scenarios, never silently dropped (spec §6).
+//! The GameOfTag/Holdazone timer texts are ported (Step 4½d: the G2 boot cases).
 //!
 //! The HUD is a **pure consumer** of `SimState`: it reads `worm.health/kills/
-//! lives/killed_timer/visible/stats_x/weapons/current_weapon`, `state.cycles`,
-//! `state.settings_health`, `state.game_mode`, `state.settings_loading_time`, and
+//! lives/killed_timer/visible/stats_x/weapons/current_weapon/max_health`,
+//! `state.cycles`, `state.game_mode`, `state.settings_loading_time`, and
 //! the current weapon's `Weapon::{ammo, loading_time}` — all existing, all
 //! hash-silent for HUD purposes (no new sim field).
 
 use crate::bitmap::{Bitmap, Pal32};
 use crate::blit::draw_bar;
 use crate::font::Font;
-use sim::state::{LevelSim, SimState};
+use sim::state::{LevelSim, SimState, WormState};
 use sim_core::fixed::ftoi;
 
 /// `Level::kHudMinimapW` (`level.hpp:30`): the minimap fits into 52 px wide.
@@ -70,6 +70,55 @@ fn computed_loading_time(settings_loading_time: i32, weapon_loading_time: i32) -
     }
 }
 
+/// `kStateColours` (`viewport.cpp:146`), indexed `[not holder / not "it"][state]`.
+const STATE_COLOURS: [[i32; 2]; 2] = [[6, 10], [79, 4]];
+
+/// The timer arms' `state` (`viewport.cpp:156-162`, `:172-178`): 1 iff `cmp(other, own)`
+/// holds for any other worm's timer.
+fn timer_state(state: &SimState, worm_idx: usize, cmp: impl Fn(i32, i32) -> bool) -> usize {
+    let own = state.worms[worm_idx].timer;
+    let any = state
+        .worms
+        .iter()
+        .enumerate()
+        .any(|(i, w)| i != worm_idx && cmp(w.timer, own));
+    usize::from(any)
+}
+
+/// `TimeToString(sec)` (`text.cpp:5-16`): `M M : S S`, first digit `sec / 600`, each digit
+/// C++ `'0' + n` in a `char` (wrapping outside 0..=9).
+fn time_to_string(sec: i32) -> String {
+    let digit = |n: i32| (b'0' as i32 + n) as u8 as char;
+    [
+        digit(sec / 600),
+        digit((sec % 600) / 60),
+        ':',
+        digit((sec % 60) / 10),
+        digit(sec % 10),
+    ]
+    .iter()
+    .collect()
+}
+
+/// The timer text of both timer arms (`viewport.cpp:166-168`, `:182-184`): the
+/// `DrawString(bmp, char const*, len, x, y, colour)` overload with `len = 5 * kMultiplier`
+/// (all of `TimeToString`'s five characters at multiplier 1), at
+/// `x = 106 * m + 84 * index * m`, `y = render_res_y - 39`, size 1.
+fn draw_timer(
+    scr: &mut Bitmap,
+    pal: &Pal32,
+    font: &Font,
+    worm: &WormState,
+    render_res_y: i32,
+    multiplier: i32,
+    colour: i32,
+) {
+    let text = time_to_string(worm.timer);
+    let len = (5 * multiplier).clamp(0, text.len() as i32) as usize;
+    let x = 106 * multiplier + 84 * worm.index * multiplier;
+    font.draw_string(scr, pal, &text[..len], x, render_res_y - 39, colour, 1);
+}
+
 /// Draw the HUD pre-block for `worm_idx`'s worm (`viewport.cpp:84-189`, the
 /// KillEmAll/Scales arms). Drawn into the full-surface clip (the caller sets it
 /// before calling; the bars are unclipped, the text clips to `scr.clip`), at
@@ -93,10 +142,10 @@ pub fn draw_hud(
     // --- Life bar (viewport.cpp:84-95) ---
     if worm.visible {
         // viewport.cpp:85 — kLifebarWidth = worm.health * 100 / worm.settings->health.
-        // `worm.settings->health` is the per-worm max health; the framehash layout
-        // carries it as the single `state.settings_health` scalar (WormSettings
-        // default 100, never overridden by the dumper).
-        let lifebar_width = worm.health * 100 / state.settings_health;
+        // `worm.settings->health` is this worm's own max health, carried per worm as
+        // `WormState::max_health` (4½f-1; the WormSettings default 100 unless the
+        // match's settings say otherwise).
+        let lifebar_width = worm.health * 100 / worm.max_health;
         // viewport.cpp:86-87 — the 4-arg DrawBar overload (blit.cpp:101-102) => height 2;
         // colour kLifebarWidth/10 + 234.
         draw_bar(
@@ -215,18 +264,24 @@ pub fn draw_hud(
             let lives_text = format!("{}{}", labels.lives, worm.lives);
             font.draw_string(scr, pal, &lives_text, stats_x, render_res_y - 22, 6, 1);
         }
-        // viewport.cpp:155-169 — kGmHoldazone timer text: TRIPWIRE (Holdazone deferred
-        // past Step 2; no scenario sets game_mode 2). Never silently dropped.
-        2 => debug_assert!(
-            false,
-            "Holdazone HUD timer (viewport.cpp:155-169) deferred past Step 2 (spec §6)"
-        ),
-        // viewport.cpp:171-185 — kGmGameOfTag timer text: TRIPWIRE (no render scenario
-        // sets game_mode 1).
-        1 => debug_assert!(
-            false,
-            "GameOfTag HUD timer (viewport.cpp:171-185) deferred (spec §6)"
-        ),
+        // viewport.cpp:155-169 — kGmHoldazone timer text. `state` = 1 iff another worm's
+        // timer is <= this one's. `game.holdazone.holder_idx` is not modelled: it is -1
+        // (game.hpp:36) until a zone capture, which only a processed Holdazone match makes,
+        // and the builder refuses those; only the never-processed 4½d boot game carries
+        // mode 2 (Step 4½d G2 `shell_holdazone_boot`).
+        2 => {
+            let holder_idx = -1;
+            let st = timer_state(state, worm_idx, |other, own| other <= own);
+            let colour = STATE_COLOURS[usize::from(holder_idx != worm.index)][st];
+            draw_timer(scr, pal, font, worm, render_res_y, multiplier, colour);
+        }
+        // viewport.cpp:171-185 — kGmGameOfTag timer text: `state` = 1 iff another worm's
+        // timer is >= this one's; the colour row is `game.last_killed_idx != worm.index`.
+        1 => {
+            let st = timer_state(state, worm_idx, |other, own| other >= own);
+            let colour = STATE_COLOURS[usize::from(state.last_killed_idx != worm.index)][st];
+            draw_timer(scr, pal, font, worm, render_res_y, multiplier, colour);
+        }
         // viewport.cpp:187 — default: break.
         _ => {}
     }
@@ -247,9 +302,8 @@ pub fn draw_hud(
 /// CALLER's responsibility (T5 `frame::draw` invokes this once per viewport);
 /// this function paints exactly one pass.
 ///
-/// The Holdazone minimap marker (`viewport.cpp:615-634`) is **tripwired** — no
-/// render scenario sets `game_mode == kGmHoldazone`, so it is deferred past
-/// Step 2, never silently dropped (spec §6).
+/// The Holdazone minimap marker (`viewport.cpp:615-634`) never draws: its
+/// `timeout_left > 0` gate is false for the only mode-2 game (see the body).
 pub fn draw_minimap(
     scr: &mut Bitmap,
     pal: &Pal32,
@@ -286,18 +340,15 @@ pub fn draw_minimap(
         }
     }
 
-    // viewport.cpp:615-634 — Holdazone minimap marker: TRIPWIRE. Deferred past
-    // Step 2; no render scenario sets game_mode == kGmHoldazone (2). Never
-    // silently dropped (spec §6).
-    debug_assert!(
-        state.game_mode != 2,
-        "Holdazone minimap marker (viewport.cpp:615-634) deferred past Step 2 (spec §6)"
-    );
+    // viewport.cpp:615-634 — the Holdazone minimap marker, gated on
+    // `game.holdazone.timeout_left > 0`. `timeout_left` is not modelled: it is 0
+    // (game.hpp:40) until `Game::StartGame` places the zone (game.cpp:493-501), and the
+    // builder refuses Holdazone matches, so the only mode-2 game — the never-started 4½d
+    // boot game (Step 4½d G2 `shell_holdazone_boot`) — draws no marker.
 }
 
-/// Port of `Level::DrawMiniature` (`level.cpp:489-507`): step the material grid
-/// into a `map_x/map_y`-anchored block, sampling `AppearanceAt` (Classic:
-/// `pal32[material_id[idx]]`, `level.hpp:59-64`) per cell.
+/// Port of `Level::DrawMiniature` (`level.cpp:489-507`) for the HUD minimap: delegates to
+/// [`draw_miniature_ids`] over the level's material ids.
 fn draw_miniature(
     scr: &mut Bitmap,
     pal: &Pal32,
@@ -307,14 +358,44 @@ fn draw_miniature(
     step_x: i32,
     step_y: i32,
 ) {
+    draw_miniature_ids(
+        scr,
+        pal,
+        &level.material_id,
+        level.width,
+        level.height,
+        map_x,
+        map_y,
+        step_x,
+        step_y,
+    );
+}
+
+/// Port of `Level::DrawMiniature` (`level.cpp:489-507`) over raw material ids: step the
+/// `width`×`height` grid `ids` into a `map_x/map_y`-anchored block, sampling `AppearanceAt`
+/// (Classic: `pal32[material_id[idx]]`, `level.hpp:59-64`) per cell. `pub` for the level
+/// selector's preview (Step 4½e-2, `fileSelectorState.cpp:105-145`), which holds a level that
+/// is not a `LevelSim`.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_miniature_ids(
+    scr: &mut Bitmap,
+    pal: &Pal32,
+    ids: &[u8],
+    width: i32,
+    height: i32,
+    map_x: i32,
+    map_y: i32,
+    step_x: i32,
+    step_y: i32,
+) {
     // level.cpp:490 — start half a step in.
     let mut my = step_y / 2;
     // level.cpp:492-493 — round-division bounds (`(dim + step/2) / step`), NOT the
     // ceil-div used for the step itself.
-    let map_end_y = map_y + ((level.height + step_y / 2) / step_y);
-    let map_end_x = map_x + ((level.width + step_x / 2) / step_x);
+    let map_end_y = map_y + ((height + step_y / 2) / step_y);
+    let map_end_x = map_x + ((width + step_x / 2) / step_x);
 
-    let len = level.material_id.len();
+    let len = ids.len();
     let mut y = map_y;
     while y < map_end_y {
         // level.cpp:496
@@ -322,7 +403,7 @@ fn draw_miniature(
         let mut x = map_x;
         while x < map_end_x {
             // level.cpp:498 — kIdx = mx + my*width as unsigned int.
-            let kidx = (mx + my * level.width) as u32 as usize;
+            let kidx = (mx + my * width) as u32 as usize;
             // level.cpp:499 — `kIdx < material_id.size() && clip.Inside(x,y)`
             // (that exact order). The unsigned cast makes a negative index wrap
             // huge and fail the bound, matching C++.
@@ -332,7 +413,7 @@ fn draw_miniature(
                 // ARGB. Classic AppearanceAt is `pal32[material_id[kIdx]]`
                 // (level.hpp:59-64); Modern is deferred. The clip was already
                 // checked above, so the direct pixel write is safe.
-                let argb = pal[level.material_id[kidx] as usize];
+                let argb = pal[ids[kidx] as usize];
                 scr.pixels[(y * scr.pitch + x) as usize] = argb;
             }
             // level.cpp:503
@@ -451,7 +532,7 @@ mod tests {
         let lbl = labels();
         let worms = [worm_init(0, 0, 60, true), worm_init(1, 218, 100, false)];
         let mut state = base_state(&worms, vec![]);
-        // KillEmAll (default), settings_health 100 (default).
+        // KillEmAll (default), max_health 100 (default).
         state.worms[0].kills = 5;
         state.worms[0].lives = 3;
         state.worms[0].current_weapon = 0;
@@ -529,6 +610,61 @@ mod tests {
             px(&b, 218, 178),
             0xFF00_0000 | 6,
             "worm1 lives glyph pal[6]"
+        );
+    }
+
+    #[test]
+    fn lifebar_divides_by_each_worms_own_max_health() {
+        // viewport.cpp:85 reads `worm.settings->health`, the worm's OWN max
+        // (4½f-1): worm 0 at 150 of 300 -> width 50, colour 50/10+234 = 239;
+        // worm 1 at 30 of 30 -> width 100, colour 244 (a shared 100 would give 30).
+        let pal = ramp_pal();
+        let font = origin_font();
+        let lbl = labels();
+        let worms = [worm_init(0, 0, 150, true), worm_init(1, 218, 30, true)];
+        let mut state = base_state(&worms, vec![]);
+        state.worms[0].max_health = 300;
+        state.worms[1].max_health = 30;
+        for w in state.worms.iter_mut() {
+            w.current_weapon = 0;
+            w.weapons[0] = WormWeapon {
+                ty: None,
+                ammo: 0,
+                delay_left: 0,
+                loading_left: 0,
+            };
+        }
+
+        let mut b = filled(320, 200);
+        draw_hud(&mut b, &pal, &state, 0, &font, &lbl, 200, 1);
+        draw_hud(&mut b, &pal, &state, 1, &font, &lbl, 200, 1);
+        let px = |b: &Bitmap, x: i32, y: i32| b.pixels[(y * b.pitch + x) as usize];
+
+        assert_eq!(
+            px(&b, 0, 161),
+            0xFF00_0000 | 239,
+            "worm 0 bar colour 50/10+234"
+        );
+        assert_eq!(px(&b, 49, 161), 0xFF00_0000 | 239, "worm 0 bar is 50 wide");
+        assert_eq!(
+            px(&b, 50, 161),
+            SENTINEL,
+            "worm 0 bar ends at 50 (150 * 100 / 300)"
+        );
+        assert_eq!(
+            px(&b, 218, 161),
+            0xFF00_0000 | 244,
+            "worm 1 bar colour 100/10+234"
+        );
+        assert_eq!(
+            px(&b, 317, 161),
+            0xFF00_0000 | 244,
+            "worm 1 bar is 100 wide"
+        );
+        assert_eq!(
+            px(&b, 318, 161),
+            SENTINEL,
+            "worm 1 bar ends at 100 (30 * 100 / 30)"
         );
     }
 
@@ -765,5 +901,30 @@ mod tests {
             SENTINEL,
             "reloading text gated off (cycles%20<=10)"
         );
+    }
+
+    #[test]
+    fn draw_miniature_ids_steps_a_60x40_grid_into_a_30x20_block() {
+        // Step 4½e-2: the level selector's preview of a 60×40 level at step 2×2 (the P3
+        // `tiny` footprint) — 30×20 cells at (134, 162), sampling ids[(1 + 2x) + (1 + 2y)*60].
+        let pal = ramp_pal();
+        let (w, h) = (60, 40);
+        let ids: Vec<u8> = (0..w * h)
+            .map(|i| ((i % w + i / w) % 64 + 160) as u8)
+            .collect();
+        let mut b = filled(320, 200);
+        draw_miniature_ids(&mut b, &pal, &ids, w, h, 134, 162, 2, 2);
+        for y in 0..200 {
+            for x in 0..320 {
+                let got = b.pixels[(y * b.pitch + x) as usize];
+                if (134..164).contains(&x) && (162..182).contains(&y) {
+                    let (mx, my) = (1 + 2 * (x - 134), 1 + 2 * (y - 162));
+                    let want = 0xFF00_0000 | u32::from(ids[(mx + my * w) as usize]);
+                    assert_eq!(got, want, "cell ({x}, {y})");
+                } else {
+                    assert_eq!(got, SENTINEL, "outside the footprint ({x}, {y})");
+                }
+            }
+        }
     }
 }

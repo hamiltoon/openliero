@@ -1,0 +1,12 @@
+# Step 4½ slice 4½c — weapon-selection case `bots_only_7` (design §6.4): select_bot_weapons 7 behaves as KEEP; both bots: done on frame 0.
+# Read by oracle_dump_weapsel (golden/weapsel_bots_only_7.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 1, 1 frames, 0 draws in frames, final rng 8391ca6b
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 14
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_bots_only_7_setup.cfg
+weapsel 0 0 0

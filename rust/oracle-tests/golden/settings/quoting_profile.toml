@@ -1,0 +1,16 @@
+color = 0
+controller = 0
+controls = [ 0, 0, 0, 0, 0, 0, 0 ]
+controlsEx = [ 0, 0, 0, 0, 0, 0, 0, 0 ]
+gamepadControls = [ 11, 12, 13, 14, 110, 10, 0, 9 ]
+gamepadName = """x
+y\u0002"""
+gamepadSerial = '''back\slash
+next'''
+health = 100
+inputDevice = 0
+name = "cr\rhere"
+randomName = true
+rgb = [ 1, 2, 3 ]
+rgbDepth = 8
+weapons = [ 1, 1, 1, 1, 1 ]

@@ -1,0 +1,52 @@
+# Step 4½d G2 case nav (design §6.4; plan Task 9) — written by gen_slice4_5d.
+# Rust ledger: 187 frames, end `end 187 frames`, NEW GAME 0, RESUME 0, back-to-menu 0 (game over: false), black presents 0
+setup default
+boot_seed 12
+frames 187
+expect frames
+key 35 down DOWN
+key 37 up DOWN
+key 38 down DOWN
+key 40 up DOWN
+key 41 down UP
+key 43 up UP
+key 44 down UP
+key 46 up UP
+key 47 down UP
+key 49 up UP
+key 50 down DOWN
+key 52 up DOWN
+key 53 down R
+key 55 up R
+key 56 down F
+key 58 up F
+key 59 down DOWN
+key 74 repeat DOWN
+key 77 repeat DOWN
+key 80 repeat DOWN
+key 83 repeat DOWN
+key 86 up DOWN
+key 87 down PAGEDOWN
+key 89 up PAGEDOWN
+key 90 down PAGEUP
+key 92 up PAGEUP
+key 93 down ESC
+key 95 up ESC
+key 96 down UP
+key 98 up UP
+key 99 down LALT
+key 101 up LALT
+key 102 down UP
+key 104 up UP
+key 105 down RSHIFT
+key 107 up RSHIFT
+key 108 down UP
+key 108 down R
+key 110 up UP
+key 110 up R
+key 114 down LEFT
+key 134 up LEFT
+key 135 down RIGHT
+key 155 up RIGHT
+key 156 down D
+key 166 up D

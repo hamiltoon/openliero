@@ -99,9 +99,19 @@ Each step is differential-tested against C++ before the next begins.
 | 2 | **Sim core in ECS** — Level → Worm → one weapon → `processFrame` | A bullet is fired, moves, explodes, destroys terrain — checksum matches C++ tick by tick |
 | 3 | **Rendering** — Bevy draws the world | Playable image in a window and in the browser (Wasm) |
 | 4 | **Loop + input** — fixed rate, keyboard | Playable single-player, feels like Liero |
+| **4½** | **Game shell** — menus, weapon selection, level select + random generation, settings/profiles, DumbLieroAI, match end + stats | Bare run opens the main menu; a full match is configured, played and finished through the menus alone, close to or exactly like openliero; every sim-affecting part bit-exact |
 | 5 | **bevy_ggrs** — rollback netplay | Two clients play the same match, desync-free |
 
 Steps 2–5 are detailed-specced just-in-time; we understand them better after steps 0–1.
+
+> **2026-09-10 — why Step 4½ was inserted.** Step 4 closed the play loop but, by design, stopped
+> at a minimal start flow: 4f made a bare `cargo run -p game` a playable *default match* from a
+> hard-coded fixture, with the whole menu / weapon-selection / level-select tree left as an
+> explicit deferral. "Playable single-player that feels like Liero" needs that shell — the main
+> menu over a generated level, weapon selection, settings and profiles, a bot to play against,
+> a result screen. It is inserted **before** Step 5 because netplay's own flows (rematch, weapon
+> selection under rollback, settings-hash exchange) are built on it. Overview:
+> `2026-09-10-liero-rs-step4.5-game-shell-overview.md`.
 
 ## Risks and how the oracle de-risks them
 
@@ -119,6 +129,12 @@ Steps 2–5 are detailed-specced just-in-time; we understand them better after s
 Mobile packaging, new game modes, larger levels, mod tools, 3D. All of this becomes
 possible *after* a deterministic core exists — but none of it may
 complicate steps 0–2.
+
+Added 2026-09-10 with Step 4½:
+- **Modern (non-pixel-exact) UI** — real layout, scaling, mouse. Step 4½ ports the menus
+  pixel-exact on the existing CPU render pipeline; a modern UI is a later, separate post-step.
+- **FollowAI / predictive AI** — the C++ planner simulates forward on a cloned game, so it needs
+  the Step 5a snapshot machinery. Step 4½ ships only DumbLieroAI.
 
 Two forward-looking directions have been explored (deferred, not on the critical
 path) — see the exploration docs so they aren't forgotten:

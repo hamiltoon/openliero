@@ -1,0 +1,44 @@
+# Step 4½d G2 case reuse (design §6.4; plan Task 9) — written by gen_slice4_5d.
+# Rust ledger: 383 frames, end `end 382 quit`, NEW GAME 2, RESUME 0, back-to-menu 2 (game over: false), black presents 2
+setup default
+boot_seed 3
+match_seed 201
+match_seed 202
+frames 392
+expect quit
+key 40 down RETURN
+key 42 up RETURN
+key 74 down R
+key 74 down UP
+key 76 up R
+key 76 up UP
+key 77 down LCTRL
+key 77 down RCTRL
+key 79 up LCTRL
+key 79 up RCTRL
+key 80 down G
+key 90 down LCTRL
+key 92 up LCTRL
+key 105 down LCTRL
+key 107 up LCTRL
+key 120 up G
+key 125 down LEFT
+key 130 down RCTRL
+key 132 up RCTRL
+key 160 up LEFT
+key 170 down F
+key 190 up F
+key 193 down LCTRL
+key 195 up LCTRL
+key 200 down ESC
+key 202 up ESC
+key 252 down DOWN
+key 254 up DOWN
+key 255 down RETURN
+key 257 up RETURN
+key 309 down ESC
+key 311 up ESC
+key 341 down ESC
+key 343 up ESC
+key 349 down RETURN
+key 351 up RETURN

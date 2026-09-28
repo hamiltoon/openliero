@@ -1,0 +1,10 @@
+# Step 4½d G1 settings_file_level: a file level (LevelSelect "water_stage", RELOAD LEVEL, no
+# map size rows) with non-default values, and REGENERATE toggled.
+settings menu_settings_file_level_setup.cfg
+update_items
+first_visible
+draw 1 -1 0
+draw 0 -1 0
+move_to_id 14
+right
+draw 0 -1 0

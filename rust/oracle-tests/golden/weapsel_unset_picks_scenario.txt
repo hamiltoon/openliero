@@ -1,0 +1,13 @@
+# Step 4½ slice 4½c — weapon-selection case `unset_picks` (design §6.4): constructor draws only for zero picks; enabled duplicates are kept (finding 1).
+# Read by oracle_dump_weapsel (golden/weapsel_unset_picks.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 3, 3 frames, 0 draws in frames, final rng 06a319ed
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 2
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_unset_picks_setup.cfg
+weapsel 0 1 1
+weapsel 2 16 16

@@ -1,0 +1,29 @@
+# oracle_dump_menu rust/oracle-tests/golden/menu_settings_interact_script.txt — the REAL C++ Menu / behaviors / SettingsMenu (Step 4½d design §6.1)
+# <n> <op> <sel> <top> <bottom> <vis> <shown> <prefix> <vals> <bound> <sounds> <ret> <push> <hash>
+0 update_items 0 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+1 first_visible 0 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+2 cycles 0 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+3 right 0 0 15 15 1100001111111111111 - Game_of_Tag|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - 25 0 0 -
+4 right 0 0 15 16 1011001111111111111 - Holdazone|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - 25 0 0 -
+5 right 0 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - 25 0 0 -
+6 right 0 0 15 15 1000011111111111111 - Kill'em_All|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - 25 0 0 -
+7 left 0 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - 26 0 0 -
+8 move 5 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+9 right 5 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - 1 0 -
+10 enter 5 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - 27 -1 1 -
+11 move_to_id 6 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+12 enter 6 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - -1 0 -
+13 move_to_id 14 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+14 right 14 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|125%|ON|OFF|liero|. - - 1 0 -
+15 enter 14 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|125%|ON|OFF|liero|. - 27 -1 0 -
+16 move_to_id 13 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|125%|ON|OFF|liero|. - - - 0 -
+17 enter 13 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|OFF|125%|ON|OFF|liero|. - 27 -1 0 -
+18 left 13 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|125%|ON|OFF|liero|. - 26 0 0 -
+19 move_to_id 17 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|125%|ON|OFF|liero|. - - - 0 -
+20 enter 17 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|125%|ON|OFF|liero|. - - -1 0 -
+21 cycles 17 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|125%|ON|OFF|liero|. - - - 0 -
+22 move_to_id 9 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|125%|ON|OFF|liero|. - - - 0 -
+23 right 9 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|125%|ON|OFF|liero|. - - 1 0 -
+24 cycles 9 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|100%|.|4|OFF|ON|125%|ON|OFF|liero|. - - - 0 -
+25 right 9 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|101%|.|4|OFF|ON|125%|ON|OFF|liero|. - - 1 0 -
+26 draw 9 0 15 15 1000011111111111111 - Scales_of_Justice|10:00|10:00|00:30|20|16|Random|504|350|101%|.|4|OFF|ON|125%|ON|OFF|liero|. - - - 0 1a43e32b1c64d503

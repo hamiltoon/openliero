@@ -1,0 +1,43 @@
+# Step 4½ slice 4½c — weapon-selection case `humans_default` (design §6.4): zero constructor draws; cursor wrap both ways; cycle wrap 1<->40; a tap vs Right held (cycles at held 12, 15, 18); P0 DONE first, then P1.
+# Read by oracle_dump_weapsel (golden/weapsel_humans_default.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 0, 45 frames, 0 draws in frames, final rng 00000000
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 1
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_humans_default_setup.cfg
+weapsel 0 1 0
+weapsel 2 2 0
+weapsel 4 2 0
+weapsel 6 4 0
+weapsel 8 8 0
+weapsel 10 8 0
+weapsel 12 8 0
+weapsel 13 8 0
+weapsel 14 8 0
+weapsel 15 8 0
+weapsel 16 8 0
+weapsel 17 8 0
+weapsel 18 8 0
+weapsel 19 8 0
+weapsel 20 8 0
+weapsel 21 8 0
+weapsel 22 8 0
+weapsel 23 8 0
+weapsel 24 8 0
+weapsel 25 8 0
+weapsel 26 8 0
+weapsel 27 8 0
+weapsel 28 8 0
+weapsel 29 8 0
+weapsel 30 8 0
+weapsel 32 1 0
+weapsel 34 1 0
+weapsel 36 16 0
+weapsel 38 0 2
+weapsel 40 0 1
+weapsel 42 0 1
+weapsel 44 0 16

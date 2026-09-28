@@ -31,6 +31,24 @@ bash rust/oracle-tests/gen_level_golden.sh      # PRESET=linux-x64 on Linux
 The lightweight `rust.yml` CI does not regenerate it; it runs `cargo test` against
 the committed `golden/level.txt`.
 
+### Levelgen golden
+
+`golden/levelgen.txt` pins random level generation (`sim::levelgen`) against the real
+C++ `Level::GenerateRandom` / `MakeShadow` / `GenerateFromSettings`: per case, the level
+hash and `rand.last` after every stage, the rock-loop statistics, and the file/fallback
+paths; its dig stage is also a function-level oracle for `CorrectShadow`
+(`sim::shadow`). It also needs the full C++ build:
+
+```bash
+bash rust/oracle-tests/gen_levelgen_golden.sh   # PRESET=linux-x64 on Linux
+```
+
+Eyeball a generated level (writes `rust/target/snapshots/levelgen_*.bmp`):
+
+```bash
+cargo run -p oracle-tests --example levelgen_snapshot -- <seed> [<w> <h>] [noshadow]
+```
+
 ## Oracle workflow
 
 1. The C++ dumper (`src/tools/oracle_dump`) runs the *existing* C++ functions and

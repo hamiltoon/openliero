@@ -25,6 +25,8 @@ const LOWER_MASK: u32 = 0x7fff_ffff; // the lower 31 bits
 
 /// The generator's state. `mt` is the 624 words, `idx` points at the next word
 /// to read (when it reaches 624, `generate` regenerates the whole state).
+/// Clone (Step 4½c): a probe copy continues the same stream; Step 5 snapshots it.
+#[derive(Clone)]
 pub struct Rand {
     mt: [u32; N],
     idx: usize,
@@ -162,5 +164,19 @@ mod tests {
         r.seed(42);
         let v = r.next_u32();
         assert_eq!(r.last(), v, "last() must equal the value returned by next_u32()");
+    }
+
+    #[test]
+    fn a_clone_continues_the_same_stream_independently() {
+        // Step 4½c (design finding 12): the golden harness peeks `next` on a clone, and Step 5
+        // snapshots the RNG next to the weapon-selection state.
+        let mut a = Rand::new();
+        a.seed(7);
+        a.next_u32();
+        let mut b = a.clone();
+        assert_eq!((b.last(), b.draws()), (a.last(), a.draws()));
+        assert_eq!(a.next_u32(), b.next_u32(), "same position, same value");
+        b.next_u32();
+        assert_eq!(b.draws(), a.draws() + 1, "independent copies");
     }
 }

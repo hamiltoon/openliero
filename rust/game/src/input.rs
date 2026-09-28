@@ -6,6 +6,7 @@
 //! and so it runs in the fast CI test set. `game` instantiates it with Bevy's
 //! `KeyCode` via [`default_bindings`]. See spec §4.1.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use bevy::input::ButtonInput;
@@ -14,6 +15,10 @@ use bevy::prelude::Resource;
 
 use scenario::Scenario;
 use sim::state::ControlState;
+
+pub use ui::keys::{KeyEdges, ReleaseLatch};
+use ui::keys::TypedKey;
+use ui::shell::InputEvent;
 
 /// Number of worms sampled per tick — positional `[ControlState; N]`, the same
 /// index `process_frame` reads and `Viewport::worm_idx` maps (spec §4.2).
@@ -177,6 +182,10 @@ pub struct ParsedArgs {
     /// guard/loop off. Mutually exclusive with `--live`/`--record` (enforced by
     /// the caller).
     pub replay: Option<PathBuf>,
+    /// `Some(dir)` iff `--config-root <dir>` or `--config-root=<dir>` was given (Step 4½e-1,
+    /// plan D10): C++ `paths::Resolve`'s single-directory override (`filesystem.cpp:798-817`).
+    /// Accepted with any mode; only the shell path (the live default match) reads it.
+    pub config_root: Option<PathBuf>,
 }
 
 /// A syntactic error `parse_args` can detect on its own, with no external
@@ -192,6 +201,9 @@ pub enum ParseArgsError {
     /// `--replay` was the last token — no path token followed it (4b, T2),
     /// mirroring [`ParseArgsError::RecordMissingPath`].
     ReplayMissingPath,
+    /// `--config-root` with no directory (Step 4½e-1): the last token, or followed by another
+    /// flag (C++ `match_opt` refuses a value that starts with `-`, `filesystem.cpp:790-792`).
+    ConfigRootMissingPath,
 }
 
 /// Parse the native CLI args (post `argv[0]`): leading flags — `--live`
@@ -203,11 +215,30 @@ pub enum ParseArgsError {
 /// excludes `--live`/`--record`" combination rule needs no external state, but
 /// (like "record requires live") stays the caller's job (`main.rs::resolve_scenario`)
 /// for consistency — this parser only builds the flag shape.
+///
+/// Step 4½e-1: `--config-root <dir>` / `--config-root=<dir>` may appear anywhere, as in C++
+/// `paths::Resolve`; it is taken out first and does not count as a mode flag, so
+/// `--config-root <dir>` alone is still the bare default match.
 pub fn parse_args<I: IntoIterator<Item = String>>(
     args: I,
     default_name: &str,
 ) -> Result<ParsedArgs, ParseArgsError> {
-    let mut it = args.into_iter().peekable();
+    let mut rest = Vec::new();
+    let mut config_root: Option<PathBuf> = None;
+    let mut all = args.into_iter();
+    while let Some(arg) = all.next() {
+        if let Some(dir) = arg.strip_prefix("--config-root=") {
+            config_root = Some(PathBuf::from(dir));
+        } else if arg == "--config-root" {
+            match all.next() {
+                Some(dir) if !dir.starts_with('-') => config_root = Some(PathBuf::from(dir)),
+                _ => return Err(ParseArgsError::ConfigRootMissingPath),
+            }
+        } else {
+            rest.push(arg);
+        }
+    }
+    let mut it = rest.into_iter().peekable();
     let mut mode = Mode::Scripted;
     let mut record: Option<PathBuf> = None;
     let mut replay: Option<PathBuf> = None;
@@ -253,6 +284,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(
             name: DEFAULT_MATCH.to_string(),
             record: None,
             replay: None,
+            config_root,
         });
     }
     let name = positional.unwrap_or_else(|| default_name.to_string());
@@ -261,6 +293,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(
         name,
         record,
         replay,
+        config_root,
     })
 }
 
@@ -391,6 +424,219 @@ pub fn replay_state_series(tc_root: &Path, scenario: &Scenario) -> Vec<u32> {
         series.push(sim::hash::hash_game_state(&state));
     }
     series
+}
+
+/// `SDLToDOSKey` (`keys.cpp:9-75`) over Bevy's physical `KeyCode`: the index of the key in C++'s
+/// `liero_to_sdl_keys`; a key C++ does not know is 89 (Step 4½d, design §4.1).
+pub fn dos_of_keycode(k: KeyCode) -> u32 {
+    use KeyCode::*;
+    match k {
+        Escape => 1,
+        Digit1 => 2,
+        Digit2 => 3,
+        Digit3 => 4,
+        Digit4 => 5,
+        Digit5 => 6,
+        Digit6 => 7,
+        Digit7 => 8,
+        Digit8 => 9,
+        Digit9 => 10,
+        Digit0 => 11,
+        Minus => 12,
+        Equal => 13,
+        Backspace => 14,
+        Tab => 15,
+        KeyQ => 16,
+        KeyW => 17,
+        KeyE => 18,
+        KeyR => 19,
+        KeyT => 20,
+        KeyY => 21,
+        KeyU => 22,
+        KeyI => 23,
+        KeyO => 24,
+        KeyP => 25,
+        BracketLeft => 26,
+        BracketRight => 27,
+        Enter => 28,
+        ControlLeft => 29,
+        KeyA => 30,
+        KeyS => 31,
+        KeyD => 32,
+        KeyF => 33,
+        KeyG => 34,
+        KeyH => 35,
+        KeyJ => 36,
+        KeyK => 37,
+        KeyL => 38,
+        Semicolon => 39,
+        Quote => 40,
+        Backquote => 41,
+        ShiftLeft => 42,
+        Backslash => 43,
+        KeyZ => 44,
+        KeyX => 45,
+        KeyC => 46,
+        KeyV => 47,
+        KeyB => 48,
+        KeyN => 49,
+        KeyM => 50,
+        Comma => 51,
+        Period => 52,
+        Slash => 53,
+        ShiftRight => 54,
+        NumpadMultiply => 55,
+        AltLeft => 56,
+        Space => 57,
+        CapsLock => 58,
+        F1 => 59,
+        F2 => 60,
+        F3 => 61,
+        F4 => 62,
+        F5 => 63,
+        F6 => 64,
+        F7 => 65,
+        F8 => 66,
+        F9 => 67,
+        F10 => 68,
+        NumLock => 69,
+        ScrollLock => 70,
+        Numpad7 => 71,
+        Numpad8 => 72,
+        Numpad9 => 73,
+        NumpadSubtract => 74,
+        Numpad4 => 75,
+        Numpad5 => 76,
+        Numpad6 => 77,
+        NumpadAdd => 78,
+        Numpad1 => 79,
+        Numpad2 => 80,
+        Numpad3 => 81,
+        Numpad0 => 82,
+        NumpadDecimal => 83,
+        IntlBackslash => 86,
+        F11 => 87,
+        F12 => 88,
+        NumpadEnter => 116,
+        ControlRight => 117,
+        NumpadDivide => 141,
+        PrintScreen => 143,
+        AltRight => 144,
+        Home => 159,
+        ArrowUp => 160,
+        PageUp => 161,
+        ArrowLeft => 163,
+        ArrowRight => 165,
+        End => 167,
+        ArrowDown => 168,
+        PageDown => 169,
+        Insert => 170,
+        Delete => 171,
+        _ => ui::keys::DK_UNKNOWN,
+    }
+}
+
+/// The key's `key_buf` symbol: `SDL_GetKeyFromScancode(sc, SDL_KMOD_NONE)` on a US layout —
+/// the unshifted ASCII of printable keys, Tab, and 0 (ignored by `Menu::on_keys`) for the rest.
+/// A physical US table rather than Bevy's logical key: layout-independent and deterministic.
+pub fn typed_of_keycode(k: KeyCode) -> TypedKey {
+    use KeyCode::*;
+    let c = match k {
+        Tab => return TypedKey::Tab,
+        KeyA => 'a',
+        KeyB => 'b',
+        KeyC => 'c',
+        KeyD => 'd',
+        KeyE => 'e',
+        KeyF => 'f',
+        KeyG => 'g',
+        KeyH => 'h',
+        KeyI => 'i',
+        KeyJ => 'j',
+        KeyK => 'k',
+        KeyL => 'l',
+        KeyM => 'm',
+        KeyN => 'n',
+        KeyO => 'o',
+        KeyP => 'p',
+        KeyQ => 'q',
+        KeyR => 'r',
+        KeyS => 's',
+        KeyT => 't',
+        KeyU => 'u',
+        KeyV => 'v',
+        KeyW => 'w',
+        KeyX => 'x',
+        KeyY => 'y',
+        KeyZ => 'z',
+        Digit0 => '0',
+        Digit1 => '1',
+        Digit2 => '2',
+        Digit3 => '3',
+        Digit4 => '4',
+        Digit5 => '5',
+        Digit6 => '6',
+        Digit7 => '7',
+        Digit8 => '8',
+        Digit9 => '9',
+        Space => ' ',
+        Minus => '-',
+        Equal => '=',
+        BracketLeft => '[',
+        BracketRight => ']',
+        Semicolon => ';',
+        Quote => '\'',
+        Backquote => '`',
+        Backslash => '\\',
+        Comma => ',',
+        Period => '.',
+        Slash => '/',
+        _ => return TypedKey::Sym(0),
+    };
+    TypedKey::Sym(c as u32)
+}
+
+/// One keyboard event as the shell's input events (Step 4½e-1, plan D8): the key, then — on a
+/// key-down whose `text` has no control character (`< 0x20`, `0x7f`: Enter's `"\r"`,
+/// Backspace's `"\u{8}"`, Tab) — one [`InputEvent::Text`] per `char`, in order, right after it
+/// (SDL's order: `SDL_EVENT_KEY_DOWN`, then `SDL_EVENT_TEXT_INPUT`). SDL would send an IME
+/// multi-char commit as one string, which `Utf8ToDos` turns into `'?'` (plan fact 7); splitting
+/// it is a Rust-only live convenience, outside the gate. A key-up never types.
+pub fn keyboard_events(key: ui::shell::KeyEvent, text: Option<&str>) -> Vec<InputEvent> {
+    let mut out = vec![InputEvent::Key(key)];
+    if let Some(t) = text.filter(|t| key.down && !t.chars().any(|c| c < ' ' || c == '\u{7f}')) {
+        out.extend(t.chars().map(|c| InputEvent::Text(c.to_string())));
+    }
+    out
+}
+
+/// The keyboard events waiting for the next fixed tick (design §7.1). C++ polls every pending
+/// event at the top of a frame; a tick takes the queue in order, except that a key's second
+/// event waits for the next tick (plan-time fact 19: a tap inside one slow browser frame would
+/// otherwise set and clear the menu flag before `Update` runs). Step 4½e-1: the queue holds
+/// `InputEvent`s; a text event never defers, but waits behind a deferred key (FIFO).
+#[derive(Resource, Default, Debug)]
+pub struct KeyQueue(VecDeque<InputEvent>);
+
+impl KeyQueue {
+    pub fn push(&mut self, ev: InputEvent) {
+        self.0.push_back(ev);
+    }
+
+    pub fn take_tick(&mut self) -> Vec<InputEvent> {
+        let mut out: Vec<InputEvent> = Vec::new();
+        while let Some(ev) = self.0.front() {
+            if let InputEvent::Key(k) = ev
+                && out
+                    .iter()
+                    .any(|e| matches!(e, InputEvent::Key(o) if o.dos == k.dos))
+            {
+                break;
+            }
+            out.push(self.0.pop_front().expect("front exists"));
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -877,5 +1123,228 @@ input 5 64 96
         // Dig explicitly unbound for both (§2).
         assert_eq!(map.players[0].dig, None);
         assert_eq!(map.players[1].dig, None);
+    }
+
+    #[test]
+    fn dos_of_keycode_is_the_keys_cpp_table() {
+        // keys.cpp:9-75 (the index of each SDL scancode; unknown -> 89; PRINTSCREEN's second
+        // entry wins in sdl_to_dos_scan_codes).
+        for (k, dos) in [
+            (KeyCode::Escape, 1),
+            (KeyCode::Digit1, 2),
+            (KeyCode::Digit0, 11),
+            (KeyCode::KeyR, 19),
+            (KeyCode::Enter, 28),
+            (KeyCode::ControlLeft, 29),
+            (KeyCode::KeyF, 33),
+            (KeyCode::ShiftLeft, 42),
+            (KeyCode::ShiftRight, 54),
+            (KeyCode::AltLeft, 56),
+            (KeyCode::Space, 57),
+            (KeyCode::F1, 59),
+            (KeyCode::F10, 68),
+            (KeyCode::F11, 87),
+            (KeyCode::NumpadEnter, 116),
+            (KeyCode::ControlRight, 117),
+            (KeyCode::PrintScreen, 143),
+            (KeyCode::AltRight, 144),
+            (KeyCode::ArrowUp, 160),
+            (KeyCode::PageUp, 161),
+            (KeyCode::ArrowLeft, 163),
+            (KeyCode::ArrowRight, 165),
+            (KeyCode::ArrowDown, 168),
+            (KeyCode::PageDown, 169),
+            (KeyCode::Delete, 171),
+            (KeyCode::SuperLeft, 89),
+        ] {
+            assert_eq!(dos_of_keycode(k), dos, "{k:?}");
+        }
+    }
+
+    #[test]
+    fn the_default_bindings_are_the_settings_dos_keys() {
+        // The sim samples KeyCodes, the menus test DOS keys (design §4.6): they must agree.
+        let s = scenario::settings::Settings::default();
+        for (p, b) in default_bindings().players.iter().enumerate() {
+            let keys = [b.up, b.down, b.left, b.right, b.fire, b.change, b.jump];
+            for (c, k) in keys.iter().enumerate() {
+                assert_eq!(
+                    dos_of_keycode(*k),
+                    s.worm_settings[p].controls_ex[c],
+                    "player {p} control {c}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_keys_are_the_unshifted_us_symbols() {
+        use ui::keys::TypedKey;
+        assert_eq!(typed_of_keycode(KeyCode::KeyA), TypedKey::Sym(b'a' as u32));
+        assert_eq!(
+            typed_of_keycode(KeyCode::Digit7),
+            TypedKey::Sym(b'7' as u32)
+        );
+        assert_eq!(typed_of_keycode(KeyCode::Space), TypedKey::Sym(32));
+        assert_eq!(typed_of_keycode(KeyCode::Minus), TypedKey::Sym(b'-' as u32));
+        assert_eq!(typed_of_keycode(KeyCode::Tab), TypedKey::Tab);
+        assert_eq!(
+            typed_of_keycode(KeyCode::ArrowUp),
+            TypedKey::Sym(0),
+            "not 32..=127: ignored"
+        );
+    }
+
+    #[test]
+    fn a_typed_key_is_its_key_then_one_text_event_per_char() {
+        // plan D8: key first, then the text, one event per char; control characters and key-ups
+        // type nothing.
+        use ui::shell::KeyEvent;
+        let key = |dos, down| KeyEvent {
+            dos,
+            down,
+            repeat: false,
+            typed: TypedKey::Sym(0),
+        };
+        let t = |s: &str| InputEvent::Text(s.into());
+        assert_eq!(
+            keyboard_events(key(2, true), Some("1")),
+            vec![InputEvent::Key(key(2, true)), t("1")]
+        );
+        assert_eq!(
+            keyboard_events(key(30, true), Some("åb")),
+            vec![InputEvent::Key(key(30, true)), t("å"), t("b")],
+            "a multi-char commit is split per char"
+        );
+        for control in ["\r", "\u{8}", "\t", "\u{1b}", "\u{7f}", "a\r"] {
+            assert_eq!(
+                keyboard_events(key(28, true), Some(control)),
+                vec![InputEvent::Key(key(28, true))],
+                "{control:?} is dropped"
+            );
+        }
+        assert_eq!(
+            keyboard_events(key(2, false), Some("1")),
+            vec![InputEvent::Key(key(2, false))],
+            "a key-up never types"
+        );
+        assert_eq!(
+            keyboard_events(key(160, true), None),
+            vec![InputEvent::Key(key(160, true))]
+        );
+        let repeat = KeyEvent {
+            repeat: true,
+            ..key(2, true)
+        };
+        assert_eq!(
+            keyboard_events(repeat, Some("1")),
+            vec![InputEvent::Key(repeat), t("1")],
+            "an OS repeat of a printing key types again, as SDL does"
+        );
+    }
+
+    #[test]
+    fn a_deferred_key_keeps_its_text_behind_it() {
+        // plan T10 step 4: the text of a key whose event is deferred waits with it — the queue
+        // never reorders text ahead of the key.
+        use ui::shell::KeyEvent;
+        let key = |dos, down| KeyEvent {
+            dos,
+            down,
+            repeat: false,
+            typed: TypedKey::Sym(0),
+        };
+        let mut q = KeyQueue::default();
+        for (k, text) in [
+            (key(2, true), Some("1")),
+            (key(2, false), None),
+            (key(2, true), Some("1")),
+            (key(3, true), Some("2")),
+        ] {
+            for ev in keyboard_events(k, text) {
+                q.push(ev);
+            }
+        }
+        let t = |s: &str| InputEvent::Text(s.into());
+        assert_eq!(q.take_tick(), vec![InputEvent::Key(key(2, true)), t("1")]);
+        assert_eq!(q.take_tick(), vec![InputEvent::Key(key(2, false))]);
+        assert_eq!(
+            q.take_tick(),
+            vec![
+                InputEvent::Key(key(2, true)),
+                t("1"),
+                InputEvent::Key(key(3, true)),
+                t("2")
+            ]
+        );
+    }
+
+    #[test]
+    fn config_root_parses_in_both_forms_anywhere() {
+        // plan D10: `--config-root <dir>` and `--config-root=<dir>`, with any mode, and alone it
+        // is still the bare default match.
+        let parse = |a: &[&str]| parse_args(a.iter().map(|s| s.to_string()), "blood");
+        let p = parse(&["--config-root", "/tmp/root"]).unwrap();
+        assert_eq!(p.config_root, Some(PathBuf::from("/tmp/root")));
+        assert_eq!((p.mode, p.name.as_str()), (Mode::Live, DEFAULT_MATCH));
+        let p = parse(&["--config-root=/tmp/eq"]).unwrap();
+        assert_eq!(p.config_root, Some(PathBuf::from("/tmp/eq")));
+        assert_eq!(p.name, DEFAULT_MATCH);
+        let p = parse(&["--live", "dart", "--config-root", "r"]).unwrap();
+        assert_eq!((p.mode, p.name.as_str()), (Mode::Live, "dart"));
+        assert_eq!(p.config_root, Some(PathBuf::from("r")));
+        let p = parse(&["--replay", "/tmp/x.txt", "--config-root=r"]).unwrap();
+        assert_eq!(p.replay, Some(PathBuf::from("/tmp/x.txt")));
+        assert_eq!(p.config_root, Some(PathBuf::from("r")));
+        assert_eq!(parse(&["--live"]).unwrap().config_root, None);
+        assert_eq!(
+            parse(&["--config-root"]).unwrap_err(),
+            ParseArgsError::ConfigRootMissingPath
+        );
+        assert_eq!(
+            parse(&["--config-root", "--live"]).unwrap_err(),
+            ParseArgsError::ConfigRootMissingPath,
+            "a flag is never taken as the directory (C++ match_opt)"
+        );
+    }
+
+    #[test]
+    fn a_tick_takes_the_queue_but_defers_a_keys_second_event() {
+        use ui::shell::KeyEvent;
+        let e = |dos, down| {
+            InputEvent::Key(KeyEvent {
+                dos,
+                down,
+                repeat: false,
+                typed: ui::keys::TypedKey::Sym(0),
+            })
+        };
+        let mut q = KeyQueue::default();
+        for ev in [
+            e(28, true),
+            e(160, true),
+            e(28, false),
+            e(160, false),
+            e(1, true),
+        ] {
+            q.push(ev);
+        }
+        assert_eq!(
+            q.take_tick(),
+            vec![e(28, true), e(160, true)],
+            "RETURN's up waits (plan-time fact 19)"
+        );
+        assert_eq!(q.take_tick(), vec![e(28, false), e(160, false), e(1, true)]);
+        assert!(q.take_tick().is_empty());
+        let t = |s: &str| InputEvent::Text(s.into());
+        for ev in [e(4, true), t("3"), e(4, false), t("4"), t("4")] {
+            q.push(ev);
+        }
+        assert_eq!(
+            q.take_tick(),
+            vec![e(4, true), t("3")],
+            "text never defers, but keeps its place behind a deferred key"
+        );
+        assert_eq!(q.take_tick(), vec![e(4, false), t("4"), t("4")]);
     }
 }

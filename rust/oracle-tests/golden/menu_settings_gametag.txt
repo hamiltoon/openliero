@@ -1,0 +1,11 @@
+# oracle_dump_menu rust/oracle-tests/golden/menu_settings_gametag_script.txt — the REAL C++ Menu / behaviors / SettingsMenu (Step 4½d design §6.1)
+# <n> <op> <sel> <top> <bottom> <vis> <shown> <prefix> <vals> <bound> <sounds> <ret> <push> <hash>
+0 update_items 0 0 15 15 1100001111111111111 - Game_of_Tag|59:59|59:59|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+1 first_visible 0 0 15 15 1100001111111111111 - Game_of_Tag|59:59|59:59|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+2 draw 0 0 15 15 1100001111111111111 - Game_of_Tag|59:59|59:59|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 d37d79983307da7b
+3 move 1 0 15 15 1100001111111111111 - Game_of_Tag|59:59|59:59|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+4 draw 1 0 15 15 1100001111111111111 - Game_of_Tag|59:59|59:59|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 5bb91abcb6e96c23
+5 move 0 0 15 15 1100001111111111111 - Game_of_Tag|59:59|59:59|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+6 cycles 0 0 15 15 1100001111111111111 - Game_of_Tag|59:59|59:59|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+7 left 0 0 15 15 1000011111111111111 - Kill'em_All|59:59|59:59|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - 26 0 0 -
+8 draw 0 0 15 15 1000011111111111111 - Kill'em_All|59:59|59:59|00:30|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 a0fa86802f615ea3

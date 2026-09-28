@@ -1,0 +1,60 @@
+# Step 4½e-1 G2e-1 case labels (plan Task 8) — written by gen_slice4_5e1_shell.
+# Rust ledger: 741 frames, end `end 740 quit`, NEW GAME 1, RESUME 0, back-to-menu 1, tops -GM, entries 0, weapon boxes 0, file lines 0
+setup shell_labels_setup.cfg
+boot_seed 27
+match_seed 2741
+frames 750
+expect quit
+detail
+key 40 down RETURN
+key 42 up RETURN
+key 74 down R
+key 74 down UP
+key 76 up R
+key 76 up UP
+key 77 down LCTRL
+key 77 down RCTRL
+key 79 up LCTRL
+key 79 up RCTRL
+key 80 down LCTRL
+key 82 up LCTRL
+key 95 down LCTRL
+key 97 up LCTRL
+key 110 down LCTRL
+key 112 up LCTRL
+key 125 down LCTRL
+key 127 up LCTRL
+key 140 down LCTRL
+key 142 up LCTRL
+key 155 down LCTRL
+key 157 up LCTRL
+key 170 down LCTRL
+key 172 up LCTRL
+key 185 down LCTRL
+key 187 up LCTRL
+key 200 down LSHIFT
+key 240 up LSHIFT
+key 246 down RALT
+key 286 up RALT
+key 292 down LSHIFT
+key 292 down RALT
+key 322 up LSHIFT
+key 322 up RALT
+key 327 down LCTRL
+key 329 up LCTRL
+key 342 down LCTRL
+key 344 up LCTRL
+key 357 down LCTRL
+key 359 up LCTRL
+key 372 down LCTRL
+key 374 up LCTRL
+key 387 down LCTRL
+key 389 up LCTRL
+key 402 down LCTRL
+key 404 up LCTRL
+key 667 down ESC
+key 669 up ESC
+key 699 down ESC
+key 701 up ESC
+key 707 down RETURN
+key 709 up RETURN

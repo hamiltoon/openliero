@@ -9,19 +9,24 @@
 //! [`assets`] (data parsers); rendering, audio, input, and networking live in
 //! other crates layered on top.
 
+pub mod ai;
 pub mod blit;
 pub mod bobject;
 pub mod bonus;
 pub mod control;
 pub mod debug;
 pub mod flash;
+pub mod game_over;
 pub mod hash;
+pub mod levelgen;
 pub mod nobject;
 pub mod physics;
 pub mod pool;
+pub mod shadow;
 pub mod shake;
 pub mod sobject;
 pub mod sound;
 pub mod state;
 pub mod weapon;
+pub mod weapsel;
 pub mod wide_checksum;

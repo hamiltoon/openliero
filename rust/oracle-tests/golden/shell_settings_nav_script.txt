@@ -1,0 +1,58 @@
+# Step 4½e-1 G2e-1 case settings_nav (plan Task 8) — written by gen_slice4_5e1_shell.
+# Rust ledger: 276 frames, end `end 275 quit`, NEW GAME 1, RESUME 0, back-to-menu 1, tops -GM, entries 0, weapon boxes 0, file lines 0
+setup default
+boot_seed 21
+match_seed 2101
+frames 285
+expect quit
+detail
+key 40 down UP
+key 42 up UP
+key 43 down RETURN
+key 45 up RETURN
+key 51 down UP
+key 53 up UP
+key 54 down UP
+key 56 up UP
+key 57 down UP
+key 59 up UP
+key 60 down DOWN
+key 62 up DOWN
+key 63 down DOWN
+key 65 up DOWN
+key 66 down DOWN
+key 68 up DOWN
+key 69 down DOWN
+key 71 up DOWN
+key 72 down DOWN
+key 74 up DOWN
+key 75 down R
+key 77 up R
+key 78 down F
+key 80 up F
+key 81 down F
+key 83 up F
+key 84 down DOWN
+key 99 repeat DOWN
+key 102 repeat DOWN
+key 105 repeat DOWN
+key 108 repeat DOWN
+key 111 up DOWN
+key 115 down ESC
+key 117 up ESC
+key 123 down F7
+key 125 up F7
+key 129 down PAGEDOWN
+key 131 up PAGEDOWN
+key 132 down PAGEDOWN
+key 134 up PAGEDOWN
+key 135 down PAGEUP
+key 137 up PAGEUP
+key 143 down F1
+key 145 up F1
+key 192 down ESC
+key 194 up ESC
+key 234 down ESC
+key 236 up ESC
+key 242 down RETURN
+key 244 up RETURN

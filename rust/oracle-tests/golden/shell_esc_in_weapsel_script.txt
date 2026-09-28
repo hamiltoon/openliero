@@ -1,0 +1,51 @@
+# Step 4½d G2 case esc_in_weapsel (design §6.4; plan Task 9) — written by gen_slice4_5d.
+# Rust ledger: 402 frames, end `end 401 quit`, NEW GAME 1, RESUME 1, back-to-menu 2 (game over: false), black presents 2
+setup default
+boot_seed 2
+match_seed 111
+frames 411
+expect quit
+key 40 down RETURN
+key 42 up RETURN
+key 74 down F
+key 74 down DOWN
+key 76 up F
+key 76 up DOWN
+key 77 down RIGHT
+key 97 up RIGHT
+key 103 down ESC
+key 105 up ESC
+key 155 down RETURN
+key 157 up RETURN
+key 199 down R
+key 199 down UP
+key 201 up R
+key 201 up UP
+key 202 down R
+key 202 down UP
+key 204 up R
+key 204 up UP
+key 205 down LCTRL
+key 205 down RCTRL
+key 207 up LCTRL
+key 207 up RCTRL
+key 208 down G
+key 218 down LCTRL
+key 220 up LCTRL
+key 233 down LCTRL
+key 235 up LCTRL
+key 248 up G
+key 253 down LEFT
+key 258 down RCTRL
+key 260 up RCTRL
+key 288 up LEFT
+key 298 down F
+key 318 up F
+key 321 down LCTRL
+key 323 up LCTRL
+key 328 down ESC
+key 330 up ESC
+key 360 down ESC
+key 362 up ESC
+key 368 down RETURN
+key 370 up RETURN

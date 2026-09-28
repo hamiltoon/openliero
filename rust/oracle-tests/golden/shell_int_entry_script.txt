@@ -1,0 +1,127 @@
+# Step 4½e-1 G2e-1 case int_entry (plan Task 8) — written by gen_slice4_5e1_shell.
+# Rust ledger: 247 frames, end `end 247 frames`, NEW GAME 0, RESUME 0, back-to-menu 0, tops IM, entries 7, weapon boxes 0, file lines 0
+setup default
+boot_seed 23
+frames 247
+expect frames
+detail
+key 40 down F7
+key 42 up F7
+key 46 down DOWN
+key 48 up DOWN
+key 49 down RETURN
+key 51 up RETURN
+key 54 down 7
+text 54 37
+key 56 up 7
+key 57 down BACKSPACE
+key 59 up BACKSPACE
+key 60 down 4
+text 60 34
+key 62 up 4
+key 63 down 2
+text 63 32
+key 65 up 2
+key 66 down RETURN
+key 68 up RETURN
+key 72 down DOWN
+key 74 up DOWN
+key 75 down DOWN
+key 77 up DOWN
+key 78 down RETURN
+key 80 up RETURN
+key 83 down BACKSPACE
+key 85 up BACKSPACE
+key 86 down BACKSPACE
+key 88 up BACKSPACE
+key 89 down BACKSPACE
+key 91 up BACKSPACE
+key 92 down 9
+text 92 39
+key 94 up 9
+key 95 down 9
+text 95 39
+key 97 up 9
+key 98 down 9
+text 98 39
+key 100 up 9
+key 101 down 9
+text 101 39
+key 103 up 9
+key 104 down RETURN
+key 106 up RETURN
+key 110 down RETURN
+key 112 up RETURN
+key 115 down BACKSPACE
+key 117 up BACKSPACE
+key 118 down BACKSPACE
+key 120 up BACKSPACE
+key 121 down BACKSPACE
+key 123 up BACKSPACE
+key 124 down BACKSPACE
+key 126 up BACKSPACE
+key 127 down 0
+text 127 30
+key 129 up 0
+key 130 down RETURN
+key 132 up RETURN
+key 136 down RETURN
+key 138 up RETURN
+key 141 down BACKSPACE
+key 143 up BACKSPACE
+key 144 down BACKSPACE
+key 146 up BACKSPACE
+key 147 down 3
+text 147 33
+key 149 up 3
+key 150 down 3
+text 150 33
+key 152 up 3
+key 153 down 3
+text 153 33
+key 155 up 3
+key 156 down RETURN
+key 158 up RETURN
+key 162 down DOWN
+key 164 up DOWN
+key 165 down DOWN
+key 167 up DOWN
+key 168 down DOWN
+key 170 up DOWN
+key 171 down DOWN
+key 173 up DOWN
+key 174 down RETURN
+key 176 up RETURN
+key 179 down 5
+text 179 35
+key 181 up 5
+key 182 down ESC
+key 184 up ESC
+key 188 down UP
+key 190 up UP
+key 191 down UP
+key 193 up UP
+key 194 down RETURN
+key 196 up RETURN
+key 199 down BACKSPACE
+key 201 up BACKSPACE
+key 202 down BACKSPACE
+key 204 up BACKSPACE
+key 205 down BACKSPACE
+key 207 up BACKSPACE
+key 208 down RETURN
+key 210 up RETURN
+key 214 down RETURN
+key 216 up RETURN
+key 219 down R
+text 219 72
+key 221 up R
+key 222 down 5
+text 222 35
+key 224 up 5
+key 225 down RETURN
+key 227 up RETURN
+key 231 down DOWN
+key 233 up DOWN
+key 234 down DOWN
+key 236 up DOWN

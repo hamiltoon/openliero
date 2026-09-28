@@ -1,0 +1,52 @@
+# Step 4½e-1 G2e-1 case key_edges (plan Task 8) — written by gen_slice4_5e1_shell.
+# Rust ledger: 830 frames, end `end 829 quit`, NEW GAME 1, RESUME 0, back-to-menu 1, tops -GM, entries 0, weapon boxes 0, file lines 0
+setup shell_key_edges_setup.cfg
+boot_seed 31
+match_seed 3101
+frames 839
+expect quit
+detail
+key 40 down RETURN
+key 42 up RETURN
+key 74 down R
+key 74 down UP
+key 76 up R
+key 76 up UP
+key 77 down LCTRL
+key 77 down RCTRL
+key 79 up LCTRL
+key 79 up RCTRL
+key 320 down LSHIFT
+key 324 down G
+key 326 up G
+key 330 down G
+key 332 up G
+key 336 down D
+key 338 up D
+key 344 up LSHIFT
+key 348 down RALT
+key 352 down RIGHT
+key 354 up RIGHT
+key 358 down LEFT
+key 360 up LEFT
+key 366 up RALT
+key 370 down LSHIFT
+key 371 down LALT
+key 400 up LALT
+key 401 up LSHIFT
+key 410 down LALT
+key 412 up LALT
+key 453 down F
+key 478 up F
+key 479 down LCTRL
+key 481 up LCTRL
+key 542 down LCTRL
+key 692 up LCTRL
+key 713 down LCTRL
+key 715 up LCTRL
+key 756 down ESC
+key 758 up ESC
+key 788 down ESC
+key 790 up ESC
+key 796 down RETURN
+key 798 up RETURN

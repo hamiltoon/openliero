@@ -549,10 +549,14 @@ mod tests {
             ready: true,
             make_sight_green: false,
             steerable_count: 0,
+            steerable_sum_x: 0,
+            steerable_sum_y: 0,
             current_frame: 0,
             animate: false,
             hotspot_x: 0,
             hotspot_y: 0,
+            reacts: [0; 4],
+            max_health: 100,
         }
     }
 

@@ -182,6 +182,7 @@ fn render_tick(b: &mut Built, tick: u32, draw_hud: bool, map: bool) -> u64 {
         labels: &b.labels,
         draw_hud,
         map,
+        small_labels: None,
     };
     render::frame::draw(&mut b.bmp, &b.state, &mut b.viewports, &scene);
 

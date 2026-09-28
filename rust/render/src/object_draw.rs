@@ -22,6 +22,7 @@ use crate::blit::{
 };
 use crate::fire_cone::FIRE_CONE_OFFSET;
 use crate::shadow_query::ShadowQuery;
+use crate::small_text::draw_text_small;
 use crate::viewport::Viewport;
 use assets::sprite::SpriteSet;
 use sim::state::{angle_frame, ControlState, SimState};
@@ -230,6 +231,33 @@ pub fn shadow_pass(
     }
 }
 
+/// The three `DrawTextSmall` name labels (Step 4½e-1): the switch that turns them on, and
+/// their inputs. `text` is the 4×4 `text.tga` bank (`Common::text_sprites`, 26 frames);
+/// `names_on_bonuses` is the live `Settings::names_on_bonuses` (`viewport.cpp:408`, `:466`).
+/// `None` (every golden path, and every caller before 4½e-1) draws no label at all, so the
+/// sprite pass is byte-identical to its pre-4½e-1 self.
+#[derive(Clone, Copy, Debug)]
+pub struct SmallLabels<'a> {
+    pub text: &'a SpriteSet,
+    pub names_on_bonuses: bool,
+}
+
+/// One `DrawTextSmall` label centred on `x`: `(x - len*4/2 + dx, y)`, `len` the name's byte
+/// count (`viewport.cpp:410-412`, `:475-478`, `:578-580`).
+fn draw_label(
+    scr: &mut Bitmap,
+    pal: &Pal32,
+    text: &SpriteSet,
+    name: &str,
+    x: i32,
+    dx: i32,
+    y: i32,
+) {
+    let name = name.as_bytes();
+    let len = name.len() as i32 * 4;
+    draw_text_small(scr, pal, text, name, x - len / 2 + dx, y);
+}
+
 /// **Pass 2** — port of `viewport.cpp:400-590`, all sprites drawn on top of the
 /// fully-composited shadow layer. The families run in the same fixed C++ order as
 /// the shadow pass: bonuses -> sobjects -> wobjects -> nobjects -> worms(+laser
@@ -244,9 +272,10 @@ pub fn shadow_pass(
 /// crosshair is gated on the **viewport's own** worm being visible (`vp.worm_idx`),
 /// NOT on the loop worm.
 ///
-/// The **name-label `DrawTextSmall` calls** (`:411`, `:476`, `:580`) and the
-/// **AI debug** draw (`:550`) are deliberately omitted here — they belong to 3e
-/// (font/HUD). The sobject blit is the sole sprite-pass user of the `ShadowQuery`
+/// The **name-label `DrawTextSmall` calls** (`:408-413`, `:466-479`, `:575-581`) are drawn by
+/// [`sprite_pass_with`] when it is given [`SmallLabels`] (Step 4½e-1); `sprite_pass` passes
+/// `None` and draws none. The **AI debug** draw (`:550`) is omitted (no AI worm is ported).
+/// The sobject blit is the sole sprite-pass user of the `ShadowQuery`
 /// (`BlitImageR`'s water-range test, `viewport.cpp:423`); the query is built
 /// internally (a pure read-only view of the level + palette), so `frame::draw`'s
 /// own shadow query can be dropped before this takes `&mut vp`.
@@ -264,6 +293,39 @@ pub fn sprite_pass(
     laser_weapon: i32,
     bonus_frames: &[i32],
 ) {
+    sprite_pass_with(
+        scr,
+        state,
+        pal,
+        vp,
+        off_x,
+        off_y,
+        fire_cone_sprites,
+        nr_begin,
+        nr_end,
+        laser_weapon,
+        bonus_frames,
+        None,
+    );
+}
+
+/// [`sprite_pass`] with the optional [`SmallLabels`] (Step 4½e-1): the same pass, plus the three
+/// `DrawTextSmall` name labels at their exact C++ points when `labels` is `Some`.
+#[allow(clippy::too_many_arguments)]
+pub fn sprite_pass_with(
+    scr: &mut Bitmap,
+    state: &SimState,
+    pal: &Pal32,
+    vp: &mut Viewport,
+    off_x: i32,
+    off_y: i32,
+    fire_cone_sprites: &SpriteSet,
+    nr_begin: i32,
+    nr_end: i32,
+    laser_weapon: i32,
+    bonus_frames: &[i32],
+    labels: Option<&SmallLabels>,
+) {
     // The sobject BlitImageR (:423) reads the LEVEL (water range) via this query.
     // Same `world_offset = -kOffs` convention as `frame::draw`/`shadow_pass`.
     let shadow = ShadowQuery {
@@ -275,7 +337,7 @@ pub fn sprite_pass(
         cycles: state.cycles,
     };
 
-    // (7) bonuses — viewport.cpp:402-415 (name label :411 skipped).
+    // (7) bonuses — viewport.cpp:402-415.
     for i in state.bonuses.iter() {
         if i.timer > BONUS_FLICKER_TIME || (state.cycles & 3) == 0 {
             let f = bonus_frames[i.frame as usize]; // :405
@@ -288,6 +350,22 @@ pub fn sprite_pass(
                 ftoi(i.x) - 3 + off_x,
                 ftoi(i.y) - 3 + off_y,
             );
+            // :408-413 — inside the flicker gate: the weapon name of a weapon bonus (frame 0)
+            // at (Ftoi(x) - len*4/2, Ftoi(y) - 10) + offs.
+            if let Some(l) = labels {
+                if l.names_on_bonuses && i.frame == 0 {
+                    let name = &state.weapons[i.weapon as usize].name;
+                    draw_label(
+                        scr,
+                        pal,
+                        l.text,
+                        name,
+                        ftoi(i.x),
+                        off_x,
+                        ftoi(i.y) - 10 + off_y,
+                    );
+                }
+            }
         }
     }
 
@@ -309,9 +387,12 @@ pub fn sprite_pass(
         );
     }
 
-    // (9) wobjects — viewport.cpp:428-481 (name label :465-479 skipped). The
-    // sprite blit is UNCONDITIONAL on `w.shadow` (unlike the shadow pass).
-    for i in state.wobjects.iter() {
+    // (9) wobjects — viewport.cpp:428-481. The sprite blit is UNCONDITIONAL on
+    // `w.shadow` (unlike the shadow pass). Walked with each object's pool SLOT (the
+    // booby-trap label's `&*i - wobjects.arr`, :471); the same live-slot order as `iter()`.
+    let wobjects = (0..state.wobjects.capacity())
+        .filter_map(|slot| state.wobjects.get(slot).map(|o| (slot, o)));
+    for (slot, i) in wobjects {
         let w = &state.weapons[i.ty.expect("live wobject has a weapon type") as usize]; // :431
         if w.start_frame > -1 {
             // :432
@@ -333,6 +414,19 @@ pub fn sprite_pass(
             let pos_x = ftoi(i.pos.x) + off_x;
             let pos_y = ftoi(i.pos.y) + off_y;
             scr.set_pixel(pos_x, pos_y, i.cur_frame as u8, pal);
+        }
+        // :466-479 — the booby trap (weapon type index 34) shows a pseudo-random weapon name,
+        // `weapons[slot % weapons.size()]`, unless RemExp is on, while its cur_frame is 0.
+        if let Some(l) = labels {
+            if !state.wobject_consts.h_rem_exp
+                && i.ty == Some(34)
+                && l.names_on_bonuses
+                && i.cur_frame == 0
+            {
+                let name = &state.weapons[slot % state.weapons.len()].name;
+                let (x, y) = (ftoi(i.pos.x), ftoi(i.pos.y) - 10 + off_y);
+                draw_label(scr, pal, l.text, name, x, off_x, y);
+            }
         }
     }
 
@@ -425,8 +519,8 @@ pub fn sprite_pass(
         }
     }
 
-    // (12) aim crosshair — viewport.cpp:566-583 (change-name label :575-582
-    // skipped). Gated on the VIEWPORT'S OWN worm being visible.
+    // (12) aim crosshair — viewport.cpp:566-583. Gated on the VIEWPORT'S OWN worm
+    // being visible.
     let worm = &state.worms[vp.worm_idx];
     if worm.visible {
         // :566
@@ -440,6 +534,17 @@ pub fn sprite_pass(
         // :572 — small[44] when the sight is green, else small[43].
         let f = if worm.make_sight_green { 44 } else { 43 };
         blit_image(scr, pal, &state.small_sprites, f, temp_x, temp_y);
+        // :575-581 — while the CURRENT Change bit is held (`Worm::Pressed`, worm.hpp:185),
+        // the current weapon's name at (Ftoi(pos.x) - len*4/2 + 1, Ftoi(pos.y) - 10) + offs.
+        if let Some(l) = labels {
+            if worm.control_states.get(ControlState::CHANGE) {
+                if let Some(ty) = worm.weapons[worm.current_weapon as usize].ty {
+                    let name = &state.weapons[ty as usize].name;
+                    let (x, y) = (ftoi(worm.pos.x), ftoi(worm.pos.y) - 10 + off_y);
+                    draw_label(scr, pal, l.text, name, x, 1 + off_x, y);
+                }
+            }
+        }
     }
 
     // (13) bobjects (blood) — viewport.cpp:585-590. Encloses gate then SetPixel.
@@ -1163,6 +1268,338 @@ mod tests {
         let mut b = filled(64, 64);
         sprite_pass(&mut b, &state, &pal, &mut vp, 0, 0, &SpriteSet::default(), 0, 0, 0, &[]);
         assert!(b.pixels.iter().all(|&p| p == SENTINEL), "empty sprite scene draws nothing");
+    }
+
+    // ===================================================================
+    // the three DrawTextSmall labels (Step 4½e-1) — viewport.cpp:408-413, :466-479, :575-581
+    // ===================================================================
+
+    // Letter `f` of the label bank paints one pixel of index 100 + f at its (0,0), so a drawn
+    // label decodes back to (x, y, letter) and never collides with the solid sprite banks (1).
+    fn label_bank() -> SpriteSet {
+        let mut data = vec![0u8; 26 * 16];
+        for f in 0..26 {
+            data[f * 16] = 100 + f as u8;
+        }
+        SpriteSet {
+            width: 4,
+            height: 4,
+            count: 26,
+            data,
+        }
+    }
+
+    fn labels_drawn(b: &Bitmap) -> Vec<(i32, i32, char)> {
+        let mut out = Vec::new();
+        for y in 0..b.h {
+            for x in 0..b.w {
+                let idx = px(b, x, y) & 0xFF;
+                if px(b, x, y) >> 24 == 0xFF && (100..126).contains(&idx) {
+                    out.push((x, y, (b'A' + (idx - 100) as u8) as char));
+                }
+            }
+        }
+        out
+    }
+
+    // 40 weapons whose names are two capitals: weapon k is `A + k/26`, `A + k%26` ("AA", "AB", …).
+    fn named_weapons() -> Vec<Weapon> {
+        (0..40)
+            .map(|k: u8| Weapon {
+                name: format!("{}{}", (b'A' + k / 26) as char, (b'A' + k % 26) as char),
+                start_frame: -1,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn run_labels(state: &SimState, worm_idx: usize, labels: Option<&SmallLabels>) -> Bitmap {
+        let pal = ramp_pal();
+        let mut vp = vp_at(worm_idx);
+        let mut b = filled(64, 64);
+        sprite_pass_with(
+            &mut b,
+            state,
+            &pal,
+            &mut vp,
+            0,
+            0,
+            &SpriteSet::default(),
+            0,
+            0,
+            0,
+            &[0, 0],
+            labels,
+        );
+        b
+    }
+
+    // A weapon bonus (frame 0) of weapon 2 ("AC") at (30, 30), past the flicker time.
+    fn bonus_state() -> SimState {
+        let mut state = base_state(&[worm_init(0, 0, 0, false), worm_init(1, 0, 0, false)]);
+        state.weapons = named_weapons();
+        state.bonuses.spawn(sim::state::Bonus {
+            x: itof(30),
+            y: itof(30),
+            timer: BONUS_FLICKER_TIME + 1,
+            weapon: 2,
+            frame: 0,
+            vel_y: 0,
+        });
+        state
+    }
+
+    #[test]
+    fn the_bonus_label_draws_only_under_its_full_gate() {
+        let bank = label_bank();
+        let on = SmallLabels {
+            text: &bank,
+            names_on_bonuses: true,
+        };
+        let off = SmallLabels {
+            text: &bank,
+            names_on_bonuses: false,
+        };
+        // :408-413 — (Ftoi(x) - len*4/2, Ftoi(y) - 10) + offs: len 2 -> 30 - 4 = 26, y 20.
+        let state = bonus_state();
+        assert_eq!(
+            labels_drawn(&run_labels(&state, 1, Some(&on))),
+            vec![(26, 20, 'A'), (30, 20, 'C')]
+        );
+        assert!(
+            labels_drawn(&run_labels(&state, 1, Some(&off))).is_empty(),
+            "names off"
+        );
+        assert!(
+            labels_drawn(&run_labels(&state, 1, None)).is_empty(),
+            "no labels"
+        );
+        // A health bonus (frame 1) has no name.
+        let mut health = bonus_state();
+        health.bonuses = sim::pool::Pool::new(health.bonuses.capacity());
+        health.bonuses.spawn(sim::state::Bonus {
+            x: itof(30),
+            y: itof(30),
+            timer: BONUS_FLICKER_TIME + 1,
+            weapon: 2,
+            frame: 1,
+            vel_y: 0,
+        });
+        assert!(
+            labels_drawn(&run_labels(&health, 1, Some(&on))).is_empty(),
+            "frame 1"
+        );
+        // Inside the flicker gate: a flickered-out bonus (timer <= the flicker time and
+        // cycles & 3 != 0) draws neither its sprite nor its name; on a (cycles & 3) == 0 tick
+        // both come back.
+        let mut flicker = bonus_state();
+        flicker.bonuses = sim::pool::Pool::new(flicker.bonuses.capacity());
+        flicker.bonuses.spawn(sim::state::Bonus {
+            x: itof(30),
+            y: itof(30),
+            timer: BONUS_FLICKER_TIME,
+            weapon: 2,
+            frame: 0,
+            vel_y: 0,
+        });
+        flicker.cycles = 1;
+        let b = run_labels(&flicker, 1, Some(&on));
+        assert!(
+            b.pixels.iter().all(|&p| p == SENTINEL),
+            "flickered out: nothing"
+        );
+        flicker.cycles = 4;
+        assert_eq!(labels_drawn(&run_labels(&flicker, 1, Some(&on))).len(), 2);
+    }
+
+    // A live wobject at `slot` of type `ty` with `cur_frame`, the only live one, at (30, 30).
+    fn wobject_state(slot: usize, ty: i32, cur_frame: i32) -> SimState {
+        let mut state = base_state(&[worm_init(0, 0, 0, false), worm_init(1, 0, 0, false)]);
+        state.weapons = named_weapons();
+        state.wobject_consts.h_rem_exp = false;
+        for _ in 0..=slot {
+            state.wobjects.spawn(WObject {
+                pos: Vec2::new(itof(30), itof(30)),
+                ty: Some(ty),
+                cur_frame,
+                ..Default::default()
+            });
+        }
+        for s in 0..slot {
+            state.wobjects.free(s);
+        }
+        assert_eq!(state.wobjects.len(), 1);
+        state
+    }
+
+    #[test]
+    fn the_booby_trap_label_names_weapons_slot_mod_n() {
+        // :466-479 — type index 34, the name is weapons[slot % weapons.size()]: the live object
+        // in pool slot 3 shows weapon 3 ("AD"), not the first live object's (weapon 0, "AA").
+        let bank = label_bank();
+        let on = SmallLabels {
+            text: &bank,
+            names_on_bonuses: true,
+        };
+        let state = wobject_state(3, 34, 0);
+        assert_eq!(
+            labels_drawn(&run_labels(&state, 1, Some(&on))),
+            vec![(26, 20, 'A'), (30, 20, 'D')]
+        );
+        // slot % n wraps: slot 41 of 40 weapons is weapon 1 ("AB").
+        let state = wobject_state(41, 34, 0);
+        assert_eq!(
+            labels_drawn(&run_labels(&state, 1, Some(&on))),
+            vec![(26, 20, 'A'), (30, 20, 'B')]
+        );
+    }
+
+    #[test]
+    fn the_booby_trap_label_draws_only_under_its_full_gate() {
+        let bank = label_bank();
+        let on = SmallLabels {
+            text: &bank,
+            names_on_bonuses: true,
+        };
+        let off = SmallLabels {
+            text: &bank,
+            names_on_bonuses: false,
+        };
+        let drawn = |state: &SimState, l: Option<&SmallLabels>| {
+            labels_drawn(&run_labels(state, 1, l)).len()
+        };
+        assert_eq!(
+            drawn(&wobject_state(3, 34, 0), Some(&on)),
+            2,
+            "the full gate"
+        );
+        assert_eq!(drawn(&wobject_state(3, 34, 0), Some(&off)), 0, "names off");
+        assert_eq!(drawn(&wobject_state(3, 34, 0), None), 0, "no labels");
+        assert_eq!(
+            drawn(&wobject_state(3, 33, 0), Some(&on)),
+            0,
+            "not the booby trap"
+        );
+        assert_eq!(
+            drawn(&wobject_state(3, 34, 1), Some(&on)),
+            0,
+            "cur_frame != 0"
+        );
+        let mut rem_exp = wobject_state(3, 34, 0);
+        rem_exp.wobject_consts.h_rem_exp = true;
+        assert_eq!(drawn(&rem_exp, Some(&on)), 0, "RemExp on");
+    }
+
+    // Worm 0 visible at (30, 30) holding weapon 5 ("AF") in its current slot; worm 1 visible at
+    // (10, 50) holding weapon 7 ("AH").
+    fn change_state(change0: bool, change1: bool) -> SimState {
+        let mut state = base_state(&[worm_init(0, 30, 30, true), worm_init(1, 10, 50, true)]);
+        state.weapons = named_weapons();
+        for (wi, ty, change) in [(0usize, 5, change0), (1, 7, change1)] {
+            state.worms[wi].weapons[0] = WormWeapon {
+                ty: Some(ty),
+                ammo: 0,
+                delay_left: 0,
+                loading_left: 0,
+            };
+            state.worms[wi].current_weapon = 0;
+            state.worms[wi]
+                .control_states
+                .set(ControlState::CHANGE, change);
+        }
+        state
+    }
+
+    #[test]
+    fn the_change_label_uses_the_current_bit_of_the_viewports_own_worm() {
+        let bank = label_bank();
+        let on = SmallLabels {
+            text: &bank,
+            names_on_bonuses: true,
+        };
+        // :575-581 — (Ftoi(pos.x) - len*4/2 + 1, Ftoi(pos.y) - 10) + offs: 30 - 4 + 1 = 27, 20.
+        assert_eq!(
+            labels_drawn(&run_labels(&change_state(true, false), 0, Some(&on))),
+            vec![(27, 20, 'A'), (31, 20, 'F')]
+        );
+        // Not gated on names_on_bonuses.
+        let off = SmallLabels {
+            text: &bank,
+            names_on_bonuses: false,
+        };
+        assert_eq!(
+            labels_drawn(&run_labels(&change_state(true, false), 0, Some(&off))).len(),
+            2
+        );
+        // `Worm::Pressed` reads the CURRENT control bit only (the Rust worm carries no previous
+        // state): clear draws nothing.
+        assert!(labels_drawn(&run_labels(&change_state(false, false), 0, Some(&on))).is_empty());
+        // Another worm holding Change draws nothing in this viewport; its own viewport draws it.
+        assert!(labels_drawn(&run_labels(&change_state(false, true), 0, Some(&on))).is_empty());
+        assert_eq!(
+            labels_drawn(&run_labels(&change_state(false, true), 1, Some(&on))),
+            vec![(7, 40, 'A'), (11, 40, 'H')]
+        );
+        // The label sits inside the visible-worm crosshair block.
+        let mut hidden = change_state(true, false);
+        hidden.worms[0].visible = false;
+        assert!(labels_drawn(&run_labels(&hidden, 0, Some(&on))).is_empty());
+        assert!(labels_drawn(&run_labels(&change_state(true, false), 0, None)).is_empty());
+    }
+
+    #[test]
+    fn no_labels_is_the_pre_4_5e1_sprite_pass() {
+        // Every label's gate is open; `None` (and `sprite_pass`) must equal the old pass, and
+        // `Some` must differ from it only at label pixels.
+        let bank = label_bank();
+        let on = SmallLabels {
+            text: &bank,
+            names_on_bonuses: true,
+        };
+        let mut state = change_state(true, false);
+        state.bonuses.spawn(sim::state::Bonus {
+            x: itof(50),
+            y: itof(55),
+            timer: BONUS_FLICKER_TIME + 1,
+            weapon: 2,
+            frame: 0,
+            vel_y: 0,
+        });
+        state.wobjects.spawn(WObject {
+            pos: Vec2::new(itof(15), itof(20)),
+            ty: Some(34),
+            cur_frame: 0,
+            ..Default::default()
+        });
+        let pal = ramp_pal();
+        let mut vp = vp_at(0);
+        let mut old = filled(64, 64);
+        sprite_pass(
+            &mut old,
+            &state,
+            &pal,
+            &mut vp,
+            0,
+            0,
+            &SpriteSet::default(),
+            0,
+            0,
+            0,
+            &[0, 0],
+        );
+        let none = run_labels(&state, 0, None);
+        assert_eq!(none, old, "None == sprite_pass");
+        let some = run_labels(&state, 0, Some(&on));
+        assert_eq!(labels_drawn(&some).len(), 6, "all three labels drawn");
+        for (i, (&a, &b)) in old.pixels.iter().zip(some.pixels.iter()).enumerate() {
+            if a != b {
+                let idx = b & 0xFF;
+                assert!(
+                    (100..126).contains(&idx),
+                    "pixel {i} differs only by a label"
+                );
+            }
+        }
     }
 
     // ---- the LOAD-BEARING two-pass ordering: shadow pass COMPLETE, then sprites ----

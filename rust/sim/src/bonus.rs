@@ -103,7 +103,6 @@ pub fn create_bonus(
     bonus_rand_timer: &[[i32; 2]; 2],
     weap_table: &[i32],
     game_mode: u32,
-    settings_health: i32,
     rand: &mut Rand,
 ) {
     // :219 `if (bonuses.Size() >= settings->max_bonuses) return;` — no rand.
@@ -192,7 +191,6 @@ pub fn create_bonus(
                 sobject_types,
                 blood,
                 game_mode,
-                settings_health,
                 rand,
             );
             return;
@@ -260,7 +258,6 @@ pub fn bonus_process(
     bonus_bounce_div: i32,
     bonus_s_objects: &[i32; 2],
     game_mode: u32,
-    settings_health: i32,
     rand: &mut Rand,
 ) -> BonusOutcome {
     // :9 y += vel_y.
@@ -316,7 +313,6 @@ pub fn bonus_process(
             sobject_types,
             blood,
             game_mode,
-            settings_health,
             rand,
         );
         // :31-33 free the bonus iff used.
@@ -359,7 +355,6 @@ pub fn process_bonuses(
     bonus_bounce_div: i32,
     bonus_s_objects: &[i32; 2],
     game_mode: u32,
-    settings_health: i32,
     rand: &mut Rand,
 ) {
     for slot in 0..bonuses.capacity() {
@@ -390,7 +385,6 @@ pub fn process_bonuses(
             bonus_bounce_div,
             bonus_s_objects,
             game_mode,
-            settings_health,
             rand,
         ) {
             BonusOutcome::Keep => {
@@ -406,24 +400,24 @@ pub fn process_bonuses(
 /// Port of `Game::DoHealingDirect` (`game.cpp:555-565`) — RNG-free, both arms.
 ///
 /// `w.health += amount`, then either (`kGmScalesOfJustice`, `game_mode == 3`)
-/// convert every whole `settings_health` of overflow into an extra life
-/// (`while health > settings_health { lives += 1; health -= settings_health }`,
-/// `:558-561`) OR (every other mode, the `else` arm) clamp to `settings_health`
-/// (`:563`). Slice 6 T5 made the Scales arm LIVE (it is reached from the
+/// convert every whole `max_health` of overflow into an extra life
+/// (`while health > max_health { lives += 1; health -= max_health }`, `:558-561`)
+/// OR (every other mode, the `else` arm) clamp to `max_health` (`:563`). The max is
+/// the HEALED worm's own (`w.settings->health`, 4½f-1). Slice 6 T5 made the Scales arm LIVE (it is reached from the
 /// `do_damage` redistribution and, in a Scales game, the bonus-pickup heal); for
 /// KillEmAll (`game_mode 0`) the clamp arm is identical to the prior port, so
 /// KillEmAll priors stay byte-identical. A negative `amount` is possible in
 /// general but the callers only ever pass a non-negative heal.
-pub fn do_healing_direct(w: &mut WormState, amount: i32, game_mode: u32, settings_health: i32) {
+pub fn do_healing_direct(w: &mut WormState, amount: i32, game_mode: u32) {
     w.health += amount;
     // kGmScalesOfJustice == 3 (settings.hpp:51). Overflow health rolls into lives.
     if game_mode == 3 {
-        while w.health > settings_health {
+        while w.health > w.max_health {
             w.lives += 1;
-            w.health -= settings_health;
+            w.health -= w.max_health;
         }
     } else {
-        w.health = w.health.min(settings_health);
+        w.health = w.health.min(w.max_health);
     }
 }
 
@@ -438,10 +432,10 @@ pub fn do_healing_direct(w: &mut WormState, amount: i32, game_mode: u32, setting
 /// `ipos = Ftoi(pos)` is computed once (`:285`); `pos` is not moved by the pickup,
 /// so the C++ single evaluation is preserved. Per in-range bonus, in source order:
 ///
-/// * **frame == 1 (health)** (`:291-297`): iff `health < settings_health`, `Free`
-///   the bonus, then draw **one** `rand(BonusHealthVar)` and
-///   `DoHealingDirect((rand + BonusMinHealth) * settings_health / 100)`. When
-///   `health >= settings_health` there is **no free and no draw**. `health` is read
+/// * **frame == 1 (health)** (`:291-297`): iff `health < max_health` (the picking
+///   worm's own), `Free` the bonus, then draw **one** `rand(BonusHealthVar)` and
+///   `DoHealing((rand + BonusMinHealth) * max_health / 100)`. When
+///   `health >= max_health` there is **no free and no draw**. `health` is read
 ///   fresh each iteration, so a heal from an earlier bonus in the same walk feeds
 ///   the next gate (see the running-health test).
 /// * **frame == 0 (weapon)** (`:298-319`): **always** draw `rand(BonusExplodeRisk)`.
@@ -476,7 +470,6 @@ pub fn worm_pickup_bonuses(
     textures: &[Texture],
     blood: i32,
     game_mode: u32,
-    settings_health: i32,
     bonus_health_var: i32,
     bonus_min_health: i32,
     bonus_explode_risk: i32,
@@ -506,17 +499,20 @@ pub fn worm_pickup_bonuses(
 
         if bonus.frame == 1 {
             // :291-297 health bonus.
-            if worms[wi].health < settings_health {
+            // The picking worm's own max (`settings->health`, 4½f-1).
+            let max_health = worms[wi].max_health;
+            if worms[wi].health < max_health {
                 // :293 Free BEFORE the heal draw (Free draws no rand).
                 bonuses.free(slot);
                 // :295 the ONLY draw: rand(BonusHealthVar). The heal amount is
-                // integer `(rand + BonusMinHealth) * settings_health / 100`.
+                // integer `(rand + BonusMinHealth) * max_health / 100`.
                 let amount = (rand.bound(bonus_health_var as u32) as i32 + bonus_min_health)
-                    * settings_health
+                    * max_health
                     / 100;
-                do_healing_direct(&mut worms[wi], amount, game_mode, settings_health);
+                // worm.cpp:295 calls Game::DoHealing (Scales redistributes, 4½a-1).
+                crate::state::do_healing(worms, wi, amount, game_mode);
             }
-            // health >= settings_health: no free, NO rand.
+            // health >= max_health: no free, NO rand.
         } else if bonus.frame == 0 {
             // :298-319 weapon bonus. rand(BonusExplodeRisk) is ALWAYS drawn.
             if rand.bound(bonus_explode_risk as u32) as i32 > 1 {
@@ -563,7 +559,6 @@ pub fn worm_pickup_bonuses(
                     sobject_types,
                     blood,
                     game_mode,
-                    settings_health,
                     rand,
                 );
             }
@@ -690,7 +685,6 @@ mod tests {
             &timer,
             weap_table,
             0,
-            100,
             rand,
         );
         // Stash the flash sobject count via the pool the caller does NOT see; assert
@@ -873,7 +867,6 @@ mod tests {
             &[[100, 50], [200, 70]],
             &vec![0i32; 5],
             0,
-            100,
             &mut rand,
         );
 
@@ -921,7 +914,6 @@ mod tests {
             &[[100, 50], [200, 70]],
             &vec![0i32; 5],
             0,
-            100,
             &mut rand,
         );
 
@@ -1107,7 +1099,6 @@ mod tests {
             div,
             &[7, 7],
             0,
-            100,
             rand,
         );
         (outcome, sobjects)
@@ -1296,7 +1287,6 @@ mod tests {
             3,
             &[7, 7],
             0,
-            100,
             &mut rand,
         );
 
@@ -1312,9 +1302,10 @@ mod tests {
     // ---- Slice 5'b T8: bonus pickup (worm.cpp:287-322) ----------------------
     // The visible-worm pickup block. RNG contract (verified against :287-322):
     //   for each bonus in pool (slot) order, iff the 11x11 AABB gate passes:
-    //     frame == 1 (health): iff health < settings_health -> Free + ONE
-    //         rand(BonusHealthVar); DoHealingDirect((rand + BonusMinHealth) *
-    //         settings_health / 100). health >= settings_health -> NO free, NO rand.
+    //     frame == 1 (health): iff health < max_health -> Free + ONE
+    //         rand(BonusHealthVar); DoHealing((rand + BonusMinHealth) *
+    //         max_health / 100). health >= max_health -> NO free, NO rand.
+    //         `max_health` is the PICKING worm's own (settings->health, 4½f-1).
     //     frame == 0 (weapon): ALWAYS rand(BonusExplodeRisk).
     //         > 1  -> reload (ww.type/ammo unless HBonusReloadOnly, fire_cone=0),
     //                 Free, loading_left=0, no further rand.
@@ -1385,6 +1376,8 @@ mod tests {
 
     // Drive `worm_pickup_bonuses` with the common test plumbing. Returns the number
     // of SObjects the booby branch spawned (0 for health/reload/out-of-range).
+    // `max_health` is written into the picking worm (`worms[wi].max_health`, the
+    // C++ `settings->health` the pickup reads, 4½f-1) before the walk.
     #[allow(clippy::too_many_arguments)]
     fn run_pickup(
         worms: &mut [WormState],
@@ -1392,7 +1385,7 @@ mod tests {
         bonuses: &mut Pool<Bonus>,
         rand: &mut Rand,
         weps: &[Weapon],
-        settings_health: i32,
+        max_health: i32,
         health_var: i32,
         min_health: i32,
         explode_risk: i32,
@@ -1403,6 +1396,7 @@ mod tests {
         let sts = booby_sobject_types();
         let (mut wobjects, mut nobjects, mut sobjects) = empty_pools();
         let mut level = clear_level(300, 300);
+        worms[wi].max_health = max_health;
         worm_pickup_bonuses(
             worms,
             wi,
@@ -1419,7 +1413,6 @@ mod tests {
             &[],
             0,
             0,
-            settings_health,
             health_var,
             min_health,
             explode_risk,
@@ -1450,11 +1443,11 @@ mod tests {
         assert_eq!(spawned, 0, "no sobject");
     }
 
-    // ---- (b) health bonus, health < settings_health: ONE draw, heal, free ---
+    // ---- (b) health bonus, health < max_health: ONE draw, heal, free ---
 
     #[test]
     fn health_bonus_below_max_heals_and_frees_with_one_draw() {
-        let settings_health = 100;
+        let max_health = 100;
         let health_var = 20;
         let min_health = 30;
         let start = 10;
@@ -1464,15 +1457,15 @@ mod tests {
         let mut rand = seeded();
 
         // Reference: exactly one rand(BonusHealthVar); amount is
-        // (rand + BonusMinHealth) * settings_health / 100 (truncating /).
+        // (rand + BonusMinHealth) * max_health / 100 (truncating /).
         let mut refr = seeded();
         let ex_amount =
-            (refr.bound(health_var as u32) as i32 + min_health) * settings_health / 100;
-        let ex_health = (start + ex_amount).min(settings_health);
+            (refr.bound(health_var as u32) as i32 + min_health) * max_health / 100;
+        let ex_health = (start + ex_amount).min(max_health);
 
         let before = rand.draws();
         run_pickup(
-            &mut worms, 0, &mut bonuses, &mut rand, &weapons(5), settings_health, health_var,
+            &mut worms, 0, &mut bonuses, &mut rand, &weapons(5), max_health, health_var,
             min_health, 1000, false,
         );
 
@@ -1482,25 +1475,25 @@ mod tests {
         assert_eq!(bonuses.len(), 0, "the health bonus was freed");
     }
 
-    // ---- (c) health bonus, health >= settings_health: NO free, NO rand ------
+    // ---- (c) health bonus, health >= max_health: NO free, NO rand ------
 
     #[test]
     fn health_bonus_at_full_health_draws_nothing_and_keeps_bonus() {
-        let settings_health = 100;
-        let mut worms = vec![pickup_worm(100, 100, settings_health)];
+        let max_health = 100;
+        let mut worms = vec![pickup_worm(100, 100, max_health)];
         let mut bonuses: Pool<Bonus> = Pool::new(99);
         bonuses.spawn(bonus_at(100, 100, 1, 0));
         let mut rand = seeded();
 
         let before = rand.draws();
         run_pickup(
-            &mut worms, 0, &mut bonuses, &mut rand, &weapons(5), settings_health, 20, 30, 1000,
+            &mut worms, 0, &mut bonuses, &mut rand, &weapons(5), max_health, 20, 30, 1000,
             false,
         );
 
-        assert_eq!(rand.draws(), before, "health >= settings_health: NO rand");
+        assert_eq!(rand.draws(), before, "health >= max_health: NO rand");
         assert_eq!(bonuses.len(), 1, "full-health worm does NOT free the bonus");
-        assert_eq!(worms[0].health, settings_health, "health unchanged");
+        assert_eq!(worms[0].health, max_health, "health unchanged");
     }
 
     // ---- (d) weapon bonus, rand(BonusExplodeRisk) > 1: reload, ONE draw -----
@@ -1598,7 +1591,7 @@ mod tests {
 
     #[test]
     fn multiple_health_bonuses_iterate_in_slot_order() {
-        let settings_health = 100;
+        let max_health = 100;
         let health_var = 20;
         let min_health = 5;
         let mut worms = vec![pickup_worm(100, 100, 10)];
@@ -1610,14 +1603,14 @@ mod tests {
         // Reference: slot 0 heals on the running health, then slot 1 heals on the
         // updated health — two rand(BonusHealthVar) in slot order.
         let mut refr = seeded();
-        let a0 = (refr.bound(health_var as u32) as i32 + min_health) * settings_health / 100;
-        let h1 = (10 + a0).min(settings_health);
-        let a1 = (refr.bound(health_var as u32) as i32 + min_health) * settings_health / 100;
-        let h2 = (h1 + a1).min(settings_health);
+        let a0 = (refr.bound(health_var as u32) as i32 + min_health) * max_health / 100;
+        let h1 = (10 + a0).min(max_health);
+        let a1 = (refr.bound(health_var as u32) as i32 + min_health) * max_health / 100;
+        let h2 = (h1 + a1).min(max_health);
 
         let before = rand.draws();
         run_pickup(
-            &mut worms, 0, &mut bonuses, &mut rand, &weapons(5), settings_health, health_var,
+            &mut worms, 0, &mut bonuses, &mut rand, &weapons(5), max_health, health_var,
             min_health, 1000, false,
         );
 
@@ -1626,30 +1619,30 @@ mod tests {
         assert_eq!(bonuses.len(), 0, "both bonuses freed");
     }
 
-    // ---- (g) health bonus heal amount TRUNCATES when settings_health % 100 != 0
+    // ---- (g) health bonus heal amount TRUNCATES when max_health % 100 != 0
     // (deferral #4, worm.cpp:295) --------------------------------------------
     //
-    // Every other pickup test above uses `settings_health = 100`, where
+    // Every other pickup test above uses `max_health = 100`, where
     // `x * 100 / 100 == x` for any `x` — the identity hides the fact that
     // `DoHealingDirect`'s amount is computed with a TRUNCATING integer divide,
-    // `(rand(BonusHealthVar) + BonusMinHealth) * settings_health / 100`
-    // (`worm.cpp:295`). This test uses `settings_health = 150` and hand-picks
+    // `(rand(BonusHealthVar) + BonusMinHealth) * max_health / 100`
+    // (`worm.cpp:295`). This test uses `max_health = 150` and hand-picks
     // `min_health` so the numerator is odd, forcing a genuine non-integer
     // quotient that a floating/rounded divide would resolve differently.
     //
     // Hand-derivation (SEED = 0x5151, the module's fixed seed):
     //   - first draw: `rand.bound(health_var=20)` == 2 (verified directly against
     //     the same seeded `Rand` below, same as every other test in this module).
-    //   - amount = (rand=2 + min_health=31) * settings_health=150 / 100
+    //   - amount = (rand=2 + min_health=31) * max_health=150 / 100
     //            = 33 * 150 / 100 = 4950 / 100
     //            = 49 remainder 50           <- truncating integer divide: 49
     //     A floating/rounded divide gives 4950 / 100 = 49.5, which rounds to 50
     //     (both "round half up" and "round half to even" land on 50, since 50 is
     //     even) — one off from the truncated 49, so this assertion is non-vacuous.
-    //   - ex_health = (start=10 + amount=49).min(settings_health=150) = 59.
+    //   - ex_health = (start=10 + amount=49).min(max_health=150) = 59.
     #[test]
-    fn health_bonus_heal_amount_truncates_when_settings_health_not_multiple_of_100() {
-        let settings_health = 150;
+    fn health_bonus_heal_amount_truncates_when_max_health_not_multiple_of_100() {
+        let max_health = 150;
         let health_var = 20;
         let min_health = 31; // rand(2) + 31 = 33, odd -> *150/100 truncates.
         let start = 10;
@@ -1663,7 +1656,7 @@ mod tests {
         assert_eq!(refr.bound(health_var as u32), 2, "seed precondition for the hand-derivation");
 
         run_pickup(
-            &mut worms, 0, &mut bonuses, &mut rand, &weapons(5), settings_health, health_var,
+            &mut worms, 0, &mut bonuses, &mut rand, &weapons(5), max_health, health_var,
             min_health, 1000, false,
         );
 
@@ -1672,5 +1665,38 @@ mod tests {
         // (2 + 31) * 150 / 100 = 4950 / 100 = 49 (truncated, NOT 50 = rounded).
         assert_eq!(worms[0].health, 59, "start=10 + truncated amount=49, clamped to 150");
         assert_eq!(bonuses.len(), 0, "the health bonus was freed");
+    }
+
+    // ---- 4½f-1: the heal amount scales by the PICKING worm's own max ---------
+    // worm.cpp:292-296 read `settings->health` of the worm that picks the bonus (T0
+    // P7: P2 at max 300 gained +69, +72, +78, +90 — multiples of 3 above 60 — and P1
+    // at max 50 gained +15, +8). The other worm's max plays no part.
+    #[test]
+    fn health_bonus_scales_by_the_picking_worms_own_max() {
+        let (health_var, min_health) = (51, 10); // the openliero TC (tc.cfg:61-62)
+        let mut refr = seeded();
+        let r = refr.bound(health_var as u32) as i32;
+        for (max, other_max) in [(50, 300), (300, 50)] {
+            let mut worms = vec![pickup_worm(100, 100, 10), pickup_worm(200, 200, 10)];
+            worms[1].max_health = other_max;
+            let mut bonuses: Pool<Bonus> = Pool::new(99);
+            bonuses.spawn(bonus_at(100, 100, 1, 0));
+            let mut rand = seeded();
+            run_pickup(
+                &mut worms, 0, &mut bonuses, &mut rand, &weapons(5), max, health_var, min_health,
+                1000, false,
+            );
+            let amount = (r + min_health) * max / 100;
+            assert_eq!(worms[0].health, (10 + amount).min(max), "max {max}");
+            assert_eq!(
+                worms[1].health, 10,
+                "the other worm is untouched (Kill'em All)"
+            );
+        }
+        // P7's bands: `(rand(51) + 10) * max / 100` is 30..=180 (a multiple of 3) for
+        // 300 and 5..=30 for 50, never the 10..=60 a shared 100 would give.
+        let (a300, a50) = ((r + min_health) * 300 / 100, (r + min_health) * 50 / 100);
+        assert!((30..=180).contains(&a300) && a300 % 3 == 0, "{a300}");
+        assert!((5..=30).contains(&a50), "{a50}");
     }
 }

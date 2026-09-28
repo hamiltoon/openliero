@@ -1,0 +1,28 @@
+# Step 4½d G1 nav_wrap: Movement wraps over hidden/unselectable items; MoveTo clamps and skips
+# forward; IndexFromId -1; bottom_item 0 before the first move; disabled / x-override draws.
+menu 40 20 15 0 0
+item 10 48 7 1 1 ALPHA
+item 11 48 7 1 1 BETA
+space
+item 12 48 7 0 1 HIDDEN
+item 13 48 7 1 0 GREY
+item 14 48 7 1 1 OMEGA
+draw 0 -1 0
+first_visible
+move 1
+move 1
+move 1
+move 1
+move -1
+move -1
+move -1
+move_to 99
+move_to -5
+move_to 2
+move_to_id 13
+move_to_id 12
+move_to_id 77
+draw 0 -1 0
+draw 1 -1 1
+draw 1 -1 0
+draw 0 60 0

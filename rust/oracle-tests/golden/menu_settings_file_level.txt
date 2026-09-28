@@ -1,0 +1,9 @@
+# oracle_dump_menu rust/oracle-tests/golden/menu_settings_file_level_script.txt — the REAL C++ Menu / behaviors / SettingsMenu (Step 4½d design §6.1)
+# <n> <op> <sel> <top> <bottom> <vis> <shown> <prefix> <vals> <bound> <sounds> <ret> <push> <hash>
+0 update_items 0 0 13 13 1000011001111111111 - Kill'em_All|10:00|10:00|00:30|20|15|"water_stage"|504|350|9999%|.|99|ON|OFF|0%|ON|ON|liero|. - - - 0 -
+1 first_visible 0 0 13 13 1000011001111111111 - Kill'em_All|10:00|10:00|00:30|20|15|"water_stage"|504|350|9999%|.|99|ON|OFF|0%|ON|ON|liero|. - - - 0 -
+2 draw 0 0 13 13 1000011001111111111 - Kill'em_All|10:00|10:00|00:30|20|15|"water_stage"|504|350|9999%|.|99|ON|OFF|0%|ON|ON|liero|. - - - 0 9dadf6f261f3915b
+3 draw 0 0 13 13 1000011001111111111 - Kill'em_All|10:00|10:00|00:30|20|15|"water_stage"|504|350|9999%|.|99|ON|OFF|0%|ON|ON|liero|. - - - 0 f86acb872d3cde5f
+4 move_to_id 16 0 13 13 1000011001111111111 - Kill'em_All|10:00|10:00|00:30|20|15|"water_stage"|504|350|9999%|.|99|ON|OFF|0%|ON|ON|liero|. - - - 0 -
+5 right 16 0 13 13 1000011001111111111 - Kill'em_All|10:00|10:00|00:30|20|15|"water_stage"|504|350|9999%|.|99|ON|OFF|0%|ON|OFF|liero|. - 25 0 0 -
+6 draw 16 0 13 13 1000011001111111111 - Kill'em_All|10:00|10:00|00:30|20|15|"water_stage"|504|350|9999%|.|99|ON|OFF|0%|ON|OFF|liero|. - - - 0 11c117b07be6e41b

@@ -183,9 +183,11 @@ mod tests {
             first_blood_colour: 0,
             bobj_gravity: 0,
             laser_weapon: 0,
-            settings_health: 100,
+            wobject_consts: crate::weapon::WObjectConsts::default(),
             game_mode: 0,
+            ai_params: [[0; 7]; 2],
             time_to_lose: 600,
+            shadow: false,
             last_killed_idx: -1,
             got_changed: false,
             settings_max_bonuses: 0,
@@ -267,10 +269,14 @@ mod tests {
             ready: true,
             make_sight_green: false,
             steerable_count: 0,
+            steerable_sum_x: 0,
+            steerable_sum_y: 0,
             current_frame: 13,
             animate: false,
             hotspot_x: 0,
             hotspot_y: 0,
+            reacts: [0; 4],
+            max_health: 100,
         }
     }
 

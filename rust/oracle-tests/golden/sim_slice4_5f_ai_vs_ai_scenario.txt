@@ -1,0 +1,23 @@
+# Step 4½f-1 T6 — G-AI `ai_vs_ai` (504x350): two CPUs, BOT WEAPONS RANDOM through one weapsel frame, Kill'em All lives 2, to game over; until the game over + 200. Read by BOTH
+# the C++ dumper (oracle_dump_sim_physics: `generate` = the REAL
+# Level::GenerateFromSettings over its own Rand seeded 45103; `settings` = the real
+# Settings::FromToml + the LocalController start state; `ai` = a REAL DumbLieroAI per
+# controller-1 player, run in LocalController's order before each tick) and the Rust gate
+# (sim_slice4_5f_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5f1_sim -- gen ai_vs_ai 153 4503 <this file>
+# level_seed 45103 (fixed per case); seed = the game seed.
+# LEDGER (Rust, driven state): game over at tick 1417, over for 201 rows
+# LEDGER ai: runs 1617 per worm; fire draws 1995; fallback 12:300; change 307; rope-attached 0; reacts presses L 59 R 190; max_dist arms explo 2209 speed 1025 floored 956; deaths 1 2; respawns 1 1
+# LEDGER detail: CPU worms w0 w1; walk 1628; fire in range 983; min real_dist (both visible) 61; CPU weapons held BOUNCY MINE, HELLRAIDER, BLASTER, LASER, GRASSHOPPER, NAPALM, MINI NUKE; tick-1 rand.last 2af09813 2af09813; the two AI streams first differ at tick 198; tick-0 rng a53230d9
+# LEDGER detail: w0 picks BOUNCY MINE (tte 12000, speed 0 floored 90), MINI NUKE (tte 70, explo 94), GRENADE (tte 115, explo 143), CANNON (tte 0, speed 130), GRASSHOPPER (tte 130, explo 153)
+# LEDGER detail: w1 picks HELLRAIDER (tte 150, explo 161), BLASTER (tte 0, speed 50 floored 90), ZIMM (tte 1000, speed 300), GRASSHOPPER (tte 130, explo 153), LASER (tte 0, speed 100)
+# LEDGER detail: deaths at t917/w1 by w1, t1105/w0 by w0, t1417/w1 by w1
+# LEDGER detail: respawns at t1105/w1 at 100, t1298/w0 at 100
+# Inputs: per tick Rand(input_seed).next_u32() & 0x7f, worm 0 then worm 1 (zero pairs
+# omitted); a CPU's and an idle human's word is 0.
+seed 153
+generate 45103
+ticks 1617
+settings sim_slice4_5f_ai_vs_ai_setup.cfg
+ai
+weapsel 0 0 0

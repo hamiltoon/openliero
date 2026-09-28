@@ -24,7 +24,7 @@
 //!    blood-trail arm is still deferred (T3).
 //! 3. **wobjects / nobjects blow-away loops** (`:118-186`): nudge `vel` of pooled
 //!    objects with `affect_by_explosions`; **draw NO rand**. The
-//!    `chain_explosion -> BlowUpObject` recursion is **deferred (O9)**.
+//!    `chain_explosion -> BlowUpObject` recursion is LIVE since 4½c-0 T6.
 //! 4. **Dirt-throw** (`:188-205`): `kWidth = detect_range/2`; the
 //!    `Rect(x-kWidth, y-kWidth, x+kWidth+1, y+kWidth+1)` intersected with the
 //!    level bounds is scanned **row-major (`y` outer, `x` inner)**. Per cell the
@@ -35,7 +35,7 @@
 //!    `rand(20000)`, `rand(20000)`).
 //! 5. **Crater** (`:209-210`): iff `dirt_effect >= 0`, [`draw_dirt_effect`] carves
 //!    the level and draws `rand(r_frame)` — the LAST cluster draw. `CorrectShadow`
-//!    is omitted (`settings->shadow = false`, O4).
+//!    follows behind `SimState.shadow` (4½a-1; draws no rand).
 //! 6. **Bonus chain-loop** (`:217-227`): LIVE (Slice 6 T3). Each bonus inside the
 //!    `±detect_range` box is freed and replaced by a recursive
 //!    `sobject_types[0].Create` (the booby) at its `Ftoi(pos)`; the booby's own
@@ -101,7 +101,7 @@ pub enum SObjectOutcome {
 /// * worm-in-range **damage arm** (`w.health > 0`) — LIVE (Slice 5b): DoDamage +
 ///   the `rand(128)` blood fan (`nobject_types[6].Create2`) + the `rand(3)`
 ///   hit-sound gate. ScalesOfJustice redistribution stays mode-gated/deferred;
-/// * **chain_explosion** recursion in the wobjects loop — `debug_assert!`ed off (O9);
+/// * **chain_explosion** recursion in the wobjects loop — LIVE (4½c-0 T6);
 /// * the **bonus chain-loop** (`:217-227`) — LIVE (Slice 6 T3): each in-range
 ///   bonus is freed and replaced by a recursive `sobject_types[0].Create`
 ///   (depth-first, terminating); rand-neutral when no bonus sits in range.
@@ -125,7 +125,6 @@ pub fn sobject_create(
     sobject_types: &[SObjectType],
     blood: i32,
     game_mode: u32,
-    settings_health: i32,
     rand: &mut Rand,
 ) {
     // :19 NewObjectReuse + :35-39 field init. Allocated first; the field writes
@@ -234,7 +233,7 @@ pub fn sobject_create(
                 if worms[w_idx].health > 0 {
                     // :93 DoDamage(w, z, owner_idx) — RNG-free wound; the Scales
                     // (game_mode 3) redistribution heals the other worm(s) (T5).
-                    do_damage(worms, w_idx, z, owner_idx, game_mode, settings_health);
+                    do_damage(worms, w_idx, z, owner_idx, game_mode);
                     // :94 DamageDealt stat — omitted (no sim/RNG).
 
                     // :96 kBloodAmount = settings.blood * power_sum / 100 (trunc).
@@ -279,43 +278,82 @@ pub fn sobject_create(
             }
         }
 
-        // --- 7b. wobjects blow-away loop (:118-153). Nudges `vel` of wobjects
-        // with `affect_by_explosions`; draws NO rand. chain_explosion deferred (O9).
+        // --- 7b. wobjects blow-away loop (:118-153). Nudges `vel` of wobjects with
+        // `affect_by_explosions`; draws NO rand. A `chain_explosion` wobject in the box is
+        // blown up on the spot (:148-150, LIVE since 4½c-0 T6): `BlowUpObject(game,
+        // owner_idx)` frees it FIRST (weapon.cpp:87), then explodes it at its post-nudge
+        // pos/vel with THIS blast's owner as the cause — a recursion through `blow_up` ->
+        // `sobject_create`. The index walk, restarted at each recursion level, is
+        // order-identical to C++'s `wobjects.All()` Range (`Next()` skips freed slots, the
+        // walk only advances) — the bonus chain-loop below has the same shape — and every
+        // chained wobject is freed before its own blast scans, so the recursion ends.
         let obj_blow_away = ty.blow_away / 3;
-        for i in wobjects.iter_mut() {
-            let weapon = &weapons[i
-                .ty
-                .expect("live wobject must carry a resolved weapon type")
-                as usize];
-            if weapon.affect_by_explosions {
+        for slot in 0..wobjects.capacity() {
+            let chained = {
+                let Some(i) = wobjects.get_mut(slot) else {
+                    continue;
+                };
+                let wid = i
+                    .ty
+                    .expect("live wobject must carry a resolved weapon type");
+                let weapon = &weapons[wid as usize];
+                if !weapon.affect_by_explosions {
+                    continue;
+                }
                 let ipx = ftoi(i.pos.x);
                 let ipy = ftoi(i.pos.y);
-                if ipx < x + dr && ipx > x - dr && ipy < y + dr && ipy > y - dr {
-                    // x nudge: note the `else if delta < 0` — delta == 0 does
-                    // nothing (distinct from the worm loop's `if/else`).
-                    let delta = ipx - x;
-                    let power = dr - delta.abs();
-                    if power > 0 {
-                        if delta > 0 {
-                            i.vel.x = i.vel.x.wrapping_add(obj_blow_away.wrapping_mul(power));
-                        } else if delta < 0 {
-                            i.vel.x = i.vel.x.wrapping_sub(obj_blow_away.wrapping_mul(power));
-                        }
-                    }
-                    let delta = ipy - y;
-                    let power = dr - delta.abs();
-                    if power > 0 {
-                        if delta > 0 {
-                            i.vel.y = i.vel.y.wrapping_add(obj_blow_away.wrapping_mul(power));
-                        } else if delta < 0 {
-                            i.vel.y = i.vel.y.wrapping_sub(obj_blow_away.wrapping_mul(power));
-                        }
-                    }
-                    debug_assert!(
-                        !weapon.chain_explosion,
-                        "chain_explosion -> BlowUpObject recursion deferred (O9)"
-                    );
+                if !(ipx < x + dr && ipx > x - dr && ipy < y + dr && ipy > y - dr) {
+                    continue;
                 }
+                // x nudge: note the `else if delta < 0` — delta == 0 does
+                // nothing (distinct from the worm loop's `if/else`).
+                let delta = ipx - x;
+                let power = dr - delta.abs();
+                if power > 0 {
+                    if delta > 0 {
+                        i.vel.x = i.vel.x.wrapping_add(obj_blow_away.wrapping_mul(power));
+                    } else if delta < 0 {
+                        i.vel.x = i.vel.x.wrapping_sub(obj_blow_away.wrapping_mul(power));
+                    }
+                }
+                let delta = ipy - y;
+                let power = dr - delta.abs();
+                if power > 0 {
+                    if delta > 0 {
+                        i.vel.y = i.vel.y.wrapping_add(obj_blow_away.wrapping_mul(power));
+                    } else if delta < 0 {
+                        i.vel.y = i.vel.y.wrapping_sub(obj_blow_away.wrapping_mul(power));
+                    }
+                }
+                if weapon.chain_explosion {
+                    Some((wid, i.pos, i.vel))
+                } else {
+                    None
+                }
+            };
+            if let Some((wid, pos, vel)) = chained {
+                wobjects.free(slot);
+                crate::weapon::blow_up(
+                    &weapons[wid as usize],
+                    level,
+                    large_sprites,
+                    textures,
+                    pos,
+                    vel,
+                    owner_idx,
+                    sobject_types,
+                    nobject_types,
+                    cossin,
+                    worms,
+                    wobjects,
+                    weapons,
+                    nobjects,
+                    sobjects,
+                    bonuses,
+                    blood,
+                    game_mode,
+                    rand,
+                );
             }
         }
 
@@ -391,7 +429,7 @@ pub fn sobject_create(
 
     // :209-215 crater. Carve AFTER the dirt-throw (the trap): draw_dirt_effect
     // writes material_id, and its rand(r_frame) is the LAST cluster draw.
-    // CorrectShadow omitted (settings->shadow = false, O4).
+    // :212-214 CorrectShadow behind settings->shadow (Step 4½a-1).
     if ty.dirt_effect >= 0 {
         draw_dirt_effect(
             level,
@@ -402,6 +440,7 @@ pub fn sobject_create(
             y - 7,
             rand,
         );
+        crate::shadow::correct_shadow_if_enabled(level, x - 10, y - 10, x + 11, y + 11);
     }
 
     // :217-227 bonus chain-loop (Slice 6 T3 — deferral #1, closed). After the
@@ -445,7 +484,6 @@ pub fn sobject_create(
                 sobject_types,
                 blood,
                 game_mode,
-                settings_health,
                 rand,
             );
         }
@@ -569,7 +607,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         // Obj init (:35-39): id = 2, x = 50-8, y = 50-8, cur_frame = 0,
@@ -614,7 +652,7 @@ mod tests {
         let draws_before = rand.draws();
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
         let events = crate::sound::take_frame();
 
@@ -650,7 +688,7 @@ mod tests {
         crate::flash::begin_frame(20);
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
         assert_eq!(crate::flash::take_frame(), 20, "max(flash 8, seed 20) = 20");
 
@@ -658,7 +696,7 @@ mod tests {
         crate::flash::begin_frame(3);
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
         assert_eq!(crate::flash::take_frame(), 8, "max(flash 8, seed 3) = 8");
     }
@@ -682,7 +720,7 @@ mod tests {
         crate::shake::reset_frame();
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         // The RAW blast (50, 50) — NOT the -8-offset obj coords (42, 42).
@@ -711,7 +749,7 @@ mod tests {
         crate::shake::reset_frame();
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         assert_eq!(rand.last(), 0, "shake emission draws zero rand");
@@ -738,7 +776,7 @@ mod tests {
         crate::shake::reset_frame();
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         assert!(
@@ -762,7 +800,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         assert_eq!(rand.last(), 0, "start_sound < 0 -> no rand drawn at all");
@@ -801,7 +839,7 @@ mod tests {
         // (index 699), matching C++ `&arr[Limit - 1]`.
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         assert_eq!(sobjects.len(), 700, "count stays at cap: overwrite, not append");
@@ -859,7 +897,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         assert_eq!(worms[0].vel, Vec2::zero(), "out-of-range worm not nudged");
@@ -890,7 +928,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         // delta_x = 57-50 = 7 > 0 -> vel.x += blow_away * (8 - 7) = 3000.
@@ -986,7 +1024,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], blood, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], blood, 0, &mut rand,
         );
 
         // Wound: health dropped by the clamped z = 2, stays > 0; not a kill, so
@@ -1076,7 +1114,6 @@ mod tests {
             &[],
             blood,
             0,
-            100,
             &mut rand,
         );
 
@@ -1112,7 +1149,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         assert_eq!(worms[0].health, 100, "out-of-range worm takes no damage");
@@ -1145,7 +1182,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 0, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 0, 0, &mut rand,
         );
 
         // Still wounded (DoDamage runs regardless of blood), but no blood nobjects.
@@ -1214,7 +1251,7 @@ mod tests {
 
         sobject_create(
             &ty, cx, cy, 3, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         // Exact total draw count + order: rand.last matches the reference iff the
@@ -1262,7 +1299,7 @@ mod tests {
 
         sobject_create(
             &ty, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         assert_eq!(rand.last(), expected_last, "no dirt -> no rand(8) drawn");
@@ -1355,7 +1392,7 @@ mod tests {
         let mut rand = seeded();
         sobject_create(
             &ty, cx, cy, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &nts,
-            &mut level, &cossin, &sprites, &textures, &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, 100, &mut rand,
+            &mut level, &cossin, &sprites, &textures, &mut sobjects, &mut Pool::<Bonus>::new(1), &[], 100, 0, &mut rand,
         );
 
         // (a) the carve's rand(2) is the LAST draw of the cluster.
@@ -1557,7 +1594,7 @@ mod tests {
         sobject_create(
             &parent, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &[],
             &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects,
-            &mut bonuses, &sts, 100, 0, 100, &mut rand,
+            &mut bonuses, &sts, 100, 0, &mut rand,
         );
 
         assert_eq!(bonuses.len(), 0, "the in-range bonus was freed (:224)");
@@ -1595,7 +1632,7 @@ mod tests {
         sobject_create(
             &parent, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &[],
             &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects,
-            &mut bonuses, &sts, 100, 0, 100, &mut rand,
+            &mut bonuses, &sts, 100, 0, &mut rand,
         );
 
         assert_eq!(bonuses.len(), 1, "out-of-range bonus NOT freed");
@@ -1629,7 +1666,7 @@ mod tests {
         sobject_create(
             &parent, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &[],
             &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects,
-            &mut bonuses, &sts, 100, 0, 100, &mut rand,
+            &mut bonuses, &sts, 100, 0, &mut rand,
         );
 
         assert_eq!(bonuses.len(), 1, "exactly one bonus freed");
@@ -1665,7 +1702,7 @@ mod tests {
         sobject_create(
             &parent, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &[],
             &mut level, &cossin, &SpriteSet::default(), &[], &mut sobjects,
-            &mut bonuses, &sts, 100, 0, 100, &mut rand,
+            &mut bonuses, &sts, 100, 0, &mut rand,
         );
 
         // Termination: the call returned (no infinite loop) and every bonus is gone.
@@ -1729,7 +1766,7 @@ mod tests {
         sobject_create(
             &parent, 50, 50, 1, &mut worms, &mut wobjects, &[], &mut nobjects, &[],
             &mut level, &cossin, &sprites, &textures, &mut sobjects,
-            &mut bonuses, &sts, 100, 0, 100, &mut rand,
+            &mut bonuses, &sts, 100, 0, &mut rand,
         );
 
         assert_eq!(bonuses.len(), 0, "the in-range bonus was freed");
@@ -1739,5 +1776,129 @@ mod tests {
             expected_last,
             "sound, crater, THEN the booby's sound — the scan runs after the crater"
         );
+    }
+
+    // ---- 4½c-0 T6: chain explosions (sobject.cpp:148-150) ----------------------------
+
+    // weapons[0]: a BOOBY-TRAP-shaped mine — affected by explosions, chain-exploding, its
+    // own blast sobject_types[1]; weapons[1]: affected but NOT chaining.
+    fn chain_weapons() -> Vec<Weapon> {
+        vec![
+            Weapon {
+                id: 0,
+                affect_by_explosions: true,
+                chain_explosion: true,
+                create_on_exp: 1,
+                dirt_effect: -1,
+                splinter_amount: 0,
+                ..Default::default()
+            },
+            Weapon {
+                id: 1,
+                affect_by_explosions: true,
+                chain_explosion: false,
+                create_on_exp: 1,
+                dirt_effect: -1,
+                splinter_amount: 0,
+                ..Default::default()
+            },
+        ]
+    }
+
+    // A silent, no-carve blast with damage > 0 (so ITS wobject loop runs too) and a ±10 box.
+    fn chain_blast(id: i32) -> SObjectType {
+        SObjectType {
+            id,
+            start_sound: -1,
+            num_sounds: 0,
+            anim_delay: 3,
+            num_frames: 4,
+            detect_range: 10,
+            damage: 5,
+            blow_away: 0,
+            dirt_effect: -1,
+            ..Default::default()
+        }
+    }
+
+    fn mine(ty: i32, px: i32) -> WObject {
+        WObject {
+            pos: Vec2::new(itof(px), itof(50)),
+            ty: Some(ty),
+            owner_idx: 0,
+            time_left: 100,
+            ..WObject::default()
+        }
+    }
+
+    // One blast of sobject_types[1] at (50,50) owned by worm 1, over `wobjects`.
+    fn blast_at_50(wobjects: &mut Pool<WObject>, sobjects: &mut Pool<SObject>) {
+        let cossin = precompute_cossin();
+        let weapons = chain_weapons();
+        let sts = vec![chain_blast(0), chain_blast(1)];
+        let nts = nobject_types();
+        let mut level = bg_level(100, 100);
+        let mut nobjects: Pool<NObject> = Pool::new(600);
+        let mut worms: Vec<WormState> = Vec::new();
+        let mut rand = seeded();
+        sobject_create(
+            &sts[1],
+            50,
+            50,
+            1,
+            &mut worms,
+            wobjects,
+            &weapons,
+            &mut nobjects,
+            &nts,
+            &mut level,
+            &cossin,
+            &SpriteSet::default(),
+            &[],
+            sobjects,
+            &mut Pool::<Bonus>::new(1),
+            &sts,
+            100,
+            0,
+            &mut rand,
+        );
+    }
+
+    #[test]
+    fn a_chain_mine_in_the_blast_is_freed_then_blown_up() {
+        // sobject.cpp:148-150 -> BlowUpObject: free FIRST (weapon.cpp:87), then its
+        // create_on_exp at Ftoi(pos) — here a second blast at (52,50).
+        let mut wobjects: Pool<WObject> = Pool::new(600);
+        let mut sobjects: Pool<SObject> = Pool::new(700);
+        wobjects.spawn(mine(0, 52));
+        blast_at_50(&mut wobjects, &mut sobjects);
+        assert!(wobjects.is_empty(), "the chained mine is freed");
+        let blasts: Vec<(i32, i32, i32)> = sobjects.iter().map(|s| (s.id, s.x, s.y)).collect();
+        assert_eq!(blasts, vec![(1, 42, 42), (1, 44, 42)], "trigger, then the mine's blast");
+    }
+
+    #[test]
+    fn an_affected_non_chain_wobject_survives_the_blast() {
+        let mut wobjects: Pool<WObject> = Pool::new(600);
+        let mut sobjects: Pool<SObject> = Pool::new(700);
+        wobjects.spawn(mine(1, 52));
+        blast_at_50(&mut wobjects, &mut sobjects);
+        assert_eq!(wobjects.len(), 1, "no chain_explosion -> only nudged");
+        assert_eq!(sobjects.len(), 1, "only the trigger blast");
+    }
+
+    #[test]
+    fn chains_recurse_depth_first_through_each_mines_own_blast() {
+        // Mine A at x 55 is inside the trigger's box (40 < 55 < 60); mine B at x 63 is not
+        // (63 >= 60) but is inside A's blast box (45 < 63 < 65). A is freed and blows up
+        // first; its blast chains B; the outer walk then finds B's slot already free.
+        let mut wobjects: Pool<WObject> = Pool::new(600);
+        let mut sobjects: Pool<SObject> = Pool::new(700);
+        wobjects.spawn(mine(0, 55));
+        wobjects.spawn(mine(0, 63));
+        blast_at_50(&mut wobjects, &mut sobjects);
+        assert!(wobjects.is_empty(), "both mines went off");
+        let xs: Vec<i32> = sobjects.iter().map(|s| s.x + 8).collect();
+        assert_eq!(xs, vec![50, 55, 63], "trigger, A, then B (reached only through A)");
     }
 }

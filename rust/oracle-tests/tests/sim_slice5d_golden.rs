@@ -41,7 +41,7 @@
 //! `SimState::new` defaults the blood consts (`num_blood_colours`/`first_blood_colour`
 //! /`bobj_gravity`, as in 5b) AND the `WormSpawnRect*`/`WormMinSpawnDist*` respawn
 //! consts to 0. This harness assigns them from the loaded TC AFTER `new` — the exact
-//! `LC(...)` values the C++ dumper holds. `settings_health` defaults to 100 (the
+//! `LC(...)` values the C++ dumper holds. `max_health` defaults to 100 (the
 //! dumper never overrides `WormSettings::health`), the value `DoRespawning` restores.
 //! Both `small_sprites` (7x7 bank) and `large_sprites` (16x16 bank) + `textures` are
 //! loaded so the death-spray land-blits and the respawn dirt carve index a real bank.
@@ -282,10 +282,10 @@ fn sim_slice5d_death_respawn_match_cpp_oracle() {
     state.worm_spawn_rect_h = tc.constants.WormSpawnRectH;
     state.worm_min_spawn_dist_last = tc.constants.WormMinSpawnDistLast;
     state.worm_min_spawn_dist_enemy = tc.constants.WormMinSpawnDistEnemy;
-    // `settings_health` (the DoRespawning restore target) defaults to 100 in `new`;
-    // pin it here so the "returns to settings_health" guard reads the real target.
-    let settings_health = state.settings_health;
-    assert_eq!(settings_health, 100, "dumper uses the default WormSettings::health 100");
+    // `max_health` (the DoRespawning restore target) defaults to 100 in `new`;
+    // pin it here so the "returns to max_health" guard reads the real target.
+    let max_health = state.worms[1].max_health;
+    assert_eq!(max_health, 100, "dumper uses the default WormSettings::health 100");
 
     let check = |tick: u32, name: &str, got: u32, want: u32| {
         assert_eq!(got, want, "tick {tick}: {name}: got {got:08x} expected {want:08x}");
@@ -367,11 +367,11 @@ fn sim_slice5d_death_respawn_match_cpp_oracle() {
     // worm1 health CROSSES <= 0 (the death) ...
     let worm1_min = *worm1_health.iter().min().expect("ticks recorded");
     assert!(worm1_min <= 0, "worm1 health must cross <= 0 (it dies); min was {worm1_min}");
-    // ... AND RETURNS to settings_health after the respawn completes.
+    // ... AND RETURNS to max_health after the respawn completes.
     let worm1_final = *worm1_health.last().expect("ticks recorded");
     assert_eq!(
-        worm1_final, settings_health,
-        "worm1 health must be restored to settings_health ({settings_health}) after respawn"
+        worm1_final, max_health,
+        "worm1 health must be restored to max_health ({max_health}) after respawn"
     );
 
     // On the death tick: the death block ran — worm1 hidden, `killed_timer` armed to
@@ -472,8 +472,8 @@ fn sim_slice5d_death_respawn_match_cpp_oracle() {
         "DoRespawning completes AFTER BeginRespawn (reborn {reborn_tick} > begin {begin_respawn_tick})"
     );
     assert_eq!(
-        worm1_health[reborn_tick], settings_health,
-        "worm1 health is restored to settings_health on the reborn tick"
+        worm1_health[reborn_tick], max_health,
+        "worm1 health is restored to max_health on the reborn tick"
     );
     // DoRespawning completion draws the lone `rand()&1` aiming bit (+ the dirt carve):
     // a small rng footprint on the reborn tick.
@@ -485,7 +485,7 @@ fn sim_slice5d_death_respawn_match_cpp_oracle() {
     // worm1 stays visible + at full health from the reborn tick to the end.
     for k in reborn_tick..worm1_visible.len() {
         assert!(worm1_visible[k], "tick {k}: worm1 must stay visible after respawn");
-        assert_eq!(worm1_health[k], settings_health, "tick {k}: worm1 stays at full health after respawn");
+        assert_eq!(worm1_health[k], max_health, "tick {k}: worm1 stays at full health after respawn");
     }
 
     // The window genuinely carved terrain (explosion craters + respawn dirt) and never

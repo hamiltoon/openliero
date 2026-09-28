@@ -1,0 +1,12 @@
+# oracle_dump_menu rust/oracle-tests/golden/menu_settings_holdazone_script.txt — the REAL C++ Menu / behaviors / SettingsMenu (Step 4½d design §6.1)
+# <n> <op> <sel> <top> <bottom> <vis> <shown> <prefix> <vals> <bound> <sounds> <ret> <push> <hash>
+0 update_items 0 0 15 16 1011001111111111111 - Holdazone|10:00|10:00|00:45|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+1 first_visible 0 0 15 16 1011001111111111111 - Holdazone|10:00|10:00|00:45|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+2 draw 0 0 15 16 1011001111111111111 - Holdazone|10:00|10:00|00:45|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 789b8e8302ceadb3
+3 page 10 1 16 16 1011001111111111111 - Holdazone|10:00|10:00|00:45|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+4 draw 10 1 16 16 1011001111111111111 - Holdazone|10:00|10:00|00:45|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 9d457af0256458cf
+5 page 17 1 16 16 1011001111111111111 - Holdazone|10:00|10:00|00:45|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+6 draw 17 1 16 16 1011001111111111111 - Holdazone|10:00|10:00|00:45|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 a840358e8e0276a3
+7 move 16 1 16 16 1011001111111111111 - Holdazone|10:00|10:00|00:45|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+8 move_to 18 1 16 16 1011001111111111111 - Holdazone|10:00|10:00|00:45|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 -
+9 draw 18 1 16 16 1011001111111111111 - Holdazone|10:00|10:00|00:45|20|15|Random|504|350|100%|.|4|OFF|ON|100%|ON|OFF|liero|. - - - 0 32ee68b1becad183

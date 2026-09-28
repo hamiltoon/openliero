@@ -1,0 +1,13 @@
+# Step 4½d G1 settings_holdazone: Holdazone shows TIME TO WIN and ZONE TIMEOUT (00:45);
+# paging down and the scrollbar at the end of the list.
+settings menu_settings_holdazone_setup.cfg
+update_items
+first_visible
+draw 1 -1 0
+page 1
+draw 0 -1 0
+page 1
+draw 0 -1 0
+move -1
+move_to 18
+draw 1 -1 0

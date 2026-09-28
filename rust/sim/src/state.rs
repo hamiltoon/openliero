@@ -31,7 +31,9 @@ use crate::pool::{BloodPool, Pool};
 use crate::sobject::{sobject_process, SObjectOutcome};
 use crate::shake::ShakeEvent;
 use crate::sound::{HookIndices, SoundEvent};
-use crate::weapon::{blow_up, wobject_process, worm_fire, WObjectOutcome};
+use crate::weapon::{
+    blow_up, process_steerables, wobject_process, worm_fire, WObjectConsts, WObjectOutcome,
+};
 
 /// Number of weapon slots per worm. Mirrors C++ `NUM_WEAPONS` (`worm.hpp:13`).
 /// `Settings::kSelectableWeapons` is also 5, so `InitWeapons` fills every slot.
@@ -342,6 +344,14 @@ pub struct WormState {
     /// steerable-object accumulator the dead arm zeroes each tick. Default 0.
     /// **Not hashed.**
     pub steerable_count: i32,
+    /// `Worm::steerable_sum_x` (`worm.hpp:267`): the sum of `Ftoi(pos.x)` over the
+    /// wobjects `ProcessSteerables` steered this tick — with `steerable_sum_y` and
+    /// `steerable_count`, the centroid the viewport follows (`viewport.cpp:30-32`).
+    /// Written only by [`crate::weapon::process_steerables`]. **Not hashed** (absent from
+    /// `stateHash.hpp` and `WideRollbackChecksum`). Default 0.
+    pub steerable_sum_x: i32,
+    /// `Worm::steerable_sum_y` (`worm.hpp:267`), see [`steerable_sum_x`](Self::steerable_sum_x).
+    pub steerable_sum_y: i32,
 
     // --- Slice 5' T1: worm-sprite selection (NOT hashed) -------------------
     // The render-frame selector `CheckForSpecWormHit` (T2) reads to pick the
@@ -382,6 +392,27 @@ pub struct WormState {
     /// `Worm::hotspot_y` (`worm.hpp:225`), see [`hotspot_x`](Self::hotspot_x).
     /// **Not hashed.**
     pub hotspot_y: i32,
+
+    // --- Slice 4½f-1 T1: per-worm state the CPU player and unequal healths read ---
+    /// `Worm::reacts` (`worm.hpp:260`, indexed `kRfDown, kRfLeft, kRfUp, kRfRight`):
+    /// the reaction-force counts `CalculateReactionForce` writes at the top of every
+    /// visible `Worm::Process` (`worm.cpp:135-144`). **Kept across ticks**: a worm
+    /// that is not processed or not visible keeps last visible tick's value, and it
+    /// is never reset on death, respawn or `ResetWorms`. Read stale only by
+    /// [`crate::ai`] (`worm.cpp:680-694`), which runs before the tick. `0` in
+    /// [`from_init`](Self::from_init) (C++ leaves it uninitialised; both oracle
+    /// dumpers zero it, plan D5). **Not hashed** (C++ `HashGameState` has no
+    /// `reacts`).
+    pub reacts: [i32; 4],
+    /// `Worm::settings->health` (`WormSettings::health{100}`, `worm.hpp:104`): this
+    /// worm's own max / reset health. Read by the clamp (`worm.cpp:213`), the
+    /// health bonus (`:292-296`), the low-health blood gate (`:355`), Scales' extra
+    /// life on death (`:386`), the respawn restore (`:795`), `DoHealingDirect` /
+    /// `DoHealing` (`game.cpp:556-563`, `:607`) and the lifebar (`viewport.cpp:85`).
+    /// **100** in [`from_init`](Self::from_init) (the C++ default, not the scenario's
+    /// start health); the match builder writes `worm_settings[i].health`. **Not
+    /// hashed** (a settings value).
+    pub max_health: i32,
 }
 
 /// `Worm::kKilledTimerInitial` (`worm.hpp:243`): the respawn countdown the worm
@@ -437,6 +468,8 @@ impl WormState {
             ready: true, // ctor `ready(true)` (worm.hpp:179); ResetWorms keeps it
             make_sight_green: false,
             steerable_count: 0,
+            steerable_sum_x: 0,
+            steerable_sum_y: 0,
 
             // Slice 5' T1 worm-sprite selection: fresh-worm defaults
             // (`worm.hpp:244` current_frame{0}, `worm.hpp:232` animate{false}).
@@ -448,6 +481,12 @@ impl WormState {
             // Render-only, not hashed.
             hotspot_x: 0,
             hotspot_y: 0,
+
+            // Slice 4½f-1 T1: `reacts` starts at 0 (D5; C++ leaves it
+            // uninitialised and the dumpers zero it); `max_health` is the C++
+            // `WormSettings::health{100}` default (worm.hpp:104). Not hashed.
+            reacts: [0; 4],
+            max_health: 100,
         }
     }
 
@@ -490,14 +529,7 @@ impl WormState {
 /// byte-identical. The loop compares by SLOT (`j != w_idx`, mirroring C++
 /// `other.get() != &w`); `left / parts` is never evaluated for a single worm (the
 /// body is skipped), so no divide-by-zero.
-pub fn do_damage(
-    worms: &mut [WormState],
-    w_idx: usize,
-    amount: i32,
-    by_idx: i32,
-    game_mode: u32,
-    settings_health: i32,
-) {
+pub fn do_damage(worms: &mut [WormState], w_idx: usize, amount: i32, by_idx: i32, game_mode: u32) {
     worms[w_idx].do_damage_direct(amount, by_idx);
 
     if amount > 0 && game_mode == 3 {
@@ -508,19 +540,39 @@ pub fn do_damage(
             for j in 0..worms.len() {
                 if j != w_idx {
                     let k = left / parts;
-                    crate::bonus::do_healing_direct(&mut worms[j], k, game_mode, settings_health);
+                    crate::bonus::do_healing_direct(&mut worms[j], k, game_mode);
                     parts -= 1;
                     left -= k;
                 }
             }
         } else {
-            crate::bonus::do_healing_direct(
-                &mut worms[by_idx as usize],
-                amount,
-                game_mode,
-                settings_health,
-            );
+            crate::bonus::do_healing_direct(&mut worms[by_idx as usize], amount, game_mode);
         }
+    }
+}
+
+/// Port of `Game::DoHealing` (`game.cpp:591-609`) — the pickup heal. `DoHealingDirect`
+/// on the healed worm, then in Scales (`game_mode == 3`) the SAME amount is dealt to
+/// the other worms, split by truncating division in source order (`parts`/`left`,
+/// `:595-604`) through `DoDamageDirect(other, k, w.index)` — the healer is the
+/// attributed killer if one dies. Every other mode clamps (`:607`; already applied by
+/// `do_healing_direct`, so KillEmAll is byte-identical to the prior pickup port).
+pub fn do_healing(worms: &mut [WormState], w_idx: usize, amount: i32, game_mode: u32) {
+    crate::bonus::do_healing_direct(&mut worms[w_idx], amount, game_mode);
+    if game_mode == 3 {
+        let healer = worms[w_idx].index;
+        let mut parts = worms.len() as i32 - 1;
+        let mut left = amount;
+        for j in 0..worms.len() {
+            if j != w_idx {
+                let k = left / parts;
+                worms[j].do_damage_direct(k, healer);
+                parts -= 1;
+                left -= k;
+            }
+        }
+    } else {
+        worms[w_idx].health = worms[w_idx].health.min(worms[w_idx].max_health);
     }
 }
 
@@ -661,6 +713,9 @@ pub const MAT_DIRT_ROCK: u8 = MAT_DIRT | MAT_DIRT2 | MAT_ROCK;
 /// worm-body palette index carries. `CheckForSpecWormHit` (T2) tests it on the
 /// worm-sprite pixel via [`LevelSim::worm_pixel`].
 pub const MAT_WORM: u8 = 1 << 5;
+/// `Material::kSeeShadow` (`material.hpp:11`, `1 << 4`): a pixel that shows a shadow
+/// when a `DirtRock` pixel sits at `(x + 3, y - 3)` — `CorrectShadow`'s predicate.
+pub const MAT_SEE_SHADOW: u8 = 1 << 4;
 
 impl LevelSim {
     /// Port of `Level::CheckedMatWrap(x, y).Background()` (`level.hpp:124-130` +
@@ -737,32 +792,54 @@ impl LevelSim {
     // takes a flat index because Task 1 computes the index once per pixel and
     // both reads and the write share it.
 
+    /// The material flag byte of `(x, y)` — C++ `Level::Mat(x, y)`
+    /// (`materials[x + y * width]`), the unchecked read behind `Background()`,
+    /// `Rock()`, `Dirt()` and friends.
+    ///
+    /// **Safe edges (John's ruling, 4½e-1 plan, Addendum G3).** C++ indexes
+    /// `materials[]` with the flat `x + y * width` and never checks it. On a level
+    /// smaller than the TC's `WormSpawnRect` the spawn path (`Worm::BeginRespawn`'s
+    /// drop-down `Mat(x, y + 4)`, `worm.cpp:731-734`, and `CheckRespawnPosition`'s
+    /// `!=`-bounded rock scan, `game.cpp:640-647`) walks past the end of the
+    /// vector: undefined behaviour (a segfault or garbage). Rust instead treats a
+    /// flat index outside `material_id` as **solid rock** (not background), so a
+    /// spawn candidate touching it is rejected and the worm draws another. A flat
+    /// index inside the array — including C++'s defined wrap onto the next row for
+    /// `x >= width` — reads the real pixel exactly as before, so every run on which
+    /// C++ stays inside the vector is unchanged (every golden re-diffs identical).
+    #[inline]
+    fn mat_flags(&self, x: i32, y: i32) -> u8 {
+        let idx = x as i64 + y as i64 * self.width as i64;
+        if idx >= 0 && (idx as u64) < self.material_id.len() as u64 {
+            self.material_flags[self.material_id[idx as usize] as usize]
+        } else {
+            MAT_ROCK
+        }
+    }
+
     /// Background bit (`material.hpp:18`) of the **in-bounds** pixel `(x, y)`.
     /// Looks up `material_flags[material_id[x + y*width]]` and tests
-    /// [`MAT_BACKGROUND`]. In-bounds only (see the shape note above).
+    /// [`MAT_BACKGROUND`]. Meant for in-bounds pixels (see the shape note above);
+    /// a flat index outside the array reads as rock ([`mat_flags`](Self::mat_flags)).
     pub fn background(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_BACKGROUND) != 0
+        (self.mat_flags(x, y) & MAT_BACKGROUND) != 0
     }
 
     /// Either dirt bit (`material.hpp`: `kDirt | kDirt2`) of the in-bounds
     /// pixel `(x, y)` — the "any destructible dirt" predicate `DrawDirtEffect`
     /// uses to decide a pixel may be dug.
     pub fn any_dirt(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & (MAT_DIRT | MAT_DIRT2)) != 0
+        (self.mat_flags(x, y) & (MAT_DIRT | MAT_DIRT2)) != 0
     }
 
     /// First dirt bit ([`MAT_DIRT`]) of the in-bounds pixel `(x, y)`.
     pub fn dirt(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_DIRT) != 0
+        (self.mat_flags(x, y) & MAT_DIRT) != 0
     }
 
     /// Second dirt bit ([`MAT_DIRT2`]) of the in-bounds pixel `(x, y)`.
     pub fn dirt2(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_DIRT2) != 0
+        (self.mat_flags(x, y) & MAT_DIRT2) != 0
     }
 
     /// The FIRST `material_id` writer (used by `DrawDirtEffect` in Task 1 to
@@ -787,10 +864,11 @@ impl LevelSim {
     }
 
     /// Rock bit ([`MAT_ROCK`], `material.hpp:17`) of the in-bounds pixel `(x, y)`.
-    /// The `BObject::Process` rock-landing probe (`bobject.cpp:43`). In-bounds only.
+    /// The `BObject::Process` rock-landing probe (`bobject.cpp:43`) and
+    /// `CheckRespawnPosition`'s scan. A flat index outside the array reads as rock
+    /// ([`mat_flags`](Self::mat_flags), the safe-edges ruling).
     pub fn rock(&self, x: i32, y: i32) -> bool {
-        let idx = (x + y * self.width) as usize;
-        (self.material_flags[self.material_id[idx] as usize] & MAT_ROCK) != 0
+        (self.mat_flags(x, y) & MAT_ROCK) != 0
     }
 
     /// Port of `common.materials[pal].Worm()` (`worm.cpp:1181` + `material.hpp:25`):
@@ -1035,6 +1113,10 @@ pub struct SimState {
     /// the index arm is inert and only the per-weapon `laser_sight` flag can arm the
     /// sight. Keeps every prior golden byte-identical (the sight fields are unhashed).
     pub laser_weapon: i32,
+    /// The TC constants/hacks `WObject::Process` reads (Step 4½c-0: RemExp + the particle-
+    /// trail divisors). **Not hashed.** Defaulted inert by `new`; assigned post-`new` by
+    /// `scenario::build::build_match` and `scenario::load` (`WObjectConsts::from_tc`).
+    pub wobject_consts: WObjectConsts,
     /// C++ `Settings::max_bonuses` (`settings.hpp:69`, in-game default 4): the cap the
     /// per-tick **bonus-drop roll** gates on (`game.cpp:359`). The roll `if (max_bonuses
     /// > 0 && rand(CBonusDropChance) == 0) CreateBonus()` fires in [`process_frame`]
@@ -1134,7 +1216,7 @@ pub struct SimState {
     /// `rand(BonusHealthVar)` heal-amount draw.
     pub bonus_health_var: i32,
     /// C++ `LC(BonusMinHealth)` (`worm.cpp:295`): the additive floor in the heal
-    /// amount `(rand(BonusHealthVar) + BonusMinHealth) * settings_health / 100`.
+    /// amount `(rand(BonusHealthVar) + BonusMinHealth) * worm.max_health / 100`.
     pub bonus_min_health: i32,
     /// C++ `LC(BonusExplodeRisk)` (`worm.cpp:299`): the bound of the weapon-bonus
     /// `rand(BonusExplodeRisk)` draw — ALWAYS drawn for a frame-0 bonus; `> 1`
@@ -1144,18 +1226,6 @@ pub struct SimState {
     /// skips the weapon-type swap + `fire_cone = 0` and only clears `loading_left`.
     /// False in the openliero TC.
     pub h_bonus_reload_only: bool,
-
-    /// C++ `Worm::settings->health` (`WormSettings::health{100}`, `worm.hpp:104`):
-    /// the per-worm max/reset health. The clamp `health = min(health,
-    /// settings->health)` (`worm.cpp:213`) caps every worm to it each tick, and
-    /// `DoRespawning` (5d T5) restores `health = settings->health` on respawn. The
-    /// oracle dumper never overrides `worm_settings[idx]->health`, so BOTH worms
-    /// use the default **100** — a single scalar suffices for bit-exactness. NOT
-    /// in the `new` arg list: defaulted to 100 (the C++ default) post-`new` — like
-    /// the blood/bonus consts — so every existing call site is unchanged and the
-    /// clamp is identity for slices 1-5c (health starts at 100 and never exceeds
-    /// it), keeping those goldens byte-identical. **Not hashed** (settings scalar).
-    pub settings_health: i32,
 
     /// C++ `Settings::game_mode` (`settings.hpp:73`, enum `kGmKillEmAll=0,
     /// kGmGameOfTag=1, kGmHoldazone=2, kGmScalesOfJustice=3`). Selects the
@@ -1169,12 +1239,26 @@ pub struct SimState {
     /// in neither the master nor the component fold); its hashed *effects* (timer /
     /// health / lives) are what the goldens witness.
     pub game_mode: u32,
+    /// C++ `common.ai_params.k` (`common_model.hpp:521-531`): the CPU player's
+    /// per-control toggle odds, indexed `[pressed as usize][control]` with the
+    /// [`ControlState`] bit order (Up, Down, Left, Right, Fire, Change, Jump) —
+    /// `[0]` is the TC's `off`, `[1]` its `on`. Read only by [`crate::ai`]
+    /// (`worm.cpp:516`, `:525`, `:530`, `:625-641`). Zeros from `new`; both match
+    /// builders set it from the TC (`AiParams::ordered()`). **Not hashed** (a TC
+    /// constant).
+    pub ai_params: [[i32; 7]; 2],
     /// C++ `Settings::time_to_lose` (`settings.hpp:71`, default `600`): the GameOfTag
     /// "it"-timer cap. The frame-tail gate bumps `last_killed_by->timer` only while
     /// `timer < time_to_lose` (`game.cpp:385`). The oracle dumper never overrides it
     /// (it uses the `Settings` default), so this defaults to **600** post-`new` — no
     /// scenario directive, mirroring the dumper. **Not hashed** (settings scalar).
     pub time_to_lose: i32,
+    /// C++ `Settings::shadow` (`settings.hpp:74`, in-game default `true`): gates
+    /// `CorrectShadow` after every in-frame crater (`sim::shadow`, Step 4½a-1). The
+    /// oracle dumper's classic path forces it `false`, so it defaults to **false**
+    /// post-`new` and every prior golden stays byte-identical; the 4½a builder assigns
+    /// the setting. **Not hashed** (its effect on `material_id` is).
+    pub shadow: bool,
 
     /// C++ `Game::last_killed_idx` (`game.hpp`, default `-1`): the index of the
     /// most recently killed worm. Written by the death block (`worm.cpp:393-401`)
@@ -1221,7 +1305,7 @@ pub struct SimState {
     /// [`crate::sound`] context at the top of [`process_frame`](Self::process_frame)
     /// so a deep callsite can play a hook without threading its index. **Not
     /// hashed** (a sound-table input, like the object `start_sound`s); defaulted to
-    /// [`SoundHooks::default`] post-`new` (the difftest/game assign the real TC
+    /// [`SoundHooks::default`] post-`new` (`scenario::load` assigns the real TC
     /// values), so every prior golden stays byte-identical (sound never hashes).
     pub sound_hooks: SoundHooks,
     /// The per-tick **sound-event stream** (Slice-4c, `sound.rs`): the one-shot /
@@ -1340,6 +1424,9 @@ impl SimState {
             // sight); the difftest assigns the real `LC(LaserWeapon)` after `new`. The
             // sight fields are unhashed, so this leaves every golden byte-identical.
             laser_weapon: 0,
+            // 4½c-0: the WObject::Process TC consts — inert Default (RemExp off, trail
+            // divisors unread), assigned post-`new` by the builder / loader.
+            wobject_consts: WObjectConsts::default(),
             // Bonus-drop roll inputs: defaulted (0). Left at 0 the roll short-circuits
             // (NO rand) so slices 1-5b stay byte-identical; the difftest assigns the
             // real `max_bonuses`/`BonusDropChance` after `new` (post-`new` pattern, like
@@ -1376,18 +1463,17 @@ impl SimState {
             bonus_min_health: 0,
             bonus_explode_risk: 0,
             h_bonus_reload_only: false,
-            // Worm settings health: the C++ `WormSettings::health` default (100),
-            // which the dumper never overrides. Post-`new` default (like the blood
-            // consts) so no call site changes; the clamp is identity for slices
-            // 1-5c (worms start at 100, never exceed it) => priors byte-identical.
-            settings_health: 100,
             // Game mode (settings.hpp:73). Default kGmKillEmAll (0): the frame-tail
             // switch hits `default: break` and the Scales `do_damage`/`do_healing`
             // arms are inert, so KillEmAll priors (slices 1-5') stay byte-identical.
             // The difftest assigns the scenario's `game_mode` after `new`. time_to_lose
             // defaults to the C++ `Settings` value 600 (the dumper never overrides it).
             game_mode: 0,
+            // CPU toggle odds (common.ai_params): zeros; the match builders set
+            // the TC's. Read only by `sim::ai`, never by `process_frame`.
+            ai_params: [[0; 7]; 2],
             time_to_lose: 600,
+            shadow: false,
             // Game-level kill bookkeeping (worm.cpp:393-401). C++ defaults:
             // last_killed_idx = -1, got_changed = false. Not hashed; written only
             // when a worm dies (unreached for slices 1-5c) => priors identical.
@@ -1462,20 +1548,20 @@ impl SimState {
     /// [`Explode`]: WObjectOutcome::Explode
     /// [`Remove`]: WObjectOutcome::Remove
     ///
-    /// **Input interleave** (matches the C++ dumper `sim_physics_dump.cpp:233-238`):
-    /// for each worm in `worms` order, overwrite its `control_states` from the
-    /// tick's input (mirroring `ControlState::Unpack`), then run that worm's full
-    /// pass before moving to the next worm. Inputs shorter than `worms` leave the
-    /// remaining worms' control state unchanged.
+    /// **Input application** (Step 4½c-0, design §4.3): every worm's `control_states` is
+    /// overwritten from the tick's input (mirroring `ControlState::Unpack`) at the TOP of
+    /// the tick, before the object loops — as C++ controllers do before
+    /// `Game::ProcessFrame`, and as the dumper does on every path since 4½c-0. Inputs
+    /// shorter than `worms` leave the remaining worms' control state unchanged.
     ///
     /// Per-worm order (design doc, *Per-worm pass: exact ordering*):
     ///
-    /// 1. `health = min(health, settings_health)` — inert this slice (no healing;
-    ///    `health` starts at `settings_health` and never exceeds it), so skipped.
+    /// 1. `health = min(health, max_health)` — inert this slice (no healing;
+    ///    `health` starts at `max_health` and never exceeds it), so skipped.
     /// 2. [`worm_reactions`] → `reacts` (may nudge `pos.y`/`vel.y`). Computed
     ///    **once** and read by BOTH `process_tasks` (jump) AND `worm_process_physics`
     ///    — never recomputed between (load-bearing).
-    /// 3. `process_steerables` — no-op (empty `wobjects`).
+    /// 3. [`process_steerables`] — steers this worm's steerable wobjects (4½c-0 T7).
     /// 4. movable reset.
     /// 5. [`process_aiming`].
     /// 6. [`process_tasks`] — jump reads `reacts[kRfUp]` and writes `vel.y`
@@ -1506,6 +1592,18 @@ impl SimState {
         // panic or a direct unit-test call can never leak stale ones in). Drained
         // into `self.shake_events` at the BOTTOM of the tick. Determinism-inert.
         crate::shake::begin_frame();
+        // Step 4½a-1: publish this tick's settings->shadow for the CorrectShadow sites.
+        crate::shadow::begin_frame(self.shadow);
+
+        // Step 4½c-0 (design §4.3): every worm's input is applied HERE, before any sim
+        // work — C++ controllers set `control_states` before `Game::ProcessFrame`
+        // (`localController.cpp:58-80` / `:175`; the dumper's `render_live` path and, since
+        // 4½c-0, its reduced tail too). The object loops therefore read THIS tick's input
+        // (the steerable Up boost, `weapon.cpp:152`; RemExp, `:139`). Inputs shorter than
+        // `worms` leave the remaining worms' control state unchanged.
+        for (w, input) in self.worms.iter_mut().zip(inputs) {
+            w.control_states = *input;
+        }
 
         // Disjoint field borrows: destructuring `&mut self` binds each field as a
         // separate `&mut` (default binding mode), so the object loops can hold
@@ -1540,6 +1638,7 @@ impl SimState {
             first_blood_colour,
             bobj_gravity,
             laser_weapon,
+            wobject_consts,
             settings_max_bonuses,
             bonus_drop_chance,
             bonus_spawn_rect_w,
@@ -1562,7 +1661,6 @@ impl SimState {
             h_bonus_reload_only,
             bonuses,
             cycles,
-            settings_health,
             game_mode,
             time_to_lose,
             last_killed_idx,
@@ -1584,6 +1682,7 @@ impl SimState {
         let first_blood_colour = *first_blood_colour;
         let bobj_gravity = *bobj_gravity;
         let laser_weapon = *laser_weapon;
+        let wobject_consts = *wobject_consts;
         let settings_max_bonuses = *settings_max_bonuses;
         let bonus_drop_chance = *bonus_drop_chance;
         let bonus_spawn_rect_w = *bonus_spawn_rect_w;
@@ -1601,7 +1700,6 @@ impl SimState {
         let bonus_min_health = *bonus_min_health;
         let bonus_explode_risk = *bonus_explode_risk;
         let h_bonus_reload_only = *h_bonus_reload_only;
-        let settings_health = *settings_health;
         let game_mode = *game_mode;
         let time_to_lose = *time_to_lose;
         let worm_spawn_rect_x = *worm_spawn_rect_x;
@@ -1663,7 +1761,6 @@ impl SimState {
             bonus_bounce_div,
             bonus_s_objects,
             game_mode,
-            settings_health,
             rand,
         );
 
@@ -1721,19 +1818,25 @@ impl SimState {
                 cossin,
                 blood,
                 game_mode,
-                settings_health,
+                wobject_consts,
                 rand,
             ) {
                 WObjectOutcome::Keep => {
                     *wobjects.get_mut(slot).expect("slot still live") = obj;
                 }
                 WObjectOutcome::Explode => {
+                    // weapon.cpp:87 — BlowUpObject frees `this` FIRST, then explodes: the
+                    // blast's own wobject loop (and a chain it sets off, sobject.cpp:148-150)
+                    // must not see this wobject's stale slot. Hash-neutral for every
+                    // non-chain blast (the stale slot was only nudged, then freed anyway).
+                    wobjects.free(slot);
                     blow_up(
                         weapon,
                         level,
                         large_sprites,
                         textures,
                         obj.pos,
+                        obj.vel,
                         obj.owner_idx,
                         sobject_types,
                         nobject_types,
@@ -1746,10 +1849,8 @@ impl SimState {
                         bonuses,
                         blood,
                         game_mode,
-                        settings_health,
                         rand,
                     );
-                    wobjects.free(slot);
                 }
                 WObjectOutcome::Remove => {
                     wobjects.free(slot);
@@ -1797,7 +1898,6 @@ impl SimState {
                 num_blood_colours,
                 first_blood_colour,
                 game_mode,
-                settings_health,
                 rand,
             ) {
                 NObjectOutcome::Keep => {
@@ -1869,7 +1969,6 @@ impl SimState {
                 bonus_rand_timer,
                 weap_table,
                 game_mode,
-                settings_health,
                 rand,
             );
         }
@@ -1888,13 +1987,10 @@ impl SimState {
         // both expressible. The visible arm rebinds `let w = &mut worms[i]` and is
         // otherwise unchanged.
         for i in 0..worms.len() {
-            // Interleave: apply this worm's input (≈ `Unpack`), then Process it.
-            if let Some(input) = inputs.get(i) {
-                worms[i].control_states = *input;
-            }
+            // (This tick's input was applied at the top of `process_frame` — 4½c-0 T8.)
 
             // Port of `Worm::Process` (worm.cpp:210-452). The C++ structure is:
-            //   health = min(health, settings_health);          // 213 — ALWAYS
+            //   health = min(health, settings->health);         // 213 — ALWAYS
             //   if ((mode != KillEmAll && mode != Scales) || lives > 0) {  // 215
             //     if (visible) { ...active-sim body (steps 2-11)... }      // 218
             //     else { steerable_count = 0; PressedOnce(kFire)->ready;   // 431-450
@@ -1902,10 +1998,10 @@ impl SimState {
             //   }
 
             // Health clamp (worm.cpp:213) — ALWAYS, BEFORE the game-mode/lives
-            // gate, so it caps even a gate-closed (lives==0) worm. Identity for
-            // slices 1-5c (worms start at settings_health == 100 and never exceed
-            // it), so priors stay byte-identical.
-            worms[i].health = worms[i].health.min(settings_health);
+            // gate, so it caps even a gate-closed (lives==0) worm, each at its own
+            // `max_health` (4½f-1). Identity for slices 1-5c (worms start at
+            // max_health == 100 and never exceed it), so priors stay byte-identical.
+            worms[i].health = worms[i].health.min(worms[i].max_health);
 
             // Game-mode / lives gate (worm.cpp:215). The full C++ condition to
             // PROCESS the worm is `(mode != KillEmAll && mode != Scales) || lives >
@@ -1921,8 +2017,12 @@ impl SimState {
             if worms[i].visible {
                 // 2. reaction orchestration -> reacts (shared by tasks + physics).
                 //    Computed with a scoped `&mut worms[i]` that ends before the
-                //    pickup, which needs the whole `&mut worms` slice.
-                let reacts = worm_reactions(level, &mut worms[i], physics);
+                //    pickup, which needs the whole `&mut worms` slice. Stored into
+                //    `worms[i].reacts` (4½f-1 D5): C++ keeps `Worm::reacts` between
+                //    ticks and the AI reads it stale before the next tick; the rest
+                //    of this arm reads the stored copy.
+                worms[i].reacts = worm_reactions(level, &mut worms[i], physics);
+                let reacts = worms[i].reacts;
 
                 // 2b. Bonus pickup (worm.cpp:287-322) — at the C++ `:285`→`:287`
                 //     point, AFTER the reaction-force block and BEFORE
@@ -1948,7 +2048,6 @@ impl SimState {
                     textures,
                     blood,
                     game_mode,
-                    settings_health,
                     bonus_health_var,
                     bonus_min_health,
                     bonus_explode_risk,
@@ -1961,7 +2060,13 @@ impl SimState {
                 // directly so `begin_respawn` can also read the enemy slot.
                 let w = &mut worms[i];
 
-                // 3. process_steerables: no-op this slice (empty wobjects).
+                // 3. ProcessSteerables (worm.cpp:324, :1214-1241) — LIVE (4½c-0 T7): turn
+                //    this worm's wobjects of its CURRENT steerable weapon type by
+                //    (cycles & 1) + 1 per held Left/Right — `*cycles` is the post-`++cycles`
+                //    worm-loop value — clear `movable`, and accumulate the centroid the
+                //    viewport follows. The movable reset below keeps `movable` false while
+                //    Left/Right are held, freezing aim and walk.
+                process_steerables(w, weapons, wobjects, *cycles);
 
                 // 4. movable reset (worm.cpp:330-333).
                 if !w.movable
@@ -2064,11 +2169,11 @@ impl SimState {
 
                 // 12. Pre-death blood drip (worm.cpp:355-367) — fires at the END
                 //     of the visible arm (after the change/movement gate) while
-                //     the worm is alive but under settings_health/4. Hash-neutral
+                //     the worm is alive but under its own max_health/4. Hash-neutral
                 //     for slices 1-5c: their worms start at full health
-                //     (>= settings_health/4) so the outer gate never opens and no
+                //     (>= max_health/4) so the outer gate never opens and no
                 //     rand is drawn (goldens stay byte-identical).
-                worm_pre_death_drip(w, i as i32, settings_health, nobject_types, rand, nobjects);
+                worm_pre_death_drip(w, i as i32, nobject_types, rand, nobjects);
 
                 // 13. Death block (worm.cpp:369-426) — fires at the very END of
                 //     the visible arm when `health <= 0`. Plays a death sound
@@ -2098,6 +2203,7 @@ impl SimState {
                     nobjects,
                     last_killed_idx,
                     got_changed,
+                    game_mode,
                 ) {
                     deferred_kills.push(killer);
                 }
@@ -2174,7 +2280,7 @@ impl SimState {
                         level,
                         large_sprites,
                         textures,
-                        settings_health,
+                        game_mode,
                         rand,
                     );
                 }
@@ -2274,6 +2380,8 @@ impl SimState {
         // max(type.flash, screen_flash) at each sobject-create). Unhashed side
         // channel — the render reads it, the hash never does (design §0).
         *screen_flash = crate::flash::take_frame();
+        // Step 4½a-1: the CorrectShadow flag is off again outside the tick.
+        crate::shadow::end_frame();
     }
 }
 
@@ -2528,8 +2636,10 @@ fn begin_respawn(
         worms[index].pos.y = itof(cand_y);
 
         // :731-734 drop-down: slide `pos.y` down over Background pixels. Reads the
-        // LIVE level via `Mat(x, y+4).Background()` (in-bounds; guarded by
-        // `Ftoi(pos.y)+4 < height`), draws NO rand.
+        // LIVE level via `Mat(x, y+4).Background()`, draws NO rand. `y + 4 < height`
+        // is guarded but `x` is not: a candidate right of a narrow level reads on
+        // through the flat index, and past the array's end C++ is UB; Rust reads
+        // rock there (safe edges, `LevelSim::mat_flags`), which stops the slide.
         while ftoi(worms[index].pos.y) + 4 < level.height
             && level.background(ftoi(worms[index].pos.x), ftoi(worms[index].pos.y) + 4)
         {
@@ -2622,10 +2732,21 @@ fn check_respawn_position(
     min_x = min_x.max(0);
     min_y = min_y.max(0);
 
-    // :640-647 reject on any Rock() pixel (half-open `!=` bounds, exactly as C++;
-    // the clamps guarantee `min <= max`). The "special rock respawn bug" TODO
-    // (:642) behaviour is intentionally preserved.
-    let mut i = min_x;
+    // :640-647 reject on any Rock() pixel (half-open `!=` bounds, exactly as C++).
+    // The clamps do NOT guarantee `min <= max`: a candidate below or right of a
+    // small level (the spawn rect is 5,5 + 494x340) has `min > max`, and the `!=`
+    // walk runs on through the flat index until it finds rock. C++ reads past
+    // `materials[]` there (UB); Rust's `rock` reads an out-of-array index as rock
+    // (safe edges, `LevelSim::mat_flags`), so the walk always ends in a reject.
+    // The "special rock respawn bug" TODO (:642) behaviour is intentionally
+    // preserved.
+    //
+    // With `min_y == max_y` (a candidate exactly 3 rows below the level) the inner
+    // walk is empty, so the outer walk reads nothing; with `min_x > max_x` too it
+    // would only spin `i` through a signed overflow (C++ UB; in practice the loop
+    // does nothing and the candidate is accepted). Skipping it is exact for every
+    // non-overflowing walk and keeps that accept without the overflow.
+    let mut i = if min_y == max_y { max_x } else { min_x };
     while i != max_x {
         let mut j = min_y;
         while j != max_y {
@@ -2667,18 +2788,18 @@ fn limit_xy(x: &mut i32, y: &mut i32, max_x: i32, max_y: i32) {
 ///    HIGH bit of the same draw): they advance the RNG identically but select
 ///    different bits, so the call form is load-bearing.
 ///
-/// Omissions (faithful to the dumper's settings): `CorrectShadow` (`:784-786`,
-/// gated on `settings->shadow`, **false**), the `SoundAlive` play (`:789`) and
+/// `CorrectShadow` (`:784-786`) is live since 4½a-1 (behind `SimState.shadow`).
+/// Omissions (faithful to the dumper's settings): the `SoundAlive` play (`:789`) and
 /// `AfterSpawn` stats (`:807`) — all render/sound/stats side effects the sim
-/// drops. The Scales-of-Justice guard on the health restore (`:794`) folds away
-/// (the TC is KillEmAll), so `health` is always restored here.
+/// drops. The Scales-of-Justice guard on the health restore (`:794`) is live since
+/// 4½a-1.
 #[allow(clippy::too_many_arguments)]
 fn do_respawning(
     worm: &mut WormState,
     level: &mut LevelSim,
     large_sprites: &SpriteSet,
     textures: &[Texture],
-    settings_health: i32,
+    game_mode: u32,
     rand: &mut Rand,
 ) {
     // :758-770 step the cursor toward Ftoi(pos)-80 by ±1, FOUR times per tick,
@@ -2727,7 +2848,14 @@ fn do_respawning(
         let ipos_y = ftoi(worm.pos.y);
         draw_dirt_effect(level, large_sprites, textures, 0, ipos_x - 7, ipos_y - 7, rand);
 
-        // :784-786 CorrectShadow — gated on settings->shadow (false) => OMITTED.
+        // :784-786 CorrectShadow behind settings->shadow (Step 4½a-1).
+        crate::shadow::correct_shadow_if_enabled(
+            level,
+            ipos_x - 10,
+            ipos_y - 10,
+            ipos_x + 11,
+            ipos_y + 11,
+        );
 
         // :788 ready = false; :789 `Play(sound_hook[SoundAlive])` — Slice-4c
         // respawn one-shot (no rand; not hashed).
@@ -2737,8 +2865,11 @@ fn do_respawning(
         worm.visible = true;
         worm.fire_cone = 0;
         worm.vel = Vec2::zero();
-        // :794-796 health = settings->health (Scales guard folds away; KillEmAll).
-        worm.health = settings_health;
+        // :794-796 health = settings->health (this worm's own max), except in
+        // Scales (game_mode 3).
+        if game_mode != 3 {
+            worm.health = worm.max_health;
+        }
 
         // :799-805 the lone no-arg `rand() & 1` (raw next draw's LOW bit). Odd =>
         // face left-ish (Itof(32), dir 0); even => face right-ish (Itof(96), dir 1).
@@ -2756,7 +2887,7 @@ fn do_respawning(
 
 /// Port of the **pre-death blood drip** (`worm.cpp:355-367`) — the tail of the
 /// visible arm that sprays a single blood `nobject` while the worm is alive but
-/// under `settings_health / 4`.
+/// under its own `max_health / 4` (`settings->health / 4`).
 ///
 /// RNG order (the contract, verified against `worm.cpp:355-367`):
 /// 1. `rand(health + 6)` (`:356`, the OUTER gate);
@@ -2771,20 +2902,19 @@ fn do_respawning(
 ///    (x, y) when blood's `distribution != 0`.
 ///
 /// The `Create1` spawn sits **inside** the outer gate but **outside** the sound
-/// gate. Gated on `health < settings_health / 4` (integer `/`), so it is inert —
-/// zero draws — for a full-health worm; slices 1-5c (worms at `settings_health`)
+/// gate. Gated on `health < max_health / 4` (integer `/`, the worm's own max), so
+/// it is inert — zero draws — for a full-health worm; slices 1-5c (worms at 100)
 /// never open the gate, keeping their goldens byte-identical.
 #[allow(clippy::too_many_arguments)]
 fn worm_pre_death_drip(
     w: &WormState,
     index: i32,
-    settings_health: i32,
     nobject_types: &[NObjectType],
     rand: &mut Rand,
     nobjects: &mut Pool<NObject>,
 ) {
     // :355 outer gate — integer `/4`, strict `<`.
-    if w.health < settings_health / 4 {
+    if w.health < w.max_health / 4 {
         // :356 outer roll. `(health + 6) as u32` mirrors C++ `int -> uint32_t`
         // (2's-complement), matching `game.rand(health + 6)` for any health.
         if rand.bound((w.health + 6) as u32) == 0 {
@@ -2863,6 +2993,7 @@ fn worm_death(
     nobjects: &mut Pool<NObject>,
     last_killed_idx: &mut i32,
     got_changed: &mut bool,
+    game_mode: u32,
 ) -> Option<usize> {
     // :369 gate. Inert (zero draws, no mutation) while the worm is alive.
     if w.health > 0 {
@@ -2889,21 +3020,31 @@ fn worm_death(
     w.fire_cone = 0;
     w.ninjarope.out = false;
 
-    // :384-391 lives. KillEmAll: `--lives` (:390). The Scales death branch
-    // (`while health <= 0 { health += settings->health; --lives }`, :385-388) is
-    // UNPORTED — deferred past step 2: game_mode IS modelled since slice-6 T5,
-    // but no committed Scales scenario kills a worm, so the branch is unreached
-    // (the sim_slice6_scales golden wounds without killing).
-    w.lives -= 1;
+    // :384-391 lives. Scales (game_mode 3): wrap every whole settings->health (the
+    // dying worm's own max_health) of overkill into a lost life, leaving health in
+    // (0, max_health]; every other mode: one life. `max_health >= 1` is guaranteed
+    // by the 4½a builder (BuildError::InvalidHealth), so the loop terminates.
+    if game_mode == 3 {
+        while w.health <= 0 {
+            w.health += w.max_health;
+            w.lives -= 1;
+        }
+    } else {
+        w.lives -= 1;
+    }
 
-    // :393-401 last_killed_idx / got_changed bookkeeping (no rand; unhashed).
-    // The GameOfTag multi-kill guard at :396-398 is UNPORTED — deferred past
-    // step 2: the assignment below matches C++ whenever the guard evaluates
-    // true, which holds for the first kill (last_killed_idx starts at -1) and
-    // always outside GameOfTag; the committed gametag golden has exactly one
-    // kill, so the divergent second-kill path is unreached.
+    // :393-401 last_killed_idx / got_changed (no rand; unhashed). GameOfTag keeps "it"
+    // when the killer is neither the victim nor "it" (:396-398) — unobservable with two
+    // worms (design §1.3 finding 3), ported for fidelity.
     let old_last_killed = *last_killed_idx;
-    *last_killed_idx = index;
+    if game_mode != 1
+        || *last_killed_idx < 0
+        || w.last_killed_by_idx < 0
+        || w.last_killed_by_idx == index
+        || w.last_killed_by_idx == *last_killed_idx
+    {
+        *last_killed_idx = index;
+    }
     *got_changed = old_last_killed != *last_killed_idx;
 
     // :403-405 the killer's `kills++` (hashed on master). Deferred to the caller
@@ -4159,7 +4300,7 @@ mod tests {
     // ----- Slice 5d T1: clamp + lives gate + visible/dead arm split ---------
     // `idle_state` builds TWO INVISIBLE worms (`two_worms` sets `visible: false`,
     // `killed_timer: 150`, `lives: 5`, `health: 100`) via `SimState::new`
-    // (`settings_health` defaults to 100). The dead-worm `else` arm's
+    // (`max_health` defaults to 100). The dead-worm `else` arm's
     // `killed_timer` countdown is the cleanest non-hashed witness for the gate/
     // split without needing a physics/gravity setup; all cases keep
     // `killed_timer` at 150→149 so the `begin_respawn`/`do_respawning` stubs
@@ -4170,7 +4311,7 @@ mod tests {
         // worm.cpp:213 `health = min(health, settings->health)` runs BEFORE the
         // lives gate (:215) — so it clamps even a `lives == 0` worm whose body is
         // skipped. This pins the clamp OUTSIDE the gate (a stronger statement than
-        // "clamp runs"). settings_health defaults to 100.
+        // "clamp runs"). max_health defaults to 100.
         let mut state = idle_state(1);
         // Gate-closed (lives==0), invisible worm with above-max health: ONLY the
         // clamp can touch it, and the skipped body must leave killed_timer frozen.
@@ -4184,7 +4325,7 @@ mod tests {
 
         assert_eq!(
             state.worms[0].health, 100,
-            "clamp caps to settings_health even with the lives gate closed"
+            "clamp caps to max_health even with the lives gate closed"
         );
         assert_eq!(
             state.worms[0].killed_timer, 150,
@@ -4255,7 +4396,7 @@ mod tests {
 
     // ----- Slice 5d T2: pre-death blood drip (worm.cpp:355-367) -------------
     // The drip fires at the END of the visible arm while a worm is alive but
-    // under settings_health/4. RNG contract (verified against :355-367):
+    // under max_health/4. RNG contract (verified against :355-367):
     //   rand(health+6)            [outer gate]
     //   on 0 -> rand(3)           [inner gate]
     //   on 0 -> rand(3)           [sound index 18 + rand(3)]
@@ -4318,8 +4459,8 @@ mod tests {
 
     #[test]
     fn t2_drip_gate_closed_at_or_above_quarter_health_draws_nothing() {
-        // health >= settings_health/4 (integer /): the whole drip is skipped —
-        // no draw, no spawn. settings_health=100 => quarter = 25; health=25 is
+        // health >= max_health/4 (integer /): the whole drip is skipped —
+        // no draw, no spawn. max_health=100 => quarter = 25; health=25 is
         // NOT < 25 (the boundary), so the gate is closed. This pins the integer
         // `/4` and the `<` (not `<=`).
         let w = drip_worm(25);
@@ -4328,7 +4469,7 @@ mod tests {
         let mut rand = seeded_rand(7);
         let before = rand.last();
 
-        worm_pre_death_drip(&w, 1, 100, &types, &mut rand, &mut pool);
+        worm_pre_death_drip(&w, 1, &types, &mut rand, &mut pool);
 
         assert_eq!(rand.last(), before, "closed gate draws NO rand");
         assert_eq!(pool.len(), 0, "closed gate spawns nothing");
@@ -4336,7 +4477,7 @@ mod tests {
 
     #[test]
     fn t2_drip_nonzero_outer_draws_one_and_spawns_nothing() {
-        // health < settings_health/4 opens the outer gate; a NON-ZERO outer
+        // health < max_health/4 opens the outer gate; a NON-ZERO outer
         // roll draws exactly ONE value (rand(health+6)) and spawns nothing (no
         // inner, no sound, no Create1).
         let health = 24; // 24 < 25; health+6 = 30
@@ -4351,7 +4492,7 @@ mod tests {
         let outer = refr.bound(30);
         assert_ne!(outer, 0, "seed guard: the outer roll must be non-zero");
 
-        worm_pre_death_drip(&w, 1, 100, &types, &mut rand, &mut pool);
+        worm_pre_death_drip(&w, 1, &types, &mut rand, &mut pool);
 
         assert_eq!(rand.last(), refr.last(), "exactly ONE outer draw");
         assert_eq!(pool.len(), 0, "non-zero outer => no blood spawn");
@@ -4378,7 +4519,7 @@ mod tests {
         let _dx = refr.bound(20000); // Create1 x
         let _dy = refr.bound(20000); // Create1 y
 
-        worm_pre_death_drip(&w, 1, 100, &types, &mut rand, &mut pool);
+        worm_pre_death_drip(&w, 1, &types, &mut rand, &mut pool);
 
         assert_eq!(
             rand.last(),
@@ -4414,7 +4555,7 @@ mod tests {
         let _dx = refr.bound(20000); // Create1 x
         let _dy = refr.bound(20000); // Create1 y
 
-        worm_pre_death_drip(&w, 1, 100, &types, &mut rand, &mut pool);
+        worm_pre_death_drip(&w, 1, &types, &mut rand, &mut pool);
 
         assert_eq!(
             rand.last(),
@@ -4504,7 +4645,7 @@ mod tests {
         let before = rand.last();
         let (mut lki, mut gc) = (-1i32, false);
 
-        let killer = worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        let killer = worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0);
 
         assert_eq!(rand.last(), before, "live worm: death block draws NO rand");
         assert_eq!(pool.len(), 0, "live worm: no spray");
@@ -4536,7 +4677,7 @@ mod tests {
             let _speed = refr.bound(20); // gib[0] speed_v (distribution 0 => no dist draws)
         }
 
-        let killer = worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        let killer = worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0);
 
         assert_eq!(rand.last(), refr.last(), "draws: sound(1) + 8 gibs x (angle+speed)");
         assert_eq!(pool.len(), 8, "blood 0 => kMax 0 => NO blood spray; exactly 8 gibs");
@@ -4567,7 +4708,7 @@ mod tests {
         let mut rand = seeded_rand(3);
         let (mut lki, mut gc) = (-1i32, false);
 
-        let killer = worm_death(&mut w, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        let killer = worm_death(&mut w, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0);
 
         assert_eq!(killer, Some(0), "killer worm 0 gets kills++ (:403-405)");
     }
@@ -4584,7 +4725,7 @@ mod tests {
         let mut rand = seeded_rand(3);
         let (mut lki, mut gc) = (-1i32, false);
         let self_killer =
-            worm_death(&mut w_self, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+            worm_death(&mut w_self, 1, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0);
         assert_eq!(self_killer, None, "self-kill (killed_by == index) => no kills++");
 
         let mut w_none = dying_worm(0, 0, -1);
@@ -4592,7 +4733,7 @@ mod tests {
         let mut rand2 = seeded_rand(3);
         let (mut lki2, mut gc2) = (-1i32, false);
         let none_killer =
-            worm_death(&mut w_none, 0, 0, &types, &cossin, &mut rand2, &mut pool2, &mut lki2, &mut gc2);
+            worm_death(&mut w_none, 0, 0, &types, &cossin, &mut rand2, &mut pool2, &mut lki2, &mut gc2, 0);
         assert_eq!(none_killer, None, "unknown killer (< 0) => no kills++");
     }
 
@@ -4628,7 +4769,7 @@ mod tests {
             refr.bound(10000);
         }
 
-        worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        worm_death(&mut w, 1, 100, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0);
 
         assert_eq!(
             rand.last(),
@@ -4660,7 +4801,7 @@ mod tests {
             refr.bound(20);
         }
 
-        worm_death(&mut w, 0, 1, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        worm_death(&mut w, 0, 1, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0);
 
         assert_eq!(rand.last(), refr.last(), "blood 1 => no blood draws; only sound + 8 gibs");
         assert_eq!(pool.len(), 8, "kMax == 1 is NOT > 1 => no blood spray; exactly 8 gibs");
@@ -4679,7 +4820,7 @@ mod tests {
         let mut rand = seeded_rand(1);
         let (mut lki, mut gc) = (-1i32, false);
 
-        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0);
 
         assert_eq!(pool.len(), 8, "gib loop runs EXACTLY 8 times ({{7,21,..,105}})");
     }
@@ -4699,7 +4840,7 @@ mod tests {
         let mut pool0: Pool<NObject> = Pool::new(600);
         let mut r0 = seeded_rand(2);
         let (mut lki0, mut gc0) = (-1i32, false);
-        worm_death(&mut w0, 0, 0, &types, &cossin, &mut r0, &mut pool0, &mut lki0, &mut gc0);
+        worm_death(&mut w0, 0, 0, &types, &cossin, &mut r0, &mut pool0, &mut lki0, &mut gc0, 0);
         let mut ref0 = seeded_rand(2);
         ref0.bound(3); // sound
         for _ in 0..8 {
@@ -4712,7 +4853,7 @@ mod tests {
         let mut pool1: Pool<NObject> = Pool::new(600);
         let mut r1 = seeded_rand(2);
         let (mut lki1, mut gc1) = (-1i32, false);
-        worm_death(&mut w1, 1, 0, &types, &cossin, &mut r1, &mut pool1, &mut lki1, &mut gc1);
+        worm_death(&mut w1, 1, 0, &types, &cossin, &mut r1, &mut pool1, &mut lki1, &mut gc1, 0);
         let mut ref1 = seeded_rand(2);
         ref1.bound(3); // sound
         for _ in 0..8 {
@@ -4983,6 +5124,35 @@ mod tests {
         );
     }
 
+    /// 4½e-1 Addendum G3, safe edges (John's ruling): a candidate below or right of a small
+    /// level makes the `!=` rock walk run past `materials[]` (C++ UB). Rust reads rock there,
+    /// so the walk rejects; a walk that stays in the array (the flat wrap) is unchanged; and a
+    /// walk that reads nothing still accepts, without the signed-overflow spin.
+    #[test]
+    fn safe_edges_check_respawn_position_past_the_array_rejects_without_panicking() {
+        let level = flat_level(20, 10); // all no-flag: no rock anywhere in the array
+        let far = 9999;
+        let ok = |l: &LevelSim, x, y| check_respawn_position(l, far, far, far, far, x, y, 30, 30);
+        // Below the level (y >= height + 4): min_y > max_y, the walk leaves the array.
+        assert!(!ok(&level, 10, 40));
+        // Right of the level (x >= width + 3), inside rows: it wraps in-array, then leaves it.
+        assert!(!ok(&level, 300, 5));
+        // The drop-down read past the end (last row, x beyond the width) is rock, not
+        // background, so the slide stops.
+        assert!(!level.background(60, 9) && level.rock(60, 9));
+        // x == width + 2: min_x == max_x, nothing is read, accept (C++-defined).
+        assert!(ok(&level, 22, 300));
+        // y == height + 3 with x far right: the inner walk is empty for every i; C++ spins i
+        // through a signed overflow and reads nothing; Rust accepts at once.
+        assert!(ok(&level, 400, 13));
+        // In-array rock found through the defined flat wrap still rejects as before.
+        let mut rlevel = flat_level(20, 10);
+        rlevel.material_flags[9] = MAT_ROCK;
+        rlevel.material_id[(1 + 3 * 20) as usize] = 9; // (21, 2) wraps to (1, 3)
+        assert!(rlevel.rock(21, 2));
+        assert!(!ok(&rlevel, 24, 5));
+    }
+
     // ------------------------------------------------------------------------
     // Slice 5d T5: DoRespawning (worm.cpp:755-809) — the drop-in convergence
     // walk (+/-1 four times/tick, no rand), the LimitXy clamp, and — on
@@ -5036,7 +5206,7 @@ mod tests {
         let mut w = respawn_worm(150, 150, (0, 200), true);
         let mut rand = seeded_rand(999);
 
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 0, &mut rand);
 
         // 4 steps: x 0->4 (++), y 200->196 (--). No rand consumed.
         assert_eq!(
@@ -5060,7 +5230,7 @@ mod tests {
         let mut level = flat_level(200, 200);
         let mut w = respawn_worm(150, 150, (1000, 1000), false);
         let mut rand = seeded_rand(1);
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 0, &mut rand);
         assert_eq!(w.logic_respawn, Vec2::new(42, 42), "clamped to [.,width-158]=42");
         assert_eq!(rand.last(), 0, "ready=false => no draw even when (clamped) converged");
         assert!(!w.visible, "ready=false => no respawn");
@@ -5069,7 +5239,7 @@ mod tests {
         let mut level2 = flat_level(200, 200);
         let mut w2 = respawn_worm(150, 150, (-1000, -1000), false);
         let mut rand2 = seeded_rand(1);
-        do_respawning(&mut w2, &mut level2, &sprites, &tex, 100, &mut rand2);
+        do_respawning(&mut w2, &mut level2, &sprites, &tex, 0, &mut rand2);
         assert_eq!(w2.logic_respawn, Vec2::new(0, 0), "clamped to [0,.]");
     }
 
@@ -5084,7 +5254,7 @@ mod tests {
         let mut w = respawn_worm(150, 150, (70, 70), false);
         let mut rand = seeded_rand(7);
 
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 0, &mut rand);
 
         assert_eq!(rand.last(), 0, "converged but !ready => zero rand draws");
         assert!(!w.visible, "converged but !ready => no respawn");
@@ -5118,7 +5288,7 @@ mod tests {
             w.direction = 9;
             let mut rand = seeded_rand(seed);
 
-            do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+            do_respawning(&mut w, &mut level, &sprites, &tex, 0, &mut rand);
 
             // Exactly 2 draws, in order: dirt puff THEN the lone aiming rand.
             assert_eq!(
@@ -5130,7 +5300,7 @@ mod tests {
             assert!(w.visible, "visible = true (:791)");
             assert_eq!(w.fire_cone, 0, "fire_cone = 0 (:792)");
             assert_eq!(w.vel, Vec2::zero(), "vel.Zero() (:793)");
-            assert_eq!(w.health, 100, "health = settings_health, KillEmAll restore (:794-796)");
+            assert_eq!(w.health, 100, "health = max_health, KillEmAll restore (:794-796)");
             if bit != 0 {
                 assert_eq!(w.aiming_angle, itof(32), "odd bit => Itof(32)");
                 assert_eq!(w.direction, 0, "odd bit => direction 0");
@@ -5175,7 +5345,7 @@ mod tests {
         let mut level = flat_level(400, 400);
         let mut w = respawn_worm(150, 150, (70, 70), true);
         let mut rand = seeded_rand(seed);
-        do_respawning(&mut w, &mut level, &sprites, &tex, 100, &mut rand);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 0, &mut rand);
 
         // The facing must follow the LOW bit (odd => Itof(32)/dir0).
         if low != 0 {
@@ -6015,7 +6185,7 @@ mod tests {
         // worm0 (idx 0) wounds worm1 (idx 1) by 18. Scales heals worm0 by 18.
         let mut ws = scales_worms(50, 100);
         let (l0, l1) = (ws[0].lives, ws[1].lives);
-        do_damage(&mut ws, 1, 18, 0, 3, 100);
+        do_damage(&mut ws, 1, 18, 0, 3);
         assert_eq!(ws[1].health, 82, "the wounded worm drops by the damage");
         assert_eq!(ws[0].health, 68, "the attacker (other worm) heals by the full amount");
         assert_eq!((ws[0].lives, ws[1].lives), (l0, l1), "no life change below the cap");
@@ -6026,13 +6196,13 @@ mod tests {
         // Environmental (`by_idx < 0`) damage to worm1 heals every OTHER worm; with
         // two worms that is worm0 by `left/parts == amount` (parts == 1).
         let mut ws = scales_worms(50, 100);
-        do_damage(&mut ws, 1, 18, -1, 3, 100);
+        do_damage(&mut ws, 1, 18, -1, 3);
         assert_eq!(ws[1].health, 82);
         assert_eq!(ws[0].health, 68, "the sole other worm gets left/parts == full amount");
 
         // Self damage (`by_idx == w.index`) takes the same split branch.
         let mut ws = scales_worms(50, 100);
-        do_damage(&mut ws, 1, 18, 1, 3, 100);
+        do_damage(&mut ws, 1, 18, 1, 3);
         assert_eq!(ws[0].health, 68, "self damage also heals the other worm");
     }
 
@@ -6042,7 +6212,7 @@ mod tests {
         // (DoHealingDirect Scales arm, game.cpp:558-561).
         let mut ws = scales_worms(95, 100);
         let lives0 = ws[0].lives;
-        do_damage(&mut ws, 1, 18, 0, 3, 100);
+        do_damage(&mut ws, 1, 18, 0, 3);
         assert_eq!(ws[0].lives, lives0 + 1, "overflow health rolls into a life");
         assert_eq!(ws[0].health, 13, "113 - 100 == 13 after the overflow");
     }
@@ -6052,7 +6222,7 @@ mod tests {
         // game_mode 0: `do_damage` is `do_damage_direct` only; the other worm is
         // untouched (the priors-safety guarantee for the shared damage sites).
         let mut ws = scales_worms(50, 100);
-        do_damage(&mut ws, 1, 18, 0, 0, 100);
+        do_damage(&mut ws, 1, 18, 0, 0);
         assert_eq!(ws[1].health, 82, "the wounded worm still drops");
         assert_eq!(ws[0].health, 50, "KillEmAll never heals the other worm");
     }
@@ -6062,8 +6232,508 @@ mod tests {
         // amount == 0: `do_damage_direct` is a no-op and the redistribution is gated
         // out (`amount > 0`), so no worm changes.
         let mut ws = scales_worms(50, 100);
-        do_damage(&mut ws, 1, 0, 0, 3, 100);
+        do_damage(&mut ws, 1, 0, 0, 3);
         assert_eq!(ws[1].health, 100);
         assert_eq!(ws[0].health, 50, "no heal when amount == 0");
+    }
+
+    #[test]
+    fn a45_shadow_defaults_off_and_process_frame_clears_the_frame_flag() {
+        let mut state = idle_state(3);
+        assert!(!state.shadow, "post-new default false => every golden byte-identical");
+        state.shadow = true;
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert!(!crate::shadow::enabled(), "end_frame clears the flag after the tick");
+    }
+
+    #[test]
+    fn a45_scales_death_wraps_the_overkill_into_lives() {
+        let mut w = dying_worm(0, -130, -1); // lives 5 (two_worms)
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (-1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 3);
+        assert_eq!(w.lives, 3, "two whole max_health of overkill => two lives (worm.cpp:385-388)");
+        assert_eq!(w.health, 70, "-130 + 100 + 100");
+    }
+
+    #[test]
+    fn a45_killemall_death_keeps_the_negative_health() {
+        let mut w = dying_worm(0, -130, -1);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (-1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 0);
+        assert_eq!(w.lives, 4);
+        assert_eq!(w.health, -130);
+    }
+
+    #[test]
+    fn a45_gameoftag_guard_keeps_it_for_a_third_party_killer() {
+        // "it" = worm 1; worm 0 is killed by worm 2 (neither victim nor "it") => "it" stays.
+        let mut w = dying_worm(0, 0, 2);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 1);
+        assert_eq!(lki, 1, "worm.cpp:396-398: the guard is false => no reassignment");
+        assert!(!gc);
+    }
+
+    #[test]
+    fn a45_gameoftag_guard_reassigns_when_it_is_the_killer() {
+        let mut w = dying_worm(0, 0, 1);
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (1i32, false);
+        worm_death(&mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 1);
+        assert_eq!(lki, 0, "killer == it => the victim becomes it");
+        assert!(gc);
+    }
+
+    #[test]
+    fn a45_scales_respawn_does_not_restore_health() {
+        let sprites = dirt_sprites();
+        let tex = [dirt_texture()];
+        let mut level = flat_level(400, 400);
+        let mut w = respawn_worm(150, 150, (70, 70), true);
+        w.health = 37;
+        let mut rand = seeded_rand(7);
+        do_respawning(&mut w, &mut level, &sprites, &tex, 3, &mut rand);
+        assert!(w.visible, "converged + ready => respawned");
+        assert_eq!(w.health, 37, "Scales: no restore (worm.cpp:794-796)");
+
+        let mut level2 = flat_level(400, 400);
+        let mut w2 = respawn_worm(150, 150, (70, 70), true);
+        w2.health = 37;
+        let mut rand2 = seeded_rand(7);
+        do_respawning(&mut w2, &mut level2, &sprites, &tex, 0, &mut rand2);
+        assert_eq!(w2.health, 100, "KillEmAll: health = settings->health");
+    }
+
+    #[test]
+    fn a45_do_healing_scales_damages_the_other_worm() {
+        let mut worms: Vec<WormState> = two_worms().iter().map(WormState::from_init).collect();
+        worms[0].health = 50;
+        do_healing(&mut worms, 0, 30, 3);
+        assert_eq!(worms[0].health, 80);
+        assert_eq!(worms[1].health, 70, "game.cpp:594-605: the healed amount is dealt to the others");
+        assert_eq!(worms[1].last_killed_by_idx, -1, "not killed => no attribution");
+
+        worms[1].health = 10;
+        do_healing(&mut worms, 0, 30, 3);
+        assert_eq!(worms[1].health, -20);
+        assert_eq!(worms[1].last_killed_by_idx, 0, "the healer is the killer (DoDamageDirect by_idx)");
+    }
+
+    #[test]
+    fn a45_do_healing_killemall_clamps_and_leaves_the_others() {
+        let mut worms: Vec<WormState> = two_worms().iter().map(WormState::from_init).collect();
+        worms[0].health = 90;
+        do_healing(&mut worms, 0, 30, 0);
+        assert_eq!(worms[0].health, 100);
+        assert_eq!(worms[1].health, 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4½c-0 T6: the wobjects driver frees an exploding wobject BEFORE blow_up
+    // (weapon.cpp:87), so its own blast's chain loop never sees its stale slot.
+    // -----------------------------------------------------------------------
+
+    fn chain_state() -> SimState {
+        let w = 200i32;
+        let level = LevelData {
+            width: w,
+            height: w,
+            material_id: vec![1u8; (w * w) as usize],
+            palette: None,
+            display: None,
+        };
+        let mut flags = [0u8; 256];
+        flags[0] = MAT_BACKGROUND;
+        flags[1] = MAT_BACKGROUND;
+        let weapons = vec![Weapon {
+            id: 0,
+            shot_type: 0,
+            mult_speed: 100,
+            affect_by_explosions: true,
+            chain_explosion: true,
+            time_to_explo: 5,
+            create_on_exp: 0,
+            dirt_effect: -1,
+            splinter_amount: 0,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ammo: 1,
+            ..Default::default()
+        }];
+        let blast = SObjectType {
+            id: 0,
+            start_sound: -1,
+            num_sounds: 0,
+            anim_delay: 3,
+            num_frames: 4,
+            detect_range: 10,
+            damage: 5,
+            blow_away: 0,
+            dirt_effect: -1,
+            ..Default::default()
+        };
+        let mk = |index: i32, pos: Vec2| WormInit {
+            index,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit { ty: Some(0), ammo: 1 }; NUM_WEAPONS],
+            start_pos: pos,
+            visible: true,
+        };
+        SimState::new(
+            &level,
+            &[
+                mk(0, Vec2::new(itof(20), itof(20))),
+                mk(1, Vec2::new(itof(180), itof(20))),
+            ],
+            1,
+            &flags,
+            weapons,
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            SpriteSet::default(),
+            Vec::new(),
+            vec![blast],
+            Vec::new(),
+            100,
+            true,
+            100,
+        )
+    }
+
+    #[test]
+    fn an_exploding_chain_wobject_is_freed_before_its_own_blast() {
+        // time_left 0 -> the timeout explodes it this tick. Its blast (damage 5, ±10 box)
+        // is centred on it: with the free AFTER blow_up, the stale slot would sit inside
+        // the box and chain a second explosion.
+        let mut state = chain_state();
+        state.wobjects.spawn(WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::zero(),
+            cur_frame: 0,
+            time_left: 0,
+            ty: Some(0),
+            owner_idx: 0,
+        });
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+        assert!(state.wobjects.is_empty(), "the wobject exploded and is gone");
+        assert_eq!(state.sobjects.len(), 1, "exactly one blast — no self-chain");
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4½c-0 T7/T8: a MISSILE-shaped steerable in flight.
+    // -----------------------------------------------------------------------
+
+    /// Two visible worms on a 200x200 all-background level, every slot holding weapon 0 —
+    /// a MISSILE-shaped steerable (shot_type 2, speed 230, add_speed 150) — and one such
+    /// missile of worm 0 at rest at (100,100) aiming at cossin[32].
+    fn steer_state() -> SimState {
+        let w = 200i32;
+        let level = LevelData {
+            width: w,
+            height: w,
+            material_id: vec![1u8; (w * w) as usize],
+            palette: None,
+            display: None,
+        };
+        let mut flags = [0u8; 256];
+        flags[0] = MAT_BACKGROUND;
+        flags[1] = MAT_BACKGROUND;
+        let weapons = vec![Weapon {
+            id: 0,
+            shot_type: 2,
+            speed: 230,
+            add_speed: 150,
+            mult_speed: 100,
+            obj_trail_type: -1,
+            part_trail_obj: -1,
+            ammo: 1,
+            ..Default::default()
+        }];
+        let mk = |index: i32, pos: Vec2| WormInit {
+            index,
+            health: 100,
+            lives: 5,
+            stats_x: 0,
+            weapons: [WeaponInit { ty: Some(0), ammo: 1 }; NUM_WEAPONS],
+            start_pos: pos,
+            visible: true,
+        };
+        let mut state = SimState::new(
+            &level,
+            &[
+                mk(0, Vec2::new(itof(20), itof(20))),
+                mk(1, Vec2::new(itof(180), itof(20))),
+            ],
+            1,
+            &flags,
+            weapons,
+            PhysicsConsts::default(),
+            ControlConsts::default(),
+            false,
+            SpriteSet::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            100,
+            true,
+            100,
+        );
+        state.wobjects.spawn(WObject {
+            pos: Vec2::new(itof(100), itof(100)),
+            vel: Vec2::zero(),
+            cur_frame: 32,
+            time_left: 0,
+            ty: Some(0),
+            owner_idx: 0,
+        });
+        state
+    }
+
+    #[test]
+    fn the_visible_arm_steers_the_worms_missile_with_the_post_increment_cycles() {
+        // worm.cpp:324: ProcessSteerables runs in the worm loop, AFTER `++cycles`
+        // (game.cpp:357): cycles 0 -> 1 -> step (1 & 1) + 1 = 2.
+        let mut state = steer_state();
+        state.process_frame(&[ControlState::unpack(4), ControlState::new()]);
+        let m = *state.wobjects.iter().next().expect("the missile flies on");
+        assert_eq!(m.cur_frame, 30, "32 - 2");
+        let w = &state.worms[0];
+        assert_eq!(w.steerable_count, 1);
+        assert_eq!(
+            (w.steerable_sum_x, w.steerable_sum_y),
+            (ftoi(m.pos.x), ftoi(m.pos.y))
+        );
+        assert!(!w.movable, "Left held + a live missile: movable stays false");
+        assert_eq!(state.worms[1].steerable_count, 0, "worm 1 owns no missile");
+    }
+
+    #[test]
+    fn the_object_loop_reads_this_ticks_input() {
+        // Step 4½c-0 T8 (design §4.3): C++ sets control_states BEFORE Game::ProcessFrame, so
+        // the MISSILE's Up boost (weapon.cpp:152) in the object loop sees THIS tick's Up:
+        // new_vel = dir*speed/100 + dir*add_speed/100; vel = (vel*8 + new_vel)/9.
+        let mut state = steer_state();
+        state.process_frame(&[ControlState::unpack(1), ControlState::new()]);
+        let dir = state.cossin[32];
+        let boosted = dir.mul(230).div(100).add(dir.mul(150).div(100));
+        let m = *state.wobjects.iter().next().expect("the missile flies on");
+        assert_eq!(
+            m.vel,
+            Vec2::zero().mul(8).add(boosted).div(9),
+            "boosted on the very first tick"
+        );
+    }
+
+    // ----- Slice 4½f-1 T1: `reacts` kept between ticks; per-worm `max_health` -----
+
+    #[test]
+    fn f1_from_init_zeroes_reacts_and_defaults_max_health_to_100() {
+        // D5 / D6: `reacts` starts at 0 (C++ leaves it uninitialised, the dumpers zero
+        // it); `max_health` is the C++ `WormSettings::health{100}` default, NOT the
+        // scenario's start health (pitfall 13).
+        let mut init = two_worms()[0];
+        init.health = 37;
+        let w = WormState::from_init(&init);
+        assert_eq!(w.reacts, [0; 4]);
+        assert_eq!(w.max_health, 100, "the default, not WormInit::health");
+        assert_eq!(w.health, 37);
+    }
+
+    #[test]
+    fn f1_visible_worm_stores_this_ticks_reacts() {
+        // A visible worm's `reacts` after the tick is `worm_reactions` of the pre-tick
+        // worm (worm.cpp:135-144 at the top of the visible Process). Worm 0 sits at
+        // x = 2 so the left-edge addition makes RF_RIGHT non-zero (a non-vacuous value).
+        let mut state = open_state(itof(20), 0);
+        state.worms[0].pos = Vec2::new(itof(2), itof(20));
+        state.worms[0].reacts = [9, 9, 9, 9];
+        let mut pre = state.worms[0].clone();
+        let want = worm_reactions(&state.level, &mut pre, &state.physics);
+        assert_ne!(want, [0; 4], "the edge makes the expected value non-zero");
+
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+
+        assert_eq!(state.worms[0].reacts, want, "stored where computed (D5)");
+    }
+
+    #[test]
+    fn f1_invisible_worm_keeps_its_reacts() {
+        // Only a visible Process rewrites `reacts`; a waiting (invisible) worm keeps
+        // last visible tick's value — what DumbLieroAI reads stale (worm.cpp:680-694).
+        let mut state = idle_state(1);
+        assert!(!state.worms[0].visible);
+        state.worms[0].reacts = [1, 2, 3, 4];
+
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+
+        assert_eq!(state.worms[0].reacts, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn f1_skipped_worm_keeps_its_reacts() {
+        // Kill'em All, lives == 0: the whole body is skipped (worm.cpp:215), so a
+        // visible worm keeps its `reacts` too.
+        let mut state = open_state(itof(20), 0);
+        state.worms[0].pos = Vec2::new(itof(2), itof(20));
+        state.worms[0].lives = 0;
+        state.worms[0].reacts = [1, 2, 3, 4];
+
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+
+        assert_eq!(state.worms[0].reacts, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn f1_reacts_and_max_health_are_not_hashed() {
+        // C++ `HashGameState` (stateHash.hpp:19-50) has neither `reacts` nor
+        // `settings->health`.
+        let a = idle_state(5);
+        let mut b = idle_state(5);
+        b.worms[0].reacts = [1, 2, 3, 4];
+        b.worms[1].reacts = [-5, 6, -7, 8];
+        b.worms[0].max_health = 30;
+        b.worms[1].max_health = 300;
+        assert_eq!(
+            crate::hash::hash_game_state(&a),
+            crate::hash::hash_game_state(&b)
+        );
+        assert_eq!(
+            crate::hash::hash_components(&a),
+            crate::hash::hash_components(&b)
+        );
+    }
+
+    #[test]
+    fn f1_clamp_caps_each_worm_at_its_own_max() {
+        // worm.cpp:213 `health = min(health, settings->health)`, per worm.
+        let mut state = idle_state(1);
+        state.worms[0].max_health = 50;
+        state.worms[0].health = 80;
+        state.worms[1].max_health = 300;
+        state.worms[1].health = 280;
+
+        state.process_frame(&[ControlState::new(), ControlState::new()]);
+
+        assert_eq!(state.worms[0].health, 50, "capped at its own 50");
+        assert_eq!(state.worms[1].health, 280, "280 < its own 300: unchanged");
+    }
+
+    #[test]
+    fn f1_respawn_restores_each_worms_own_max_and_scales_keeps_health() {
+        // worm.cpp:794-796: `health = settings->health` outside Scales (T0 P7: P1 50 and
+        // P2 300 respawn at 50 and 300); Scales keeps the current health (P7: 11, 20, 8).
+        let sprites = dirt_sprites();
+        let tex = [dirt_texture()];
+        for (max, mode, want) in [(50, 0, 50), (300, 0, 300), (30, 3, 11)] {
+            let mut level = flat_level(400, 400);
+            let mut w = respawn_worm(150, 150, (70, 70), true);
+            w.max_health = max;
+            w.health = 11;
+            let mut rand = seeded_rand(3);
+            do_respawning(&mut w, &mut level, &sprites, &tex, mode, &mut rand);
+            assert!(w.visible, "converged and ready: respawned");
+            assert_eq!(w.health, want, "max {max}, mode {mode}");
+        }
+    }
+
+    #[test]
+    fn f1_drip_gate_is_a_quarter_of_the_worms_own_max() {
+        // worm.cpp:355 `health < settings->health / 4` (T0 P7: P2 at max 300 drew on every
+        // tick in 25..75; P1 at max 50 did not in 12..25). The outer roll draws iff open.
+        let types = blood_types();
+        for (max, health, open) in [
+            (300, 74, true),
+            (300, 75, false),
+            (50, 11, true),
+            (50, 12, false),
+        ] {
+            let mut w = drip_worm(health);
+            w.max_health = max;
+            let mut pool: Pool<NObject> = Pool::new(600);
+            let mut rand = seeded_rand(7);
+            worm_pre_death_drip(&w, 1, &types, &mut rand, &mut pool);
+            assert_eq!(rand.draws() > 0, open, "max {max}, health {health}");
+        }
+    }
+
+    #[test]
+    fn f1_scales_death_wraps_at_the_dying_worms_own_max() {
+        // worm.cpp:385-388: `while (health <= 0) { health += settings->health; --lives; }`.
+        // Max 30, health -40: -40 + 30 = -10, + 30 = 20, two lives lost.
+        let mut w = dying_worm(0, -40, -1); // lives 5
+        w.max_health = 30;
+        let types = death_types();
+        let cossin = precompute_cossin();
+        let mut pool: Pool<NObject> = Pool::new(600);
+        let mut rand = seeded_rand(11);
+        let (mut lki, mut gc) = (-1i32, false);
+        worm_death(
+            &mut w, 0, 0, &types, &cossin, &mut rand, &mut pool, &mut lki, &mut gc, 3,
+        );
+        assert_eq!((w.lives, w.health), (3, 20));
+    }
+
+    #[test]
+    fn f1_do_healing_direct_wraps_or_clamps_at_the_worms_own_max() {
+        // game.cpp:555-565. Scales, max 30, health 25, +40: 65 -> 35 (lives +1) -> 5
+        // (lives +2). Kill'em All clamps to the own max instead.
+        let mut w = WormState::from_init(&two_worms()[0]); // lives 5
+        w.max_health = 30;
+        w.health = 25;
+        crate::bonus::do_healing_direct(&mut w, 40, 3);
+        assert_eq!((w.lives, w.health), (7, 5));
+
+        let mut w = WormState::from_init(&two_worms()[0]);
+        w.max_health = 30;
+        w.health = 25;
+        crate::bonus::do_healing_direct(&mut w, 40, 0);
+        assert_eq!((w.lives, w.health), (5, 30));
+    }
+
+    #[test]
+    fn f1_scales_damage_heals_the_other_worm_against_its_own_max() {
+        // game.cpp:566-589, both arms (T0 P7 note): unattributed damage on worm 0 heals
+        // the other worm; damage by worm 1 heals the attacker. Either way worm 1 (max
+        // 30, health 25) takes +40 and wraps at ITS max: 5 health, two lives. Worm 0's
+        // own max (100) plays no part.
+        for by in [-1, 1] {
+            let mut ws = scales_worms(100, 25); // lives 5 each
+            ws[1].max_health = 30;
+            do_damage(&mut ws, 0, 40, by, 3);
+            assert_eq!(ws[0].health, 60, "by {by}: worm 0 wounded");
+            assert_eq!(
+                (ws[1].lives, ws[1].health),
+                (7, 5),
+                "by {by}: wrapped at 30"
+            );
+        }
+    }
+
+    #[test]
+    fn f1_healing_clamps_at_the_healed_worms_own_max() {
+        // game.cpp:607 (DoHealing, Kill'em All): `min(health, w.settings->health)`.
+        let mut ws = scales_worms(40, 100);
+        ws[0].max_health = 50;
+        do_healing(&mut ws, 0, 30, 0);
+        assert_eq!(ws[0].health, 50);
+        assert_eq!(ws[1].health, 100, "Kill'em All touches no other worm");
     }
 }

@@ -1,0 +1,24 @@
+# Step 4½e-2 G2e-2 level_tree (T0 P1, P3): the install's system layer; the user's
+# Replays folder and five Levels entries (two water copies under other names, a
+# dotfile, a .txt the filter drops, the 60x40 tiny.lev).
+dir sys Profiles
+dir sys Resources
+file sys Setups/liero.cfg data/Setups/liero.cfg
+file sys Setups/orbmit.cfg data/Setups/orbmit.cfg
+file sys TC/openliero/tc.cfg data/TC/openliero/tc.cfg
+file sys TC/openliero/Levels/modern_test.lev data/TC/openliero/Levels/modern_test.lev
+file sys TC/openliero/Levels/physics_fall_test.lev data/TC/openliero/Levels/physics_fall_test.lev
+file sys TC/openliero/Levels/render_stage.lev data/TC/openliero/Levels/render_stage.lev
+file sys TC/openliero/Levels/see_shadow_test.lev data/TC/openliero/Levels/see_shadow_test.lev
+file sys TC/openliero/Levels/water_stage.lev data/TC/openliero/Levels/water_stage.lev
+dir sys TC/openliero/nobjects
+dir sys TC/openliero/sobjects
+dir sys TC/openliero/sounds
+dir sys TC/openliero/sprites
+dir sys TC/openliero/weapons
+dir user Replays
+file user TC/openliero/Levels/Zeta.lev data/TC/openliero/Levels/water_stage.lev
+file user TC/openliero/Levels/alpha.LEV data/TC/openliero/Levels/water_stage.lev
+file user TC/openliero/Levels/.hidden.lev data/TC/openliero/Levels/render_stage.lev
+file user TC/openliero/Levels/notes.txt data/README.md
+file user TC/openliero/Levels/tiny.lev rust/oracle-tests/golden/shell_level_tree_tiny.lev

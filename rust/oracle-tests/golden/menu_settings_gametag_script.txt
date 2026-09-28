@@ -1,0 +1,12 @@
+# Step 4½d G1 settings_gametag: Game of Tag shows TIME TO LOSE (59:59); a disabled draw,
+# the selection, and GAME MODE wrapping left.
+settings menu_settings_gametag_setup.cfg
+update_items
+first_visible
+draw 1 -1 0
+move 1
+draw 0 -1 0
+move -1
+cycles 0
+left
+draw 1 -1 0

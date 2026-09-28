@@ -1,0 +1,6 @@
+# Step 4½d G2 case boot_idle (design §6.4; plan Task 9) — written by gen_slice4_5d.
+# Rust ledger: 60 frames, end `end 60 frames`, NEW GAME 0, RESUME 0, back-to-menu 0 (game over: false), black presents 0
+setup default
+boot_seed 11
+frames 60
+expect frames

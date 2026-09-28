@@ -1,0 +1,14 @@
+color = 0
+controller = 0
+controls = [ 17, 31, 30, 32, 21, 22, 23 ]
+controlsEx = [ 17, 31, 30, 32, 21, 22, 23, 0 ]
+gamepadControls = [ 11, 12, 13, 14, 110, 10, 0, 9 ]
+gamepadName = ''
+gamepadSerial = ''
+health = 100
+inputDevice = 0
+name = 'etc'
+randomName = false
+rgb = [ 160, 40, 220 ]
+rgbDepth = 8
+weapons = [ 19, 36, 9, 40, 31 ]

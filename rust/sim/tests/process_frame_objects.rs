@@ -384,7 +384,7 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
             &cossin,
             s.blood,
             0,
-            100,
+            sim::weapon::WObjectConsts::default(),
             &mut r2,
         ),
         WObjectOutcome::Explode,
@@ -396,6 +396,7 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
         &s.large_sprites,
         &s.textures,
         obj.pos,
+        obj.vel,
         0, // fired by worm 0
         &s.sobject_types,
         &s.nobject_types,
@@ -408,7 +409,6 @@ fn dart_explosion_drives_sobject_and_dirt_debris_with_crosspool_ordering() {
         &mut Pool::<sim::state::Bonus>::new(1),
         100,
         0,
-        100,
         &mut r2,
     );
 

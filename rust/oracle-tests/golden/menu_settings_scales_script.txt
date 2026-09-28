@@ -1,0 +1,13 @@
+# Step 4½d G1 settings_scales: Scales of Justice shows LIVES; LIVES clamped at its minimum
+# of 1 and Enter pushing the REAL InputStringState.
+settings menu_settings_scales_setup.cfg
+update_items
+first_visible
+draw 1 -1 0
+move 1
+cycles 0
+right
+left
+left
+enter
+draw 0 -1 0

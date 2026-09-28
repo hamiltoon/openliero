@@ -9,4 +9,5 @@ render   = { path = "../render" }
 sim      = { path = "../sim" }
 assets   = { path = "../assets" }
 sim-core = { path = "../sim-core" }
+ui       = { path = "../ui" }
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -1,0 +1,13 @@
+# Step 4½ slice 4½c — weapon-selection case `bot_random` (design §6.4): a RANDOM bot (select_bot_weapons 0) draws all five over its saved picks and is ready at once.
+# Read by oracle_dump_weapsel (golden/weapsel_bot_random.txt) and by the
+# Rust milestone (weapsel_golden.rs). Written by
+#   cargo run -p oracle-tests --example gen_slice4_5c -- write <golden dir>
+# LEDGER (Rust, driven): init draws 5, 3 frames, 0 draws in frames, final rng 76957d51
+# weapsel <frame> <worm0_7bit> <worm1_7bit>: Up=1 Down=2 Left=4 Right=8 Fire=16; an
+# absent frame is 0; the last line is the frame the phase ends on (design §6.1).
+seed 11
+level Levels/render_stage.lev
+ticks 0
+settings weapsel_bot_random_setup.cfg
+weapsel 0 1 0
+weapsel 2 16 0

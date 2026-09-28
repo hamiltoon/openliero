@@ -1,0 +1,32 @@
+# Step 4½d G1 visibility: SetVisibility adjusting visible_item_count, top_item and the
+# selection's view; hiding the selected item; restoring every item.
+menu 40 10 5 0 0
+item 0 48 7 1 1 ROW 0
+item 1 48 7 1 1 ROW 1
+item 2 48 7 1 1 ROW 2
+item 3 48 7 1 1 ROW 3
+item 4 48 7 1 1 ROW 4
+item 5 48 7 1 1 ROW 5
+item 6 48 7 1 1 ROW 6
+item 7 48 7 1 1 ROW 7
+item 8 48 7 1 1 ROW 8
+item 9 48 7 1 1 ROW 9
+draw 0 -1 0
+move_to 4
+visible 4 0
+draw 0 -1 0
+visible 0 0
+visible 1 0
+draw 0 -1 0
+move_to 9
+visible 2 0
+visible 9 0
+draw 0 -1 0
+visible 9 1
+visible 0 1
+visible 4 1
+visible 1 1
+visible 2 1
+draw 0 -1 0
+move 1
+move -1

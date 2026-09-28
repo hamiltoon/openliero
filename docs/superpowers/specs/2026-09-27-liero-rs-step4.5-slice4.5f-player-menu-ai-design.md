@@ -1055,3 +1055,10 @@ loaded into RIGHT PLAYER on a phone, what should happen?**
   LOAD SETUP already does on a phone. You can still switch CONTROLLER to Human yourself.
 - **B:** As the original: player 2 becomes Human. A phone has no controls for it, so the next match waits in weapon
   selection until you set CONTROLLER back to CPU.
+
+## Rulings (John, 2026-09-28, 4½f-2)
+
+Both recommendations were accepted:
+
+- **Q6 → A, the phone buttons always work.** On a touch-only page the on-screen buttons act as the arrow keys, Enter and Esc in the menus and move player 1 directly in a match, whatever keys are set and even after a Joystick profile. The eight key rows still show and change player 1's keyboard keys (for a keyboard plugged in later). In the PRESS A KEY box a button sets the arrow or Enter key it stands for, and MENU cancels.
+- **Q7 → A, player 2 stays the CPU on a phone.** Loading a Human profile into RIGHT PLAYER on a touch-only page loads its name, colour, health, weapons and keys, and keeps player 2 as CPU, as LOAD SETUP already does. CONTROLLER can still be switched to Human by hand.

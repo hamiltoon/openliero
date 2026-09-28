@@ -38,6 +38,14 @@ pub struct StartOptions {
     pub touch_only: bool,
 }
 
+/// Players 1 and 2's names (`WormSettings::name`), as the selection's name boxes show them.
+fn names_of(s: &Settings) -> [String; 2] {
+    [
+        s.worm_settings[0].name.clone(),
+        s.worm_settings[1].name.clone(),
+    ]
+}
+
 /// `Game::Focus` → `UpdateSettings` (`game.cpp:475-488`): both worms' ramps into `origpal`.
 fn focus_palette(scene: &mut SceneData, settings: &Settings) {
     for i in 0..2 {
@@ -218,6 +226,7 @@ impl Match {
             (MatchFlow::new(), None)
         } else {
             let mut sel = Selection::new(new_game_config(settings, opts.touch_only));
+            sel.set_names(names_of(settings));
             sel.begin(&mut state)
                 .expect("the settings select over the TC");
             (MatchFlow::with_weapon_selection(), Some(sel))
@@ -314,13 +323,24 @@ impl Match {
     /// facts 14-16), after `apply_live_settings` wrote the sim's live-read set: the whole
     /// `MatchConfig::settings` (the `kStateGame` lives and blood pool, the selection's
     /// `level_file`, the shadow gate, `names_on_bonuses`), the HUD's `map`, and a running
-    /// selection's `weap_table` (`weapsel.cpp:255`, `:278`, `:327` read it live).
+    /// selection's `weap_table` (`weapsel.cpp:255`, `:278`, `:327` read it live) and — Step
+    /// 4½f-2 (R-10) — its name boxes' names (`weapsel.cpp:199-203` reads them live too). The kill
+    /// banners read the refreshed copy in [`Match::draw`].
     pub fn resync(&mut self, s: &Settings) {
         self.cfg.settings = s.clone();
         self.hud.map = s.map;
         if let Some(sel) = self.selection.as_mut() {
             sel.set_weap_table(s.weap_table);
+            sel.set_names(names_of(s));
         }
+    }
+
+    /// The names the selection's name boxes show, while one runs (Step 4½f-2; tests).
+    pub fn selection_names(&self) -> Option<[&str; 2]> {
+        self.selection
+            .as_ref()
+            .filter(|s| s.is_active())
+            .map(Selection::names)
     }
 
     /// The selection's picks as the shared C++ `WormSettings::weapons` hold them now
@@ -428,6 +448,9 @@ impl Match {
             .scene
             .as_scene(sim.screen_flash, self.cfg.settings.shadow);
         self.hud.apply(&mut scene);
+        // 4½f-2 D11: the kill banners' names, from the match's copy of the settings.
+        let ws = &self.cfg.settings.worm_settings;
+        scene.names = [&ws[0].name, &ws[1].name];
         if small_labels {
             scene.small_labels = Some(SmallLabels {
                 text: &self.scene.text_sprites,

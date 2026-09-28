@@ -213,6 +213,7 @@ fn render_tick(b: &mut Built, tick: u32, screen_flash: i32) -> u64 {
         draw_hud: false,
         map: false,
         small_labels: None,
+        names: ["", ""],
     };
     render::frame::draw(&mut b.bmp, &b.state, &mut b.viewports, &scene);
     let fade = if tick == 0 { 0 } else { 33 };

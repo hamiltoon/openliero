@@ -5621,6 +5621,37 @@ mod tests {
             );
         }
 
+        // Names (plan T5, D11; R-10, T0 P7 `l_sel`).
+
+        #[test]
+        fn resume_shows_a_renamed_player_in_selection_only_while_attached() {
+            for detach in [false, true] {
+                let (mut sh, mut sim) = boot_on(files::tests::install());
+                sh.settings_mut().worm_settings[0].name = "A".into();
+                sh.settings_mut().worm_settings[1].name = "B".into();
+                until_routed(&mut sh, &mut sim, DK_RETURN);
+                assert_eq!(sh.phase(), Phase::Weapsel);
+                let names = |sh: &Shell| {
+                    sh.current()
+                        .unwrap()
+                        .selection_names()
+                        .unwrap()
+                        .map(String::from)
+                };
+                assert_eq!(names(&sh), ["A", "B"], "NEW GAME");
+                to_menu(&mut sh, &mut sim);
+                if detach {
+                    load_setup(&mut sh, &mut sim, 1);
+                }
+                sh.settings_mut().worm_settings[0].name = "SEL".into();
+                let outs = until_routed(&mut sh, &mut sim, DK_F1);
+                assert_eq!(outs.last().unwrap().routed, Some(Route::Resume));
+                let want = if detach { ["A", "B"] } else { ["SEL", "B"] };
+                assert_eq!(names(&sh), want, "detach {detach}");
+                assert_eq!(sh.phase(), Phase::Weapsel, "back in selection");
+            }
+        }
+
         // The network player's slot 0 (plan fact 5; T0 P8).
 
         #[test]
